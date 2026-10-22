@@ -259,11 +259,11 @@ public:
                                     DerivedWords derived = DerivedWords::Evaluated) const;
     /// Whether the rows of some instance of `encoder` need their derived words supplied (DeviceEncodeInput::derived): their
     /// graphs read derived atoms (for rows without goal masks, with goal masks over the fluent slots, or with derived
-    /// goal masks too) and the device cannot evaluate the axioms (they exceed the matcher limits or the object-bitset
-    /// widths), so that such rows without supplied words are flagged invalid (a batch without task ids is refused).
-    /// Computed on the host, without uploading a context.
+    /// goal masks too; and with subgoal layers that have derived masks, or without) and the device cannot evaluate the
+    /// axioms (they exceed the matcher limits or the object-bitset widths), so that such rows without supplied words
+    /// are flagged invalid (a batch without task ids is refused). Computed on the host, without uploading a context.
     [[nodiscard]] static bool needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks,
-                                            bool derived_goal_masks);
+                                            bool derived_goal_masks, bool derived_layer_masks);
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.

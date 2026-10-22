@@ -5,10 +5,12 @@ encoder's capacity form bit for bit, and :class:`JaxFlatBatch` holds them with t
 
 Rows are the u64 words of each state as JAX sees them without 64-bit types: uint32 ``[N, 2 W]`` (the low half first;
 ``task.encode(states)`` gives the uint64 words, which a NumPy view or ``mymyr.rl.jax.as_words`` turns into halves).
-uint64 and int64 words are accepted too, and int32 halves.
+uint64 and int64 words are accepted too, and int32 halves. Subgoal layers and history steps are masks of the same words
+per layer, ``[N, L, 2 W]`` (or ``[N, L, W]`` words), with the forms of ``FlatRelationEncoder.encode``.
 
 Capacities: shapes are static under ``jax.jit``, so a traced call needs ``capacities=dict(graphs=, entities=, args=,
-targets=)`` (``targets`` only with target sources): the variable-size arrays have the capacities' sizes, the true
+targets=, history=)`` (``targets`` only with target sources, ``history`` only with history steps): the variable-size
+arrays have the capacities' sizes, the true
 sizes and the overflow flags are in ``batch.device_sizes``, and a batch that does not fit is all zero with its flag
 set. An eager call without capacities waits once for the batch's sizes: it encodes at the capacities held for the encoder
 and the number of rows (the first call counts the batch to find them, rounded up to powers of two), encodes again at
@@ -20,10 +22,10 @@ does so on first use) and the registry holds it until :func:`unregister`; a comp
 so it keeps working after its encoder is unregistered and every Python reference to it is gone.
 
 What the target encodes: what the device encodes, on both platforms (a function gives the same arrays wherever it
-runs): no action relations (they need an expansion, which JAX cannot pass), no schema the device refuses, and the
-rows' derived words are required where the device cannot evaluate the axioms a graph reads (an axiom body or object
-set beyond the device's matcher limits). Such calls raise ``ValueError`` (``mymyr: encoding: ...``) when the function is
-traced.
+runs): the rows with their goals, subgoal layers and history steps, but no action relations (they need an expansion,
+which JAX cannot pass), no schema the device refuses, and the rows' derived words are required where the device cannot
+evaluate the axioms a graph reads (an axiom body or object set beyond the device's matcher limits). Such calls raise
+``ValueError`` (``mymyr: encoding: ...``) when the function is traced.
 """
 
 from __future__ import annotations
@@ -68,8 +70,9 @@ class _Registration:
         self.layout = _device.layout_of(encoder)
         self.info = _encoding_jax.info(handle)
         self.scratch: dict[tuple[int, int, bool], int] = {}
-        # the capacities of eager calls without capacities, per number of rows: they only grow
-        self.held: dict[int, tuple[int, int, int]] = {}
+        # the (entities, args, targets, history) capacities of eager calls without capacities, per number of rows:
+        # they only grow
+        self.held: dict[int, tuple[int, int, int, int]] = {}
 
 
 _lock = threading.Lock()
@@ -215,14 +218,15 @@ class JaxFlatBatch:
 
     @property
     def sizes(self) -> Optional[dict[str, Any]]:
-        """After an encoding with capacities: the true entities, tuples, args and targets of the batch, and whether it
-        overflowed (``overflow``: the batch is all zero) because of the capacities (``capacity_overflow``), the index
-        type (``index_overflow``) or an invalid row (``invalid_input``); None for an exact batch. It reads
-        ``device_sizes`` on the host, which waits for the computation (not under ``jax.jit``). Of a batch stacked by
-        ``lax.scan`` or ``jax.vmap`` every value is a NumPy array over the stacked axes."""
+        """After an encoding with capacities: the true entities, tuples, args and targets of the batch (and history
+        steps, for a schema with history), and whether it overflowed (``overflow``: the batch is all zero) because of
+        the capacities (``capacity_overflow``), the index type (``index_overflow``) or an invalid row
+        (``invalid_input``); None for an exact batch. It reads ``device_sizes`` on the host, which waits for the
+        computation (not under ``jax.jit``). Of a batch stacked by ``lax.scan`` or ``jax.vmap`` every value is a NumPy
+        array over the stacked axes."""
         if self._sizes is None:
             return None
-        return _host_sizes(np.asarray(self._sizes))
+        return _host_sizes(np.asarray(self._sizes), "history_offsets" in self._static[0])
 
     def as_dict(self, framework: Optional[str] = None) -> dict[str, Any]:
         """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, table_fingerprint,
@@ -272,13 +276,13 @@ for _name in _ARRAYS:
 del _name
 
 
-def _host_sizes(words: np.ndarray) -> dict[str, Any]:
+def _host_sizes(words: np.ndarray, history: bool) -> dict[str, Any]:
     """The sizes of ``device_sizes`` words (uint32 [..., S, 2]): Python values for one batch, NumPy arrays over the
-    leading axes of a stacked batch."""
+    leading axes of a stacked batch. ``history``: the schema has history steps (otherwise the dict has the keys of a
+    host batch without them)."""
     halves = np.ascontiguousarray(words, dtype=np.uint32).astype(np.uint64)
     packed = halves[..., 0] | (halves[..., 1] << np.uint64(32))  # [..., S]
-    # a batch of this target has no history steps (the device refuses such schemas), as a host batch without history
-    values = {name: packed[..., k] for k, name in enumerate(_SIZE_FIELDS) if name != "history"}
+    values = {name: packed[..., k] for k, name in enumerate(_SIZE_FIELDS) if history or name != "history"}
     flags = values["overflow"]
     values["overflow"] = flags != 0
     values["capacity_overflow"] = (flags & _device._OVERFLOW_CAPACITY) != 0
@@ -363,6 +367,110 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     return masks[0], masks[1], masks[2], masks[3]
 
 
+def _layer_halves(x: Any, name: str) -> Any:
+    """``x`` as uint32 [rows, layers, 2 words]: masks of u64 words as halves, low half first."""
+    if x is None:
+        raise _error(f"'{name}' must be an array, not None")
+    if isinstance(x, jax.Array):
+        if x.dtype in (jnp.uint64, jnp.int64):
+            x = jax.lax.bitcast_convert_type(x, jnp.uint32).reshape(*x.shape[:-1], 2 * x.shape[-1])
+        elif x.dtype == jnp.int32:
+            x = jax.lax.bitcast_convert_type(x, jnp.uint32)
+        elif x.dtype != jnp.uint32:
+            raise _error(f"'{name}' must hold uint32 or int32 halves or uint64 or int64 words, not {x.dtype}")
+    else:
+        a = np.asarray(x)
+        if a.dtype in (np.uint64, np.int64, np.uint32, np.int32):
+            a = np.ascontiguousarray(a).view(np.uint32)
+        else:
+            raise _error(f"'{name}' must hold uint32 or int32 halves or uint64 or int64 words, not {a.dtype}")
+        x = jnp.asarray(a)
+    if x.ndim != 3 or x.shape[2] % 2:
+        raise _error(f"'{name}' must be an array of masks [N, layers, 2 words] uint32 halves (or [N, layers, words] "
+                     f"64-bit words), got shape {tuple(x.shape)}")
+    return x
+
+
+def _ints(x: Any, name: str, shape: tuple[int, ...]) -> Any:
+    """``x`` as int32 of ``shape``: integers (converted to int32)."""
+    if isinstance(x, jax.Array):
+        if not jnp.issubdtype(x.dtype, jnp.integer):
+            raise _error(f"'{name}' must be integers, not {x.dtype}")
+        t = x.astype(jnp.int32)
+    else:
+        a = np.asarray(x)
+        if a.size and not np.issubdtype(a.dtype, np.integer):
+            raise _error(f"'{name}' must be integers, not {a.dtype}")
+        t = jnp.asarray(a.astype(np.int32))
+    if tuple(t.shape) != shape:
+        raise _error(f"'{name}' must be int32 of shape {list(shape)}, not of shape {list(t.shape)}")
+    return t
+
+
+def _layer_pair(items: tuple, at: int, names: tuple, graphs: int, may_share: bool) -> tuple[Any, Any]:
+    """The masks ``items[at]`` and ``items[at + 1]`` as halves, checked to be a pair of one row per state (or of one
+    row for all, if ``may_share``)."""
+    pos, neg = _layer_halves(items[at], names[at]), _layer_halves(items[at + 1], names[at + 1])
+    if pos.shape != neg.shape:
+        raise _error(f"'{names[at + 1]}' has another shape than '{names[at]}'")
+    rows = pos.shape[0]
+    if rows != graphs and not (may_share and rows == 1):
+        raise _error(f"'{names[at]}' has {rows} rows: one per state ({graphs})" +
+                     (" or a single shared row" if may_share else ""))
+    if at and pos.shape[1] != items[0].shape[1]:
+        raise _error(f"'{names[at]}' has {pos.shape[1]} layers, '{names[0]}' has {items[0].shape[1]}")
+    return pos, neg
+
+
+def _subgoals(subgoals: Any, graphs: int, reg: _Registration) -> tuple[Any, ...]:
+    """The four subgoal operands: (pos, neg, derived_pos, derived_neg), [0] for an absent pair."""
+    empty = jnp.zeros((0,), jnp.uint32)
+    if subgoals is None:
+        return empty, empty, empty, empty
+    if isinstance(subgoals, str) or not hasattr(subgoals, "__len__") or len(subgoals) not in (2, 4):
+        raise _error("subgoals must be (pos, neg) or (pos, neg, derived_pos, derived_neg)")
+    names = ("subgoals[0] (pos)", "subgoals[1] (neg)", "subgoals[2] (derived_pos)", "subgoals[3] (derived_neg)")
+    items = tuple(subgoals)
+    out = [*_layer_pair(items, 0, names, graphs, True)]
+    items = (out[0], *items[1:])
+    if len(items) == 4:
+        out += _layer_pair(items, 2, names, graphs, True)
+    layers, levels = out[0].shape[1], reg.options["max_goal_level"]
+    if layers and not levels:
+        raise _error("subgoal layers are given, but the schema has no subgoal relations")
+    if layers > levels:
+        raise _error(f"{layers} subgoal layers are given, the schema has {levels} levels")
+    return (*out, *[empty] * (4 - len(out)))
+
+
+def _history(history: Any, graphs: int, reg: _Registration) -> tuple[Any, ...]:
+    """The six history operands: (pos, neg, dt, count, derived_pos, derived_neg), [0] for an absent one."""
+    empty, none = jnp.zeros((0,), jnp.uint32), jnp.zeros((0,), jnp.int32)
+    if history is None:
+        return empty, empty, none, none, empty, empty
+    if isinstance(history, str) or not hasattr(history, "__len__") or len(history) not in (3, 4, 6):
+        raise _error("history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, dt, count, derived_pos, "
+                     "derived_neg)")
+    names = ("history[0] (pos)", "history[1] (neg)", "history[2] (dt)", "history[3] (count)",
+             "history[4] (derived_pos)", "history[5] (derived_neg)")
+    items = tuple(history)
+    pos, neg = _layer_pair(items, 0, names, graphs, False)
+    steps = pos.shape[1]
+    if steps and not reg.options["history"]:
+        raise _error("history steps are given, but the schema has no history relations")
+    if items[2] is None:
+        if graphs * steps:
+            raise _error(f"'{names[2]}' must be an array, not None")
+        dt = none
+    else:
+        dt = _ints(items[2], names[2], (graphs, steps))
+    count = none if len(items) < 4 or items[3] is None else _ints(items[3], names[3], (graphs,))
+    derived = (empty, empty)
+    if len(items) == 6:
+        derived = _layer_pair((pos, *items[1:]), 4, names, graphs, False)
+    return pos, neg, dt, count, *derived
+
+
 def _cuda_device() -> Optional[Any]:
     """JAX's first CUDA device, or None when JAX has no CUDA backend."""
     try:
@@ -396,9 +504,9 @@ def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Opt
 
 
 def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entities: int, args: int, targets: int,
-          threads: int) -> tuple[dict[str, Any], Any]:
+          history: int, threads: int) -> tuple[dict[str, Any], Any]:
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
-    specs = reg.layout.specs(jnp, graphs, entities, args, targets)
+    specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
     del specs["sizes"]
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
@@ -407,7 +515,7 @@ def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entitie
         shapes = results if scratch is None else [*results, jax.ShapeDtypeStruct((scratch,), jnp.uint8)]
         out = jax.ffi.ffi_call("mymyr_encode_flat", shapes, vmap_method="sequential")(
             *rows, args=np.int64(args), entities=np.int64(entities), handle=np.int64(handle),
-            targets=np.int64(targets), threads=np.int64(threads),
+            history=np.int64(history), targets=np.int64(targets), threads=np.int64(threads),
         )  # fmt: skip
         return tuple(out[: len(results)])
 
@@ -428,6 +536,8 @@ def encode(
     *,
     derived: Any = None,
     goals: Any = None,
+    subgoals: Any = None,
+    history: Any = None,
     capacities: Optional[dict] = None,
     threads: int = 1,
 ) -> JaxFlatBatch:
@@ -444,11 +554,18 @@ def encode(
     goal_derived_pos, goal_derived_neg)``, each with N rows or one row for all (halves or words), replacing the
     instances' goals as in ``FlatRelationEncoder.encode``.
 
-    capacities: ``dict(graphs=, entities=, args=, targets=)`` (``targets`` only with target sources; ``graphs`` at least
-    N), required under ``jax.jit``: the arrays have static shapes, the true sizes are in ``batch.device_sizes`` and a
-    batch that does not fit is all zero with its flag set. Without capacities (eager calls only) the call waits once
-    for the batch's sizes, raises ``ValueError`` for an invalid row and ``OverflowError`` when the index type is too
-    narrow, and returns exact arrays.
+    subgoals: ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)``, the subgoal layers of the rows as masks
+    [N, L, 2 W] (halves; or [N, L, W] words; one row [1, L, ...] for all), at most as many layers as the encoder's
+    ``max_goal_level``. history: ``(pos, neg, dt)``, ``(pos, neg, dt, count)`` or ``(pos, neg, dt, count,
+    derived_pos, derived_neg)``, the history steps of the rows, oldest first: masks [N, H, 2 W], ``dt`` int32 [N, H]
+    and ``count`` int32 [N], the valid steps of each row (None: all H). Both as in ``FlatRelationEncoder.encode``;
+    the schema needs subgoal levels or history.
+
+    capacities: ``dict(graphs=, entities=, args=, targets=, history=)`` (``targets`` only with target sources,
+    ``history`` only with history steps; ``graphs`` at least N), required under ``jax.jit``: the arrays have static
+    shapes, the true sizes are in ``batch.device_sizes`` and a batch that does not fit is all zero with its flag set.
+    Without capacities (eager calls only) the call waits once for the batch's sizes, raises ``ValueError`` for an
+    invalid row and ``OverflowError`` when the index type is too narrow, and returns exact arrays.
 
     threads: the CPU target's worker threads (0: one per hardware thread); the result does not depend on it.
     ``index_dtype='int64'`` needs ``jax_enable_x64``."""
@@ -467,9 +584,13 @@ def encode(
     goal_pos, goal_neg, goal_derived_pos, goal_derived_neg = _goals(goals, graphs)
     if goals is not None and not reg.layout.goal_complete:
         raise _error("goals are given, but the schema has no goal relations")
+    layers = _subgoals(subgoals, graphs, reg)
+    steps = _history(history, graphs, reg)
     if derived is None:
         need = info["needs_derived"]
-        if need and need[0 if goals is None else (1 if len(goals) == 2 else 2)]:
+        goal_mode = 0 if goals is None else (1 if len(goals) == 2 else 2)
+        derived_layers = layers[2].ndim == 3 and layers[0].shape[1] != 0
+        if need and need[goal_mode + (3 if derived_layers else 0)]:
             raise _error("the rows' derived words are required: a graph reads derived atoms whose axioms the device "
                          "cannot evaluate (pass derived=)")
         derived_words = jnp.zeros((0,), jnp.uint32)
@@ -479,7 +600,7 @@ def encode(
             raise _error(f"'derived' has {derived_words.shape[0]} rows, the states {graphs}")
         if derived_words.shape[1] // 2 < info["derived_words"]:
             raise _error(f"'derived' needs at least {info['derived_words']} words per row")
-    operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
+    operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps)
     static = (
         tuple(n for n in _ARRAYS if reg.layout.present(n)),
         reg.layout.relations,
@@ -491,17 +612,17 @@ def encode(
         _signed(reg.table_fingerprint),
     )
     if capacities is not None:
-        caps_graphs, entities, args, targets = _device._capacities(capacities, reg.layout)
+        caps_graphs, entities, args, targets, history_steps = _device._capacities(capacities, reg.layout)
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
-        arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, threads)
+        arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)
         return JaxFlatBatch(arrays, sizes, static)
     if _traced(*operands):
         raise _error("capacities are required under jax.jit and other transformations (the arrays need static shapes): "
-                     "pass capacities=dict(graphs=, entities=, args=, targets=)")
+                     "pass capacities=dict(graphs=, entities=, args=, targets=, history=)")
     arrays, sizes = _eager(handle, reg, operands, graphs, threads)
     cut = {"entity_role": "entities", "entity_ref": "entities", "relation_args": "args", "target_entity": "targets",
-           "target_group": "targets"}  # fmt: skip
+           "target_group": "targets", "history_entity": "history", "history_dt": "history"}  # fmt: skip
     arrays = {name: a[: sizes[cut[name]]] if name in cut else a for name, a in arrays.items()}
     return JaxFlatBatch(arrays, None, static)
 
@@ -511,22 +632,28 @@ def _eager(handle: int, reg: _Registration, operands: tuple, graphs: int, thread
     and number of rows (the first call counts the batch at zero capacities to find them), reads its sizes and, if the
     batch did not fit, runs once more at capacities that hold it; the held capacities only grow, so that batches of
     similar sizes reuse one compiled call."""
+    history = reg.layout.history
+    keys = ("entities", "args", "targets", "history")
+
+    def grown(held: tuple, sizes: dict) -> tuple:
+        return tuple(max(h, _rounded(sizes.get(key, 0))) for h, key in zip(held, keys))
+
     with _lock:
         held = reg.held.get(graphs)
     if held is None:
-        _, counted = _call(handle, reg, operands, graphs, 0, 0, 0, threads)
-        sizes = _host_sizes(np.asarray(counted))
+        _, counted = _call(handle, reg, operands, graphs, 0, 0, 0, 0, threads)
+        sizes = _host_sizes(np.asarray(counted), history)
         _check_sizes(sizes)
-        held = (_rounded(sizes["entities"]), _rounded(sizes["args"]), _rounded(sizes["targets"]))
+        held = grown((0, 0, 0, 0), sizes)
     while True:
         arrays, words = _call(handle, reg, operands, graphs, *held, threads)
-        sizes = _host_sizes(np.asarray(words))
+        sizes = _host_sizes(np.asarray(words), history)
         _check_sizes(sizes)
         if not sizes["capacity_overflow"]:
             break
-        held = tuple(max(h, _rounded(sizes[key])) for h, key in zip(held, ("entities", "args", "targets")))
+        held = grown(held, sizes)
     with _lock:
-        old = reg.held.get(graphs, (0, 0, 0))
+        old = reg.held.get(graphs, (0, 0, 0, 0))
         reg.held[graphs] = tuple(max(a, b) for a, b in zip(old, held))
     return arrays, sizes
 
@@ -534,12 +661,15 @@ def _eager(handle: int, reg: _Registration, operands: tuple, graphs: int, thread
 def _check_sizes(sizes: dict) -> None:
     """Raises for a batch with an invalid row or one that its index type cannot hold."""
     if sizes["invalid_input"]:
-        raise _error("a row is invalid: a task id outside the table, a state row or goal mask narrower than its "
-                     "instance, or a bit that its instance has no atom for")
+        raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or history "
+                     "step narrower than its instance, a history count outside [0, steps], or a bit that its instance "
+                     "has no atom for")
     if sizes["index_overflow"]:
+        history = f", history {sizes['history']}" if "history" in sizes else ""
         raise OverflowError(
             f"mymyr: encoding: the batch needs more indices than its index type holds (entities {sizes['entities']}, "
-            f"tuples {sizes['tuples']}, args {sizes['args']}, targets {sizes['targets']}): use index_dtype='int64'"
+            f"tuples {sizes['tuples']}, args {sizes['args']}, targets {sizes['targets']}{history}): use "
+            "index_dtype='int64'"
         )
 
 

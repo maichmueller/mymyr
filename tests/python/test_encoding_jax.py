@@ -48,6 +48,19 @@ OPTION_SETS = {
     "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": False},
     "no_actions": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": ()},
 }
+ALL_GOALS = ("plain", "satisfied", "unsatisfied")
+LAYERED_OPTION_SETS = {
+    "levels_targets": {"max_goal_level": 3, "goal_derivations": ALL_GOALS, "target_sources": ("goal", "subgoal")},
+    "history": {"history": True},
+    "history_newest_targets": {"history": True, "history_max_steps": 2, "target_sources": ("history",)},
+    "levels_history_virtual": {
+        "max_goal_level": 2,
+        "history": True,
+        "target_sources": ("goal", "subgoal", "history"),
+        "predicate_virtual_nodes": True,
+        "goal_derivations": ("plain", "satisfied"),
+    },
+}
 
 
 def platforms():
@@ -176,13 +189,25 @@ def jax_inputs(case, platform, goals=None):
     return put(halves(case.rows), platform), put(case.ids, platform), put(halves(case.derived), platform), g
 
 
-def jax_encode(encoder, case, platform, goals=None, jit=True, **kwargs):
+def layered_inputs(platform, subgoals=None, history=None):
+    """The ``subgoals`` and ``history`` arguments of ``ej.encode`` on ``platform``: the masks as uint32 halves, dt and
+    count as they are."""
+
+    def one(x):
+        return None if x is None else put(halves(x) if x.dtype == np.uint64 else x, platform)
+
+    return {key: None if value is None else tuple(one(x) for x in value)
+            for key, value in (("subgoals", subgoals), ("history", history))}
+
+
+def jax_encode(encoder, case, platform, goals=None, jit=True, subgoals=None, history=None, **kwargs):
     rows, ids, derived, g = jax_inputs(case, platform, goals)
+    layers = layered_inputs(platform, subgoals, history)
 
-    def f(rows, ids, derived, g):
-        return ej.encode(encoder, rows, ids, derived=derived, goals=g, **kwargs)
+    def f(rows, ids, derived, g, layers):
+        return ej.encode(encoder, rows, ids, derived=derived, goals=g, **layers, **kwargs)
 
-    return (jax.jit(f) if jit else f)(rows, ids, derived, g)
+    return (jax.jit(f) if jit else f)(rows, ids, derived, g, layers)
 
 
 def same_batch(host, batch):
@@ -213,6 +238,8 @@ def exact_capacities(batch, factor=1):
     }
     if hasattr(batch, "target_offsets") and batch.num_graphs:
         sizes["targets"] = int(batch.target_offsets[-1])
+    if hasattr(batch, "history_offsets"):
+        sizes["history"] = int(batch.history_offsets[-1]) if batch.num_graphs else 0
     return {k: v * factor for k, v in sizes.items()}
 
 
@@ -232,6 +259,63 @@ def fluent_goals(case, seed=3):
             elif draw < 0.2:
                 neg[row, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
     return pos, neg
+
+
+def layered_rows(case, layers=3, steps=4, seed=11):
+    """Random subgoal layers and history steps for the rows of ``case`` as the masks of ``encode``: (subgoals,
+    history). A row uses a random number of its layers (the others are empty) and has a random number of valid steps;
+    the literals are random over its slots (over its derived atoms for the derived masks)."""
+    rng = np.random.default_rng(seed)
+    offsets = np.asarray(case.table.atom_metadata()["atom_offsets"])
+    ids = np.zeros(case.n, np.int64) if case.ids is None else case.ids
+    n, words = case.rows.shape
+    dwords = None if case.derived is None else case.derived.shape[1]
+
+    def masks(count):
+        pos, neg = (np.zeros((n, count, words), np.uint64) for _ in range(2))
+        dpos = dneg = None
+        if dwords is not None:
+            dpos, dneg = (np.zeros((n, count, dwords), np.uint64) for _ in range(2))
+        return pos, neg, dpos, dneg
+
+    def draw(pos, neg, dpos, dneg, row, k):
+        slots = int(offsets[ids[row] + 1] - offsets[ids[row]])
+        for slot in range(slots):
+            r = rng.random()
+            target = pos if r < 0.08 else neg if r < 0.16 else None
+            if target is not None:
+                target[row, k, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+        if dwords is not None:
+            held = [w * 64 + b for w in range(dwords) for b in range(64) if (int(case.derived[row, w]) >> b) & 1]
+            for slot in held:
+                r = rng.random()
+                target = dpos if r < 0.4 else dneg if r < 0.6 else None
+                if target is not None:
+                    target[row, k, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+
+    used = rng.integers(0, layers + 1, n)
+    valid = rng.integers(0, steps + 1, n).astype(np.int32)
+    layer_masks, step_masks = masks(layers), masks(steps)
+    for row in range(n):
+        for k in range(int(used[row])):
+            draw(*layer_masks, row, k)
+        for k in range(steps):
+            draw(*step_masks, row, k)
+    dt = rng.integers(-20, 40, (n, steps)).astype(np.int32)
+    keep = lambda m: tuple(x for x in m if x is not None)  # noqa: E731
+    return keep(layer_masks), (*keep(step_masks)[:2], dt, valid, *keep(step_masks)[2:])
+
+
+def layered_kwargs(case, options, **kwargs):
+    """The ``subgoals`` and ``history`` arguments (host arrays) an encoder with these options takes for the rows."""
+    subgoals, history = layered_rows(case, **kwargs)
+    out = {}
+    if options.get("max_goal_level"):
+        # the layers an encoder takes: at most as many as its levels
+        out["subgoals"] = tuple(np.ascontiguousarray(x[:, : options["max_goal_level"]]) for x in subgoals)
+    if options.get("history"):
+        out["history"] = history
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ the targets
@@ -366,7 +450,7 @@ def test_lax_scan_encodes_every_step(cases):
             for name in host.as_dict():
                 if name in ej.JaxFlatBatch.array_names:
                     assert np.array_equal(np.asarray(getattr(stacked, name)[k]), np.asarray(getattr(host, name))), name
-            assert ej._host_sizes(np.asarray(stacked.device_sizes[k]))["args"] == host.sizes["args"]
+            assert ej._host_sizes(np.asarray(stacked.device_sizes[k]), False)["args"] == host.sizes["args"]
         sizes = stacked.sizes  # NumPy arrays over the stacked axis
         assert sizes["args"].shape == (steps,) and sizes["overflow"].shape == (steps,) and not sizes["overflow"].any()
         for k in range(steps):
@@ -405,6 +489,237 @@ def test_the_cpu_result_does_not_depend_on_threads(cases):
         many = jax_encode(encoder, case, "cpu", capacities=caps, threads=threads)
         for x, y in zip(jax.tree_util.tree_leaves(one), jax.tree_util.tree_leaves(many), strict=True):
             assert np.array_equal(np.asarray(x), np.asarray(y))
+
+
+# ------------------------------------------------------------------------------------------------ subgoal layers and history
+
+
+@pytest.mark.parametrize("options", LAYERED_OPTION_SETS.values(), ids=LAYERED_OPTION_SETS.keys())
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_subgoal_layers_and_history_equal_the_host_bit_for_bit(cases, layout, index, options):
+    with x64(index == "int64"):
+        for case in cases.values():
+            encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **options)
+            kwargs = layered_kwargs(case, options)
+            exact = host_encode(encoder, case, **kwargs)
+            caps = exact_capacities(exact)
+            assert ("history" in caps) == bool(options.get("history"))
+            host = host_encode(encoder, case, capacities=caps, **kwargs)
+            variants = [kwargs]
+            # a history without counts (every step is valid) and fewer layers than the encoder has levels
+            if "history" in kwargs:
+                pos, neg, dt, _count, *derived = kwargs["history"]
+                variants.append({**kwargs, "history": (pos, neg, dt, None, *derived)})
+            if "subgoals" in kwargs:
+                variants.append({**kwargs, "subgoals": tuple(np.ascontiguousarray(x[:, :1]) for x in kwargs["subgoals"])})
+            for platform in PLATFORMS:
+                batch = jax_encode(encoder, case, platform, capacities=caps, **kwargs)
+                same_batch(host, batch)
+                same_sizes(host, batch)
+                if options.get("history"):
+                    assert batch.history_dt.dtype == jnp.int32 and batch.history_entity.shape == (caps["history"],)
+                    assert batch.history_offsets.shape == (case.n + 1,)
+                # without capacities: one wait, the exact arrays
+                same_batch(exact, jax_encode(encoder, case, platform, jit=False, **kwargs))
+                for variant in variants[1:]:
+                    want = host_encode(encoder, case, **variant)
+                    roomy = exact_capacities(want, 2)
+                    same_batch(host_encode(encoder, case, capacities=roomy, **variant),
+                               jax_encode(encoder, case, platform, capacities=roomy, **variant))
+                    same_batch(want, jax_encode(encoder, case, platform, jit=False, **variant))
+
+
+@pytest.mark.parametrize("options", LAYERED_OPTION_SETS.values(), ids=LAYERED_OPTION_SETS.keys())
+@pytest.mark.parametrize("n", [0, 1])
+def test_empty_and_single_batches_with_layers_and_history_equal_the_host(cases, options, n):
+    for case in cases.values():
+        case = case.resized(n)
+        encoder = encoding.FlatRelationEncoder(case.source, **options)
+        kwargs = layered_kwargs(case, options)
+        exact = host_encode(encoder, case, **kwargs)
+        caps = exact_capacities(exact)
+        host = host_encode(encoder, case, capacities=caps, **kwargs)
+        for platform in PLATFORMS:
+            same_batch(host, jax_encode(encoder, case, platform, capacities=caps, **kwargs))
+            same_batch(exact, jax_encode(encoder, case, platform, jit=False, **kwargs))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_layers_and_history_with_row_goals_and_shared_layers_equal_the_host(cases, layout):
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    for name in ("gripper", "blocks_table", "philosophers_table"):
+        if name not in cases:
+            continue
+        case = cases[name]
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+        goals = fluent_goals(case)
+        kwargs = layered_kwargs(case, options)
+        variants = [kwargs]
+        if case.ids is None:  # layers that every row shares
+            variants.append({**kwargs, "subgoals": tuple(np.ascontiguousarray(x[:1]) for x in kwargs["subgoals"])})
+        for variant in variants:
+            caps = exact_capacities(host_encode(encoder, case, goals, **variant), 2)
+            host = host_encode(encoder, case, goals, capacities=caps, **variant)
+            for platform in PLATFORMS:
+                same_batch(host, jax_encode(encoder, case, platform, goals, capacities=caps, **variant))
+        # 64-bit words are accepted as well as halves, and int64 dt and counts
+        with x64(True):
+            caps = exact_capacities(host_encode(encoder, case, goals, **kwargs))
+            pos, neg, dt, count, *derived = kwargs["history"]
+            history = tuple(jnp.asarray(x) for x in (pos, neg, dt.astype(np.int64), count.astype(np.int64), *derived))
+            batch = ej.encode(encoder, jnp.asarray(case.rows), None if case.ids is None else jnp.asarray(case.ids),
+                              derived=None if case.derived is None else jnp.asarray(case.derived),
+                              goals=tuple(jnp.asarray(g) for g in goals),
+                              subgoals=tuple(jnp.asarray(x) for x in kwargs["subgoals"]), history=history,
+                              capacities=caps)
+            same_batch(host_encode(encoder, case, goals, capacities=caps, **kwargs), batch)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_the_capacity_form_with_history_equals_the_host(cases, layout):
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    for name in ("gripper", "blocks_table", "philosophers_table"):
+        if name not in cases:
+            continue
+        case = cases[name]
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+        kwargs = layered_kwargs(case, options)
+        exact = exact_capacities(host_encode(encoder, case, **kwargs))
+        assert set(exact) == {"graphs", "entities", "args", "targets", "history"} and exact["history"] > 0
+        short = dict(exact, history=exact["history"] - 1)
+        zero = {"entities": 0, "graphs": case.n, "args": 0, "targets": 0, "history": 0}
+        for caps in (exact, exact_capacities(host_encode(encoder, case, **kwargs), 2), short, zero):
+            host = host_encode(encoder, case, capacities=caps, **kwargs)
+            for platform in PLATFORMS:
+                batch = jax_encode(encoder, case, platform, capacities=caps, **kwargs)
+                same_batch(host, batch)
+                same_sizes(host, batch)
+                assert batch.history_entity.shape == (caps["history"],)
+                assert batch.sizes["history"] == int(host_encode(encoder, case, **kwargs).history_offsets[-1])
+        assert host_encode(encoder, case, capacities=short, **kwargs).sizes["capacity_overflow"]
+
+
+def test_eager_calls_grow_the_held_history_capacity(cases):
+    case = cases["gripper"].resized(8)
+    options = LAYERED_OPTION_SETS["history"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    handle = ej.register(encoder)
+    few = layered_kwargs(case, options, steps=1)
+    many = layered_kwargs(case, options, steps=40, seed=5)
+    rows = put(halves(case.rows), "cpu")
+    for kwargs in (few, many, few):
+        history = layered_inputs("cpu", history=kwargs["history"])["history"]
+        batch = ej.encode(handle, rows, history=history)
+        same_batch(host_encode(encoder, case, **kwargs), batch)
+    held = ej._registrations[handle].held[8]
+    assert len(held) == 4 and held[3] >= int(host_encode(encoder, case, **many).history_offsets[-1])
+
+
+def test_lax_scan_and_vmap_carry_layers_and_history(cases):
+    case = cases["gripper"].resized(30)
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    kwargs = layered_kwargs(case, options)
+    caps = exact_capacities(host_encode(encoder, case, **kwargs))
+    caps["graphs"] = 10
+
+    def split(x):
+        return np.ascontiguousarray(x.reshape(3, 10, *x.shape[1:]))
+
+    def part(b):
+        step = case.resized(10)
+        step.rows = case.rows[10 * b:10 * (b + 1)]
+        return step, {key: tuple(np.ascontiguousarray(x[10 * b:10 * (b + 1)]) for x in value)
+                      for key, value in kwargs.items()}
+
+    rows = split(halves(case.rows))
+    stacked = {key: tuple(split(halves(x) if x.dtype == np.uint64 else x) for x in value) for key, value in kwargs.items()}
+    for platform in PLATFORMS:
+        args = (put(rows, platform), {key: tuple(put(x, platform) for x in value) for key, value in stacked.items()})
+
+        def one(r, layers):
+            return ej.encode(encoder, r, **layers, capacities=caps)
+
+        mapped = jax.jit(jax.vmap(one))(*args)
+        scanned = jax.jit(lambda r, layers: jax.lax.scan(lambda c, xs: (c, one(*xs)), 0, (r, layers))[1])(*args)
+        for batched in (mapped, scanned):
+            assert batched.history_entity.shape == (3, caps["history"])
+            assert not batched.sizes["overflow"].any()
+            for b in range(3):
+                step, layers = part(b)
+                host = host_encode(encoder, step, capacities=caps, **layers)
+                for name, a in host.as_dict().items():
+                    if name in ej.JaxFlatBatch.array_names:
+                        assert np.array_equal(np.asarray(getattr(batched, name)[b]), np.asarray(a)), name
+                assert int(batched.sizes["history"][b]) == host.sizes["history"]
+
+
+def test_layers_and_history_the_schema_does_not_have_or_malformed_ones_are_refused(cases):
+    case = cases["gripper"]
+    subgoals, history = layered_rows(case)
+    plain = encoding.FlatRelationEncoder(case.source)
+    caps = exact_capacities(host_encode(plain, case))
+    for platform in PLATFORMS:
+        def refused(match, encoder=plain, capacities=caps, **kwargs):
+            with pytest.raises(ValueError, match="^mymyr: encoding: " + match):
+                jax_encode(encoder, case, platform, capacities=capacities, **kwargs)
+
+        refused("subgoal layers are given, but the schema has no subgoal relations", subgoals=subgoals)
+        refused("history steps are given, but the schema has no history relations", history=history)
+        levels = encoding.FlatRelationEncoder(case.source, max_goal_level=2)
+        refused("3 subgoal layers are given, the schema has 2 levels", levels, subgoals=subgoals)
+        steps = encoding.FlatRelationEncoder(case.source, history=True)
+        steps_caps = {**caps, "history": 64}
+        refused("the schema has history: capacities needs the key 'history'", steps, history=history)
+        refused("subgoals must be", levels, subgoals=subgoals[:1])
+        refused("history must be", steps, steps_caps, history=history[:2])
+        refused("'subgoals\\[1\\] \\(neg\\)' has another shape than 'subgoals\\[0\\] \\(pos\\)'", levels,
+                subgoals=(subgoals[0][:, :2], subgoals[1][:, :1]))
+        refused("'subgoals\\[0\\] \\(pos\\)' has 2 rows: one per state", levels,
+                subgoals=(subgoals[0][:2, :2], subgoals[1][:2, :2]))
+        refused("'history\\[0\\] \\(pos\\)' has 1 rows: one per state", steps, steps_caps,
+                history=(history[0][:1], history[1][:1], history[2][:1]))
+        refused("'history\\[2\\] \\(dt\\)' must be", steps, steps_caps, history=(history[0], history[1], history[2][:, :2]))
+        refused("'history\\[3\\] \\(count\\)' must be", steps, steps_caps,
+                history=(history[0], history[1], history[2], history[3][:3]))
+        refused("'subgoals\\[0\\] \\(pos\\)' must be", levels, subgoals=(np.zeros((case.n, 2), np.uint64),) * 2)
+        # an encoder with layers or history encodes the rows without them
+        for encoder, c in ((levels, caps), (steps, steps_caps)):
+            same_batch(host_encode(encoder, case, capacities=c), jax_encode(encoder, case, platform, capacities=c))
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: capacities are required under jax.jit"):
+        jax_encode(steps, case, "cpu", history=history)
+
+
+def test_invalid_history_counts_and_layer_bits_are_flagged_or_raise(cases):
+    case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    kwargs = layered_kwargs(case, options)
+    caps = exact_capacities(host_encode(encoder, case, **kwargs))
+    steps = kwargs["history"][2].shape[1]
+    bad = []
+    for count in (steps + 1, -1):
+        bad_count = kwargs["history"][3].copy()
+        bad_count[3] = count
+        bad.append({**kwargs, "history": (*kwargs["history"][:3], bad_count, *kwargs["history"][4:])})
+    # a subgoal bit past the slots of an instance
+    pos = kwargs["subgoals"][0].copy()
+    offsets = np.asarray(case.table.atom_metadata()["atom_offsets"])
+    ids = np.zeros(case.n, np.int64) if case.ids is None else case.ids
+    row = next(r for r in range(case.n) if int(offsets[ids[r] + 1] - offsets[ids[r]]) < 64 * case.rows.shape[1])
+    slots = int(offsets[ids[row] + 1] - offsets[ids[row]])
+    pos[row, 0, slots // 64] |= np.uint64(1) << np.uint64(slots % 64)
+    bad.append({**kwargs, "subgoals": (pos, *kwargs["subgoals"][1:])})
+    for platform in PLATFORMS:
+        for b in bad:
+            batch = jax_encode(encoder, case, platform, capacities=caps, **b)
+            sizes = batch.sizes
+            assert sizes["overflow"] and sizes["invalid_input"] and not sizes["capacity_overflow"]
+            assert all(not np.asarray(a).any() for a in batch.as_dict().values() if hasattr(a, "shape"))
+            with pytest.raises(ValueError, match=r"^mymyr: encoding: a row is invalid"):
+                jax_encode(encoder, case, platform, jit=False, **b)
+        assert jax_encode(encoder, case, platform, capacities=caps, **kwargs).sizes["overflow"] is False
 
 
 # ------------------------------------------------------------------------------------------------ errors and flags
@@ -602,14 +917,23 @@ def test_the_size_words_follow_the_native_size_fields():
         words[k] = (100 + k, 0 if name != "targets" else 3)  # no size equals the flags; targets above 32 bits
     flags = fields.index("overflow")
     words[flags] = (_device._OVERFLOW_CAPACITY | _device._OVERFLOW_INPUT, 0)
-    sizes = ej._host_sizes(words)
-    for k, name in enumerate(fields):
-        if name not in ("overflow", "history"):
-            assert sizes[name] == (100 + k) + ((3 << 32) if name == "targets" else 0), name
-    assert sizes["overflow"] and sizes["capacity_overflow"] and sizes["invalid_input"] and not sizes["index_overflow"]
+    for history in (False, True):
+        sizes = ej._host_sizes(words, history)
+        # a schema without history has the keys of a host batch without it
+        assert ("history" in sizes) == history
+        for k, name in enumerate(fields):
+            if name != "overflow" and name in sizes:
+                assert sizes[name] == (100 + k) + ((3 << 32) if name == "targets" else 0), name
+        assert sizes["overflow"] and sizes["capacity_overflow"] and sizes["invalid_input"]
+        assert not sizes["index_overflow"]
     static = (("task_ids",), 1, 0, 0, 0, True, None, 0)
     batch = ej.JaxFlatBatch({"task_ids": jnp.zeros((2,), jnp.int32)}, jnp.asarray(words), static)
     assert int(batch.overflow) == _device._OVERFLOW_CAPACITY | _device._OVERFLOW_INPUT
+    assert "history" not in batch.sizes
+    static = (("task_ids", "history_offsets"), 1, 0, 0, 0, True, None, 0)
+    batch = ej.JaxFlatBatch({"task_ids": jnp.zeros((2,), jnp.int32), "history_offsets": jnp.zeros((3,), jnp.int32)},
+                            jnp.asarray(words), static)
+    assert batch.sizes["history"] == 100 + fields.index("history")
 
 
 def test_the_device_ordinal_is_the_local_hardware_id_even_when_it_is_zero():
@@ -636,7 +960,7 @@ def test_eager_calls_without_capacities_reuse_the_capacities_held_for_their_size
         assert calls() == 3 + k  # one compiled call from then on
     # a batch larger than the held capacities is encoded again at capacities that hold it, and they stay
     reg = ej._registrations[handle]
-    reg.held[8] = (0, 0, 0)
+    reg.held[8] = (0, 0, 0, 0)
     same_batch(want, ej.encode(handle, rows))
     assert calls() == 7
     assert all(h >= 64 for h in reg.held[8][:2])
@@ -806,3 +1130,31 @@ def test_derived_words_are_required_only_where_the_device_cannot_evaluate_the_ax
     plain.__dict__.update(case.__dict__, derived=None)
     with pytest.raises(ValueError, match=r"^mymyr: encoding: the rows' derived words are required"):
         jax_encode(encoder, plain, "cuda", capacities=caps)
+
+
+def test_derived_subgoal_masks_need_derived_words_only_where_the_device_cannot_evaluate_the_axioms():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    options = {"max_goal_level": 2, "history": True}
+    for objects, evaluable in ((5, True), (2100, False)):
+        tasks = [gated_task(3), gated_task(objects)]
+        case = Case(rl.TaskTable(tasks), tasks, derived=True, steps=2)
+        pick = np.concatenate([np.flatnonzero(case.ids == k)[:6] for k in range(2)])
+        case.rows, case.ids, case.derived = (np.ascontiguousarray(x[pick]) for x in (case.rows, case.ids, case.derived))
+        encoder = encoding.FlatRelationEncoder(case.source, **options)
+        kwargs = layered_kwargs(case, options, layers=2)
+        assert len(kwargs["subgoals"]) == 4 and len(kwargs["history"]) == 6
+        caps = exact_capacities(host_encode(encoder, case, **kwargs), 2)
+        want = host_encode(encoder, case, capacities=caps, **kwargs)
+        plain = Case.__new__(Case)
+        plain.__dict__.update(case.__dict__, derived=None)
+        # a function gives the same arrays wherever it runs: the rows of an instance whose axioms the device cannot
+        # evaluate need their derived words on every platform of a CUDA build
+        refused = not evaluable and _encoding_jax.has_cuda()
+        for platform in PLATFORMS:
+            same_batch(want, jax_encode(encoder, case, platform, capacities=caps, **kwargs))
+            if refused:
+                with pytest.raises(ValueError, match=r"^mymyr: encoding: the rows' derived words are required"):
+                    jax_encode(encoder, plain, platform, capacities=caps, **kwargs)
+            else:  # the target evaluates the derived atoms that the layers read
+                same_batch(want, jax_encode(encoder, plain, platform, capacities=caps, **kwargs))

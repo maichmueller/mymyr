@@ -700,7 +700,8 @@ and does not retain the Python encoder. Graphs of different sizes can share a ca
 
 ## Encoding inside JAX
 
-`mymyr.encoding.jax.encode(encoder, states, task_ids=None, *, derived=None, goals=None, capacities=None, threads=1)` is
+`mymyr.encoding.jax.encode(encoder, states, task_ids=None, *, derived=None, goals=None, subgoals=None, history=None,
+capacities=None, threads=1)` is
 `encoder.encode` as the XLA FFI target `mymyr_encode_flat`, so a jitted function, a `lax.scan` body or a `jax.vmap`
 can encode states. On the CPU the target runs the host encoder, on CUDA the device kernels on XLA's stream; both return
 the arrays of the host encoder's capacity form bit for bit, so a function gives the same batch wherever it runs. It
@@ -725,16 +726,34 @@ jax_batch = jax.jit(lambda r: ej.encode(gripper_encoder, r, capacities=capacitie
 assert isinstance(jax_batch, ej.JaxFlatBatch) and jax_batch.relation_args.shape == (capacities["args"],)
 assert int(jax_batch.overflow) == 0                       # usable inside jit; jax_batch.sizes reads it on the host
 assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["args"]], host.relation_args)
+
+# two history steps per row: the row's own atoms, then none
+history_encoder = encoding.FlatRelationEncoder(gripper, history=True)
+steps = np.zeros((len(words), 2, words.shape[1]), np.uint64)
+steps[:, 0] = words
+history = (steps, np.zeros_like(steps), np.full((len(words), 2), 1, np.int32))
+host = history_encoder.encode(words, history=history)
+capacities = dict(graphs=len(words), entities=int(host.entity_offsets[-1]), args=int(host.relation_arg_offsets[-1]),
+                  history=int(host.history_offsets[-1]))
+jax_history = (jnp.asarray(steps.view(np.uint32)), jnp.zeros(steps.shape[:2] + (2 * steps.shape[2],), jnp.uint32),
+               jnp.asarray(history[2]))
+jax_batch = jax.jit(lambda r, h: ej.encode(history_encoder, r, history=h, capacities=capacities))(rows, jax_history)
+assert jax_batch.sizes["history"] == 2 * len(words)
+assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
 ```
 
 - **Rows.** JAX has no 64-bit types by default, so rows are the u64 words of each state as `uint32` halves, low half
   first (`[N, 2 W]`, or one row `[2 W]`), as `mymyr.rl.jax` takes them; `uint64` or `int64` words (`[N, W]`, with
   `jax_enable_x64` or as NumPy arrays) and `int32` halves are accepted too. `task_ids` is `int32` `[N]` (required for a
   table of several instances), `derived` the rows' derived words, and `goals` the masks `(goal_pos, goal_neg)` or all
-  four, with `N` rows or one row for all, as in `encoder.encode`.
+  four, with `N` rows or one row for all, as in `encoder.encode`. `subgoals` (`(pos, neg)` or all four masks, `[N, L,
+  2 W]` halves or `[N, L, W]` words, or one row `[1, L, ...]` for all) and `history` (`(pos, neg, dt)`, `(pos, neg,
+  dt, count)` or all six, masks `[N, H, ...]`, `dt` `int32` `[N, H]` and `count` `int32` `[N]`) are the subgoal layers
+  and history steps of `encoder.encode`, on both platforms.
 - **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
-  args=, targets=)` (`targets` only with target sources; `graphs` at least `N`): the per-graph arrays have `N`
-  entries, the variable-size arrays the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[S,
+  args=, targets=, history=)` (`targets` only with target sources, `history` only with history steps; `graphs` at
+  least `N`): the per-graph arrays have `N` entries, the variable-size arrays (`history_entity` and `history_dt` among
+  them) the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[S,
   2]`, the `S` 64-bit words of `DeviceFlatBatch.sizes` (entities, tuples, args, targets, history and the overflow
   flags: 1 a capacity, 2 the index type, 4 an invalid row) as halves, low half first; `batch.overflow` is the flags as
   a `uint32` scalar for use inside the function, and `batch.sizes` reads them on the host (NumPy arrays over the
@@ -749,11 +768,12 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   fingerprint included). It is returned from jitted functions and stacked by
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
-- **What it encodes.** What the device encodes, on both platforms: a schema the device refuses (action, subgoal or
-  history targets, subgoal levels, horizons) or whose kernels need more shared memory than a block has (very many
-  predicate virtual nodes or relations) and rows without their derived words where the device cannot evaluate the
-  axioms that a graph reads (a body or object set beyond the device's matcher limits) raise `ValueError` (`mymyr:
-  encoding: ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the CPU
+- **What it encodes.** What the device encodes, on both platforms: the rows with their goals, subgoal layers and
+  history steps. A schema the device refuses (action targets, horizons) or whose kernels need more shared memory than
+  a block has (very many predicate virtual nodes or relations) and rows without their derived words where the device
+  cannot evaluate the axioms that a graph or its derived subgoal masks read (a body or object set beyond the device's
+  matcher limits) raise `ValueError` (`mymyr: encoding: ...`) when the function is traced, as do subgoal layers or
+  history steps that the schema has no relations for. Otherwise the device evaluates missing derived words, as the CPU
   encoder does. Action relations need an expansion, which JAX cannot pass, so their tuples are never encoded here. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
