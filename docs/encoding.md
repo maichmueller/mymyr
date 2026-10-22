@@ -1056,8 +1056,8 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   encoding: ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the CPU
   encoder does. Action relations need an expansion, which JAX cannot pass, so their tuples are never encoded here. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an
-  encoder with shared statics (`statics='shared'`) has no device form on either target: registering it raises
-  `ValueError`.
+  encoder of a numeric table (with or without `include_numeric`), of the Simple graph or with shared statics
+  (`statics='shared'`) has no device form on either target: registering it raises `ValueError`.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
   `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
   of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device

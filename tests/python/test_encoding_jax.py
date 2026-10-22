@@ -477,6 +477,28 @@ def test_shared_statics_are_refused_before_tracing_on_every_platform(cases):
     assert ej.registered(encoder) is None
 
 
+@pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple"])
+def test_numeric_relations_and_the_simple_graph_are_refused_before_tracing_on_every_platform(cases, lane):
+    if lane == "simple":
+        task = cases["gripper"].source
+        encoder = encoding.SimpleEncoder(task)
+        message = r"^mymyr: encoding: the device does not encode Simple"
+    else:
+        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+        encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric")
+        message = r"^mymyr: encoding: the device does not encode numeric relations"
+    rows = halves(np.asarray(task.encode([task.initial_state])))
+    caps = dict(graphs=1, entities=64, args=64, targets=0)
+    with pytest.raises(ValueError, match=message):
+        ej.register(encoder)
+    assert ej.registered(encoder) is None
+    with pytest.raises(ValueError, match=message):
+        ej.encode(encoder, rows, capacities=caps)
+    with pytest.raises(ValueError, match=message):
+        jax.jit(lambda r: ej.encode(encoder, r, capacities=caps))(rows)
+    assert ej.registered(encoder) is None
+
+
 # ------------------------------------------------------------------------------------------------ batches and handles
 
 

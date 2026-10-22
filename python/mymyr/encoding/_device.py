@@ -30,6 +30,7 @@ import weakref
 from typing import Any, Optional
 
 from mymyr._core._encoding import FlatBatch
+from mymyr.rl import as_table
 
 __all__ = ["DeviceFlatBatch"]
 
@@ -88,6 +89,13 @@ class _Layout:
 
     def __init__(self, encoder: Any):
         options = encoder.options
+        # the refusals of the device encoder (DeviceEncoder::check_schema), also where the build has no CUDA backend
+        if "numeric" in encoder.relation_lanes:
+            raise _error("the device does not encode numeric relations")
+        if as_table(encoder.table).numeric:
+            raise _error("the device does not encode numeric relations (the table has numeric state words)")
+        if tuple(options["outputs"]) != ("relations",):
+            raise _error("the device does not encode Simple")
         if options["statics"] == "shared":
             raise _error("the device does not encode shared statics (statics='shared'): encode the rows on the host, or "
                          "with statics='repeat'")

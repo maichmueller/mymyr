@@ -893,12 +893,13 @@ def test_the_encoder_without_a_device_encoding_is_refused_clearly():
         encoder.reserve_device(8)
 
 
-@pytest.mark.parametrize("lane", ["numeric", "simple"])
+@pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple"])
 def test_numeric_relations_and_the_simple_graph_are_refused_by_the_device_before_any_launch(lane):
     dev = gpu()
-    if lane == "numeric":
+    if lane != "simple":
+        # without include_numeric the rows of a numeric table still carry their numeric words
         task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-        encoder = encoding.FlatRelationEncoder(task)
+        encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric")
         message = "^mymyr: encoding: the device does not encode numeric relations"
     else:
         task = text_task("gripper__prob05")

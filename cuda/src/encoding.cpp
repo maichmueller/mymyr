@@ -921,6 +921,8 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
 void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
 {
     check_schema(encoder.schema());
+    if (encoder.table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
     if (device_count() == 0)  // the shared memory of the kernels is read from the device
         return;
     const auto facts = context_facts(encoder.context());
