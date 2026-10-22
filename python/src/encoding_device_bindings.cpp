@@ -584,8 +584,8 @@ void bind_encoding_device(nb::module_& parent)
              "pointers, with graph, dynamic-array and static-block capacities, on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, "
-             "flags) to check the flags and return the graph extent and output pointers, then fills them on "
-             "`stream`.");
+             "flags, static_instances, static_tuples, static_args) to check the flags and return the graph extent "
+             "and output pointers, then fills them on `stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")
         .def("__init__", [](DeviceCollatorHandle* self, const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,
