@@ -210,21 +210,32 @@ void prepare_parents(HorizonGraphs& out)
 {
     out.parent_offsets.assign(out.graphs() + 1, 0);
     out.parent_edges.clear();
-    std::vector<i32> order;
+    std::vector<i32> order, begin;
     for (u64 g = 0; g < out.graphs(); ++g)
     {
         const i32 first = out.edge_offsets[g], count = out.edge_offsets[g + 1] - first;
         order.resize(static_cast<usize>(count));
-        for (i32 i = 0; i < count; ++i)
-            order[static_cast<usize>(i)] = i;
-        const auto before = [&](i32 a, i32 b)
+        if (count == 0)
         {
-            const usize x = static_cast<usize>(first + a), y = static_cast<usize>(first + b);
-            if (out.edge_src[x] != out.edge_src[y])
-                return out.edge_src[x] < out.edge_src[y];
-            return out.edge_dst[x] != out.edge_dst[y] ? out.edge_dst[x] < out.edge_dst[y] : a < b;
-        };
-        std::sort(order.begin(), order.end(), before);
+            out.parent_offsets[g + 1] = static_cast<i32>(out.parent_edges.size());
+            continue;
+        }
+        begin.assign(static_cast<usize>(out.node_offsets[g + 1] - out.node_offsets[g]), 0);
+        for (i32 i = 0; i < count; ++i)
+            ++begin[static_cast<usize>(out.edge_src[static_cast<usize>(first + i)])];
+        i32 at = 0;
+        for (i32& position : begin)
+        {
+            const i32 n = position;
+            position = at;
+            at += n;
+        }
+        // The edges are destination-major; stable source buckets order the pairs lexicographically.
+        for (i32 i = 0; i < count; ++i)
+        {
+            const usize src = static_cast<usize>(out.edge_src[static_cast<usize>(first + i)]);
+            order[static_cast<usize>(begin[src]++)] = i;
+        }
         i32 last = -1;
         for (const i32 e : order)
         {
