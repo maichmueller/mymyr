@@ -21,6 +21,25 @@ struct BatchShape
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
+/// Capacities of the static blocks of a batch with shared statics: the instances that have a block and the entries of
+/// static_args. Tuples have no separate capacity because every tuple has at least one argument. Kept apart from
+/// BatchShape because only encoders that store the static tuples once per instance have these arrays.
+struct StaticShape
+{
+    u64 instances = 0;
+    u64 args = 0;
+    [[nodiscard]] friend bool operator==(const StaticShape&, const StaticShape&) noexcept = default;
+};
+
+/// The true sizes of the static blocks: the distinct instances of the batch's graphs, and the tuples and arguments of
+/// their blocks.
+struct StaticSizes
+{
+    u64 instances = 0;
+    u64 tuples = 0;
+    u64 args = 0;
+};
+
 /// Flags of FlatSizes::overflow.
 inline constexpr u32 k_overflow_capacity = 1;  // some size exceeds its capacity
 inline constexpr u32 k_overflow_index = 2;     // some size or count does not fit the index type
@@ -66,6 +85,16 @@ struct FlatBuffers
     void* target_offsets = nullptr;
     void* target_entity = nullptr;
     u8* target_group = nullptr;
+    // The static blocks, present iff the schema shares its statics (EncodingSchema::shared_statics): the arrays
+    // static_task_ids [I_b], static_offsets and static_arg_offsets [I_b * R_s + 1], static_args [A_s] and
+    // static_relations [R_s]. static_offsets and static_arg_offsets must hold I_b * R_s + 1 entries (the entries of the
+    // blocks), static_task_ids I_b and static_args the arguments of the blocks (StaticSizes); static_relations is always
+    // R_s entries. The destination arrays of a capacity form may be longer; the encoder writes only the blocks' entries.
+    i32* static_task_ids = nullptr;
+    void* static_offsets = nullptr;
+    void* static_arg_offsets = nullptr;
+    void* static_args = nullptr;
+    void* static_relations = nullptr;
     void* history_offsets = nullptr;
     void* history_entity = nullptr;
     i32* history_dt = nullptr;

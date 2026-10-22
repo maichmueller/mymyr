@@ -88,6 +88,9 @@ class _Layout:
 
     def __init__(self, encoder: Any):
         options = encoder.options
+        if options["statics"] == "shared":
+            raise _error("the device does not encode shared statics (statics='shared'): encode the rows on the host, or "
+                         "with statics='repeat'")
         self.index = options["index_dtype"]
         self.relations = encoder.num_relations
         self.entity_arrays = not encoder.implicit_entities

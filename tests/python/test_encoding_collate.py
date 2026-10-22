@@ -2,8 +2,9 @@
 import numpy as np
 import pytest
 
+import mymyr
 from mymyr import encoding, rl
-from conftest import text_task, walk
+from conftest import BLOCKS, text_task, walk
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -22,6 +23,35 @@ def test_host_collation_equals_one_encoding(layout, index, targets, counts):
     for key, value in expected.as_dict().items():
         assert np.array_equal(value, actual.as_dict()[key]), key
     assert actual.num_graphs == len(rows)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("virtual", [False, True])
+def test_host_collation_of_shared_statics_equals_one_encoding(layout, index, virtual):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    tasks = [mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / f"{problem}.pddl")
+             for problem in ("probBLOCKS-8-0", "smedium")]
+    table = rl.TaskTable(tasks)
+    encoded = [np.asarray(t.encode(walk(t, steps=7, walks=2, seed=23 + i))) for i, t in enumerate(tasks)]
+    width = max(e.shape[1] for e in encoded)
+    parts = [np.pad(e, ((0, 0), (0, width - e.shape[1]))) for e in encoded]
+    # the instances interleaved, so that the slices hold one, the other or both of them
+    rows = np.concatenate([parts[0][:4], parts[1][:6], parts[0][4:], parts[1][6:]])
+    ids = np.repeat(np.array([0, 1, 0, 1], dtype=np.int32), [4, 6, len(parts[0]) - 4, len(parts[1]) - 6])
+    common = dict(layout=layout, index_dtype=index, predicate_virtual_nodes=virtual, target_sources=("goal",))
+    encoder = encoding.FlatRelationEncoder(table, statics="shared", **common)
+    expected = encoder.encode(rows, ids)
+    cuts = [0, 3, 3, 5, 9, len(rows)]
+    slices = [encoder.encode(rows[a:b], ids[a:b]) for a, b in zip(cuts, cuts[1:])]
+    assert [s.static_task_ids.tolist() for s in slices] == [[0], [], [0, 1], [1], [0, 1]]
+    actual = encoding.collate(slices)
+    for key, value in expected.as_dict().items():
+        assert np.array_equal(value, actual.as_dict()[key]), key
+    repeated = encoding.FlatRelationEncoder(table, **common).encode(rows[:3], ids[:3])
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received"):
+        encoding.collate([slices[0], repeated])
 
 
 @pytest.mark.parametrize("option", [{"layout": "relation"}, {"index_dtype": "int64"}, {"include_static": False}])

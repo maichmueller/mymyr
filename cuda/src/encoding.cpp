@@ -653,6 +653,7 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
     // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
+    if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
 }
 
 DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder)

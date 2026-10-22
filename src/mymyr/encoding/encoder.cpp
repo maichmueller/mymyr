@@ -383,6 +383,85 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
                            out.relation_arg_offsets, fill_one, cells_of);
 }
 
+/// Throws unless the static capacities and sizes are given exactly when the schema shares its statics.
+void check_static_arguments(const EncodingSchema& schema, const StaticShape* capacities, const StaticSizes* sizes)
+{
+    if (schema.shared_statics() && (!capacities || !sizes))
+        invalid("the schema shares its statics: the capacity form needs the capacities and the sizes of the static blocks");
+    if (!schema.shared_statics() && (capacities || sizes))
+        invalid("the schema repeats its statics: the capacity form takes no capacities or sizes of static blocks");
+}
+
+/// Whether the batch of `sizes` and `statics` exceeds the capacities.
+bool exceeds_capacity(const FlatSizes& sizes, const StaticSizes& statics, const BatchShape& capacities,
+                      const StaticShape* static_capacities)
+{
+    return sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
+           sizes.history > capacities.history ||
+           (static_capacities &&
+            (statics.instances > static_capacities->instances || statics.args > static_capacities->args));
+}
+
+/// The distinct instances of the rows of a call, ascending, into s.present.
+void collect_instances(const EncodeInput& in, u32 instances, Scratch& s)
+{
+    s.present.clear();
+    const u64 rows = in.states.rows;
+    if (rows == 0)
+        return;
+    if (!in.task_ids)
+    {
+        s.present.push_back(0);
+        return;
+    }
+    if (s.seen.size() < instances)
+        s.seen.assign(instances, 0);
+    i32 previous = -1;
+    for (u64 g = 0; g < rows; ++g)
+    {
+        const i32 id = in.task_ids[g];
+        if (id == previous)
+            continue;
+        previous = id;
+        if (!s.seen[static_cast<u32>(id)])
+        {
+            s.seen[static_cast<u32>(id)] = 1;
+            s.present.push_back(static_cast<u32>(id));
+        }
+    }
+    std::ranges::sort(s.present);
+    for (const u32 id : s.present)
+        s.seen[id] = 0;
+}
+
+/// Writes the static blocks of the instances in s.present: the arrays of `out` from `static_task_ids` to
+/// `static_relations`.
+template<class I>
+void write_static_blocks(const EncodingSchema& schema, const detail::ContextView& view, const Scratch& s,
+                         const FlatBuffers& out)
+{
+    const std::span<const u32> relations = schema.static_relations();
+    const u64 Rs = relations.size();
+    I* offsets = static_cast<I*>(out.static_offsets);
+    I* arg_offsets = static_cast<I*>(out.static_arg_offsets);
+    I* args = static_cast<I*>(out.static_args);
+    u64 tuples = 0, positions = 0, block = 0;
+    for (const u32 id : s.present)
+    {
+        const detail::InstanceView v = detail::instance_view(view, id);
+        out.static_task_ids[block] = static_cast<i32>(id);
+        detail::fill_static_block<I>(v, view.static_relations, view.num_static, block * Rs, tuples, positions, offsets,
+                                     arg_offsets, args);
+        const detail::StaticTotals totals = detail::static_block_totals(v);
+        tuples += totals.tuples;
+        positions += totals.args;
+        ++block;
+    }
+    offsets[block * Rs] = static_cast<I>(tuples);
+    arg_offsets[block * Rs] = static_cast<I>(positions);
+    for (u64 k = 0; k < Rs; ++k)
+        static_cast<I*>(out.static_relations)[k] = static_cast<I>(relations[k]);
+}
 }  // namespace
 
 std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, const FlatOptions& options)
@@ -441,7 +520,8 @@ u64 FlatEncoder::graphs_of(const EncodeInput& in) const noexcept
     return m_schema->has_horizon() ? in.horizon.graphs : in.states.rows;
 }
 
-FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const
+FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch,
+                             StaticSizes* static_sizes) const
 {
     const EncodingContext& context = *m_context;
     Scratch& s = scratch.impl();
@@ -587,7 +667,27 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
                 " are not in canonical order: strictly ascending in (schema, binding)");
 
     // 3. scan the members, in u64: where each starts in the batch and, relation-major, in every relation
-    const FlatSizes sizes = detail::scan_members(s, *m_schema, graphs);
+    FlatSizes sizes = detail::scan_members(s, *m_schema, graphs);
+    // the static blocks of the instances present
+    StaticSizes statics;
+    if (m_schema->shared_statics())
+    {
+        const u64 limit = index_limit(m_schema->options().index);
+        collect_instances(in, view.num_instances, s);
+        statics.instances = s.present.size();
+        for (const u32 id : s.present)
+        {
+            const detail::StaticTotals totals = detail::static_block_totals(detail::instance_view(view, id));
+            statics.tuples += totals.tuples;
+            statics.args += totals.args;
+        }
+        if (statics.tuples > limit || statics.args > limit ||
+            statics.instances * m_schema->static_relations().size() + 1 > limit)
+            sizes.overflow |= k_overflow_index;
+    }
+    s.static_sizes = statics;
+    if (static_sizes)
+        *static_sizes = statics;
 
     s.sizes = sizes;
     s.counted = true;
@@ -635,6 +735,17 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         (sizes.history > 0 && (!out.history_entity || !out.history_dt)))
         invalid(schema.has_history() ? "a history array is null, the schema stores them"
                                      : "the history arrays must be null, the schema has no history");
+    const bool shared = schema.shared_statics();
+    if (shared)
+    {
+        const StaticSizes& statics = s.static_sizes;
+        if (!out.static_offsets || !out.static_arg_offsets || (statics.instances > 0 && !out.static_task_ids) ||
+            (statics.args > 0 && !out.static_args) || (!schema.static_relations().empty() && !out.static_relations))
+            invalid("a static block array is null, the schema shares its statics");
+    }
+    else if (out.static_task_ids || out.static_offsets || out.static_arg_offsets || out.static_args ||
+             out.static_relations)
+        invalid("the static block arrays must be null, the schema repeats its statics");
     const u64 cells = graphs * schema.num_relations();
     if (schema.has_horizon())
         fill_horizon(in, sizes, out, pool, scratch);
@@ -675,16 +786,28 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         close(i64{});
     else
         close(i32{});
+    if (shared)
+    {
+        const detail::ContextView view = m_context->view();
+        if (options.index == IndexType::I64)
+            write_static_blocks<i64>(schema, view, s, out);
+        else
+            write_static_blocks<i32>(schema, view, s, out);
+    }
 }
 
 FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
-                                   ThreadPool& pool, EncodeScratch& scratch) const
+                                   ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities,
+                                   StaticSizes* static_sizes) const
 {
+    check_static_arguments(*m_schema, static_capacities, static_sizes);
     if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
-    FlatSizes sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
-        sizes.history > capacities.history)
+    StaticSizes statics;
+    FlatSizes sizes = count(in, pool, scratch, &statics);
+    if (static_sizes)
+        *static_sizes = statics;
+    if (exceeds_capacity(sizes, statics, capacities, static_capacities))
         sizes.overflow |= k_overflow_capacity;
     if (!sizes.overflowed())
         fill(in, sizes, out, pool, scratch);
@@ -698,7 +821,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return encode(in, pool, scratch);
 }
 
-FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const
+FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history,
+                                              const StaticShape& statics) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
@@ -716,7 +840,8 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     const usize entity_offsets = reserve("entity_offsets", itype, shape1(graphs + 1));
     usize entity_role = absent, entity_ref = absent, relation_counts = absent, goal_complete = absent,
           target_offsets = absent, target_entity = absent, target_group = absent, history_offsets = absent,
-          history_entity = absent, history_dt = absent;
+          history_entity = absent, history_dt = absent, static_task_ids = absent, static_offsets = absent,
+          static_arg_offsets = absent, static_args = absent, static_relations = absent;
     if (!m_schema->implicit_entity_arrays())
     {
         entity_role = reserve("entity_role", rl::DType::U8, shape1(entities));
@@ -741,6 +866,15 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
         history_entity = reserve("history_entity", itype, shape1(history));
         history_dt = reserve("history_dt", rl::DType::I32, shape1(history));
     }
+    if (m_schema->shared_statics())
+    {
+        const u64 Rs = m_schema->static_relations().size();
+        static_task_ids = reserve("static_task_ids", rl::DType::I32, shape1(statics.instances));
+        static_offsets = reserve("static_offsets", itype, shape1(statics.instances * Rs + 1));
+        static_arg_offsets = reserve("static_arg_offsets", itype, shape1(statics.instances * Rs + 1));
+        static_args = reserve("static_args", itype, shape1(statics.args));
+        static_relations = reserve("static_relations", itype, shape1(Rs));
+    }
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
     builder.scalar("num_relations", static_cast<i64>(R));
@@ -748,7 +882,7 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("table_fingerprint", std::bit_cast<i64>(m_table_fingerprint));
-    builder.scalar("statics", 0);
+    builder.scalar("statics", m_schema->shared_statics() ? 1 : 0);
     Allocation allocation{std::make_shared<rl::ArrayBundle>(builder.build()), {}};
     rl::ArrayBundle& bundle = *allocation.bundle;
     auto at = [&](usize i) -> void* { return i == absent ? nullptr : bundle.mutable_data(bundle.arrays()[i]); };
@@ -769,13 +903,19 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     out.history_offsets = at(history_offsets);
     out.history_entity = at(history_entity);
     out.history_dt = static_cast<i32*>(at(history_dt));
+    out.static_task_ids = static_cast<i32*>(at(static_task_ids));
+    out.static_offsets = at(static_offsets);
+    out.static_arg_offsets = at(static_arg_offsets);
+    out.static_args = at(static_args);
+    out.static_relations = at(static_relations);
     return allocation;
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
                                                            EncodeScratch& scratch) const
 {
-    const FlatSizes sizes = count(in, pool, scratch);
+    StaticSizes statics;
+    const FlatSizes sizes = count(in, pool, scratch, &statics);
     if (sizes.overflow & k_overflow_index)
     {
         const IndexType index = m_schema->options().index;
@@ -788,26 +928,37 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(sizes.history, index, "history steps");
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
+        detail::check_index_range(statics.tuples, index, "static tuples");
+        detail::check_index_range(statics.args, index, "static tuple arguments");
+        detail::check_index_range(statics.instances * m_schema->static_relations().size() + 1, index,
+                                  "static block cells");
     }
-    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history);
+    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history,
+                                     {statics.instances, statics.args});
     fill(in, sizes, allocation.buffers, pool, scratch);
     return std::move(allocation.bundle);
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
                                                                     const BatchShape& capacities, ThreadPool& pool,
-                                                                    EncodeScratch& scratch, FlatSizes& sizes) const
+                                                                    EncodeScratch& scratch, FlatSizes& sizes,
+                                                                    const StaticShape* static_capacities,
+                                                                    StaticSizes* static_sizes) const
 {
+    check_static_arguments(*m_schema, static_capacities, static_sizes);
     if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
-    sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
-        sizes.history > capacities.history)
+    StaticSizes statics;
+    sizes = count(in, pool, scratch, &statics);
+    if (static_sizes)
+        *static_sizes = statics;
+    if (exceeds_capacity(sizes, statics, capacities, static_capacities))
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
-    Allocation allocation =
-        allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);
+    const StaticShape static_shape = static_capacities ? *static_capacities : StaticShape{};
+    Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets,
+                                     capacities.history, static_shape);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
@@ -832,6 +983,24 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         {
             zero(out.history_entity, sizes.history, capacities.history, index_bytes);
             zero(out.history_dt, sizes.history, capacities.history, 4);
+        }
+        if (out.static_task_ids)
+        {
+            zero(out.static_task_ids, statics.instances, static_shape.instances, 4);
+            zero(out.static_args, statics.args, static_shape.args, index_bytes);
+            // the blocks past the batch's are empty: their offsets repeat the last entry
+            const u64 Rs = m_schema->static_relations().size();
+            auto repeat_last = [&]<class I>(void* offsets, I)
+            {
+                I* data = static_cast<I*>(offsets);
+                std::fill(data + statics.instances * Rs + 1, data + static_shape.instances * Rs + 1,
+                          data[statics.instances * Rs]);
+            };
+            for (void* offsets : {out.static_offsets, out.static_arg_offsets})
+                if (m_schema->options().index == IndexType::I64)
+                    repeat_last(offsets, i64{});
+                else
+                    repeat_last(offsets, i32{});
         }
     }
     else

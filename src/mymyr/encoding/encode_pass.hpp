@@ -72,6 +72,11 @@ struct EncodeScratch::Impl
     FlatSizes sizes;
 
     std::vector<u32> arity;          // [R] the arguments per tuple of each relation
+    // shared statics: the distinct instances of the counted rows, ascending, and the sizes of their static blocks;
+    // `seen` marks an instance while the rows are scanned and is all zero between calls
+    std::vector<u32> present;
+    std::vector<u8> seen;
+    StaticSizes static_sizes;
     std::unique_ptr<u64[]> derived;  // [rows, derived_stride] when the rows' derived words are evaluated here
     u64 derived_capacity = 0;
     u64 derived_stride = 0;

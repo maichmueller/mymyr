@@ -235,11 +235,17 @@ public:
     /// Whether the schema has subgoal relations: goal relations of a level above 0, including the ones of a horizon.
     [[nodiscard]] bool has_subgoals() const noexcept { return m_subgoals; }
 
+    /// Whether a batch stores the static tuples once per instance, in static blocks (FlatOptions::statics).
+    [[nodiscard]] bool shared_statics() const noexcept { return m_options.statics == Statics::Shared; }
+    /// The ids of the relations of the static lane, ascending (catalog order): with shared statics, the relations whose
+    /// tuples a batch stores in its static blocks instead of in its graphs.
+    [[nodiscard]] std::span<const u32> static_relations() const noexcept { return m_static_relations; }
+
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
     /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
-    /// are stored, the target sources, the history lane with its step limit, and the horizon mode and root policy. It
-    /// does not depend on the declaration order of the domain, on predicate or schema ids, or on the process or the
-    /// build.
+    /// are stored, whether the statics are shared, the target sources, the history lane with its step limit, and the
+    /// horizon mode and root policy. It does not depend on the declaration order of the domain, on predicate or schema
+    /// ids, or on the process or the build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
 
 private:
@@ -252,6 +258,7 @@ private:
     std::vector<i32> m_schema_relation;
     std::vector<i32> m_virtual_key;
     std::vector<i32> m_virtual_rank;
+    std::vector<u32> m_static_relations;
     u32 m_num_virtual_predicates = 0;
     bool m_implicit_entities = false;
     bool m_goal_complete = false;

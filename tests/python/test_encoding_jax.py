@@ -776,6 +776,22 @@ def test_unsupported_calls_raise_value_error_when_traced(cases):
             ej.encode(encoding.FlatRelationEncoder(case.source, target_sources=("action",)), rows, capacities=caps)
 
 
+def test_shared_statics_are_refused_before_tracing_on_every_platform(cases):
+    case = cases["gripper"]
+    rows = halves(case.rows)
+    encoder = encoding.FlatRelationEncoder(case.source, statics="shared")
+    caps = exact_capacities(host_encode(encoding.FlatRelationEncoder(case.source), case))
+    message = r"^mymyr: encoding: the device does not encode shared statics"
+    with pytest.raises(ValueError, match=message):
+        ej.register(encoder)
+    assert ej.registered(encoder) is None
+    with pytest.raises(ValueError, match=message):
+        ej.encode(encoder, rows, capacities=caps)
+    with pytest.raises(ValueError, match=message):
+        jax.jit(lambda r: ej.encode(encoder, r, capacities=caps))(rows)
+    assert ej.registered(encoder) is None
+
+
 # ------------------------------------------------------------------------------------------------ batches and handles
 
 

@@ -310,8 +310,15 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         {
             cell.op = static_cast<u32>(CellOp::Static);
             std::tie(cell.a, cell.b) = append_static_rows(ip, logical);
+            if (schema.shared_statics())
+            {
+                // the tuples go to the static block of the batch: the cell has no row in a graph
+                cell.c = cell.a;
+                cell.d = cell.b;
+                cell.a = cell.b = 0;
+            }
         }
-        if (cell.a != cell.b)
+        if (cell.a != cell.b || cell.c != cell.d)
             out.cells.push_back(cell);
     }
     for (const Cell& cell : out.cells)
@@ -923,6 +930,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     for (u32 id = 0; id < own->num_relations(); ++id)
         relation_arity.push_back(own->relation(id).arity);
     builder.add("relation_arity", rl::DType::U32, {static_cast<i64>(relation_arity.size())}, relation_arity);
+    builder.add("static_relations", rl::DType::U32, {static_cast<i64>(own->static_relations().size())},
+                std::vector<u32>(own->static_relations().begin(), own->static_relations().end()));
     context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
@@ -934,7 +943,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity
+    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -956,6 +965,8 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
         v.num_virtual = m_num_virtual;
     }
     v.relation_arity = reinterpret_cast<const u32*>(at(11));
+    v.static_relations = reinterpret_cast<const u32*>(at(12));
+    v.num_static = static_cast<u32>(m_schema->static_relations().size());
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;

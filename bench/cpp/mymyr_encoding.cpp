@@ -24,7 +24,9 @@
 // (argv[17]) says where the graphs come from: tree (the default) expands every node on its own and keeps equal states
 // apart, builder merges equal states (encoding::build_horizon_graphs, up to depth), transitions encodes the successors
 // of the rows (depth 1; expansion and encoding::transition_graphs). The line then also reports build_us_per_node, the
-// time to make the graphs per node of them.
+// time to make the graphs per node of them. statics = repeat|shared (argv[18]) selects the form of the static tuples
+// (repeated in every graph or shared once per batch); bytes is the size of the batch's bundle and hash a hash of its
+// arrays and scalars (equal hashes: equal batches).
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
@@ -33,6 +35,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -240,6 +243,11 @@ int main(int argc, char** argv)
             options.targets.insert(encoding::TargetSource::Subgoal);
         if (goals == "targets" && steps)
             options.targets.insert(encoding::TargetSource::History);
+        const std::string statics = argc > 18 ? argv[18] : "repeat";
+        const auto parsed_statics = encoding::parse_statics(statics);
+        if (!parsed_statics)
+            throw std::invalid_argument("statics must be repeat or shared");
+        options.statics = *parsed_statics;
         const auto parsed = encoding::parse_layout(layout);
         if (!parsed)
             throw std::invalid_argument("layout must be graph or relation");
@@ -489,11 +497,31 @@ int main(int argc, char** argv)
         }
         const encoding::BatchShape capacities{n, entity_ref.size(), args.size(), target_entity.size(),
                                               history_entity.size()};
+        const bool shared = options.statics == encoding::Statics::Shared;
+        std::vector<i32> static_task_ids, static_offsets, static_arg_offsets, static_args, static_relations;
+        encoding::StaticShape static_capacities;
+        encoding::StaticSizes static_sizes;
+        if (shared)
+        {
+            static_task_ids.resize(bundle->find("static_task_ids")->elements());
+            static_offsets.resize(bundle->find("static_offsets")->elements());
+            static_arg_offsets.resize(bundle->find("static_arg_offsets")->elements());
+            static_args.resize(bundle->find("static_args")->elements());
+            static_relations.resize(bundle->find("static_relations")->elements());
+            buffers.static_task_ids = static_task_ids.data();
+            buffers.static_offsets = static_offsets.data();
+            buffers.static_arg_offsets = static_arg_offsets.data();
+            buffers.static_args = static_args.data();
+            buffers.static_relations = static_relations.data();
+            static_capacities = {static_task_ids.size(), static_args.size()};
+        }
+        const encoding::StaticShape* static_caps = shared ? &static_capacities : nullptr;
         double best_into = 1e300;
         for (int rep = 0; rep < 6; ++rep)
         {
             const double t0 = now_s();
-            const encoding::FlatSizes sizes = encoder->encode_into(in, capacities, buffers, pool, scratch);
+            const encoding::FlatSizes sizes = encoder->encode_into(in, capacities, buffers, pool, scratch, static_caps,
+                                                                   shared ? &static_sizes : nullptr);
             if (sizes.overflowed())
                 throw std::runtime_error("the buffers are too small");
             if (rep > 0)
@@ -503,7 +531,7 @@ int main(int argc, char** argv)
         for (int rep = 0; rep < 6; ++rep)
         {
             const double t0 = now_s();
-            const encoding::FlatSizes sizes = encoder->count(in, pool, scratch);
+            const encoding::FlatSizes sizes = encoder->count(in, pool, scratch, shared ? &static_sizes : nullptr);
             const double t1 = now_s();
             encoder->fill(in, sizes, buffers, pool, scratch);
             if (rep > 0)
@@ -512,6 +540,16 @@ int main(int argc, char** argv)
                 best_fill = std::min(best_fill, now_s() - t1);
             }
         }
+        std::uint64_t digest = 14695981039346656037ull;
+        const auto mix = [&digest](const void* data, std::size_t size)
+        {
+            for (std::size_t i = 0; i < size; ++i)
+                digest = (digest ^ static_cast<const unsigned char*>(data)[i]) * 1099511628211ull;
+        };
+        for (const auto& array : bundle->arrays())
+            mix(bundle->data(array), array.elements() * rl::dtype_bytes(array.dtype));
+        for (const auto& [name, value] : bundle->scalars())
+            mix(&value, sizeof value);
         const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
         const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
         const u64 cells = n * encoder->schema().num_relations();
@@ -523,13 +561,15 @@ int main(int argc, char** argv)
                     "\"actions\": \"%s\", \"subgoals\": %u, \"history\": %u, \"threads\": %u, "
                     "\"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, \"hash\": \"%s\"}\n",
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, "
+                    "\"statics\": \"%s\", \"bytes\": %llu, \"hash\": \"%s\"}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), levels, steps, threads,
                     best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
                     best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
-                    arg_offsets[cells], batch_hash(*bundle).c_str());
+                    arg_offsets[cells], statics.c_str(), static_cast<unsigned long long>(bundle->bytes()),
+                    batch_hash(*bundle).c_str());
     }
     catch (const std::exception& error)
     {

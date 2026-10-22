@@ -9,7 +9,7 @@
 
 namespace mymyr::test::encoding_matrix
 {
-rl::TaskTablePtr table_of(const std::string& domain, const std::vector<std::string>& problems)
+inline rl::TaskTablePtr table_of(const std::string& domain, const std::vector<std::string>& problems)
 {
     std::vector<TaskPtr> tasks;
     for (const std::string& problem : problems)
@@ -18,7 +18,7 @@ rl::TaskTablePtr table_of(const std::string& domain, const std::vector<std::stri
 }
 
 /// Instances of 1, 42 and 184 words: `link` over n objects has n * n slots, `flag` n more, and `armed` one.
-rl::TaskTablePtr wide_table()
+inline rl::TaskTablePtr wide_table()
 {
     const auto domain = frontend::Domain::from_string(
         "(define (domain wide) (:requirements :strips)"
@@ -63,12 +63,12 @@ struct Batch
     std::vector<i32> step_count;  // [count]
 };
 
-void set_bit(u64* row, u32 slot) { row[slot >> 6] |= u64{1} << (slot & 63); }
-bool test_bit(const u64* row, u32 slot) { return (row[slot >> 6] >> (slot & 63)) & 1u; }
+inline void set_bit(u64* row, u32 slot) { row[slot >> 6] |= u64{1} << (slot & 63); }
+inline bool test_bit(const u64* row, u32 slot) { return (row[slot >> 6] >> (slot & 63)) & 1u; }
 
 /// All zeros, all ones within the instance's slots, single bits at 63, 64 and 65 and at the last slot, and the last
 /// partial word set.
-std::vector<std::vector<u64>> adversarial_rows(const rl::TaskTable& table, u32 instance)
+inline std::vector<std::vector<u64>> adversarial_rows(const rl::TaskTable& table, u32 instance)
 {
     const u32 slots = table.task(instance)->atoms().fluent_slots();
     std::vector<std::vector<u64>> rows;
@@ -98,7 +98,7 @@ std::vector<std::vector<u64>> adversarial_rows(const rl::TaskTable& table, u32 i
 }
 
 /// The derived words of a state row by a fresh axiom evaluation, as the host encoder does it.
-std::vector<u64> derived_words_of(const rl::TaskTable& table, u32 instance, const u64* row, u32 width)
+inline std::vector<u64> derived_words_of(const rl::TaskTable& table, u32 instance, const u64* row, u32 width)
 {
     const Task& task = *table.task(instance);
     std::vector<u64> out(width, 0);
@@ -114,7 +114,7 @@ std::vector<u64> derived_words_of(const rl::TaskTable& table, u32 instance, cons
 /// `count` rows: the adversarial rows of every instance first, then rows interleaved by instance: random walks from
 /// the initial states (`walk`) or random bit patterns of mixed density with garbage in the padding words past a narrower
 /// instance's words.
-Batch make_batch(const rl::TaskTablePtr& table, u64 count, bool walk, u64 seed)
+inline Batch make_batch(const rl::TaskTablePtr& table, u64 count, bool walk, u64 seed)
 {
     Batch b;
     b.table = table;
@@ -208,7 +208,7 @@ Batch make_batch(const rl::TaskTablePtr& table, u64 count, bool walk, u64 seed)
 /// (zero to all) and has a random number of valid steps (zero to all), and the masks are random literals over the
 /// row's slots, some of them the row's goal literals and the literals of the layer below (so that the levels differ
 /// from the layers). The words past a narrower instance's words are garbage in half of the rows.
-void add_layered_rows(Batch& b, u32 layers, u32 steps, u64 seed)
+inline void add_layered_rows(Batch& b, u32 layers, u32 steps, u64 seed)
 {
     std::mt19937_64 rng(seed);
     const u64 n = b.count;
@@ -304,7 +304,7 @@ struct Inputs
 
 /// The first `layers` subgoal layers of a batch over the arrays `pos`, `neg` (and the derived ones, which the batch may
 /// not have) in the batch's layout; host or device pointers.
-encoding::LayerInput layer_view(const Batch& b, u32 layers, const u64* pos, const u64* neg, const u64* derived_pos,
+inline encoding::LayerInput layer_view(const Batch& b, u32 layers, const u64* pos, const u64* neg, const u64* derived_pos,
                                 const u64* derived_neg)
 {
     encoding::LayerInput in;
@@ -324,7 +324,7 @@ encoding::LayerInput layer_view(const Batch& b, u32 layers, const u64* pos, cons
 }
 
 /// The history of a batch.
-encoding::HistoryInput history_view(const Batch& b, const Inputs& inputs, const u64* pos, const u64* neg,
+inline encoding::HistoryInput history_view(const Batch& b, const Inputs& inputs, const u64* pos, const u64* neg,
                                     const u64* derived_pos, const u64* derived_neg, const i32* dt, const i32* count)
 {
     encoding::HistoryInput in;
@@ -345,7 +345,7 @@ encoding::HistoryInput history_view(const Batch& b, const Inputs& inputs, const 
     return in;
 }
 
-encoding::EncodeInput host_input(const Batch& b, u64 n, const Inputs& inputs)
+inline encoding::EncodeInput host_input(const Batch& b, u64 n, const Inputs& inputs)
 {
     encoding::EncodeInput in;
     in.states = {b.states.data(), n, b.words, 0, 0};
@@ -389,7 +389,7 @@ using encoding::GoalDerivation;
 using encoding::TargetSource;
 
 /// The configurations the device encodes. Rows for the first one carry derived words whenever the table has derived atoms.
-std::vector<Config> configs()
+inline std::vector<Config> configs()
 {
     const encoding::GoalDerivations all = {GoalDerivation::Plain, GoalDerivation::Satisfied, GoalDerivation::Unsatisfied};
     std::vector<Config> out;
@@ -446,7 +446,7 @@ std::vector<Config> configs()
 }
 
 /// The configurations with subgoal levels and history steps, on the batches `add_layered_rows(batch, 3, 4, ...)` makes.
-std::vector<Config> layered_configs()
+inline std::vector<Config> layered_configs()
 {
     const encoding::GoalDerivations all = {GoalDerivation::Plain, GoalDerivation::Satisfied, GoalDerivation::Unsatisfied};
     std::vector<Config> out;
@@ -545,7 +545,7 @@ struct Corpus
     bool walk;
 };
 
-std::vector<Corpus> corpus()
+inline std::vector<Corpus> corpus()
 {
     std::vector<Corpus> out;
     out.push_back({"blocks", table_of("blocks", {"smedium", "probBLOCKS-8-0"}), true});
@@ -557,7 +557,7 @@ std::vector<Corpus> corpus()
     return out;
 }
 
-encoding::FlatOptions with(encoding::FlatOptions o, encoding::Layout layout, encoding::IndexType index)
+inline encoding::FlatOptions with(encoding::FlatOptions o, encoding::Layout layout, encoding::IndexType index)
 {
     o.layout = layout;
     o.index = index;

@@ -1242,6 +1242,12 @@ TEST(DeviceEncoderSchema, RefusesActionTargets)
     o.targets = {encoding::TargetSource::Action};
     expect_schema_refusal(o, "action targets");
 }
+TEST(DeviceEncoderSchema, RefusesSharedStatics)
+{
+    encoding::FlatOptions o;
+    o.statics = encoding::Statics::Shared;
+    expect_schema_refusal(o, "shared statics (statics='shared')");
+}
 TEST(DeviceEncoderSchema, RefusesFullHorizons)
 {
     encoding::FlatOptions o;
@@ -1260,6 +1266,18 @@ TEST(DeviceEncoderSchema, RefusesActionHorizons)
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Action;
     expect_schema_refusal(o, "horizons");
+}
+TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstructed)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions o;
+    o.statics = encoding::Statics::Shared;
+    const auto encoder = encoding::FlatEncoder::create(table, o);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    EXPECT_THROW(cuda::DeviceEncoder(ctx, encoder), std::invalid_argument);
+    EXPECT_THROW(cuda::DeviceRowStream(ctx, encoder, 8, stream), std::invalid_argument);
 }
 }
 

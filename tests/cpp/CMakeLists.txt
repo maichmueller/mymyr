@@ -66,7 +66,7 @@ if(TARGET mymyr_frontend)
     add_executable(mymyr_encoder_tests encoding/test_context.cpp encoding/test_encoder.cpp encoding/test_lane_groups.cpp
         encoding/test_encoder_modes.cpp encoding/test_encoder_goals.cpp encoding/test_encoder_actions.cpp
         encoding/test_encoder_layers.cpp encoding/test_expand_derived.cpp encoding/test_stream.cpp
-        encoding/test_horizon.cpp encoding/test_horizon_graphs.cpp)
+        encoding/test_horizon.cpp encoding/test_horizon_graphs.cpp encoding/test_encoder_statics.cpp)
     target_link_libraries(mymyr_encoder_tests PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
     gtest_discover_tests(mymyr_encoder_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800 LABELS encoding)
     add_executable(mymyr_collate_tests encoding/test_collate.cpp)
