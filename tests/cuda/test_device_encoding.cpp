@@ -1115,6 +1115,44 @@ TEST(DeviceEncoder, GrowsWithItsTable)
     EXPECT_THROW(device.refresh(encoding::FlatEncoder::create(rl::TaskTable::create(tasks), other)), std::invalid_argument);
 }
 
+TEST(DeviceEncoder, RefusesToGrowIntoATableWithNumericStateWords)
+{
+    // the first instance has no object of the numeric function's type: without include_numeric both tables have one
+    // schema, and only the grown one has numeric state words
+    SKIP_WITHOUT_GPU();
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain grow) (:requirements :strips :typing :numeric-fluents) (:types a)"
+        " (:predicates (p)) (:functions (f ?x - a))"
+        " (:action inc :parameters (?x - a) :precondition (p) :effect (increase (f ?x) 1)))");
+    const auto empty = Task::create(*domain->instantiate_string(
+        "(define (problem empty) (:domain grow) (:init (p)) (:goal (p)))"));
+    const auto one = Task::create(*domain->instantiate_string(
+        "(define (problem one) (:domain grow) (:objects x - a) (:init (p) (= (f x) 0)) (:goal (p)))"));
+    auto options = test::encoder_options();
+    options.include_numeric = false;
+    const auto base = encoding::FlatEncoder::create(rl::TaskTable::single(empty), options);
+    const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create({empty, one}), options);
+    ASSERT_FALSE(base->table().numeric());
+    ASSERT_TRUE(grown->table().numeric());
+    ASSERT_EQ(base->schema().fingerprint(), grown->schema().fingerprint());
+    cuda::DeviceEncoder device(device_context(), base);
+    try
+    {
+        (void)device.refresh(grown);
+        ADD_FAILURE() << "the device grew into a table with numeric state words";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode numeric relations"),
+                  std::string::npos)
+            << e.what();
+    }
+    // nothing was uploaded
+    EXPECT_EQ(device.context().generation(), 1u);
+    EXPECT_EQ(device.context().num_instances(), 1u);
+    EXPECT_EQ(device.encoder(), base);
+}
+
 TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
 {
     SKIP_WITHOUT_GPU();

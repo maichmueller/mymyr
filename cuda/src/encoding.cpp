@@ -867,7 +867,8 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     std::unique_lock lock(m_state_mutex);
     if (grown->schema().fingerprint() != m_schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
-    check_schema(grown->schema());
+    // the grown table may have numeric state words that the schema (without include_numeric) does not show
+    check_encoder(*grown);
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
     m_encoder = std::move(grown);
     m_bounds = m_context->facts()->bounds;
