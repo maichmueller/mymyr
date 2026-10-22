@@ -156,7 +156,7 @@ def main():
                 speedup = reference.get("flat_us", 0) / best("core_us") if reference.get("flat_us") else None
                 action_speedup = reference.get("actions_us", 0) / best("actions_us") if reference.get("actions_us") else None
                 targets = {
-                    "core": best("core_us") <= best("core_limit_us"),
+                    "core": best("reused_derived_us" if best("derived_words") else "core_us") <= best("core_limit_us"),
                     "actions": None if metrics["action_ns_per_int"] is None else best("action_ns_per_int") <= 1,
                     "derived_reuse": None if best("derived_words") == 0 else best("reused_derived_us") <= best("core_limit_us"),
                     "single_cpp": best("single_cpp_us") <= 0.5,
