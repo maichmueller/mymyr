@@ -515,8 +515,8 @@ def encode_arrays(
     subgoals: Any = None,
     history: Any = None,
 ) -> dict[str, Any]:
-    """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [6] int64 (entities,
-    tuples, args, targets, history, overflow flags; None without capacities)."""
+    """The arrays of checked tensors, by name (absent arrays empty), and int64 sizes: entities, tuples, args, targets,
+    history, overflow flags, and the numeric count when stored. Sizes are None without capacities."""
     torch = _torch()
     layout = layout_of(encoder)
     rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
