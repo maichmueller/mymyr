@@ -268,6 +268,48 @@ def test_stream_and_collated_batches_are_viewed_like_one_encoding(cases, index):
     expect_zero_copy(view, flushed)
 
 
+@pytest.mark.parametrize("name", ["cs-drone", "counters_f64"])
+@pytest.mark.parametrize("form", ["exact", "capacity", "stream", "collated"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_numeric_batches_are_viewed_like_the_host_batch(name, form, index):
+    """Numeric capacity batches carry a seventh sizes word (the value count): the view reads the overflow flags by
+    their position, so a batch with numeric values is viewed and an overflowed one is refused."""
+    from test_encoding_numeric import build_cases
+    from test_encoding_numeric_cuda import capacities, rows_of, tensor
+
+    dev = gpu()
+    case = {c.name: c for c in build_cases()}.get(name)
+    if case is None:
+        pytest.skip("PDDL front end required")
+    encoder = encoding.FlatRelationEncoder(case.table, layout="relation", index_dtype=index, goal_derivations=())
+    rows, ids = rows_of(case), np.asarray(case.ids, np.int32)
+    host = encoder.encode(rows, ids)
+    assert len(host.numeric_values) > 0
+    device_rows, device_ids = tensor(torch, rows), tensor(torch, ids)
+    caps = capacities(host, 3)
+    if form == "exact":
+        batch = encoder.encode(device_rows, device_ids)
+    elif form == "capacity":
+        batch = encoder.encode(device_rows, device_ids, capacities=caps)
+    elif form == "collated":
+        batch = encoding.collate([encoder.encode(device_rows[:3], device_ids[:3]),
+                                  encoder.encode(device_rows[3:], device_ids[3:])])
+    else:
+        ring = encoder.device_stream(len(rows) + 2)
+        ring.append(device_rows[:3], device_ids[:3])
+        ring.append(device_rows[3:], device_ids[3:])
+        batch = ring.flush(capacities=caps | {"graphs": len(rows) + 2})
+    if form in ("capacity", "stream"):
+        assert batch.device_sizes.shape == (7,) and batch.sizes["numeric"] == len(host.numeric_values)
+    view = encoding.hgraph(batch)
+    expect_same_view(encoding.hgraph(host), view)
+    expect_zero_copy(view, batch)
+    short = encoder.encode(device_rows, device_ids, capacities={**caps, "numeric": len(host.numeric_values) - 1})
+    assert short.sizes["overflow"]
+    with pytest.raises(ValueError, match="^mymyr: encoding: the batch overflowed its capacities"):
+        encoding.hgraph(short)
+
+
 # ------------------------------------------------------------------------------------------------ lifetime
 
 
