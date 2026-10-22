@@ -608,7 +608,8 @@ __device__ void fill_simple(const Group& grp, const EncodeParams& p, const RowVi
             arg_base += before * p.context.relation_arity[relation];
         }
     }
-    const ed::SimpleGraph graph{entity_base, totals.entities, tuple_base, totals.tuples, arg_base, totals.args};
+    const u64 entities = Totals{p.totals, p.wide}.get(g + 1) - entity_base;
+    const ed::SimpleGraph graph{entity_base, entities, tuple_base, totals.tuples, arg_base, totals.args};
     I* const edge = static_cast<I*>(p.out.edge_index);
     const ed::SimpleOut<I> simple{static_cast<I*>(p.out.node_offsets), static_cast<I*>(p.out.edge_offsets),
                                  p.out.node_label, edge, edge ? edge + p.out.edge_stride : nullptr, p.out.edge_label};

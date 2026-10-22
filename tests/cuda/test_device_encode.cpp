@@ -2725,6 +2725,9 @@ TEST(DeviceEncode, SimpleEqualsTheHostForEveryCoreConfiguration)
                         if (config.options.predicate_virtual_nodes || (only && layout == encoding::Layout::Relation))
                             continue;
                         SCOPED_TRACE(config.name);
+                        SCOPED_TRACE(std::string(only ? "simple-only " : "both ") +
+                                     (layout == encoding::Layout::Graph ? "graph " : "relation ") +
+                                     (index == encoding::IndexType::I32 ? "int32" : "int64"));
                         auto options = with(config.options, layout, index);
                         options.outputs = {encoding::Output::Simple};
                         if (!only) options.outputs.insert(encoding::Output::Relations);
@@ -2732,8 +2735,10 @@ TEST(DeviceEncode, SimpleEqualsTheHostForEveryCoreConfiguration)
                         if (only) options.emit_counts = true;
                         const auto encoder = encoding::FlatEncoder::create(c.table, options);
                         cuda::DeviceEncoder device(ctx, encoder);
+                        device.reserve(cuda::BatchShape{17, 0, 0, 0, 0}, stream);
                         for (const u64 n : {u64{0}, u64{1}, u64{17}})
                         {
+                            SCOPED_TRACE("N = " + std::to_string(n));
                             const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
                             const auto result = run_device(device, ctx, stream, rows.input(batch, n, config.inputs),
                                                            shape_of(n, host.sizes));
