@@ -1154,7 +1154,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if (phase != Phase::Fill && !facts.class_ow[mode].empty())
         {
             // the evaluation flags the rows of instances it cannot evaluate: the clear goes first
-            check(detail::launch_clear(shape, context.stream()), "encoding kernels (clear)");
+            check(detail::launch_clear(shape, stream), "encoding kernels (clear)");
             shape.cleared = true;
             lifted::EncodingAxioms ax;
             ax.instances = static_cast<const lifted::EncodingAxiomInstance*>(facts.axiom_block->data());
@@ -1176,7 +1176,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             ax.class_ow = facts.class_ow[mode].data();
             ax.class_fc = facts.class_fc[mode].data();
             ax.launches = static_cast<u32>(facts.class_ow[mode].size());
-            check(lifted::launch_encoding_axioms(ax, context.stream()), "encoding axiom kernels");
+            check(lifted::launch_encoding_axioms(ax, stream), "encoding axiom kernels");
         }
     }
     switch (phase)

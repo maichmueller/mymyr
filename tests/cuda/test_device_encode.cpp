@@ -16,12 +16,17 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -1047,6 +1052,137 @@ TEST(DeviceEncode, TheStreamFormLaunchesOnItsStreamAndNotTheAcquiredOne)
         const DeviceResult eager = download_encoding(ctx, launch, layout_of, block);
         expect_sizes(host.sizes, eager.sizes);
         expect_same_arrays(*host.bundle, eager);
+    }
+}
+
+/// A host callback holds a stream, without reading device memory, until the gate is destroyed (or a minute passed, so
+/// that a test waiting on the held stream fails instead of hanging).
+class StreamGate
+{
+public:
+    explicit StreamGate(cudaStream_t stream) : m_stream(stream)
+    {
+        cuda::check(cudaLaunchHostFunc(stream, [](void* p)
+        {
+            auto& gate = *static_cast<StreamGate*>(p);
+            std::unique_lock lock(gate.m_mutex);
+            (void)gate.m_changed.wait_for(lock, std::chrono::minutes(1), [&] { return gate.m_open; });
+        }, this), "cudaLaunchHostFunc");
+    }
+    StreamGate(const StreamGate&) = delete;
+    StreamGate& operator=(const StreamGate&) = delete;
+    ~StreamGate()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_open = true;
+        }
+        m_changed.notify_all();
+        (void)cudaStreamSynchronize(m_stream);
+    }
+private:
+    cudaStream_t m_stream;
+    std::mutex m_mutex;
+    std::condition_variable m_changed;
+    bool m_open = false;
+};
+
+TEST(DeviceEncode, TheStreamFormEvaluatesTheDerivedAtomsOnItsStream)
+{
+    // Rows without derived words: the scratch clear and the axiom evaluation are launched on the launch stream with
+    // the count and fill, so a capture of that stream holds them and a held acquisition stream delays none of them.
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream owner, launch;
+    const u64 n = 33;
+    std::vector<Config> chosen{configs().back()};  // derived goal masks
+    for (const Config& c : layered_configs())
+        if (std::string_view(c.name) == "levels_row_goals_derived_targets_virtual")
+        {
+            chosen.push_back(c);  // derived goal and subgoal masks
+            Config layers_only = c;  // derived subgoal masks alone read the derived atoms
+            layers_only.name = "derived subgoal masks alone";
+            layers_only.options.include_derived = false;
+            layers_only.inputs.derived_goals = false;
+            chosen.push_back(layers_only);
+        }
+    ASSERT_EQ(chosen.size(), 3u);
+    for (const auto& c : corpus())
+    {
+        if (!c.table->derived_words())
+            continue;
+        SCOPED_TRACE(c.name);
+        const Batch batch = layered_batch(c.table, n, c.walk, 87);
+        for (Config config : chosen)
+        {
+            SCOPED_TRACE(config.name);
+            config.inputs.derived = false;
+            const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+            cuda::DeviceEncoder device(ctx, encoder);
+            const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+            const cuda::BatchShape shape = shape_of(n, host.sizes);
+            const cuda::OutputLayout layout = device.output_layout(shape);
+            const auto acquisition = device.context().acquire(owner);
+            const DeviceRows rows(ctx, launch, batch);
+            const auto input = rows.input(batch, n, config.inputs);
+            const u64 bytes = device.scratch_bytes(acquisition, shape);
+            ASSERT_EQ(bytes, device.scratch_bytes(acquisition, shape, cuda::DerivedWords::Evaluated));
+            cuda::DeviceBuffer scratch(ctx, bytes, launch), block(ctx, layout.bytes, launch);
+            const cuda::DeviceOutput out = cuda::output_of(layout, shape, block.data());
+            const auto capture = [&](cudaStream_t stream, auto&& enqueue)
+            {
+                cudaGraph_t graph = nullptr;
+                cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin capture");
+                std::exception_ptr error;
+                try { enqueue(); }
+                catch (...) { error = std::current_exception(); }
+                cuda::check(cudaStreamEndCapture(stream, &graph), "end capture");
+                if (error)
+                    std::rethrow_exception(error);
+                return graph;
+            };
+
+            // the capture of the stream form has the nodes of the acquisition's own form, and its replay evaluates the
+            // rows the graph reads when it runs: they are written after the capture
+            cuda::check(cudaMemsetAsync(const_cast<u64*>(input.states), 0, batch.states.size() * sizeof(u64), launch),
+                        "clear the rows");
+            cuda::check(cudaStreamSynchronize(launch), "clear the rows");
+            cudaGraph_t own = capture(owner, [&] { device.encode(acquisition, scratch.data(), bytes, shape, input, out); });
+            cudaGraph_t graph =
+                capture(launch, [&] { device.encode(acquisition, launch, scratch.data(), bytes, shape, input, out); });
+            const NodeCounts expected = count_nodes(own), nodes = count_nodes(graph);
+            EXPECT_EQ(nodes.kernels, expected.kernels);
+            EXPECT_EQ(nodes.memsets, expected.memsets);
+            EXPECT_EQ(nodes.others, 0u);
+            cuda::check(cudaGraphDestroy(own), "destroy the graph");
+            cuda::check(cudaStreamSynchronize(owner), "wait for the owner");
+            cudaGraphExec_t exec = nullptr;
+            cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+            cuda::check(cudaMemcpyAsync(const_cast<u64*>(input.states), batch.states.data(),
+                                        batch.states.size() * sizeof(u64), cudaMemcpyHostToDevice, launch),
+                        "write the rows");
+            cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), launch), "clear the output");
+            cuda::check(cudaGraphLaunch(exec, launch), "replay");
+            const DeviceResult replayed = download_encoding(ctx, launch, layout, block);
+            cuda::check(cudaGraphExecDestroy(exec), "destroy the executable graph");
+            cuda::check(cudaGraphDestroy(graph), "destroy the graph");
+            expect_sizes(host.sizes, replayed.sizes);
+            expect_same_arrays(*host.bundle, replayed);
+
+            // eager, while the acquisition's stream is held: the launch stream finishes the batch on its own
+            cuda::check(cudaMemsetAsync(scratch.data(), 0xa5, bytes, launch), "poison the scratch");
+            cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), launch), "clear the output");
+            DeviceResult eager;
+            {
+                const StreamGate gate(owner);
+                device.encode(acquisition, launch, scratch.data(), bytes, shape, input, out);
+                eager = download_encoding(ctx, launch, layout, block);
+            }
+            expect_sizes(host.sizes, eager.sizes);
+            expect_same_arrays(*host.bundle, eager);
+            if (::testing::Test::HasFailure())
+                return;
+        }
     }
 }
 
