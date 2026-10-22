@@ -28,8 +28,9 @@ class DeviceHGraphView:
     them writes into the batch. The tuple numbers (row 0, an arange), the ptr of a relation and the roles of a batch
     whose entity arrays are implicit are new tensors, made on request on the device.
 
-    Making the view reads the offsets of the batch at the relations' boundaries on the host, so it waits for the device;
-    after that no method waits (except for ``framework='numpy'``): the new tensors are made by torch operations on the
+    Making the view reads the graph count, sizes and offsets at the relations' boundaries on the host in one transfer,
+    so it waits for the device exactly once and must be done outside CUDA graph capture.
+    After that no method waits (except for ``framework='numpy'``): the new tensors are made by torch operations on the
     current stream, in stream order. The view keeps the counts it read, so a batch whose arrays are rewritten in place
     (a CUDA graph replay) needs a new view. The view keeps the batch alive. ``mymyr.encoding.hgraph(batch)`` makes
     one; it refuses what the host view refuses."""
@@ -52,17 +53,25 @@ class DeviceHGraphView:
             raise _error("statics='shared' is not supported by the HGraph encoding: its graphs hold the static tuples "
                          "among their own tuples")
         torch = _torch()
+        if torch.cuda.is_current_stream_capturing():
+            raise _error("create a DeviceHGraphView outside capture")
         sizes = batch.device_sizes
-        arrays = batch.as_dict("torch")  # cut to the live graphs and sizes of a stream batch
-        graphs, relations = int(arrays["num_graphs"]), schema.num_relations
-        # one host read: the first tuple and argument of every relation (and the ends), the entities, the overflow flags
+        arrays, relations = batch._arrays.copy(), schema.num_relations
+        graphs = batch.device_graphs
+        if graphs is None:
+            graphs = torch.full((1,), batch.num_graphs, dtype=torch.int64, device=batch.device)
+        # Stream offsets are packed by the live graph count, which stays on the device until the metadata is gathered.
         at = torch.arange(relations + 1, device=batch.device) * graphs
-        parts = [arrays["relation_offsets"][at], arrays["relation_arg_offsets"][at], arrays["entity_offsets"][graphs:]]
+        parts = [arrays["relation_offsets"][at], arrays["relation_arg_offsets"][at], arrays["entity_offsets"][graphs],
+                 graphs]
         if sizes is not None:
-            parts.append(sizes[-1:])
+            parts.append(sizes)
         marks = torch.cat([p.to(torch.int64) for p in parts]).tolist()
         if sizes is not None and marks[-1]:
             raise _error("the batch overflowed its capacities, so it holds no encoding to view")
+        graphs = marks[2 * relations + 3]
+        arrays["entity_offsets"] = arrays["entity_offsets"][: graphs + 1]
+        arrays["num_objects"] = arrays["num_objects"][:graphs]
         self._batch = batch
         self._schema = schema
         self._arrays = arrays
@@ -160,7 +169,6 @@ class DeviceHGraphView:
     def _entity_row(self, relation: int, slot: int) -> Any:
         """The entity at position ``slot`` of every tuple of ``relation``: a strided view of relation_args."""
         args, arity, count = self._arrays["relation_args"], self._arity[relation], self._tuples[relation]
-        # as_strided rather than a slice: an empty row keeps the stride, as on the host
         return args.as_strided((count,), (arity,), args.storage_offset() + self._first_arg[relation] + slot)
 
     def _arange(self, relation: int) -> Any:
@@ -234,7 +242,8 @@ def hgraph(batch: FlatBatch | DeviceFlatBatch) -> HGraphView | DeviceHGraphView:
     every graph. A host batch gives an ``HGraphView``, a device batch a ``DeviceHGraphView`` of torch tensors on its
     device, equal to the host view of the same rows. The view keeps the batch alive. Raises ValueError for a batch the
     view cannot be made of: one that is graph-major, has predicate virtual nodes or shared statics, or overflowed its
-    capacities; TypeError for a JAX batch, whose arrays have no strided views.
+    capacities, or for a device view created during CUDA graph capture; TypeError for a JAX batch, whose arrays have no
+    strided views.
     """
     if isinstance(batch, DeviceFlatBatch):
         return DeviceHGraphView(batch)
