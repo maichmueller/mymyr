@@ -1009,6 +1009,7 @@ specializes the handle: calling it with another registered encoder traces a grap
 To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, warm it once on the capture stream to upload
 and acquire its context. No scratch reservation is needed. An encoding without capacities waits for the sizes and
 cannot be captured. The graph reads its input tensors where they were captured: write new rows in place and replay.
+Keep input arrays and their owners alive through the final replay.
 Keep the encoder registered or referenced while the graph can replay: a captured `encode` holds raw context pointers
 and does not retain the Python encoder. Graphs of different sizes can share a capture stream; each owns its scratch.
 

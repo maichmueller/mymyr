@@ -682,7 +682,7 @@ def encode_flat(
     store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA
-    graph, and keep the encoder registered while the graph can replay. Scratch belongs to torch's allocator and needs
+    graph, and keep the encoder registered and input owners alive while the graph can replay. Scratch belongs to torch's allocator and needs
     no reservation. Horizon schemas take node/edge arrays, or parent ``states`` with ``action_succ`` and expansion
     labels to build depth-one transitions; ``derived`` is per node for a horizon schema."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
