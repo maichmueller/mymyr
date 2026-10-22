@@ -13,8 +13,9 @@ import weakref
 import numpy as np
 import pytest
 
+import mymyr
 from mymyr import encoding, rl
-from conftest import text_task
+from conftest import ROOT, text_task
 from test_rl_table import gpu_device, sets  # noqa: F401
 
 torch = pytest.importorskip("torch")
@@ -22,7 +23,9 @@ rt = pytest.importorskip("mymyr.rl.torch")
 
 CAPS = dict(entities=1 << 14, args=1 << 16)
 VARIABLE = {"entity_role": "entities", "entity_ref": "entities", "relation_args": "args", "target_entity": "targets",
-            "target_group": "targets"}
+            "target_group": "targets", "numeric_values": "numeric"}
+# the stored forms of a batch: the relation arrays, both, the Simple graph alone
+OUTPUTS = {"relations": ("relations",), "both": ("relations", "simple"), "simple": ("simple",)}
 
 
 def devices():
@@ -40,7 +43,7 @@ def arrays(batch):
     g, r = d["num_graphs"], d["num_relations"]
     graphs = {"task_ids": g, "num_objects": g, "entity_offsets": g + 1, "relation_counts": g,
               "relation_offsets": g * r + 1, "relation_arg_offsets": g * r + 1, "goal_complete": g,
-              "target_offsets": g + 1}
+              "target_offsets": g + 1, "node_offsets": g + 1, "edge_offsets": g + 1}
     out = {}
     for key, value in d.items():
         if isinstance(value, np.ndarray):
@@ -48,6 +51,12 @@ def arrays(batch):
                 value = value[: graphs[key]]
             if sizes is not None and key in VARIABLE:
                 value = value[: sizes[VARIABLE[key]]]
+            if sizes is not None and key == "node_label":
+                value = value[: sizes["entities"] + sizes["tuples"]]
+            if sizes is not None and key == "edge_label":
+                value = value[: 2 * sizes["args"]]
+            if sizes is not None and key == "edge_index":
+                value = value[:, : 2 * sizes["args"]]
         out[key] = value
     return out
 
@@ -324,11 +333,13 @@ def test_eager_step_obs_collate(gripper, dev):
     assert_same(encoding.collate([r.obs for r in steps]), host(encoder, states, ids))
 
 
+@pytest.mark.parametrize("outputs", OUTPUTS)
 @pytest.mark.parametrize("over", ["table", "suite"])
-def test_device_obs_with_capacities_never_wait(gripper, suite, over):
+def test_device_obs_with_capacities_never_wait(gripper, suite, over, outputs):
     device = gpu_device()
     table = gripper if over == "table" else suite
-    encoders = [encoding.FlatRelationEncoder(t) for t in ([gripper] if over == "table" else suite.tables)]
+    encoders = [encoding.FlatRelationEncoder(t, outputs=OUTPUTS[outputs])
+                for t in ([gripper] if over == "table" else suite.tables)]
     env = rt.BatchedEnv(table, 16, device=device, seed=3, max_steps=3, observation=encoders, obs_capacities=CAPS)
     env.step()  # the first calls make the per-stream state
     torch.cuda.synchronize(device)
@@ -441,8 +452,9 @@ def suite_check(suite, encoders, obs, states, task_ids, goals=None):
 
 @pytest.mark.parametrize("dev", devices())
 @pytest.mark.parametrize("capacities", [CAPS, None], ids=["capacities", "exact"])
-def test_suite_obs_are_one_batch_per_domain(suite, dev, capacities):
-    encoders = [encoding.FlatRelationEncoder(t) for t in suite.tables]
+@pytest.mark.parametrize("outputs", OUTPUTS)
+def test_suite_obs_are_one_batch_per_domain(suite, dev, capacities, outputs):
+    encoders = [encoding.FlatRelationEncoder(t, outputs=OUTPUTS[outputs]) for t in suite.tables]
     env = rt.BatchedEnv(suite, 20, device=device_of(dev), seed=2, max_steps=3, observation=encoders,
                         obs_capacities=capacities)
     for _ in range(6):
@@ -484,21 +496,25 @@ def test_captured_suite_rollout(suite):
                         host(encoder, states[sel], torch.as_tensor(local[rows])))
 
 
-@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize(("layout", "outputs"), [("graph", "relations"), ("relation", "relations"), ("graph", "both"),
+                                                 ("relation", "both"), ("graph", "simple")])
 @pytest.mark.parametrize("targets", [False, True])
 @pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
-def test_suite_overflow_zeroes_owned_buffers(suite, monkeypatch, layout, targets, captured):
+def test_suite_overflow_zeroes_owned_buffers(suite, monkeypatch, layout, outputs, targets, captured):
     from mymyr.encoding import _device
 
     device = gpu_device()
-    options = dict(target_sources=("goal",), index_dtype="int64", emit_counts=False) if targets else {}
-    encoders = [encoding.FlatRelationEncoder(t, layout=layout, **options) for t in suite.tables]
+    options = dict(target_sources=("goal",), index_dtype="int64") if targets else {}
+    if targets and outputs != "simple":
+        options["emit_counts"] = False
+    encoders = [encoding.FlatRelationEncoder(t, layout=layout, outputs=OUTPUTS[outputs], **options)
+                for t in suite.tables]
     env = rt.BatchedEnv(suite, 6, device=device, task_ids=[0, len(suite) - 1] * 3,
                         observation=encoders, obs_capacities=dict(entities=1, args=1, targets=1))
-    outputs = _device._outputs
+    allocate = _device._outputs
 
     def sentinel_outputs(*args, **kwargs):
-        out = outputs(*args, **kwargs)
+        out = allocate(*args, **kwargs)
         for array in out.values():
             array.fill_(17)
         return out
@@ -530,6 +546,60 @@ def test_derived_atoms_of_the_observations(dev):
     env = rt.BatchedEnv(task, 6, device=device_of(dev), seed=2, max_steps=4, observation=encoder, obs_capacities=CAPS)
     for _ in range(4):
         r = env.step()
+        assert_same(r.obs, host(encoder, r.states, r.task_ids))
+
+
+# the numeric and the Simple observation forms: a numeric task's relations with its numeric values, the Simple graph
+# of a classical task, and the Simple graph of a numeric task without numeric relations
+FORMS = {"numeric": ("cs-counters", dict()),
+         "simple": ("gripper__prob05", dict(outputs=("simple",))),
+         "simple_of_numeric": ("cs-counters", dict(outputs=("simple",), include_numeric=False))}
+NUMERIC_CAPS = dict(CAPS, numeric=1 << 12)
+
+
+def form_task(form):
+    name, options = FORMS[form]
+    task = mymyr.Task.from_text(str(ROOT / f"tests/data/numeric_tasks/{name}.txt")) if name.startswith("cs-") \
+        else text_task(name)
+    return task, encoding.FlatRelationEncoder(task, **options)
+
+
+@pytest.mark.parametrize("dev", devices())
+@pytest.mark.parametrize("capacities", [NUMERIC_CAPS, None], ids=["capacities", "exact"])
+@pytest.mark.parametrize("form", FORMS)
+def test_numeric_and_simple_obs_are_the_host_encoding(dev, capacities, form):
+    task, encoder = form_task(form)
+    env = rt.BatchedEnv(task, 12, device=device_of(dev), seed=5, max_steps=5, observation=encoder,
+                        obs_capacities=capacities)
+    for _ in range(8):
+        ids = env.task_ids.clone()
+        r = env.step()
+        assert_same(r.obs, host(encoder, r.states, r.task_ids))
+        assert_same(r.final_obs, host(encoder, r.final_states, ids))
+    if form == "numeric":
+        assert r.obs.sizes["numeric"] > 0 if capacities else len(r.obs.numeric_values) > 0
+
+
+@pytest.mark.needs_gil
+@pytest.mark.parametrize("form", FORMS)
+def test_numeric_and_simple_obs_under_torch_compile(form):
+    device = gpu_device()
+    task, encoder = form_task(form)
+    a, b = (rt.BatchedEnv(task, 8, device=device, seed=7, max_steps=3, observation=encoder,
+                          obs_capacities=NUMERIC_CAPS) for _ in range(2))
+    name = "numeric_values" if form == "numeric" else "edge_index"
+
+    def step(env):
+        r = env.step(final=False)
+        return getattr(r.obs, name), r.obs.device_sizes
+
+    torch._dynamo.reset()
+    compiled = torch.compile(step, fullgraph=True, backend="aot_eager")
+    for _ in range(3):
+        values, sizes = compiled(a)
+        r = b.step(final=False)
+        assert torch.equal(sizes, r.obs.device_sizes)
+        assert torch.equal(values, getattr(r.obs, name))
         assert_same(r.obs, host(encoder, r.states, r.task_ids))
 
 
