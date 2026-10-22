@@ -106,43 +106,46 @@ def test_numeric_stream_collation_and_capture(numeric_cases, layout, index, dtyp
                                            goal_derivations=())
     expected = encoder.encode(rows, ids)
     device_rows, device_ids = tensor(torch, rows), tensor(torch, ids)
-    cap = capacities(expected, 5)
-    ring_capacity = len(rows) + 2
-    cap["graphs"] = ring_capacity
-    ring = encoder.device_stream(ring_capacity)
-    for begin, end in ((0, 3), (3, len(rows))):
-        ring.append(device_rows[begin:end], device_ids[begin:end])
-    flushed = ring.flush(capacities=cap)
-    equal(expected, flushed)
-    assert len(ring) == 0
-    # The next append starts away from zero and wraps around the ring.
-    ring.append(device_rows, device_ids)
-    equal(expected, ring.flush(capacities=cap))
-    parts = [encoder.encode(device_rows[:3], device_ids[:3]), encoder.encode(device_rows[3:3], device_ids[3:3]),
-             encoder.encode(device_rows[3:], device_ids[3:])]
-    empty_host = encoder.encode(rows[:0], ids[:0])
-    equal(empty_host, encoding.DeviceCollator([parts[1], parts[1]]).encode())
-    equal(empty_host, ring.flush(capacities=cap))
-    prepared = encoding.DeviceCollator(parts)
-    equal(expected, prepared.encode())
-    equal(expected, prepared.encode(capacities=cap), capacity=True)
-    overflow = prepared.encode(capacities={**cap, "numeric": len(expected.numeric_values) - 1})
-    assert overflow.sizes["capacity_overflow"]
-    for array in overflow._arrays.values():
-        assert torch.count_nonzero(array).item() == 0
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        cap = capacities(expected, 5)
+        ring_capacity = len(rows) + 2
+        cap["graphs"] = ring_capacity
+        ring = encoder.device_stream(ring_capacity)
+        for begin, end in ((0, 3), (3, len(rows))):
+            ring.append(device_rows[begin:end], device_ids[begin:end])
+        flushed = ring.flush(capacities=cap)
+        equal(expected, flushed)
+        assert len(ring) == 0
+        # The next append starts away from zero and wraps around the ring.
         ring.append(device_rows, device_ids)
-        captured = ring.flush(capacities=cap)
-        collated = prepared.encode(capacities=cap)
-    for _ in range(2):
-        graph.replay()
-        equal(expected, captured)
-        equal(expected, collated, capacity=True)
-    with pytest.raises(ValueError, match="numeric_dtype|schemas"):
-        encoding.DeviceCollator([parts[0], encoding.FlatRelationEncoder(
-            case.table, layout=layout, index_dtype=index, numeric_dtype="float64" if dtype == "float32" else "float32",
-            goal_derivations=()).encode(device_rows[3:], device_ids[3:])])
+        equal(expected, ring.flush(capacities=cap))
+        parts = [encoder.encode(device_rows[:3], device_ids[:3]), encoder.encode(device_rows[3:3], device_ids[3:3]),
+                 encoder.encode(device_rows[3:], device_ids[3:])]
+        empty_host = encoder.encode(rows[:0], ids[:0])
+        equal(empty_host, encoding.DeviceCollator([parts[1], parts[1]]).encode())
+        equal(empty_host, ring.flush(capacities=cap))
+        prepared = encoding.DeviceCollator(parts)
+        equal(expected, prepared.encode())
+        equal(expected, prepared.encode(capacities=cap), capacity=True)
+        overflow = prepared.encode(capacities={**cap, "numeric": len(expected.numeric_values) - 1})
+        assert overflow.sizes["capacity_overflow"]
+        for array in overflow._arrays.values():
+            assert torch.count_nonzero(array).item() == 0
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            ring.append(device_rows, device_ids)
+            captured = ring.flush(capacities=cap)
+            collated = prepared.encode(capacities=cap)
+        for _ in range(2):
+            graph.replay()
+            equal(expected, captured)
+            equal(expected, collated, capacity=True)
+        with pytest.raises(ValueError, match="numeric_dtype|schemas"):
+            encoding.DeviceCollator([parts[0], encoding.FlatRelationEncoder(
+                case.table, layout=layout, index_dtype=index, numeric_dtype="float64" if dtype == "float32" else "float32",
+                goal_derivations=()).encode(device_rows[3:], device_ids[3:])])
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
