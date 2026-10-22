@@ -90,13 +90,16 @@ class _Layout:
 
     def __init__(self, encoder: Any):
         options = encoder.options
+        numeric_relations = encoder.relation_lanes.count("numeric")
+        if numeric_relations and "simple" in options["outputs"]:
+            raise _error("the device does not encode Simple with numeric relations")
         # the refusals of the device encoder (DeviceEncoder::check_schema), also where the build has no CUDA backend
         if tuple(options["outputs"]) != ("relations",):
             raise _error("the device does not encode Simple")
         if options["statics"] == "shared":
             raise _error("the device does not encode shared statics (statics='shared'): encode the rows on the host, or "
                          "with statics='repeat'")
-        self.numeric_relations = encoder.relation_lanes.count("numeric")
+        self.numeric_relations = numeric_relations
         self.numeric = self.numeric_relations != 0
         self.numeric_dtype = options["numeric_dtype"]
         self.index = options["index_dtype"]

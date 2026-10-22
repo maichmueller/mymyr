@@ -681,6 +681,7 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
+    if (schema.stores_node_value()) refuse("Simple with numeric relations");
     // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
     if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
