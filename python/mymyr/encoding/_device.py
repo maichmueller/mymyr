@@ -528,6 +528,7 @@ def encode_arrays(
 
 def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> dict[str, Any]:
     torch = _torch()
+    _drain(torch)
     layout = layout_of(encoder)
     device = rows.device
     native = _device_encoder(encoder, device.index)
