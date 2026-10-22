@@ -24,7 +24,8 @@ so it keeps working after its encoder is unregistered and every Python reference
 What the target encodes: what the device encodes, on both platforms (a function gives the same arrays wherever it
 runs): the rows with their goals, subgoal layers and history steps, but no action relations (they need an expansion,
 which JAX cannot pass), no schema the device refuses, and the rows' derived words are required where the device cannot
-evaluate the axioms a graph reads (an axiom body or object set beyond the device's matcher limits). Such calls raise
+evaluate the axioms a graph reads (an axiom body or object set beyond the device's matcher limits). Shared statics are
+refused because the fixed FFI result signature has no static-block arrays. Such calls raise
 ``ValueError`` (``mymyr: encoding: ...``) when the function is traced.
 """
 
