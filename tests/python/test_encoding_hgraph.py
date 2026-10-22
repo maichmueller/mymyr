@@ -390,6 +390,19 @@ def test_a_batch_that_overflowed_its_capacities_has_no_view():
         encoding.hgraph(overflowed)
 
 
-def test_a_device_batch_is_refused():
-    with pytest.raises(TypeError, match="^mymyr: encoding: the HGraph view is of host batches"):
-        encoding.hgraph(object.__new__(encoding.DeviceFlatBatch))
+def test_a_device_view_is_of_a_device_batch():
+    task = text_task("blocks__probBLOCKS-8-0")
+    batch = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False).encode(walk(task, 4, walks=1))
+    with pytest.raises(TypeError, match="^mymyr: encoding: a DeviceHGraphView is of a DeviceFlatBatch"):
+        encoding.DeviceHGraphView(batch)
+
+
+def test_a_jax_batch_is_refused_because_its_arrays_have_no_strided_views():
+    jax_encoding = pytest.importorskip("mymyr.encoding.jax")
+    task = text_task("blocks__probBLOCKS-8-0")
+    encoder = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False)
+    rows = np.ascontiguousarray(np.asarray(task.encode(walk(task, 4, walks=1))))
+    batch = jax_encoding.encode(encoder, rows.view(np.uint32))
+    assert isinstance(batch, jax_encoding.JaxFlatBatch)
+    with pytest.raises(TypeError, match="^mymyr: encoding: the HGraph view does not view a JaxFlatBatch.*no views"):
+        encoding.hgraph(batch)

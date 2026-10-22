@@ -41,8 +41,9 @@ the states again; required on a device).
   device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``, ``entities``, ``args``,
   ``targets`` and ``history`` (0 without target sources or history): a list of 17 tensors, the arrays of a batch in the
   order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty tensor) and ``sizes`` int64
-  [6]. It waits for nothing and allocates only its outputs, on torch's current stream, so it captures in a CUDA graph
-  (after ``encoder.reserve_device`` on the capture stream) and traces under ``torch.compile``.
+  [6]. It waits for nothing and allocates only its outputs and scratch, on torch's current stream, so it captures in a
+  CUDA graph (warm it once on the capture stream first; no scratch reservation is needed) and traces under
+  ``torch.compile``.
 - ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
   seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
 """
