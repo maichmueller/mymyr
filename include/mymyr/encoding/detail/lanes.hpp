@@ -736,10 +736,16 @@ MYMYR_HD u32 popcount_range(const u64* words, u32 lo, u32 hi)
 {
     if (lo >= hi)
         return 0;
-    u32 n = 0;
-    for (u32 w = lo >> 6; w <= ((hi - 1u) >> 6); ++w)
-        n += popcount64(range_word(words, w, lo, hi));
-    return n;
+    const u32 first = lo >> 6, last = (hi - 1u) >> 6;
+    const u64 start = words[first] & (~u64{0} << (lo & 63u));
+    const u64 end_mask = ~u64{0} >> (63u - ((hi - 1u) & 63u));
+    if (first == last)
+        return popcount64(start & end_mask);
+    // Only the boundary words need masks; the full-word reduction can use the host's vector instructions.
+    u64 n = popcount64(start) + popcount64(words[last] & end_mask);
+    for (u32 w = first + 1u; w < last; ++w)
+        n += popcount64(words[w]);
+    return static_cast<u32>(n);
 }
 
 /// Whether any bit at or beyond `first` is set in the first `count` words.
@@ -1936,6 +1942,16 @@ MYMYR_HD u32 fill_cell_of(const InstanceView& v, const Cell& c, const RowInput& 
     {
         n = c.b - c.a;
         const i32* row = v.static_args + static_cast<u64>(c.a) * A;
+        if constexpr (!Pred && K != 0 && K != k_any_arity)
+        {
+            if (A == K)
+            {
+                const u64 entries = static_cast<u64>(n) * K;
+                for (u64 i = 0; i < entries; ++i)
+                    dst[i] = static_cast<I>(entity_base + static_cast<u64>(row[i]));
+                return n;
+            }
+        }
         for (u32 s = 0; s < n; ++s, row += A)
             dst = write(dst, row);
         return n;

@@ -63,6 +63,12 @@ TEST(EncodingLanes, PopcountRangeAndSetBitIterationMatchABitLoop)
             EXPECT_EQ(popcount_range(words.data(), lo, hi), hi > lo ? hi - lo : 0u) << lo << " " << hi;
             EXPECT_EQ(iterate(words, lo, hi).size(), hi > lo ? hi - lo : 0u) << lo << " " << hi;
         }
+    std::vector<u64> wide(257);
+    for (u64& word : wide)
+        word = rng();
+    for (const u32 lo : {0u, 1u, 63u, 64u, 65u})
+        for (const u32 length : {0u, 1u, 63u, 64u, 65u, 127u, 128u, 256u, 1024u, 8192u})
+            EXPECT_EQ(popcount_range(wide.data(), lo, lo + length), reference_count(wide, lo, lo + length));
 }
 
 TEST(EncodingLanes, AnyBitFromLooksOnlyAtTheGivenWords)
