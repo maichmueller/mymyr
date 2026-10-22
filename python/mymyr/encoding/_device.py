@@ -439,15 +439,15 @@ class _Rows:
         return [*masks, *ptrs], steps
 
 
-def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int]:
-    """The (graphs, entities, args, targets, history) capacities of a ``capacities`` dict."""
+def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int, int, int]:
+    """The graph, dynamic-array and static-block capacities of a ``capacities`` dict."""
     if not isinstance(value, dict):
         raise _error(f"capacities must be a dict, not {type(value).__name__}")
     keys = {"entities", "graphs", "args", "targets", "history", "static_instances", "static_args"}
     unknown = set(value) - keys
     if unknown:
         raise _error(f"capacities has the unknown key '{sorted(unknown, key=str)[0]}'; the keys are 'entities', "
-                     f"'graphs', 'args', 'targets' and 'history'")
+                     f"'graphs', 'args', 'targets', 'history', 'static_instances' and 'static_args'")
     if not {"entities", "graphs", "args"} <= set(value):
         raise _error("capacities needs the keys 'entities', 'graphs' and 'args'")
     if "targets" not in value and layout.targets:
@@ -519,7 +519,7 @@ def encode_arrays(
     task_ids: Any,
     derived: Any,
     goals: Any,
-    capacities: Optional[tuple[int, int, int, int, int]],
+    capacities: Optional[tuple[int, int, int, int, int, int, int]],
     keep: Optional[list] = None,
     subgoals: Any = None,
     history: Any = None,
@@ -702,6 +702,17 @@ class _Host:
             lengths = np.diff(offsets)
         self.relation_arg_offsets = np.concatenate(([0], np.cumsum(lengths, dtype=np.int64)))
         self.relation_args = args.cpu().numpy() - begin
+        if batch._layout.shared:
+            ids = batch.static_task_ids
+            block = int(torch.searchsorted(ids, int(self.task_ids[0])).item())
+            count = batch._layout.static_relations
+            offsets = batch.static_arg_offsets[block * count:(block + 1) * count + 1].cpu().numpy()
+            self.static_task_ids = self.task_ids.copy()
+            self.static_relations = batch.static_relations.cpu().numpy()
+            self.static_arg_offsets = offsets - offsets[0]
+            self.static_args = batch.static_args[int(offsets[0]):int(offsets[-1])].cpu().numpy()
+            if self.sizes is not None:
+                self.sizes = {**self.sizes, "static_instances": 1, "static_args": len(self.static_args)}
         if batch._layout.history:
             first, last = batch.history_offsets[graph:graph + 2].tolist()
             self.history_offsets = np.array([0, last - first], dtype=np.int64)

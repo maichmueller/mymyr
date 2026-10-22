@@ -135,3 +135,7 @@ for action in result.plan:
 assert task.is_goal(state)
 ctx.synchronize()
 ```
+
+Relational encoding supports `statics="shared"` on CUDA, including device row streams, capacity outputs and collation.
+Shared blocks retain instance-local entity ids and follow ascending task ids; a model adds each graph's entity base.
+Device datasets pass their resident rows and task ids directly to the encoder through `datasets.EncodingCollate`.

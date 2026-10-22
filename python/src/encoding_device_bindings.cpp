@@ -147,7 +147,7 @@ cuda::DeviceEncodeInput input_of(const Rows& r)
 
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
-/// target_entity, target_group, history_offsets, history_entity, history_dt, sizes (0: the array is absent or has no
+/// target_entity, target_group, history_offsets, history_entity, history_dt, the five static arrays, static_sizes, sizes (0: the array is absent or has no
 /// entries).
 constexpr usize k_output_fields = 23;
 struct DeviceSizes
@@ -362,7 +362,7 @@ public:
                                  input_of(rows), out);
     }
 
-    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, history, flags)` to check the flags
+    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, history, flags, static_instances, static_tuples, static_args)` to check the flags
     /// and return the graph extent and output pointers (the sizes pointer ignored), then fills them.
     void encode_exact(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
                       const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32, u64, u64, u64)>& allocate)
@@ -578,11 +578,11 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 17 output "
-             "pointers, with the capacities (graphs, entities, args, targets, history), on `stream`. No host wait.")
+             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the output "
+             "pointers, with graph, dynamic-array and static-block capacities, on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, "
-             "flags) to check the flags and return the graph extent and seventeen pointers, then fills them on "
+             "flags) to check the flags and return the graph extent and output pointers, then fills them on "
              "`stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")

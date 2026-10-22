@@ -487,3 +487,7 @@ action-schema one-hot and by the agent's position in the native relational encod
 truncations, elapsed time and a counted subset of live array storage (not process peak memory).
 The scorer is intentionally small: the position is the object index of the successor's `at` tuple, which equals the
 chain position because the example declares its cells in chain order. It is not object-level relational reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.
+
+An environment's device observation rows can be passed directly to `encoder.encode(obs.states, obs.task_ids)`.
+The table may mix row widths; each instance reads only its own words. `statics="shared"` keeps one static block per
+instance in the resulting CUDA batch. The same observation tensors can back `datasets.StateRows` for encoding on load.

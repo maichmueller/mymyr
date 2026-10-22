@@ -39,7 +39,7 @@ the states again; required on a device).
   subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
   history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)``: the encoding of
   device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``, ``entities``, ``args``,
-  ``targets`` and ``history`` (0 without target sources or history): a list of 17 tensors, the arrays of a batch in the
+  ``targets`` and ``history`` (0 without target sources or history): a list of tensors, the arrays of a batch in the
   order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty tensor) and ``sizes`` int64
   [6]. It waits for nothing and allocates only its outputs and scratch, on torch's current stream, so it captures in a
   CUDA graph (warm it once on the capture stream first; no scratch reservation is needed) and traces under
@@ -671,7 +671,7 @@ def encode_flat(
     [N or 1, D], the subgoal layers [N or 1, L, W] (and [N or 1, L, D]), the history masks [N, H, W] (and [N, H, D]),
     ``history_dt`` int32 [N, H] and ``history_count`` int32 [N] or None) with the capacities ``graphs``, ``entities``,
     ``args``, ``targets`` and ``history`` (0 without target sources or history). ``encoder`` is a :func:`register`
-    handle of the encoder. Returns the 17 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
+    handle of the encoder. Returns the arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
     store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA

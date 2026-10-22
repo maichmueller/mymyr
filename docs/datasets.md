@@ -145,6 +145,11 @@ instances; encode them with an encoder over the base's tasks. `dataset.take(indi
 with it, once, and hands the `StateRows` to the collate function whole. A list of items is packed without Python code
 per item as well.
 
+`StateRows` also accepts CUDA DLPack arrays and keeps its rows, task ids, labels and goal masks on the device.
+`StateRows.from_state_space` accepts a device state space. `EncodingCollate(encoder, capacities=...)` dispatches those
+stored rows directly to CUDA; selecting a batch with `take` and encoding it needs no host copy of the rows or task ids.
+The dataset files continue to store rows and labels only. Tables can mix instances whose rows are 1, 42 and 184 words wide.
+
 `EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`
 (the `FlatBatch`, or the `SuiteBatch` of one batch per domain when `encoder` is a `SuiteEncoder`), the rows'
 `task_ids`, the stacked `labels` and, with `actions=True`, the `actions` expansion the action entities index

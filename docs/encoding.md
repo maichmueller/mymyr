@@ -1097,6 +1097,13 @@ assert fixed.relation_args.shape == (2048,)
 assert not fixed.sizes["overflow"]                        # reads the sizes: waits for the device
 ```
 
+With `statics="shared"`, CUDA batches keep the CPU static-block arrays, sorted by instance, with local entity ids.
+Capacity calls additionally require `static_instances` and `static_args`; `device_static_sizes` holds the true
+`[instances, tuples, args]` on the device. The torch op accepts those two capacities after `history` and returns the
+static arrays and static sizes before `sizes`. Device streams and collation carry the blocks too; collation rejects
+different blocks for the same instance. HGraph and Simple refuse this storage form. JAX FFI refuses shared statics
+because its fixed result signature has no static-block outputs.
+
 ### What the device encodes
 
 The device (the torch path, the torch op, device streams and the CUDA target of `mymyr.encoding.jax`) encodes the rows
@@ -1106,7 +1113,7 @@ types and the omitted arrays. What it does not encode raises `ValueError` with t
 schemas and calls below before any launch):
 
 - **Schemas:** an encoder with action targets, a horizon mode (the horizon, rooted horizon and transition encoders), the
-  Simple output (`"the device does not encode Simple"`), shared statics (`statics='shared'`), or of a numeric table
+  Simple output (`"the device does not encode Simple"`), or of a numeric table
   (with or without `include_numeric`: `"the device does not encode numeric relations"`); and a schema whose kernels
   need more shared memory than a block has (very many predicate virtual nodes or relations).
 - **Calls:** `actions=` (the action relations have no tuples on the device, and JAX cannot pass an expansion),
@@ -1179,7 +1186,7 @@ history_dt, history_count, history_derived_pos, history_derived_neg, graphs, ent
 capacity form as a torch custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it).
 `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that
 is absent) and the five ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It
-returns the list of 17 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and
+returns the list of tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and
 `sizes` last; an array the schema does not store is an empty tensor, and `DeviceFlatBatch.from_arrays(encoder,
 outputs)` wraps the list into a batch. The op waits for nothing, allocates only its outputs and scratch and has a fake
 implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)` traces it without a
@@ -1394,7 +1401,7 @@ batch's: `count(in, pool, scratch, &extra)`, `encode_capacity(..., sizes, &stati
 scratch, &static_shape, &extra)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
 (`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics
 are repeated. `require_repeated_statics(options, family)` is the refusal for an encoding family whose graphs need the
-static tuples among their own tuples; the device encoder refuses shared statics when it is made.
+static tuples among their own tuples.
 
 The numeric lane is a cell kind of the same passes: a numeric cell has one tuple per numeric slot `[a, b)` of an
 instance, written like the tuples of a static cell, and its values come from the numeric words of the row

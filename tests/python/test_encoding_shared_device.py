@@ -142,7 +142,7 @@ def test_shared_static_torch_op_fake_compile_and_capture(cases, layout, index):
     handle = rt.register(encoder)
 
     def call(rows, ids):
-        return torch.ops.mymyr.encode_flat(handle, rows, ids, *([None] * 16), caps["graphs"], caps["entities"],
+        return torch.ops.mymyr.encode_flat(handle, rows, ids, *([None] * 15), caps["graphs"], caps["entities"],
                                            caps["args"], caps["targets"], 0,
                                            caps["static_instances"], caps["static_args"])
     try:
@@ -184,5 +184,60 @@ def test_nullary_static_auxiliary_entity_on_device(name, layout, index, virtual)
     encoder = encoding.FlatRelationEncoder(task, statics="shared", layout=layout, index_dtype=index,
                                             predicate_virtual_nodes=virtual)
     host = encoder.encode(rows)
-    same_batch(host, encoder.encode(to_device(rows, device)))
+    actual = encoder.encode(to_device(rows, device))
+    same_batch(host, actual)
+    assert encoder.describe(actual, 0) == encoder.describe(host, 0)
+    assert encoder.entity_names(actual, 0) == encoder.entity_names(host, 0)
     same_batch(host, encoder.encode(to_device(rows, device), capacities=capacities(host)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("statics", ["repeat", "shared"])
+def test_device_state_space_rows_encode_in_place(layout, statics, monkeypatch):
+    device = gpu()
+    from mymyr import datasets
+    from conftest import text_task
+
+    task = text_task("gripper__prob05", atoms="dense")
+    space = datasets.state_space(task, device=0, remove_if_unsolvable=False)
+    dataset = StateRows.from_state_space(space)
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, statics=statics)
+    expected = encoder.encode(dataset.rows.cpu().numpy())
+    pointers = (dataset.rows.data_ptr(), dataset.task_ids.data_ptr())
+    with monkeypatch.context() as patch:
+        def no_host(*args, **kwargs):
+            raise AssertionError("device datasets must not download their stored rows")
+        patch.setattr(torch.Tensor, "cpu", no_host)
+        patch.setattr(torch.Tensor, "numpy", no_host)
+        encoded = EncodingCollate(encoder)(dataset)
+        subset = dataset.take([3, 0, 3])
+        items = EncodingCollate(encoder)([subset[i] for i in range(len(subset))])
+    assert pointers == (dataset.rows.data_ptr(), dataset.task_ids.data_ptr())
+    assert encoded.task_ids is dataset.task_ids and encoded.labels is dataset.labels
+    assert all(value.device == device for value in encoded.labels.values())
+    same_batch(expected, encoded.graphs)
+    same_batch(encoder.encode(dataset.rows[[3, 0, 3]].cpu().numpy()), items.graphs)
+
+
+@pytest.mark.parametrize("statics", ["repeat", "shared"])
+def test_device_data_loader_encodes_stored_goals_and_labels(cases, statics, monkeypatch):
+    device = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, statics=statics, goal_derivations=("plain", "satisfied"))
+    rows = to_device(case.rows, device)
+    ids = torch.zeros(len(rows), dtype=torch.int32, device=device)
+    goals = (rows.clone(), torch.zeros_like(rows))
+    dataset = StateRows(rows, ids, goals=goals, labels={"value": torch.arange(len(rows), device=device)})
+    from torch.utils.data import DataLoader
+
+    with monkeypatch.context() as patch:
+        def no_host(*args, **kwargs):
+            raise AssertionError("loading device rows must not copy them to the host")
+        patch.setattr(torch.Tensor, "cpu", no_host)
+        patch.setattr(torch.Tensor, "numpy", no_host)
+        batches = list(DataLoader(dataset, batch_size=5, num_workers=0, collate_fn=EncodingCollate(encoder)))
+    for start, batch in zip(range(0, len(rows), 5), batches, strict=True):
+        selection = slice(start, start + 5)
+        expected = encoder.encode(case.rows[selection], goals=(case.rows[selection], np.zeros_like(case.rows[selection])))
+        same_batch(expected, batch.graphs)
+        assert batch.labels["value"].tolist() == list(range(start, min(start + 5, len(rows))))
