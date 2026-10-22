@@ -657,7 +657,7 @@ def test_count_index_overflow_raises_before_exact_allocation(cases, monkeypatch)
     native = encoding._device._device_encoder(encoder, 0)
 
     def count(self, stream, rows, allocate):
-        return allocate(1 << 31, 0, 0, 0, 0, 2)
+        return allocate(1 << 31, 0, 0, 0, 0, 2, 0, 0, 0)
 
     monkeypatch.setattr(type(native), "encode_exact", count)
     with pytest.raises(OverflowError, match="use index_dtype='int64'"):
@@ -1139,8 +1139,8 @@ def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     layout = encoding._device.layout_of(encoder)
     real = type(layout).specs
 
-    def short(self, torch_, graphs, entities, args, targets, history=0):
-        return real(self, torch_, graphs - 1, entities, args, targets, history)
+    def short(self, torch_, graphs, entities, args, targets, history=0, static_instances=0, static_args=0):
+        return real(self, torch_, graphs - 1, entities, args, targets, history, static_instances, static_args)
 
     monkeypatch.setattr(type(layout), "specs", short)
     with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):
