@@ -303,6 +303,15 @@ cudaError_t launch_scan(const u32* in, u32* out, u64 n, void* temp, u64 temp_byt
 cudaError_t launch_state_offsets(const u32* seg_offsets, u32 num_schemas, u64 rows, u64 base, i32* offsets_out,
                                  cudaStream_t s);
 
+/// The status of an expansion that does not wait for the host (DeviceExpander::expand_async), one thread: *live = 1 iff
+/// every row is valid (*bad_id and *bad_row hold 0xFFFFFFFF), *status = bit 0 iff *total exceeds `capacity`, bit 1 iff
+/// a row is invalid.
+cudaError_t launch_expansion_status(const u32* total, u64 capacity, const u32* bad_id, const u32* bad_row, u32* live,
+                                    u32* status, cudaStream_t s);
+/// After the write: bit 1 of *status iff *words_needed is nonzero (a successor wider than the destination rows), bit 0
+/// iff *error is (a sorted segment found no room: it reaches past the capacity).
+cudaError_t launch_expansion_written(const u32* words_needed, const u32* error, u32* status, cudaStream_t s);
+
 /// The padded [rows, K] view of a flat expansion (rl::pad on the device; arrays that are null are not written).
 struct Padded
 {

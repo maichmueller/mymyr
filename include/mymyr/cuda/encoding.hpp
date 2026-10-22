@@ -184,8 +184,14 @@ void check_stream_schema(const encoding::EncodingSchema& schema);
 
 /// Builds depth-one horizons from parent and successor rows on the stream. Output storage follows DeviceHorizonBuild;
 /// children hold actions.capacity rows of child_stride words. No host wait; a bad expansion writes invalid offsets.
+/// Graphs and successors run in parallel: merging finds each successor's first equal row of its graph (or its root)
+/// in a hash table over (graph, row), and new nodes take their places from a scan, so the work grows with the
+/// successors and their words, not with the square of a graph's fanout. The result is the host builder's: nodes in
+/// first-seen order, edges stably ordered by destination.
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream);
+/// The scratch bytes of build_depth_one_horizon over an expansion of `capacity` rows.
+[[nodiscard]] u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge);
 
 /// Builds horizons of any depth by traversing a labelled state space's recorded ids, without comparing state words.
 /// Uses the caller's stream and storage, with no allocation or host wait. Input CSR and labels must be valid.

@@ -142,8 +142,10 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceVi
 [[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
 [[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
 
+/// The depth-one horizon builder (encoding_horizon.cu); its scratch holds horizon_builder_scratch_bytes() bytes.
 cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
-                                  const DeviceHorizonBuild& output, cudaStream_t stream);
+                                   const DeviceHorizonBuild& output, cudaStream_t stream);
+[[nodiscard]] u64 horizon_builder_scratch_bytes(u64 capacity, bool merge);
 
 /// Maps valid horizon node slices to graph task ids before evaluating the nodes' derived words.
 cudaError_t launch_horizon_instances(const EncodeParams& params, i32* instances, cudaStream_t stream);

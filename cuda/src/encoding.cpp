@@ -1365,13 +1365,25 @@ void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHori
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream)
 {
-    if (!parents.actions.offsets || !output.node_offsets ||
+    if ((parents.graphs && parents.state_words && !parents.states) || parents.state_stride < parents.state_words ||
+        !parents.actions.offsets || !output.node_offsets ||
+        (parents.actions.capacity && (!parents.actions.schema ||
+                                     (parents.actions.label_width && !parents.actions.binding))) ||
         ((parents.graphs + parents.actions.capacity) && parents.state_words && !output.nodes) ||
         (parents.actions.capacity && (!children || !output.src || !output.dst || !output.schema ||
                                      (parents.actions.label_width && !output.binding))) || child_stride < parents.state_words)
         throw std::invalid_argument("mymyr: encoding: depth-one builder needs parent rows, child rows, offsets and output storage");
     if (parents.graphs + parents.actions.capacity > 0x7fffffffull)
         throw std::invalid_argument("mymyr: encoding: depth-one horizon node capacity exceeds int32");
+    if (!output.scratch || reinterpret_cast<std::uintptr_t>(output.scratch) % 256 ||
+        output.scratch_bytes < detail::horizon_builder_scratch_bytes(parents.actions.capacity, output.merge))
+        throw std::invalid_argument("mymyr: encoding: the depth-one builder's scratch is null, too small, or not aligned "
+                                    "to 256 bytes");
     check(detail::launch_horizon_builder(parents, children, child_stride, output, stream), "depth-one horizon builder");
+}
+
+u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge)
+{
+    return detail::horizon_builder_scratch_bytes(capacity, merge);
 }
 }

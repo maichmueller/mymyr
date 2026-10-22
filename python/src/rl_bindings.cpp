@@ -554,13 +554,16 @@ T* dest_ptr(const Dest& d, const char* name, rl::DType want, rl::DType also, usi
 
 ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, ArrayArg succ, ArrayArg parent,
                        ArrayArg schema, ArrayArg binding, ArrayArg goal, ArrayArg derived, ArrayArg offsets, bool canonical, bool witness,
-                       PoolArg pool, bool validate, StreamArg stream, ContextArg ctx)
+                       PoolArg pool, bool validate, StreamArg stream, ContextArg ctx, ArrayArg status)
 {
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
-                                       is_cuda_array(derived) || is_cuda_array(offsets)))
+                                       is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status)))
         return device_hooks().expand_into({table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets,
-                                           canonical, witness, validate, stream, ctx});
+                                           canonical, witness, validate, stream, ctx, status});
+    if (!status.is_none())
+        throw nb::type_error("mymyr: expand_into: 'status' is a device array of an expansion on the device (CUDA "
+                             "states and destinations)");
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
     StateBatch in = import_table_states(states, tt);
@@ -1833,7 +1836,7 @@ void bind_rl(nb::module_& parent)
           "succ"_a = nb::none(), "parent"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(),
           "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
-          "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
+          "status"_a = nb::none(), "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
     m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {

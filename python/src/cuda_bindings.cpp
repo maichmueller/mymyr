@@ -926,11 +926,47 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     }
     x.capacity = cap.value_or(0);
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
+    const rl::StateBatchView view{w.data, w.rows, w.words - NN, w.stride, NN};
+    if (!a.status.is_none())
+    {
+        DeviceInput d = dest(a.status, "status");
+        auto* status = device_dest<u32>(d, "status", {i32t, u32t}, 1);
+        if (d.im.shape[0] < 1)
+            throw nb::value_error("mymyr: expand_into: 'status' needs one entry");
+        if (!x.offsets)
+            throw nb::value_error("mymyr: expand_into: an expansion with 'status' needs 'offsets' (they carry its total)");
+        bool waited = false;
+        {
+            ExpanderLease ex(ref, c);
+            nb::gil_scoped_release release;
+            ex->set_stream(os.s);
+            if (ex->async_unsupported(w.rows, opt).empty())
+                ex->expand_async(view, ids, x, status, opt);
+            else
+            {
+                ex->expand(view, ids, x, opt);
+                const u32 flags = (x.overflow() ? 1u : 0u) | (x.words_needed > x.words ? 2u : 0u);
+                cuda::check(cudaMemcpyAsync(status, &flags, sizeof(u32), cudaMemcpyHostToDevice, os.s), "cudaMemcpyAsync");
+                cuda::check(cudaStreamSynchronize(os.s), "cudaStreamSynchronize");  // the pageable source
+                waited = true;
+            }
+        }
+        c->release_after(os.s, std::move(keep));
+        nb::dict r;
+        if (waited)
+        {
+            r["total"] = x.total;
+            r["words_needed"] = x.words_needed;
+            r["overflow"] = x.overflow();
+        }
+        r["capacity"] = x.capacity;
+        return r;
+    }
     {
         ExpanderLease ex(ref, c);
         nb::gil_scoped_release release;
         ex->set_stream(os.s);
-        ex->expand({w.data, w.rows, w.words - NN, w.stride, NN}, ids, x, opt);
+        ex->expand(view, ids, x, opt);
     }
     c->release_after(os.s, std::move(keep));
     nb::dict r;
@@ -1478,7 +1514,7 @@ void bind_cuda(nb::module_& parent)
                    (p.overflow ? ", overflow" : "") + ")";
         });
 
-    nb::class_<PyDeviceExpansion>(m, "DeviceExpansion",
+    nb::class_<PyDeviceExpansion>(m, "DeviceExpansion", nb::is_weak_referenceable(),
                                   "rl.expand of CUDA device states: rl.Expansion's arrays on the device, produced on "
                                   "the call's stream (a consumer's __dlpack__(stream=s) waits for them), byte-equal to "
                                   "the CPU expansion.")

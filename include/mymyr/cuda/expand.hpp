@@ -39,7 +39,8 @@
 // caller's is allocated. The work runs on one stream (set_stream; null: the context's stream) in stream order after
 // the work already enqueued there, which must have produced the input states and task ids. count() synchronizes once
 // (the total and the validation), write() once more (words_needed; lazy slots may add one round per chunk), pad() once
-// (overflow).
+// (overflow). expand_async() synchronizes nothing: into destinations of a fixed capacity, it leaves the total, the
+// overflow and the validation on the device (Single and Multi batches of one chunk whose work stays on the device).
 //
 // One DeviceExpander serves one thread at a time; its scratch is reused across calls.
 
@@ -49,6 +50,7 @@
 #include "mymyr/rl/task_table.hpp"
 
 #include <memory>
+#include <string>
 
 namespace mymyr::cuda
 {
@@ -110,6 +112,22 @@ public:
     /// write into scratch and scatter it (their derived rows are scattered zero-padded to out.derived_words). Multi mode
     /// does not write out.derived (its instances have no axioms): the caller zeroes those rows first, as SuiteExpander does.
     void write(rl::Expansion& out, const RowMap& map);
+
+    /// Why expand_async() of a batch of `rows` rows would need the host (empty: it does not): an instance the kernels
+    /// cannot run, instances expanded apart (PerInstance), numeric rows, CPU-fallback schemas or axioms on the CPU, or
+    /// more rows than one chunk of views holds.
+    [[nodiscard]] std::string async_unsupported(u64 rows, const rl::ExpandOptions& options = {}) const;
+    /// The expansion of a batch into destinations of a fixed capacity, without waiting for the device: count() and
+    /// write() in stream order, with what they read back kept on the device. out.offsets is required and gets the true
+    /// counts (offsets[rows] is the total, even past the capacity); rows past the capacity are not written. *status
+    /// (a device u32, required) gets bit 0 when the successors exceed the capacity, bit 1 when the batch is invalid (a
+    /// task id outside the table, a row with bits its instance has no slot for, a successor wider than out.words);
+    /// an invalid batch writes no successor or label. Successor rows past the total are zero, and goal flags and
+    /// derived words cover every row below the capacity (past the total: those of zero rows). out.total and
+    /// out.words_needed are not set, and a later write() needs a count() first. Needs async_unsupported() empty
+    /// (std::invalid_argument otherwise).
+    void expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
+                      const rl::ExpandOptions& options = {});
 
     /// rl::pad on the device: the padded [rows, K] view of a flat device expansion (it must carry offsets).
     void pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out);
