@@ -1317,6 +1317,26 @@ TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstr
     EXPECT_THROW(cuda::DeviceEncoder(ctx, encoder), std::invalid_argument);
     EXPECT_THROW(cuda::DeviceRowStream(ctx, encoder, 8, stream), std::invalid_argument);
 }
+TEST(DeviceEncoderSchema, TheCollatorRefusesTheBatchesOfSharedStaticsWhenConstructed)
+{
+    // the descriptor of an empty batch, from the public helper: nothing is read and no kernel is launched
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions o;
+    o.statics = encoding::Statics::Shared;
+    const auto encoder = encoding::FlatEncoder::create(table, o);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    try
+    {
+        const cuda::DeviceCollator collator(ctx, {cuda::collation_batch(*encoder, {}, nullptr, 0)}, stream);
+        ADD_FAILURE() << "the collator accepted a batch of shared statics";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("statics"), std::string::npos) << e.what();
+    }
+}
 }
 
 namespace

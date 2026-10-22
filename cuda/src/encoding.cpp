@@ -471,6 +471,7 @@ DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const
     batch.table_fingerprint = encoder.table_fingerprint();
     batch.layout = schema.options().layout;
     batch.index = schema.options().index;
+    batch.shared_statics = schema.shared_statics();
     batch.stored = output_arrays(schema);
     batch.max_goal_level = schema.options().max_goal_level;
     batch.history = schema.options().history;
