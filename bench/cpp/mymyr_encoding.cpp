@@ -267,13 +267,13 @@ EncodeTimes time_encode(const encoding::FlatEncoder& encoder, const encoding::En
 /// Measures the core and each optional path over identical walk rows. Derived-word preparation and action expansion
 /// are outside the encoding timers. Ratios include output allocation and use the fastest of nine warmed calls.
 void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::vector<u64>& rows, u64 n,
-                  const std::shared_ptr<Expanded>& expanded)
+                  const std::shared_ptr<Expanded>& expanded, const std::shared_ptr<const encoding::FlatEncoder>& core,
+                  const std::shared_ptr<const encoding::FlatEncoder>& relational)
 {
     encoding::FlatOptions options;
     options.goal_derivations = {};
     encoding::EncodeInput in;
     in.states = {rows.data(), n, table->words(), 0, 0};
-    const auto core = encoding::FlatEncoder::create(table, options);
     const EncodeTimes graph = time_encode(*core, in, 1, true);
     const EncodeTimes parallel = time_encode(*core, in, 8);
     if (batch_hash(*graph.bundle) != batch_hash(*parallel.bundle))
@@ -285,8 +285,6 @@ void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::
     const double action_args = static_cast<double>(batch_sizes(*actions.bundle).args - batch_sizes(*graph.bundle).args)
                                / static_cast<double>(n);
 
-    options.layout = encoding::Layout::Relation;
-    const auto relational = encoding::FlatEncoder::create(table, options);
     const EncodeTimes relation = time_encode(*relational, in, 1);
     const HGraphTimes hgraph = time_hgraph(relation.bundle, relational->schema_ptr());
     options.layout = encoding::Layout::Graph;
@@ -441,6 +439,11 @@ int main(int argc, char** argv)
 
         if (targets)
         {
+            encoding::FlatOptions target_options;
+            target_options.goal_derivations = {};
+            const auto core = encoding::FlatEncoder::create(table, target_options);
+            target_options.layout = encoding::Layout::Relation;
+            const auto relational = encoding::FlatEncoder::create(table, target_options);
             const auto expanded = expand_rows(*table, rows.data(), n, words);
             if (server)
             {
@@ -449,12 +452,12 @@ int main(int argc, char** argv)
                 {
                     if (command != "run")
                         throw std::invalid_argument("expected run or quit");
-                    time_targets(table, rows, n, expanded);
+                    time_targets(table, rows, n, expanded, core, relational);
                     std::fflush(stdout);
                 }
             }
             else
-                time_targets(table, rows, n, expanded);
+                time_targets(table, rows, n, expanded, core, relational);
             return 0;
         }
         const std::string layout = argc > 5 ? argv[5] : "graph";
