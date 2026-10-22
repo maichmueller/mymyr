@@ -365,11 +365,11 @@ without one (a static or derived predicate whose state relation is dropped) its 
 
 ### Derived atoms
 
-The derived atoms of a row (the atoms that the task's axioms define) fill the derived state relations, the derived
-literals of goals and subgoals and the derived history masks. By default the encoder evaluates them, and only for rows
+The derived atoms of a row (the atoms that the task's axioms define) fill the derived state relations and decide which
+derived goal and subgoal literals hold (`[sat]`, `[unsat]`). By default the encoder evaluates them, and only for rows
 whose instance has derived relations in the schema. **`derived=`** gives them instead: the derived atom words of each
-row, `[N, D]` u64 (or u32 halves), as `rl.expand(..., derived=True)` computes them for the successors
-([Derived words](rl.md#derived-words)). The given words take precedence over the evaluation.
+row, `[N, D]` u64 (or u32 halves), as `rl.expand(..., derived=True)` computes them for the successors ([Derived
+words](rl.md#derived-words)). The given words take precedence over the evaluation.
 
 ### Subgoals
 
