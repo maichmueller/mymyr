@@ -198,6 +198,34 @@ def test_t_c1_is_soft_and_the_table_says_so(bench):
     assert status["cpu-eight-threads"]["status"] == "fail" and "rerun on a quiet host" in status["cpu-eight-threads"]["detail"]
 
 
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("status,unavailable,expected", [
+    ("error", False, "error"), ("skipped", False, "skipped"), ("skipped", True, "fallback"),
+])
+def test_in_step_gate_preserves_observation_failures(bench, manual, status, unavailable, expected):
+    task, n = "blocks-p01e", 16384
+    records = [record(task, "env_step_n16384", 1, N=n, min_ns_per_env=1),
+               dict(task=task, mode="env_step_obs_n16384", N=n, status=status, unavailable=unavailable,
+                    reason="observation unavailable")]
+    if manual:
+        records += [record(task, "env_step_rand_n16384", 1, N=n, min_ns_per_env=1),
+                    record(task, "env_step_encode_n16384", 2, N=n, min_ns_per_env=2)]
+    result = bench.gate_device_in_step(bench.Index(records), task)
+    expected_status = ("pass" if manual else "n/a") if expected == "fallback" else expected
+    assert result["status"] == expected_status
+    if expected != "fallback":
+        assert "env_step_obs_n16384: observation unavailable" in result["reason"]
+
+
+def test_in_step_gate_keeps_a_measured_observations_missing_baseline(bench):
+    task, n = "blocks-p01e", 16384
+    records = [record(task, "env_step_obs_n16384", 2, N=n, min_ns_per_env=2),
+               record(task, "env_step_rand_n16384", 1, N=n, min_ns_per_env=1),
+               record(task, "env_step_encode_n16384", 2, N=n, min_ns_per_env=2)]
+    result = bench.gate_device_in_step(bench.Index(records), task)
+    assert result["status"] == "n/a" and result["reason"] == "env_step_n16384 not selected"
+
+
 class FakeGpu:
     """What the device helpers use of the GPU: ok, sync and empty_cache, plus a torch.cuda that records the calls."""
 

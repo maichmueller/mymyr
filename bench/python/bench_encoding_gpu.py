@@ -972,7 +972,12 @@ def gate_device_in_step(index, task):
     pairs = [("env_step_obs_n", "env_step_n"), ("env_step_encode_n", "env_step_rand_n")]
     for with_encode, baseline in pairs:
         sizes = [r["N"] for r in index.modes_of(task, with_encode)]
-        if sizes and not unavailable(index, task, [f"{baseline}{max(sizes)}", f"{with_encode}{max(sizes)}"]):
+        if sizes:
+            missing = unavailable(index, task, [f"{with_encode}{max(sizes)}"])
+            if missing is not None:
+                if missing["status"] != "n/a":
+                    return missing
+                continue
             break
     else:
         with_encode, baseline = pairs[-1]
