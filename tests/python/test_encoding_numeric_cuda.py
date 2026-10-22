@@ -157,10 +157,13 @@ def test_numeric_rounding_undefined_values_and_torch_op(numeric_cases, layout, i
     rows = np.array(table.initial_states(ids), copy=True)
     values = np.array([1 + 2**-24, 1 + 3 * 2**-24, -(1 + 2**-24), 2**-149,
                        2**-150, -0.0, float("nan"), 16777217.0, -16777217.0, 0.0], np.float64)
-    rows[:, table.words:] = np.resize(values.view(np.uint64), (len(rows), table.numeric_words))
+    for g in range(len(rows)):
+        rows[g, table.words:] = np.resize(values[2 * g:2 * g + 2].view(np.uint64), table.numeric_words)
     encoder = encoding.FlatRelationEncoder(table, layout=layout, index_dtype=index, numeric_dtype=dtype,
                                            goal_derivations=())
     expected = encoder.encode(rows, ids)
+    assert np.isnan(expected.numeric_values).any()
+    assert np.signbit(np.asarray(expected.numeric_values)[np.asarray(expected.numeric_values) == 0]).any()
     device_rows, device_ids = tensor(torch, rows), tensor(torch, ids)
     equal(expected, encoder.encode(device_rows, device_ids))
     cap = capacities(expected)
@@ -284,8 +287,8 @@ def test_packed_int32_values_round_identically_on_device(numeric_cases, layout, 
     table = numeric_cases["counters_i32"].table
     ids = np.array([1, 0, 1], np.int32)
     rows = np.array(table.initial_states(ids), copy=True)
-    values = np.resize(np.array([16777217, -16777217, 2147483647, -2147483648], np.int32),
-                       (len(rows), 2 * table.numeric_words))
+    limits = np.array([16777217, -16777217, 2147483647, -2147483648], np.int32)
+    values = np.stack([np.resize(np.roll(limits, -g), 2 * table.numeric_words) for g in range(len(rows))])
     rows[:, table.words:] = values.view(np.uint64)
     encoder = encoding.FlatRelationEncoder(table, layout=layout, index_dtype=index, numeric_dtype=dtype,
                                            goal_derivations=())
