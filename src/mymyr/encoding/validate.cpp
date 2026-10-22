@@ -142,7 +142,7 @@ struct StaticBlocks
 };
 
 StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSchema& schema, const i32* task_ids,
-                                 const Ints& num_objects, u64 G, rl::DType itype, bool wide)
+                                 const Ints& num_objects, u64 G, rl::DType itype, bool wide, BatchForm form)
 {
     constexpr const char* names[] = {"static_task_ids", "static_offsets", "static_arg_offsets", "static_args",
                                      "static_relations"};
@@ -167,7 +167,7 @@ StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSch
     blocks.auxiliary.assign(Ib, false);
     blocks.keys.resize(Ib);
     const Ints stored_relations = Ints{batch.data(*array(batch, names[4], itype, {static_cast<i64>(Rs)})), Rs, wide};
-    for (u64 k = 0; k < Rs; ++k)
+    for (u64 k = 0; k < Rs && form == BatchForm::Encoded; ++k)
         if (stored_relations[k] != static_cast<i64>(relations[k]))
             fail("static_relations does not list the schema's static relations");
     const auto* ids_info = padded_array(batch, names[0], rl::DType::I32, Ib, false);
@@ -243,7 +243,7 @@ StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSch
 }
 }  // namespace
 
-static void validate_relations(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+static void validate_relations(const rl::ArrayBundle& batch, const EncodingSchema& schema, BatchForm form)
 {
     const i64 version = batch.scalar("version");
     if (version != 1)
@@ -353,7 +353,7 @@ static void validate_relations(const rl::ArrayBundle& batch, const EncodingSchem
 
     StaticBlocks blocks;
     if (shared)
-        blocks = check_static_blocks(batch, schema, task_ids, num_objects, G, itype, wide);
+        blocks = check_static_blocks(batch, schema, task_ids, num_objects, G, itype, wide, form);
     constexpr u8 k_object = static_cast<u8>(EntityRole::Object);
     constexpr u8 k_auxiliary = static_cast<u8>(EntityRole::Auxiliary);
     constexpr u8 k_goal = static_cast<u8>(EntityRole::Goal);
@@ -891,12 +891,20 @@ void validate_numeric(const rl::ArrayBundle& batch, const EncodingSchema& schema
 }
 }  // namespace
 
-void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema, BatchForm form)
 {
     if (schema.emits_relations())
-        validate_relations(batch, schema);
+        validate_relations(batch, schema, form);
     if (schema.emits_simple())
         validate_simple(batch, schema);
     validate_numeric(batch, schema);
+    if (form == BatchForm::Overflowed)
+        for (const rl::ArrayInfo& info : batch.arrays())
+        {
+            const auto* bytes = static_cast<const u8*>(batch.data(info));
+            const u64 size = info.elements() * rl::dtype_bytes(info.dtype);
+            if (std::any_of(bytes, bytes + size, [](u8 b) { return b != 0; }))
+                fail("the batch overflowed, but '" + std::string(info.name.view()) + "' is not zero");
+        }
 }
 }  // namespace mymyr::encoding

@@ -29,6 +29,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -2019,8 +2020,9 @@ void add_batch_array(rl::ArrayBundle::Builder& builder, const std::string& name,
     builder.add_bytes(rl::ArrayName(name), dtype, rl::ArrayShape(shape), std::move(bytes), false);
 }
 
-/// The sizes of a batch with capacities, from the dictionary `FlatBatch.sizes` gives.
-encoding::FlatSizes sizes_of(nb::handle dict)
+/// The sizes of a batch of `schema` with capacities, from the dictionary `FlatBatch.sizes` gives: its FlatSizes and, in
+/// `extra`, its numeric count (with numeric values) and static block sizes (with shared statics).
+encoding::FlatSizes sizes_of(nb::handle dict, const encoding::EncodingSchema& schema, encoding::ExtraSizes& extra)
 {
     auto field = [&](const char* key) -> nb::object
     {
@@ -2051,7 +2053,12 @@ encoding::FlatSizes sizes_of(nb::handle dict)
     number("tuples", out.tuples, true);
     number("args", out.args, true);
     number("targets", out.targets, true);
-    number("history", out.history, false);
+    number("history", out.history, schema.has_history());
+    number("numeric", extra.numeric, schema.stores_numeric_values());
+    const bool shared = schema.shared_statics();
+    number("static_instances", extra.statics.instances, shared);
+    number("static_tuples", extra.statics.tuples, shared);
+    number("static_args", extra.statics.args, shared);
     auto flag = [&](const char* key)
     {
         nb::object value = field(key);
@@ -2120,41 +2127,64 @@ PyFlatBatch batch_from_arrays(const PyEncodingSchema& schema, nb::handle arrays,
     out.schema = schema.schema;
     out.framework = parse_framework(framework);
     auto bundle = std::make_shared<const rl::ArrayBundle>(builder.build());
-    // every batch, also one that overflowed, is of this schema and version and has the arrays of its contract
-    encoding::validate(*bundle, *schema.schema);
+    std::optional<encoding::FlatSizes> given;
     if (!sizes_arg.is_none())
+        given = sizes_of(sizes_arg, *schema.schema, out.extra);
+    // every batch, also one that overflowed (whose arrays must then all be zero), is of this schema and version and
+    // has the arrays of its contract
+    const bool overflowed = given && given->overflowed();
+    encoding::validate(*bundle, *schema.schema,
+                       overflowed ? encoding::BatchForm::Overflowed : encoding::BatchForm::Encoded);
+    if (given)
     {
-        const encoding::FlatSizes sizes = sizes_of(sizes_arg);
-        if (sizes.overflowed())
+        const encoding::FlatSizes& sizes = *given;
+        if (!overflowed)
         {
-            // a batch that did not fit its capacities is all zero
-            for (const rl::ArrayInfo& info : bundle->arrays())
-            {
-                const auto* bytes = static_cast<const unsigned char*>(bundle->data(info));
-                for (u64 i = 0; i < info.elements() * rl::dtype_bytes(info.dtype); ++i)
-                    if (bytes[i] != 0)
-                        throw nb::value_error(
-                            ("mymyr: encoding: the sizes say the batch overflowed, but '" + std::string(info.name.view()) +
-                             "' is not zero")
-                                .c_str());
-            }
-        }
-        else
-        {
+            // the arrays passed validate, so every offset array named here exists and is long enough
+            const encoding::EncodingSchema& contract = *schema.schema;
             const bool wide = bundle->scalar("index_dtype") == 1;
-            auto last = [&](const char* name) -> u64
+            auto entry = [&](const char* name, u64 at) -> u64
             {
-                const rl::ArrayInfo* info = bundle->find(name);
-                if (!info || info->elements() == 0)
-                    return 0;
-                const auto* p = static_cast<const std::byte*>(bundle->data(*info));
-                const u64 at = info->elements() - 1;
+                const auto* p = static_cast<const std::byte*>(bundle->data(*bundle->find(name)));
                 return wide ? static_cast<u64>(reinterpret_cast<const i64*>(p)[at])
                             : static_cast<u64>(reinterpret_cast<const i32*>(p)[at]);
             };
-            if (sizes.entities != last("entity_offsets") || sizes.args != last("relation_arg_offsets") ||
-                (schema.schema->has_targets() && sizes.targets != last("target_offsets")) ||
-                (schema.schema->has_history() && sizes.history != last("history_offsets")))
+            auto last = [&](const char* name) { return entry(name, bundle->find(name)->elements() - 1); };
+            const u64 G = static_cast<u64>(bundle->scalar("num_graphs"));
+            const u64 R = contract.num_relations();
+            bool agree = sizes.entities == last("entity_offsets");
+            if (contract.emits_relations())
+            {
+                agree = agree && sizes.tuples == last("relation_offsets") && sizes.args == last("relation_arg_offsets");
+                if (contract.stores_numeric_values())
+                {
+                    // the numeric tuples are those of the cells of the last relations, the numeric ones
+                    const bool relation_major = contract.options().layout == encoding::Layout::Relation;
+                    u64 numeric = 0;
+                    for (u64 g = 0; g < G; ++g)
+                        for (u64 r = contract.first_numeric_relation(); r < R; ++r)
+                        {
+                            const u64 cell = relation_major ? r * G + g : g * R + r;
+                            numeric += entry("relation_offsets", cell + 1) - entry("relation_offsets", cell);
+                        }
+                    agree = agree && out.extra.numeric == numeric;
+                }
+            }
+            if (contract.emits_simple())
+                agree = agree && sizes.entities + sizes.tuples == last("node_offsets") &&
+                        2 * sizes.args == last("edge_offsets");
+            agree = agree && (!contract.has_targets() || sizes.targets == last("target_offsets")) &&
+                    (!contract.has_history() || sizes.history == last("history_offsets"));
+            if (contract.shared_statics())
+            {
+                // one block per distinct instance of the graphs
+                const auto* task_ids = static_cast<const i32*>(bundle->data(*bundle->find("task_ids")));
+                const std::set<i32> instances(task_ids, task_ids + G);
+                agree = agree && out.extra.statics.instances == instances.size() &&
+                        out.extra.statics.tuples == last("static_offsets") &&
+                        out.extra.statics.args == last("static_arg_offsets");
+            }
+            if (!agree)
                 throw nb::value_error("mymyr: encoding: the sizes do not match the batch's offsets");
         }
         out.sizes = sizes;

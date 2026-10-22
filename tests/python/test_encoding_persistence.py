@@ -8,8 +8,9 @@ import pickle
 import numpy as np
 import pytest
 
+import mymyr
 from mymyr import encoding, rl
-from conftest import text_task, walk
+from conftest import ROOT, text_task, walk
 from test_encoding_pickle import OPTION_SETS, TASKS
 from test_encoding_pool import SCALARS, arrays_equal
 
@@ -312,3 +313,118 @@ def test_horizon_batches_round_trip_too(mode):
     arrays_equal(encoding.FlatBatch.from_arrays(encoder.schema, batch.as_dict()), batch)
     record = json.loads(json.dumps(encoding.schema_to_dict(encoder.schema)))
     arrays_equal(encoding.FlatBatch.from_arrays(encoding.schema_from_dict(record, task), batch.as_dict()), batch)
+
+
+# ------------------------------------------------------------------------------------------------ table identity,
+# shared statics, Simple graphs and numeric values
+
+NUMERIC = ROOT / "tests/data/numeric_tasks"
+
+
+def numeric_task():
+    return mymyr.Task.from_text(str(NUMERIC / "cs-drone.txt"))
+
+
+def test_a_loaded_batch_keeps_its_table_fingerprint_and_collates_with_its_table_only(tmp_path):
+    task = text_task("logistics00__probLOGISTICS-6-1")
+    table, other = rl.TaskTable([task, task]), rl.TaskTable([task])
+    assert table.fingerprint >= 2**63  # stored as the signed value of the same 64 bits
+    states = walk(task, steps=4, walks=2)
+    ids = np.arange(len(states), dtype=np.int32) % 2
+    encoder = encoding.FlatRelationEncoder(table)
+    batch = encoder.encode(states, ids)
+    path = tmp_path / "batch.npz"
+    np.savez(path, **batch.as_dict())
+    with np.load(path) as saved:
+        loaded = encoding.FlatBatch.from_arrays(encoder.schema, saved)
+    assert loaded.as_dict()["table_fingerprint"] % 2**64 == table.fingerprint
+    # the unsigned value of the same bits reads back alike
+    unsigned = encoding.FlatBatch.from_arrays(encoder.schema, dict(batch.as_dict(), table_fingerprint=table.fingerprint))
+    arrays_equal(unsigned, batch)
+    arrays_equal(encoding.collate([loaded, batch]), encoder.encode(states + states, np.concatenate([ids, ids])))
+    foreign = encoding.FlatRelationEncoder(other).encode(states)
+    with pytest.raises(ValueError, match="different tables"):
+        encoding.collate([loaded, foreign])
+    without = {k: v for k, v in batch.as_dict().items() if k != "table_fingerprint"}
+    with pytest.raises(ValueError, match="no 'table_fingerprint'"):
+        encoding.FlatBatch.from_arrays(encoder.schema, without)
+
+
+RECORD_CASES = {
+    "shared": ("gripper__prob05", dict(statics="shared", predicate_virtual_nodes=True)),
+    "simple": ("gripper__prob05", dict(outputs=("relations", "simple"))),
+    "simple-only": ("gripper__prob05", dict(outputs=("simple",))),
+    "numeric-f64": (None, dict(numeric_dtype="float64", outputs=("relations", "simple"))),
+}
+
+
+@pytest.mark.parametrize("case", RECORD_CASES)
+def test_statics_outputs_and_numeric_dtype_survive_the_record_and_the_pickle(case):
+    name, options = RECORD_CASES[case]
+    task = numeric_task() if name is None else text_task(name)
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=(), **options)
+    record = json.loads(json.dumps(encoding.schema_to_dict(encoder.schema)))
+    for key, value in options.items():
+        assert record["options"][key] == (list(value) if isinstance(value, tuple) else value)
+    rebuilt = encoding.schema_from_dict(record, task)
+    assert rebuilt.schema_fingerprint == encoder.schema.schema_fingerprint and rebuilt.options == encoder.schema.options
+    again = pickle.loads(pickle.dumps(encoder))
+    assert again.schema.options == encoder.schema.options
+    states = walk(task, steps=5, walks=1)
+    batch = encoder.encode(states)
+    arrays_equal(encoding.FlatBatch.from_arrays(rebuilt, batch.as_dict()), batch)
+    arrays_equal(again.encode(states), batch)
+
+
+CAPACITY_CASES = {
+    "shared": ("gripper__prob05", dict(statics="shared", predicate_virtual_nodes=True),
+               dict(static_instances=1, static_args=4000)),
+    "simple": ("gripper__prob05", dict(outputs=("relations", "simple")), {}),
+    "numeric": (None, dict(numeric_dtype="float64", outputs=("relations", "simple")), dict(numeric=400)),
+}
+
+
+@pytest.mark.parametrize("case", CAPACITY_CASES)
+def test_a_capacity_batch_round_trips_with_its_numeric_and_static_sizes(case):
+    name, options, extra_caps = CAPACITY_CASES[case]
+    task = numeric_task() if name is None else text_task(name)
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=(), **options)
+    states = walk(task, steps=5, walks=1)
+    caps = dict(graphs=len(states), entities=400, args=4000, **extra_caps)
+    batch = encoder.encode(states, capacities=caps)
+    assert not batch.sizes["overflow"]
+    load = lambda arrays, sizes: encoding.FlatBatch.from_arrays(encoder.schema, arrays, sizes=sizes)  # noqa: E731
+    loaded = load(batch.as_dict(), batch.sizes)
+    arrays_equal(loaded, batch)
+    assert loaded.sizes == batch.sizes
+    for key in ("tuples", "numeric", "static_instances", "static_tuples", "static_args"):
+        if key not in batch.sizes:
+            continue
+        with pytest.raises(ValueError, match="sizes do not match"):
+            load(batch.as_dict(), dict(batch.sizes, **{key: batch.sizes[key] + 1}))
+        with pytest.raises(ValueError, match=f"sizes has no '{key}'"):
+            load(batch.as_dict(), {k: v for k, v in batch.sizes.items() if k != key})
+    # an overflowed one is checked like any other
+    tight = encoder.encode(states, capacities=dict(caps, entities=3))
+    assert tight.sizes["overflow"]
+    arrays_equal(load(tight.as_dict(), tight.sizes), tight)
+    wrong = dict(tight.as_dict(), schema_fingerprint=int(tight.as_dict()["schema_fingerprint"]) + 1)
+    with pytest.raises(ValueError, match="schema_fingerprint does not match"):
+        load(wrong, tight.sizes)
+
+
+def test_the_scalars_of_a_batch_are_those_of_its_schema():
+    task = text_task("gripper__prob05")
+    plain = encoding.FlatRelationEncoder(task)
+    arrays = dict(plain.encode([task.initial_state]).as_dict())
+    with pytest.raises(ValueError, match="'numeric_dtype', which a batch of its schema does not have"):
+        encoding.FlatBatch.from_arrays(plain.schema, dict(arrays, numeric_dtype=0))
+    simple = encoding.FlatRelationEncoder(task, outputs=("relations", "simple"))
+    record = dict(simple.encode([task.initial_state]).as_dict())
+    with pytest.raises(ValueError, match="no 'simple_node_labels'"):
+        encoding.FlatBatch.from_arrays(simple.schema, {k: v for k, v in record.items() if k != "simple_node_labels"})
+    drone = numeric_task()
+    numeric = encoding.FlatRelationEncoder(drone, goal_derivations=())
+    values = dict(numeric.encode([drone.initial_state]).as_dict())
+    with pytest.raises(ValueError, match="numeric_relations"):
+        encoding.FlatBatch.from_arrays(numeric.schema, dict(values, numeric_relations=values["numeric_relations"] + 1))
