@@ -535,16 +535,13 @@ class Env:
             info["binding"] = binding
         if self.final_state:
             info["final_state"] = final
-            if self.observation_encoders is not None:
-                if self.native.autoreset:
-                    info["final_obs"] = self.encode(final, state.task_id, state.goal_pos, state.goal_neg)
-                else:
-                    info["final_obs"] = None  # filled below: the reached states are the next observation
         if not self.native.autoreset:
             info["no_autoreset"] = ()
         obs = self.observation(s)
-        if info.get("final_obs", ()) is None:
-            info["final_obs"] = obs.encoding
+        if self.final_state and self.observation_encoders is not None:
+            # the reached states in the instances and goals before the step (the observation without autoreset)
+            info["final_obs"] = (self.encode(final, state.task_id, state.goal_pos, state.goal_neg)
+                                 if self.native.autoreset else obs.encoding)
         return s, obs, reward, terminated, truncated, info
 
     def random_actions(self, key: Any, state: EnvState, max_actions: Optional[int] = None) -> Any:

@@ -374,6 +374,16 @@ def test_captured_suite_rollout(suite):
                         host(encoder, states[sel], torch.as_tensor(local[rows])))
 
 
+@pytest.mark.parametrize("dev", devices())
+def test_derived_atoms_of_the_observations(dev):
+    task = text_task("philosophers__p03-phil4")  # axioms and a derived goal
+    encoder = encoding.FlatRelationEncoder(task)
+    env = rt.BatchedEnv(task, 6, device=device_of(dev), seed=2, max_steps=4, observation=encoder, obs_capacities=CAPS)
+    for _ in range(4):
+        r = env.step()
+        assert_same(r.obs, host(encoder, r.states, r.task_ids))
+
+
 def test_one_table_without_the_front_end():
     task = text_task("gripper__prob05")
     encoder = encoding.FlatRelationEncoder(task)
