@@ -246,7 +246,7 @@ public:
 
     void flush(std::intptr_t stream, const std::vector<std::uintptr_t>& ring, std::uintptr_t status,
                const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
-               std::uintptr_t graphs, std::uintptr_t scratch, u64 bytes)
+               std::uintptr_t graphs, std::uintptr_t scratch, u64 bytes, bool zero_unused)
     {
         if (capacities.size() != 4) refuse("expected four capacities");
         auto in = input_of(rows_of(ring));
@@ -256,6 +256,7 @@ public:
         in.row_capacity = in.graphs;
         auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3]});
         out.graphs = ptr<u64>(graphs);
+        out.zero_unused = zero_unused;
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
@@ -528,7 +529,7 @@ void bind_encoding_device(nb::module_& parent)
         .def("clear", &DeviceEncoderHandle::clear, "stream"_a, "status"_a, "capacity"_a,
              "Empties the ring and clears its overflow flag on the stream.")
         .def("flush", &DeviceEncoderHandle::flush, "stream"_a, "ring"_a, "status"_a, "outputs"_a,
-             "capacities"_a, "graphs"_a, "scratch"_a, "bytes"_a,
+             "capacities"_a, "graphs"_a, "scratch"_a, "bytes"_a, "zero_unused"_a = false,
              "Encodes the live ring and empties it on the stream.")
         .def("reserve", &DeviceEncoderHandle::reserve, "stream"_a, "graphs"_a,
              "Makes the workspace of `stream` (a cudaStream_t, 0: the default stream) hold at least `graphs` graphs. "

@@ -484,6 +484,45 @@ def test_captured_suite_rollout(suite):
                         host(encoder, states[sel], torch.as_tensor(local[rows])))
 
 
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("targets", [False, True])
+@pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
+def test_suite_overflow_zeroes_owned_buffers(suite, monkeypatch, layout, targets, captured):
+    from mymyr.encoding import _device
+
+    device = gpu_device()
+    options = dict(target_sources=("goal",), index_dtype="int64", emit_counts=False) if targets else {}
+    encoders = [encoding.FlatRelationEncoder(t, layout=layout, **options) for t in suite.tables]
+    env = rt.BatchedEnv(suite, 6, device=device, task_ids=[0, len(suite) - 1] * 3,
+                        observation=encoders, obs_capacities=dict(entities=1, args=1, targets=1))
+    outputs = _device._outputs
+
+    def sentinel_outputs(*args, **kwargs):
+        out = outputs(*args, **kwargs)
+        for array in out.values():
+            array.fill_(17)
+        return out
+
+    monkeypatch.setattr(_device, "_outputs", sentinel_outputs)
+    try:
+        rollout = env.capture(2, final=True) if captured else None
+        for _ in range(2):
+            if captured:
+                result = rollout.replay()
+                observations = (*result.obs, *result.final_obs)
+            else:
+                result = env.step()
+                observations = (result.obs, result.final_obs)
+            for observation in observations:
+                for batch in observation.batches:
+                    assert batch.sizes["capacity_overflow"]
+                    for name, array in batch._arrays.items():
+                        assert not torch.count_nonzero(array).item(), name
+    finally:
+        torch.cuda.synchronize(device)
+        env.close()
+
+
 @pytest.mark.parametrize("dev", devices())
 def test_derived_atoms_of_the_observations(dev):
     task = text_task("philosophers__p03-phil4")  # axioms and a derived goal

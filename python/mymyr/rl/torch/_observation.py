@@ -240,7 +240,8 @@ class Observer:
             scratch = _device._scratch(torch, self._natives[k], stream, n, self.device, False)
             status = self._status[k]
             self._natives[k].flush(stream, self._ring[k].fields, status.data_ptr(), _device._pointers(out),
-                                   [n, *caps[1:4]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
+                                   [n, *caps[1:4]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel(),
+                                   zero_unused=True)
             batch = _device.DeviceFlatBatch(encoder, out, exact=False)
             batch._device_graphs = graphs
             batch._keepalive = (scratch,)
