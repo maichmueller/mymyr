@@ -253,7 +253,9 @@ def test_action_rows_combine_with_row_goals_subgoals_and_history(layout):
     same(host, encoder.encode(words, **kwargs))
     capacity = caps(host)
     capacity["history"] = len(host.history_dt) + 3
-    same(host, encoder.encode(words, capacities=capacity, **kwargs))
+    padded = encoder.encode(rows, goals=(positive, negative), subgoals=(layers, empty),
+                            history=(layers, empty, dt), actions=rl.expand(task, rows), capacities=capacity)
+    same(padded, encoder.encode(words, capacities=capacity, **kwargs))
 
 
 @pytest.mark.needs_gil
@@ -371,3 +373,58 @@ def test_horizon_derived_evaluation_ignores_unused_node_capacity(index):
     padded = replace(uploaded, nodes=torch.cat((uploaded.nodes, tail)))
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode="full", index_dtype=index, layout="relation")
     same(encoder.encode(view), encoder.encode(padded))
+
+
+@pytest.mark.needs_gil
+def test_transition_op_builds_from_successors_under_compilation_and_capture():
+    device = gpu()
+    import mymyr.rl.torch as rt
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=1, walks=1)))
+    words = tensor(rows, device)
+    encoder = encoding.FlatTransitionEffectsEncoder(task, parent_relation=True)
+    expected = encoder.encode(rows)
+    capacity, graphs = caps(expected), len(rows)
+    expansion = rl.expand(task, words, framework="torch")
+    succ, schema, binding = expansion.succ, expansion.schema, expansion.binding
+    offsets, parent = expansion.offsets, expansion.parent
+    handle = rt.register(encoder)
+    def call():
+        return torch.ops.mymyr.encode_flat(handle, words, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None,
+            graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
+            action_schema=schema, action_binding=binding, action_offsets=offsets, action_parent=parent,
+            action_succ=succ)
+    try:
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, call()))
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder,
+             torch.compile(call, fullgraph=True, backend="aot_eager")()))
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            call()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            outputs = call()
+        graph.replay()
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, outputs))
+    finally:
+        rt.unregister(handle)
+
+
+@pytest.mark.parametrize("padding", ["parent", "child"])
+def test_transition_builder_normalizes_parent_and_child_word_padding(padding):
+    device = gpu()
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=1, walks=1)))
+    words = tensor(rows, device)
+    expansion = rl.expand(task, words, framework="torch")
+    children = expansion.succ
+    if padding == "parent":
+        words = torch.nn.functional.pad(words, (0, 2))
+    else:
+        children = torch.nn.functional.pad(children, (0, 2))
+    actions = SimpleNamespace(succ=children, schema=expansion.schema, binding=expansion.binding,
+                              parent=expansion.parent, offsets=expansion.offsets)
+    encoder = encoding.FlatTransitionEffectsEncoder(task)
+    same(encoder.encode(rows), encoder.encode(words, actions=actions))

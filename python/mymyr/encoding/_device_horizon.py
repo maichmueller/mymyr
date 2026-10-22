@@ -128,6 +128,8 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     from mymyr.rl.torch._ops import _stream
 
     torch = d._torch()
+    if as_table(encoder.table).numeric:
+        raise d._error("horizon encodings do not encode numeric state rows")
     keep: list = []
     states = d._words(torch, d._cuda_tensor(torch, parents, "states", keep), "states")
     ids = None if task_ids is None else d._cuda_tensor(torch, task_ids, "task_ids", keep)
@@ -139,8 +141,14 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     if not hasattr(source, "succ"):
         raise d._error("transition actions need successor rows as well as labels and offsets")
     children = d._words(torch, d._cuda_tensor(torch, source.succ, "actions.succ", keep), "actions.succ")
-    if children.device != states.device or children.shape != (a.capacity, states.shape[1]):
-        raise d._error("the expansion successor rows need the parents' word width and the label arrays' row count")
+    if children.device != states.device or children.shape[0] != a.capacity:
+        raise d._error("the successor rows need the parents' device and the label arrays' row count")
+    width = max(states.shape[1], children.shape[1])
+    if states.shape[1] < width:
+        states = torch.nn.functional.pad(states, (0, width - states.shape[1]))
+        rows = d._Rows(torch, states, ids, None, None)
+    if children.shape[1] < width:
+        children = torch.nn.functional.pad(children, (0, width - children.shape[1]))
     rows.fields[35:42] = [a.offsets.data_ptr(), a.schema.data_ptr(), a.binding.data_ptr(),
                           0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1], 0]
     nodes = torch.empty((rows.graphs + a.capacity, states.shape[1]), dtype=torch.int64, device=states.device)
@@ -151,7 +159,7 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     native = d._device_encoder(encoder, states.device.index)
     native.build_horizon(_stream(states), rows.fields, children.data_ptr(), d._stride(children),
                          [nodes.data_ptr(), no.data_ptr(), src.data_ptr(), dst.data_ptr(), schema.data_ptr(), binding.data_ptr()], merge)
-    d._retain(torch, [actions, children, *keep], states.device)
+    d._retain(torch, [actions, children, *rows.tensors, *keep], states.device)
     return HorizonView(nodes, no, a.offsets, src, dst, schema, binding, ids)
 
 

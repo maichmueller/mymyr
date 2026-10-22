@@ -671,6 +671,7 @@ def encode_flat(
     edge_dst: Optional[Tensor] = None,
     edge_schema: Optional[Tensor] = None,
     edge_binding: Optional[Tensor] = None,
+    action_succ: Optional[Tensor] = None,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -682,7 +683,8 @@ def encode_flat(
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA
     graph, and keep the encoder registered while the graph can replay. Scratch belongs to torch's allocator and needs
-    no reservation."""
+    no reservation. Horizon schemas take node/edge arrays, or parent ``states`` with ``action_succ`` and expansion
+    labels to build depth-one transitions; ``derived`` is per node for a horizon schema."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
@@ -699,12 +701,12 @@ def encode_flat(
         "history", (history_pos, history_neg), (history_derived_pos, history_derived_neg), (history_dt, history_count)
     )
     actions = None
-    if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent)):
+    if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent, action_succ)):
         if any(a is None for a in (action_schema, action_binding, action_offsets)):
             raise ValueError("mymyr: encoding: actions need schema, binding and offsets")
         from types import SimpleNamespace
         actions = SimpleNamespace(schema=action_schema, binding=action_binding, offsets=action_offsets,
-                                  parent=action_parent)
+                                  parent=action_parent, succ=action_succ)
     horizon = None
     if node_offsets is not None:
         if steps is not None or actions is not None:
@@ -712,6 +714,12 @@ def encode_flat(
         from mymyr.encoding import HorizonView
         horizon = HorizonView(states, node_offsets, edge_offsets, edge_src, edge_dst, edge_schema,
                               edge_binding, task_ids)
+    elif enc.options["horizon_mode"] is not None:
+        if actions is None or action_succ is None or steps is not None:
+            raise ValueError("mymyr: encoding: a horizon op needs node offsets and edges, or successor rows and expansion labels")
+        from mymyr.encoding._device_horizon import build_horizon
+        horizon = build_horizon(enc, states, task_ids, actions, merge=False)
+        actions = None
     arrays = _device.encode_arrays(
         enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps,
         actions=actions, horizon=horizon
@@ -740,6 +748,7 @@ def _(
     history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
     action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None, edge_schema=None, edge_binding=None,
+    action_succ=None,
 ):  # fmt: skip
     if node_offsets is not None:
         states = states[:node_offsets.shape[0] - 1]

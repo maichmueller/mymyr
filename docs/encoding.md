@@ -340,7 +340,8 @@ full, delta and action horizons of depth one, every root policy, parent relation
 `merge` controls first-seen state merging. Device construction requires `depth=1`; node limits and host pools raise
 `ValueError`. Encoding views of depth 2 or more is refused. Device transition encoders expand and encode
 on the current stream; supplied expansions reuse their successor rows. The torch op takes node and edge offsets,
-endpoints and labels; JAX FFI refuses horizons and transitions because it has no node-offset or edge operands.
+endpoints and labels, or parent rows with `action_succ` and expansion labels to build transitions. JAX FFI refuses
+horizons and transitions because it has no node-offset or edge operands.
 Host invalid views raise `ValueError` naming the graph
 (`graph 3 of the horizon has no nodes`, `edge 2 of graph 0 of the horizon has an endpoint outside the graph's nodes`,
 `node 1 of graph 2 sets an atom bit its instance does not have`).
