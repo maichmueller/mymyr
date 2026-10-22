@@ -8,7 +8,7 @@ import pytest
 
 import mymyr
 from mymyr import datasets, encoding, rl
-from conftest import ROOT
+from conftest import ROOT, python_lines, text_task, walk
 from test_encoding_pool import arrays_equal
 from test_rl_task_suite import suite_batch, suite_of
 from test_rl_table import sets  # noqa: F401  (a fixture: the table instances of several domains)
@@ -191,3 +191,68 @@ def test_a_data_loader_encodes_batches_on_load(knowledge_base):
         arrays_equal(batch.graphs, expected)
         seen += len(rows)
     assert seen == len(dataset)
+
+
+def walked_rows(task, steps=10, walks=2):
+    return np.ascontiguousarray(np.asarray(task.encode(walk(task, steps=steps, walks=walks))))
+
+
+def test_a_dataset_fetches_a_batch_of_indices_as_one_take():
+    task = text_task("gripper__prob05")
+    rows = walked_rows(task)
+    dataset = datasets.StateRows(rows, labels={"step": np.arange(len(rows))})
+    fetched = dataset.__getitems__([5, 1, 1])
+    assert isinstance(fetched, datasets.StateRows)
+    assert np.array_equal(fetched.rows, rows[[5, 1, 1]]) and np.array_equal(fetched.labels["step"], [5, 1, 1])
+
+
+def test_collating_items_runs_no_python_code_per_item():
+    task = text_task("gripper__prob05")
+    rows = walked_rows(task)
+    n = len(rows)
+    goals = tuple(np.asarray(g) for g in rl.goal_masks(rl.as_table(task), np.zeros(n, np.int32)))
+    dataset = datasets.StateRows(rows, labels={"step": np.arange(n), "pair": np.ones((n, 2))}, goals=goals)
+    collate = datasets.EncodingCollate(encoding.FlatRelationEncoder(task, **OPTIONS))
+    few = [dataset[i % n] for i in range(4)]
+    many = [dataset[i % n] for i in range(96)]
+    assert python_lines("datasets/_rows.py", lambda: collate(few)) == python_lines(
+        "datasets/_rows.py", lambda: collate(many)
+    )
+    loaded = collate(many)
+    picked = np.arange(96) % n
+    arrays_equal(loaded.graphs, collate(dataset.take(picked)).graphs)
+    assert np.array_equal(loaded.labels["pair"], np.ones((96, 2))) and np.array_equal(loaded.labels["step"], picked)
+
+
+def test_a_data_loader_fetches_each_batch_with_one_take(monkeypatch):
+    torch = pytest.importorskip("torch")
+    task = text_task("gripper__prob05")
+    rows = walked_rows(task)
+    dataset = datasets.StateRows(rows, labels={"step": np.arange(len(rows))})
+    encoder = encoding.FlatRelationEncoder(task, **OPTIONS)
+    taken = []
+    take = datasets.StateRows.take
+
+    def recorded(self, indices):
+        taken.append(np.asarray(indices))
+        return take(self, indices)
+
+    def one_row(self, i):
+        raise AssertionError("the data loader fetched a row on its own")
+
+    monkeypatch.setattr(datasets.StateRows, "take", recorded)
+    monkeypatch.setattr(datasets.StateRows, "__getitem__", one_row)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=4,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(0),
+        collate_fn=datasets.EncodingCollate(encoder, framework="torch"),
+    )
+    for batch in loader:
+        indices = taken[-1]
+        assert isinstance(batch.graphs.relation_args, torch.Tensor)
+        arrays_equal(batch.graphs, encoder.encode(rows[indices]))
+        assert np.array_equal(batch.labels["step"], indices)
+    assert len(taken) == (len(rows) + 3) // 4
+    assert sorted(np.concatenate(taken).tolist()) == list(range(len(rows)))

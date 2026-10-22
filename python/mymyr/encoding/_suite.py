@@ -146,6 +146,7 @@ class SuiteEncoder:
         suite = self.suite
         if isinstance(states, (list, tuple)):
             rows = len(states)
+            states = np.fromiter(states, object, count=rows)  # so that a domain's States are taken by one index
         else:
             rows = int(states.shape[0])
         split = _Split(suite, task_ids, rows)
@@ -197,8 +198,9 @@ class SuiteEncoder:
 
 
 def _states_of(states: Any, idx: np.ndarray, words: int) -> Any:
-    """The rows `idx` of the states, limited to the `words` atom words of a domain's table."""
-    if isinstance(states, (list, tuple)):
-        return [states[i] for i in idx]
+    """The rows `idx` of the states (a list of the States for an object array of them), limited to the `words` atom
+    words of a domain's table."""
+    if isinstance(states, np.ndarray) and states.dtype == object:
+        return states[idx].tolist()
     return _take(states, idx, words)
 

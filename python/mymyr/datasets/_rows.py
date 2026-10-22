@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from operator import attrgetter, itemgetter
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -58,7 +59,9 @@ def _words(values: Any, what: str) -> np.ndarray:
 
 class StateRows:
     """A map-style dataset of state rows: ``dataset[i]`` is a ``StateRow`` and ``len(dataset)`` the number of rows, so it
-    works with ``torch.utils.data.DataLoader`` (and anything else that takes ``__len__`` and ``__getitem__``).
+    works with ``torch.utils.data.DataLoader`` (and anything else that takes ``__len__`` and ``__getitem__``). A
+    batch is fetched whole: ``dataset.__getitems__(indices)`` is ``dataset.take(indices)``, which a ``DataLoader``
+    calls once per batch, so its ``collate_fn`` receives a ``StateRows``.
 
     A dataset stores what the state spaces hold: the rows of atom words and the instance of each row, never an encoding.
     The encoding happens when a batch is loaded: ``EncodingCollate(encoder)`` is the ``collate_fn`` that turns the
@@ -154,8 +157,8 @@ class StateRows:
         return StateRow(self.rows[i], int(self.task_ids[i]), {name: v[i] for name, v in self.labels.items()}, goal)
 
     def take(self, indices: SupportsDLPack | Sequence[int]) -> StateRows:
-        """The dataset of the rows ``indices`` (any order, repeats allowed), as a copy: one ``torch`` batch sampler step
-        can load a whole batch with it instead of ``len(indices)`` single items."""
+        """The dataset of the rows ``indices`` (any order, repeats allowed), as a copy: a batch loaded whole instead
+        of as ``len(indices)`` single items."""
         picked = np.asarray(indices, dtype=np.int64)
         return StateRows(
             self.rows[picked],
@@ -164,13 +167,45 @@ class StateRows:
             goals=None if self.goals is None else (self.goals[0][picked], self.goals[1][picked]),
         )
 
+    def __getitems__(self, indices: Sequence[int]) -> StateRows:
+        """``take(indices)``: ``torch.utils.data.DataLoader`` fetches each batch of its sampler with one call of this
+        instead of one ``dataset[i]`` per row, and hands the result to its ``collate_fn`` as it is."""
+        return self.take(indices)
+
     def __repr__(self) -> str:
         return f"StateRows({len(self)} rows of {self.rows.shape[1]} words, labels {sorted(self.labels)})"
 
 
+_ROW, _TASK_ID, _LABELS, _GOAL = attrgetter("row"), attrgetter("task_id"), attrgetter("labels"), attrgetter("goal")
+_FIRST, _SECOND = itemgetter(0), itemgetter(1)
+
+
+def _pack(
+    items: Sequence[StateRow],
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, np.ndarray] | None]:
+    """The rows, task ids, labels and goals of a list of items, stacked. The fields are gathered by ``map`` and stacked
+    by ``np.array``, which iterate in C: the cost per item is that of reading its fields, with no Python code per item."""
+    n = len(items)
+    if n == 0:
+        raise ValueError("mymyr: datasets: cannot encode an empty batch of rows")
+    rows = np.array(list(map(_ROW, items)), np.uint64)
+    task_ids = np.fromiter(map(_TASK_ID, items), np.int32, count=n)
+    label_maps = list(map(_LABELS, items))
+    labels = {name: np.array(list(map(itemgetter(name), label_maps))) for name in label_maps[0]}
+    goal_pairs = list(map(_GOAL, items))
+    without = goal_pairs.count(None)
+    if 0 < without < n:
+        raise ValueError("mymyr: datasets: some rows of the batch have a goal and some do not")
+    goals = None
+    if without == 0:
+        goals = (np.array(list(map(_FIRST, goal_pairs)), np.uint64), np.array(list(map(_SECOND, goal_pairs)), np.uint64))
+    return rows, task_ids, labels, goals
+
+
 class EncodingCollate:
     """The ``collate_fn`` of a data loader that encodes the loaded rows: ``EncodingCollate(encoder)(items)`` takes the
-    items of one batch (a list of ``StateRow``, or a ``StateRows``) and returns their ``EncodedRows``.
+    items of one batch (a ``StateRows``, as a data loader fetches it, or a list of ``StateRow``) and returns their
+    ``EncodedRows``.
 
     ``encoder`` is a ``FlatRelationEncoder`` over the table whose instances the rows' ``task_id`` number, or a
     ``SuiteEncoder`` when the rows are of the instances of a suite (global ids; the graphs are then one batch per domain).
@@ -202,20 +237,7 @@ class EncodingCollate:
         if isinstance(items, StateRows):
             rows, task_ids, labels, goals = items.rows, items.task_ids, items.labels, items.goals
         else:
-            if len(items) == 0:
-                raise ValueError("mymyr: datasets: cannot encode an empty batch of rows")
-            rows = np.stack([item.row for item in items])
-            task_ids = np.array([item.task_id for item in items], np.int32)
-            names = list(items[0].labels)
-            labels = {name: np.stack([np.asarray(item.labels[name]) for item in items]) for name in names}
-            with_goal = [item.goal is not None for item in items]
-            if any(with_goal) and not all(with_goal):
-                raise ValueError("mymyr: datasets: some rows of the batch have a goal and some do not")
-            goals = (
-                (np.stack([item.goal[0] for item in items]), np.stack([item.goal[1] for item in items]))
-                if all(with_goal)
-                else None
-            )
+            rows, task_ids, labels, goals = _pack(items)
         expansion = None
         extra: dict[str, Any] = {}
         if self.actions:

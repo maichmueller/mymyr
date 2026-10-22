@@ -6,7 +6,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import text_task
+from conftest import python_lines, text_task, walk
 from test_encoding_pool import arrays_equal
 from test_rl_table import sets  # noqa: F401  (a fixture: the table instances of several domains)
 from test_rl_task_suite import SUITES, suite_batch, suite_of  # noqa: F401
@@ -121,6 +121,27 @@ def test_a_suite_of_one_domain_is_its_table(sets):  # noqa: F811
     arrays_equal(suite_result[0], alone)
     from_table = encoding.SuiteEncoder(table, **OPTIONS)
     arrays_equal(from_table.encode(states, ids)[0], alone)
+
+
+def test_a_list_of_states_is_grouped_by_domain_without_python_code_per_state(sets):  # noqa: F811
+    suite = suite_of(sets, "gripper+blocks")
+    states, ids = [], []
+    for g in range(len(suite)):
+        walked = walk(suite[g], steps=4, seed=g, walks=1)
+        states += walked
+        ids += [g] * len(walked)
+    order = np.random.default_rng(0).permutation(len(ids))
+    states, ids = [states[i] for i in order], np.asarray(ids, np.int32)[order]
+    encoder = encoding.SuiteEncoder(suite, **OPTIONS)
+    result = encoder.encode(states, ids)
+    local = np.asarray(suite.local_ids, np.int32)
+    for d in result:
+        own = [states[i] for i in result.rows[d]]
+        arrays_equal(result[d], encoder.encoders[d].encode(own, local[ids[result.rows[d]]]))
+    many, many_ids = states * 8, np.tile(ids, 8)
+    assert python_lines("encoding/_suite.py", lambda: encoder.encode(states, ids)) == python_lines(
+        "encoding/_suite.py", lambda: encoder.encode(many, many_ids)
+    )
 
 
 def test_capacities_are_per_domain(sets):  # noqa: F811

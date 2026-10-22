@@ -140,8 +140,10 @@ print(loaded.task_ids, loaded.labels["unit_goal_distances"])
 instance of each row, labels (arrays with `N` entries) and, for goal-conditioned data, the goal masks of every row.
 `StateRows.from_state_space(space, ids, task_id=..., labels=...)` takes the rows of one space and
 `StateRows.from_knowledge_base(kb)` those of every space of a knowledge base, with the base's task indices as the rows'
-instances; encode them with an encoder over the base's tasks. `dataset.take(indices)` selects rows as a dataset, which
-a batch sampler can pass to the collate function whole instead of item by item.
+instances; encode them with an encoder over the base's tasks. `dataset.take(indices)` selects rows as a dataset, and
+`dataset.__getitems__(indices)` is the same call: a `torch.utils.data.DataLoader` fetches each batch of its sampler
+with it, once, and hands the `StateRows` to the collate function whole. A list of items is packed without Python code
+per item as well.
 
 `EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`
 (the `FlatBatch`, or the `SuiteBatch` of one batch per domain when `encoder` is a `SuiteEncoder`), the rows'
