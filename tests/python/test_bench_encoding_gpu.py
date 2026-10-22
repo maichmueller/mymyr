@@ -454,6 +454,18 @@ def test_the_launch_gate_allows_four_kernels_and_nothing_but_memsets_besides(ben
     assert device_gate(bench, "device-launches", relation=dict(other_nodes=1))[0]["status"] == "fail"
 
 
+@pytest.mark.parametrize("gate,field", [("device-launches", "kernels"), ("device-launches", "other_nodes"),
+                                      ("device-scratch", "scratch_bytes"), ("device-scratch", "cub_bytes"),
+                                      ("device-scratch", "cells"), ("device-scratch", "relations")])
+def test_device_gates_require_their_measurements(bench, gate, field):
+    records = [device_record("device_encode_graph", "graph"), device_record("device_encode_rel", "relation")]
+    del records[1][field]
+    results, status, _ = gate_rows(bench, records, ["blocks-p01e"])
+    assert results[gate]["blocks-p01e"]["status"] == "n/a"
+    assert "not measured; use --device-bench" in results[gate]["blocks-p01e"]["reason"]
+    assert status[gate]["status"] == "n/a"
+
+
 def test_the_scratch_gate_counts_16_bytes_per_graph_and_4_per_cell_plus_the_scan(bench):
     base = device_record("device_encode_graph", "graph")["scratch_bytes"]
     rel = device_record("device_encode_rel", "relation")["scratch_bytes"]

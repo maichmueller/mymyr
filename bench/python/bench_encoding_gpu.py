@@ -944,6 +944,8 @@ def gate_device_launches(index, task):
     """At most 4 kernels per captured encode (one width class per task), nothing else in the graph but memsets: a capture
     holds no host synchronization, allocation or copy."""
     records = [index.rec[(task, m)] for m in ("device_encode_graph", "device_encode_rel")]
+    if any(not {"kernels", "other_nodes"} <= r.keys() for r in records):
+        return outcome("n/a", "launch counts were not measured; use --device-bench")
     kernels, others = max(r["kernels"] for r in records), sum(r["other_nodes"] for r in records)
     return outcome(verdict(kernels <= 4 and others == 0), value=kernels, limit=4, other_nodes=others)
 
@@ -955,6 +957,8 @@ def gate_device_scratch(index, task):
     worst = None
     for mode in ("device_encode_graph", "device_encode_rel"):
         r = index.rec[(task, mode)]
+        if not {"scratch_bytes", "cub_bytes", "cells", "relations"} <= r.keys():
+            return outcome("n/a", "scratch usage was not measured; use --device-bench")
         n = r["N"]
         cells = n * (r["relations"] if r["layout"] == "relation" else r["cells"])
         limit = 16 * (n + 1) + 4 * cells + r["cub_bytes"] + SCRATCH_SLACK
