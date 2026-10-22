@@ -10,6 +10,7 @@ The tests run only when a GPU is made visible explicitly (conftest.py hides GPUs
 """
 
 import gc
+import warnings
 
 import numpy as np
 import pytest
@@ -98,15 +99,17 @@ def expect_zero_copy(view, batch):
     if not batch.implicit_entities and view.num_nodes(SYMBOL):
         assert view.entity_role.data_ptr() == batch.entity_role.data_ptr()
     assert torch.cuda.memory_allocated() == allocated  # nothing was copied
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        for edge_type in view.edge_types + view.reverse_edge_types:
-            view.edge_index(edge_type)
-        for node_type in view.node_types:
-            view.ptr(node_type)
-        view.entity_role
-    finally:
-        torch.cuda.set_sync_debug_mode(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # torch calls the sync debug mode a prototype
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            for edge_type in view.edge_types + view.reverse_edge_types:
+                view.edge_index(edge_type)
+            for node_type in view.node_types:
+                view.ptr(node_type)
+            view.entity_role
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
     return rows
 
 
@@ -161,7 +164,8 @@ def test_the_tables_of_several_instances_mix_their_graphs_in_one_view(cases):
             expect_same_view(encoding.hgraph(host_encode(encoder, case)), view)
             # the entities of the graphs of both instances are the `_symbol_` nodes, numbered by the batch
             objects = device.num_objects.cpu().numpy()
-            assert len(set(objects.tolist())) > 1
+            if name == "blocks_table":
+                assert len(set(objects.tolist())) > 1  # instances of different sizes
             assert view.num_nodes(SYMBOL) == int(device.entity_offsets[-1]) >= int(objects.sum())
 
 

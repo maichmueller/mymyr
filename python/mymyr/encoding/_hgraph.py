@@ -159,8 +159,8 @@ class DeviceHGraphView:
     def _entity_row(self, relation: int, slot: int) -> Any:
         """The entity at position ``slot`` of every tuple of ``relation``: a strided view of relation_args."""
         args, arity, count = self._arrays["relation_args"], self._arity[relation], self._tuples[relation]
-        start = self._first_arg[relation] + slot
-        return args[start : start + (count - 1) * arity + 1 : arity] if count else args[start:start]
+        # as_strided rather than a slice: an empty row keeps the stride, as on the host
+        return args.as_strided((count,), (arity,), args.storage_offset() + self._first_arg[relation] + slot)
 
     def _arange(self, relation: int) -> Any:
         args = self._arrays["relation_args"]
