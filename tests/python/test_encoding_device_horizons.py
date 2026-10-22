@@ -217,7 +217,8 @@ def test_device_space_node_limits_and_invalid_roots(space):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_deep_torch_op_compiles_and_replays_with_cousins(layout):
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_deep_torch_op_compiles_and_replays_with_cousins(layout, index):
     import mymyr.rl.torch as rt
 
     device = gpu()
@@ -225,7 +226,7 @@ def test_deep_torch_op_compiles_and_replays_with_cousins(layout):
     rows = np.asarray(task.encode([task.initial_state]))
     view = encoding.horizon(task, rows, depth=3, merge=False)
     inputs = upload(view, device)
-    encoder = encoding.FlatRootedHorizonEncoder(task, layout=layout, index_dtype="int64",
+    encoder = encoding.FlatRootedHorizonEncoder(task, layout=layout, index_dtype=index,
                                                sibling_relation=True, cousin_relation=True)
     expected = encoder.encode(view)
     capacity = caps(expected)
