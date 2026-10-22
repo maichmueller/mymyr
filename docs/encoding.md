@@ -456,6 +456,11 @@ the rows of one batch of states plus offsets and edges, as `rl.expand` produces 
 | `edge_binding` | int32 `[E, L]`: the objects of an edge's ground action (`L` at least the table's `label_width`; only the schema's arity entries of a row are read) |
 | `task_ids` | int32 `[G]`: the instance of each graph (required for a table of several instances) |
 | `truncated` | uint8 `[G]`: set where `encoding.horizon` stopped a graph at `max_nodes`; `None` when not known |
+| `parent_offsets`, `parent_edges` | optional int32 `[G + 1]` and `[P]`: graph-local edge indices representing the distinct parent pairs, sorted by `(src, dst)` within each graph |
+
+The builders prepare the parent arrays so the encoder can reuse their canonical pairs. Supply both arrays together,
+with one edge per distinct pair and offsets from zero, or omit both to canonicalize arbitrary edges during encoding.
+Prepared pairs must describe the complete pair set of the unchanged edge arrays; omit them when editing edges.
 
 **The edges.** The graph is a dag: a node may have several parents, an edge may lead back to the root or to its own
 source, and the edges may come in any order and more than once. The **action tuples** of a relation are the distinct
@@ -557,8 +562,9 @@ labels (`roots`: state ids, `None` for every state): the nodes and edges follow 
 - **Memory.** All the graphs of a call are built at once and held in memory. While they are built every node takes
   `8 * W + 8` bytes (`W` state words, its graph and number) and, when merging, `8` more for its hash and `8` to `16`
   for the hash table; every edge takes `4 * (4 + L)` bytes (`L` action label columns). The view (`8 * W * nodes + 4 *
-  (3 + L) * edges` bytes) is then written from them, so the peak is about the sum of the two; expansion runs in chunks
-  of 4096 states, so nothing else grows with the number of nodes. The nodes of a graph are the states within `depth`
+  (3 + L) * edges + 4 * (P + G + 1)` bytes, with `P` distinct parent pairs and `G` graphs) is then written from them,
+  so the peak is about the sum of the two; expansion runs in chunks of 4096 states, so nothing else grows with the
+  number of nodes. The nodes of a graph are the states within `depth`
   actions of its root, which grows exponentially with `depth`, so bound it: `max_nodes` is the most nodes of a graph
   (the root included; `None` is unbounded). A graph that would have more raises `ValueError` ("mymyr: encoding: graph 3
   of the horizon would have more than `max_nodes = 100` nodes"), or, with `truncate=True`, stops growing: a successor

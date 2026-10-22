@@ -121,6 +121,11 @@ struct HPass
             out.schema = h.edge_schema ? h.edge_schema + e : nullptr;
             out.binding = h.edge_binding ? h.edge_binding + e * h.label_width : nullptr;
             out.label_width = h.label_width;
+            if (parents && h.parent_offsets && h.parent_edges)
+            {
+                out.parent_edges = h.parent_edges + h.parent_offsets[g];
+                out.parent_pairs = static_cast<u32>(h.parent_offsets[g + 1] - h.parent_offsets[g]);
+            }
         }
         out.schema_relation = schema_relation;
         out.use_actions = actions;
@@ -251,6 +256,22 @@ void count_range(const HPass& p, u32 t)
             {
                 m.bad_edge = std::min(m.bad_edge, g);
                 continue;
+            }
+            if (p.parents && hz.parent_offsets)
+            {
+                i32 last_src = -1, last_dst = -1;
+                for (i32 i = hz.parent_offsets[g]; i < hz.parent_offsets[g + 1]; ++i)
+                {
+                    const i32 e = hz.parent_edges[i];
+                    if (e < 0 || static_cast<u32>(e) >= p.edges_of(g))
+                        invalid("a canonical parent edge is outside its graph's edges");
+                    const u64 at = p.first_edge(g) + static_cast<u32>(e);
+                    const i32 src = hz.edge_src[at], dst = hz.edge_dst[at];
+                    if (src < last_src || (src == last_src && dst <= last_dst))
+                        invalid("canonical parent pairs must be distinct and ascending by (source, destination)");
+                    last_src = src;
+                    last_dst = dst;
+                }
             }
         }
         const u64 stride = hz.nodes.stride ? hz.nodes.stride : hz.nodes.words;
@@ -558,6 +579,21 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     }
     const bool edges_used = options.include_actions || options.horizon.parent_relation ||
                             options.horizon.sibling_relation || options.horizon.cousin_relation;
+    if (h.parent_offsets)
+    {
+        if (h.parent_pairs && !h.parent_edges)
+            invalid("canonical parent pairs need their edge indices");
+        if (h.parent_offsets[0] != 0 || h.parent_pairs > edges)
+            invalid("canonical parent offsets must start at 0 and hold at most one pair per edge");
+        for (u64 g = 0; g < graphs; ++g)
+            if (h.parent_offsets[g + 1] < h.parent_offsets[g] ||
+                static_cast<u64>(h.parent_offsets[g + 1]) > h.parent_pairs)
+                invalid("canonical parent offsets must be ascending within the pair array");
+        if (static_cast<u64>(h.parent_offsets[graphs]) != h.parent_pairs)
+            invalid("canonical parent offsets must end at the number of pairs");
+    }
+    else if (h.parent_edges || h.parent_pairs)
+        invalid("canonical parent pairs need their offsets");
     if (edges_used && edges)
     {
         if (!h.edge_src || !h.edge_dst)

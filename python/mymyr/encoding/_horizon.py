@@ -35,6 +35,10 @@ class HorizonView:
     - ``task_ids``: the instance of each graph, int32 [G]; None for a table of one instance.
     - ``truncated``: uint8 [G], set where ``horizon`` stopped a graph at ``max_nodes``; None when not known. The encoders
       do not read it.
+    - ``parent_offsets`` and ``parent_edges``: optional int32 [G + 1] and [P] canonical parent pairs, supplied together.
+      The slice for graph g contains one graph-local edge index per distinct (source, destination), ordered by that
+      pair. Builders prepare these arrays so that encoding parent relations needs no sort. They must describe the
+      complete pair set of the unchanged edges; omit both when editing edges or constructing an arbitrary view.
 
     The edges may come in any order and be repeated, and a node may have several incoming edges or none: the encoder
     works from their canonical form, so the batch does not depend on how the view was made. An action relation holds one
@@ -56,6 +60,8 @@ class HorizonView:
     edge_binding: SupportsDLPack | None = None
     task_ids: SupportsDLPack | Sequence[int] | None = None
     truncated: SupportsDLPack | None = None
+    parent_offsets: SupportsDLPack | None = None
+    parent_edges: SupportsDLPack | None = None
 
     def __post_init__(self) -> None:
         for name in ("nodes", "node_offsets", "edge_offsets"):
@@ -93,7 +99,8 @@ def horizon(
     Memory. All the graphs of a call are built at once and held in memory. While they are built every node takes
     ``8 * W + 8`` bytes (W state words, its graph and number) and, when merging, 8 more for its hash and 8 to 16 for the
     hash table; every edge takes ``4 * (4 + L)`` bytes (L action label columns). The result (``8 * W * nodes + 4 * (3 +
-    L) * edges`` bytes) is then written from them, so the peak is about the sum of the two; expansion works in chunks,
+    L) * edges + 4 * (P + G + 1)`` bytes, P distinct parent pairs and G graphs) is then written from them, so the peak is
+    about the sum of the two; expansion works in chunks,
     so nothing else grows with the number of nodes. The number of nodes of a graph is at most the number of
     states within ``depth`` actions of its root, which can grow exponentially with the depth. ``max_nodes`` bounds it:
     a graph that would hold more nodes than ``max_nodes`` (the root included) raises ValueError, or with

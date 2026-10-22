@@ -169,6 +169,12 @@ struct HorizonInput
     const i32* edge_schema = nullptr;   // [E]
     const i32* edge_binding = nullptr;  // [E, label_width]
     u32 label_width = 0;
+    /// Optional canonical parent pairs: parent_edges[parent_offsets[g] ... parent_offsets[g + 1]) contains one
+    /// graph-local edge index per distinct (source, destination), sorted by that pair. Both arrays must be given
+    /// together and describe the same unchanged edges. Builders provide them to avoid sorting pairs during encoding.
+    const i32* parent_offsets = nullptr;  // [G + 1], ascending from 0
+    const i32* parent_edges = nullptr;    // [parent_pairs]
+    u64 parent_pairs = 0;
 };
 
 /// The inputs of one batch. With a horizon schema (EncodingSchema::has_horizon) the graphs are those of `horizon` and

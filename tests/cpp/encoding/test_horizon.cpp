@@ -730,6 +730,66 @@ bool same_bytes(const rl::ArrayBundle& a, const rl::ArrayBundle& b)
     return true;
 }
 
+TEST(Horizon, PreparedParentPairsMatchUnpreparedGraphs)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "probBLOCKS-8-0"));
+    const auto roots = test::random_walk(*table, 0, 3, 11);
+    HorizonBuild build;
+    build.depth = 3;
+    const auto graphs = build_horizon_graphs(*table, roots.view(), roots.task_ids.data(), build);
+    ASSERT_FALSE(graphs.parent_edges.empty());
+    for (const auto mode : {HorizonMode::Full, HorizonMode::Delta, HorizonMode::Action})
+        for (const auto root : {RootPolicy::Include, RootPolicy::EncodeOnly, RootPolicy::Exclude})
+            for (const auto layout : {Layout::Graph, Layout::Relation})
+                for (const auto index : {IndexType::I32, IndexType::I64})
+                    for (const bool kin : {false, true})
+                    {
+                        FlatOptions options;
+                        options.horizon.mode = mode;
+                        options.horizon.root = root;
+                        options.horizon.parent_relation = true;
+                        options.horizon.sibling_relation = kin;
+                        options.horizon.cousin_relation = kin;
+                        options.layout = layout;
+                        options.index = index;
+                        if (mode == HorizonMode::Delta)
+                            options.goal_derivations = {};
+                        const auto encoder = FlatEncoder::create(table, options);
+                        EncodeInput in;
+                        in.horizon = graphs.input();
+                        const auto prepared = encoder->encode(in);
+                        in.horizon.parent_offsets = nullptr;
+                        in.horizon.parent_edges = nullptr;
+                        in.horizon.parent_pairs = 0;
+                        const auto plain = encoder->encode(in);
+                        EXPECT_TRUE(same_bytes(*prepared, *plain));
+                        validate(*prepared, encoder->schema());
+                    }
+}
+
+TEST(Horizon, PreparedParentPairsCheckTheirBoundsAndOrder)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "probBLOCKS-8-0"));
+    const auto roots = test::random_walk(*table, 0, 1, 3);
+    HorizonBuild build;
+    build.depth = 2;
+    auto graphs = build_horizon_graphs(*table, roots.view(), roots.task_ids.data(), build);
+    FlatOptions options;
+    options.horizon.mode = HorizonMode::Full;
+    options.horizon.parent_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    EncodeInput in;
+    in.horizon = graphs.input();
+    in.horizon.parent_pairs = 0;
+    EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+    ASSERT_GE(graphs.parent_edges.size(), 2);
+    graphs.parent_edges[0] = -1;
+    in.horizon = graphs.input();
+    EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+    graphs.parent_edges[0] = graphs.parent_edges[1];
+    EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+}
+
 TEST(Horizon, ThreadsGiveIdenticalBatches)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "probBLOCKS-8-0"));

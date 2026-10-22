@@ -23,7 +23,8 @@
 // Memory. All the graphs of a call are built at once and held in memory. While they are built every node takes
 // 8 * words + 8 bytes (its row, its graph and number) and, when merging, 8 more for its hash and 8 to 16 for the hash
 // table; every edge takes 4 * (4 + label_width) bytes. The result (8 * words bytes per node, 4 * (3 + label_width) per
-// edge) is written from them, so the peak is about the sum of the two. HorizonBuild::depth bounds the nodes of a graph by
+// edge, plus 4 bytes per distinct parent pair and 4 * (graphs + 1) for its offsets) is written from them, so the peak is
+// about the sum of the two. HorizonBuild::depth bounds the nodes of a graph by
 // the number of states within that many actions of the root, HorizonBuild::max_nodes by a number of your choice (the
 // call refuses a graph above it, or stops adding nodes to it with `truncate`). Expansion runs in chunks of at most
 // k_horizon_chunk states, so the working memory beyond the above is bounded by the successors of a chunk.
@@ -70,6 +71,8 @@ struct HorizonGraphs
     /// derived-word input).
     std::vector<u64> derived;
     u32 derived_words = 0;
+    std::vector<i32> parent_offsets{0};  // [G + 1] canonical parent pairs of each graph
+    std::vector<i32> parent_edges;       // graph-local edge indices, ascending by (source, destination), distinct pairs
 
     [[nodiscard]] u64 graphs() const noexcept { return task_ids.size(); }
     [[nodiscard]] u64 num_nodes() const noexcept { return words ? nodes.size() / words : 0; }
@@ -86,6 +89,12 @@ struct HorizonGraphs
         h.edge_schema = edge_schema.data();
         h.edge_binding = edge_binding.data();
         h.label_width = label_width;
+        if (parent_offsets.size() == graphs() + 1 && static_cast<u64>(parent_offsets.back()) == parent_edges.size())
+        {
+            h.parent_offsets = parent_offsets.data();
+            h.parent_edges = parent_edges.data();
+            h.parent_pairs = parent_edges.size();
+        }
         return h;
     }
 };

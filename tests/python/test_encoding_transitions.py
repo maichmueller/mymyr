@@ -20,6 +20,7 @@ from test_encoding import derived_words
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 VIEW_FIELDS = ("nodes", "node_offsets", "edge_offsets", "edge_src", "edge_dst", "edge_schema", "edge_binding", "task_ids")
+PARENT_FIELDS = ("parent_offsets", "parent_edges")
 ADDED = ("plain", "added_satisfied", "added_unsatisfied")
 
 
@@ -74,7 +75,7 @@ def assert_same_view(actual, expected):
 
 def digest(view):
     h = hashlib.sha256()
-    for name in VIEW_FIELDS + ("truncated",):
+    for name in VIEW_FIELDS + ("truncated",) + PARENT_FIELDS:
         a = np.asarray(getattr(view, name))
         h.update(f"{name}{a.dtype}{a.shape}".encode())
         h.update(a.tobytes())
@@ -109,7 +110,18 @@ def test_the_builder_follows_the_documented_rules(name, depth, merge):
     assert not np.asarray(view.truncated).any() and np.asarray(view.truncated).dtype == np.uint8
     # a view is a valid input of the horizon encoder, which encodes each graph
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode="full", parent_relation=True)
-    assert encoder.encode(view).num_graphs == len(roots)
+    prepared = encoder.encode(view)
+    assert prepared.num_graphs == len(roots)
+    offsets, pairs = np.asarray(view.parent_offsets), np.asarray(view.parent_edges)
+    src, dst = np.asarray(view.edge_src), np.asarray(view.edge_dst)
+    for graph in range(len(roots)):
+        first, last = (int(x) for x in view.edge_offsets[graph:graph + 2])
+        chosen = first + pairs[offsets[graph]:offsets[graph + 1]]
+        assert list(zip(src[chosen], dst[chosen])) == sorted(set(zip(src[first:last], dst[first:last])))
+    bare = SimpleNamespace(**{field: getattr(view, field) for field in VIEW_FIELDS})
+    unprepared = encoder.encode(bare)
+    for field in ("entity_offsets", "relation_counts", "relation_offsets", "relation_arg_offsets", "relation_args"):
+        assert np.array_equal(np.asarray(getattr(prepared, field)), np.asarray(getattr(unprepared, field)))
 
 
 def test_merging_keeps_each_state_once_and_a_tree_does_not(blocks):
@@ -191,7 +203,7 @@ for _ in range(4):
         s = rng.choice(succ)
 view = encoding.horizon(task, np.ascontiguousarray(task.encode(out)), 3, threads=int(sys.argv[1]))
 h = hashlib.sha256()
-for name in {VIEW_FIELDS + ('truncated',)!r}:
+for name in {VIEW_FIELDS + ('truncated',) + PARENT_FIELDS!r}:
     a = np.asarray(getattr(view, name))
     h.update(f"{{name}}{{a.dtype}}{{a.shape}}".encode())
     h.update(a.tobytes())

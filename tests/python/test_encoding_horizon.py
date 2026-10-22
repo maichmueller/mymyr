@@ -65,7 +65,7 @@ def test_a_view_has_the_documented_fields(blocks):
     _, view = horizon_of(blocks, depth=1)
     assert [name for name in view.__dataclass_fields__] == [
         "nodes", "node_offsets", "edge_offsets", "edge_src", "edge_dst", "edge_schema", "edge_binding", "task_ids",
-        "truncated",
+        "truncated", "parent_offsets", "parent_edges",
     ]
     assert view.nodes.shape[0] == int(view.node_offsets[-1]) and len(view.edge_src) == int(view.edge_offsets[-1])
     with pytest.raises(TypeError, match="nodes must be given"):

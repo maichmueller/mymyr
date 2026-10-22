@@ -153,7 +153,7 @@ bool equal(const HorizonGraphs& a, const HorizonGraphs& b)
     return a.words == b.words && a.label_width == b.label_width && a.task_ids == b.task_ids && a.nodes == b.nodes &&
            a.node_offsets == b.node_offsets && a.edge_offsets == b.edge_offsets && a.edge_src == b.edge_src &&
            a.edge_dst == b.edge_dst && a.edge_schema == b.edge_schema && a.edge_binding == b.edge_binding &&
-           a.truncated == b.truncated;
+           a.truncated == b.truncated && a.parent_offsets == b.parent_offsets && a.parent_edges == b.parent_edges;
 }
 
 struct Case

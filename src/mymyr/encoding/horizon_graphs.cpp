@@ -205,6 +205,50 @@ struct EdgeStore
     [[nodiscard]] i32* last_binding() { return binding.data() + binding.size() - label_width; }
 };
 
+/// Prepares the distinct source/destination pairs independently of the action edge order.
+void prepare_parents(HorizonGraphs& out)
+{
+    out.parent_offsets.assign(out.graphs() + 1, 0);
+    out.parent_edges.clear();
+    std::vector<i32> order, begin;
+    for (u64 g = 0; g < out.graphs(); ++g)
+    {
+        const i32 first = out.edge_offsets[g], count = out.edge_offsets[g + 1] - first;
+        order.resize(static_cast<usize>(count));
+        if (count == 0)
+        {
+            out.parent_offsets[g + 1] = static_cast<i32>(out.parent_edges.size());
+            continue;
+        }
+        begin.assign(static_cast<usize>(out.node_offsets[g + 1] - out.node_offsets[g]), 0);
+        for (i32 i = 0; i < count; ++i)
+            ++begin[static_cast<usize>(out.edge_src[static_cast<usize>(first + i)])];
+        i32 at = 0;
+        for (i32& position : begin)
+        {
+            const i32 n = position;
+            position = at;
+            at += n;
+        }
+        // The edges are destination-major; stable source buckets order the pairs lexicographically.
+        for (i32 i = 0; i < count; ++i)
+        {
+            const usize src = static_cast<usize>(out.edge_src[static_cast<usize>(first + i)]);
+            order[static_cast<usize>(begin[src]++)] = i;
+        }
+        i32 last = -1;
+        for (const i32 e : order)
+        {
+            const usize at = static_cast<usize>(first + e);
+            if (last < 0 || out.edge_src[at] != out.edge_src[static_cast<usize>(first + last)] ||
+                out.edge_dst[at] != out.edge_dst[static_cast<usize>(first + last)])
+                out.parent_edges.push_back(e);
+            last = e;
+        }
+        out.parent_offsets[g + 1] = static_cast<i32>(out.parent_edges.size());
+    }
+}
+
 template<class Source, class Root>
 HorizonGraphs run(Source& source, std::vector<i32> task_ids, u64 graphs, const Root& root, u32 words, u32 label_width,
                   const HorizonBuild& options)
@@ -317,6 +361,7 @@ HorizonGraphs run(Source& source, std::vector<i32> task_ids, u64 graphs, const R
         out.edge_schema[at] = edges.schema[e];
         std::copy_n(edges.binding.begin() + e * label_width, label_width, out.edge_binding.begin() + at * label_width);
     }
+    prepare_parents(out);
     return out;
 }
 
@@ -420,6 +465,7 @@ HorizonGraphs transition_graphs(const rl::TaskTable& table, rl::StateBatchView p
         out.node_offsets[s + 1] = static_cast<i32>(node);
         out.edge_offsets[s + 1] = last;
     }
+    prepare_parents(out);
     return out;
 }
 
