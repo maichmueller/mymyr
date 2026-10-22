@@ -154,12 +154,15 @@ struct OutputLayout
     u64 task_ids = 0, num_objects = 0, entity_offsets = 0, entity_role = 0, entity_ref = 0, relation_counts = 0,
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0, goal_complete = 0, target_offsets = 0,
         target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0, sizes = 0;
+    u64 static_task_ids = 0, static_offsets = 0, static_arg_offsets = 0, static_args = 0,
+        static_relations = 0, static_sizes = 0;
+    encoding::StaticShape static_capacities{};
     u64 bytes = 0;
     OutputArrays arrays;
 };
 /// Throws std::overflow_error if a size product, sum or alignment exceeds u64.
 [[nodiscard]] OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations,
-                                         const OutputArrays& arrays = {});
+                                         const OutputArrays& arrays = {}, const encoding::StaticShape& statics = {});
 
 /// The destinations in the device block `block` of output_layout(shape, ...), with the capacities of `shape`
 /// (the graph capacity bounds every per-graph and per-cell array).
@@ -404,7 +407,8 @@ public:
     void encode(void* scratch, u64 bytes, const DeviceOutput& out) const;
     /// count writes sizes with capacity unbounded; fill reuses its scratch and unchanged source arrays,
     /// with no intervening use of that scratch.
-    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const;
+    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes,
+               encoding::StaticSizes* statics = nullptr) const;
     void fill(void* scratch, u64 bytes, const DeviceOutput& out) const;
 private:
     struct Impl;

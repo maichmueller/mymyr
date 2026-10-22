@@ -49,8 +49,28 @@ class EncodedRows:
     actions: Expansion | None = None
 
 
-def _words(values: Any, what: str) -> np.ndarray:
+def _on_device(value: Any) -> bool:
+    """Whether a DLPack array resides on a CUDA device."""
+    return hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] == 2
+
+
+def _device_array(value: Any, device: Any, dtype: Any = None) -> Any:
+    import torch
+
+    if hasattr(value, "__dlpack__") and not isinstance(value, torch.Tensor):
+        value = torch.from_dlpack(value)
+    return torch.as_tensor(value, device=device, dtype=dtype)
+
+
+def _words(values: Any, what: str) -> Any:
     """`values` as a C-contiguous uint64 array [N, W] (int64 words are reinterpreted)."""
+    if _on_device(values):
+        import torch
+
+        array = _device_array(values, None)
+        if array.ndim != 2 or array.dtype not in (torch.uint64, torch.int64):
+            raise ValueError(f"mymyr: datasets: StateRows takes {what} as a 64-bit word array [N, W]")
+        return array.contiguous().view(torch.int64)
     array = np.asarray(values)
     if array.ndim != 2 or array.dtype not in (np.uint64, np.int64):
         raise ValueError(f"mymyr: datasets: StateRows takes {what} as a 64-bit word array [N, W]")
@@ -84,6 +104,9 @@ class StateRows:
     ) -> None:
         self.rows = _words(rows, "rows")
         n = len(self.rows)
+        if _on_device(self.rows):
+            self._init_device(task_ids, labels, goals)
+            return
         self.task_ids = (
             np.zeros(n, np.int32) if task_ids is None else np.ascontiguousarray(np.asarray(task_ids, dtype=np.int32))
         )
@@ -96,6 +119,25 @@ class StateRows:
         self.goals = None
         if goals is not None:
             positive, negative = (_words(g, "goals") for g in goals)
+            if positive.shape != negative.shape or len(positive) != n:
+                raise ValueError("mymyr: datasets: goals must be two arrays [N, W] of goal masks, one row per state row")
+            self.goals = (positive, negative)
+
+    def _init_device(self, task_ids: Any, labels: Any, goals: Any) -> None:
+        import torch
+
+        n, device = len(self.rows), self.rows.device
+        self.task_ids = (torch.zeros(n, dtype=torch.int32, device=device) if task_ids is None
+                         else _device_array(task_ids, device, torch.int32).contiguous())
+        if self.task_ids.shape != (n,):
+            raise ValueError(f"mymyr: datasets: {self.task_ids.shape} task ids for {n} rows")
+        self.labels = {name: _device_array(values, device) for name, values in (labels or {}).items()}
+        for name, values in self.labels.items():
+            if values.ndim == 0 or len(values) != n:
+                raise ValueError(f"mymyr: datasets: label '{name}' must have {n} entries")
+        self.goals = None
+        if goals is not None:
+            positive, negative = (_words(_device_array(g, device), "goals") for g in goals)
             if positive.shape != negative.shape or len(positive) != n:
                 raise ValueError("mymyr: datasets: goals must be two arrays [N, W] of goal masks, one row per state row")
             self.goals = (positive, negative)
@@ -116,6 +158,14 @@ class StateRows:
         arrays = space.arrays()
         if "state_words" not in arrays:
             raise ValueError("mymyr: datasets: the state space has no rows (its task has lazy atom slots)")
+        if _on_device(arrays["state_words"]):
+            import torch
+
+            rows = _words(arrays["state_words"], "rows")
+            picked = slice(None) if ids is None else _device_array(ids, rows.device, torch.int64)
+            selected = rows[picked]
+            return cls(selected, torch.full((len(selected),), task_id, dtype=torch.int32, device=rows.device),
+                       labels={name: _device_array(arrays[name], rows.device)[picked] for name in labels})
         picked = np.arange(len(arrays["state_words"])) if ids is None else np.asarray(ids, dtype=np.int64)
         rows = np.asarray(arrays["state_words"])[picked]
         return cls(
@@ -154,12 +204,17 @@ class StateRows:
             raise IndexError(f"mymyr: datasets: row {i} of a dataset of {n} rows")
         i %= n
         goal = None if self.goals is None else (self.goals[0][i], self.goals[1][i])
-        return StateRow(self.rows[i], int(self.task_ids[i]), {name: v[i] for name, v in self.labels.items()}, goal)
+        return StateRow(self.rows[i], self.task_ids[i] if _on_device(self.rows) else int(self.task_ids[i]), {name: v[i] for name, v in self.labels.items()}, goal)
 
     def take(self, indices: SupportsDLPack | Sequence[int]) -> StateRows:
         """The dataset of the rows ``indices`` (any order, repeats allowed), as a copy: a batch loaded whole instead
         of as ``len(indices)`` single items."""
-        picked = np.asarray(indices, dtype=np.int64)
+        if _on_device(self.rows):
+            import torch
+
+            picked = _device_array(indices, self.rows.device, torch.int64)
+        else:
+            picked = np.asarray(indices, dtype=np.int64)
         return StateRows(
             self.rows[picked],
             self.task_ids[picked],
@@ -188,6 +243,18 @@ def _pack(
     n = len(items)
     if n == 0:
         raise ValueError("mymyr: datasets: cannot encode an empty batch of rows")
+    if _on_device(items[0].row):
+        import torch
+
+        rows = torch.stack(list(map(_ROW, items)))
+        task_ids = torch.stack([_device_array(i.task_id, rows.device, torch.int32) for i in items])
+        labels = {name: torch.stack([i.labels[name] for i in items]) for name in items[0].labels}
+        pairs = list(map(_GOAL, items))
+        if any(g is None for g in pairs) and not all(g is None for g in pairs):
+            raise ValueError("mymyr: datasets: some rows of the batch have a goal and some do not")
+        goals = None if pairs[0] is None else (torch.stack(list(map(_FIRST, pairs))),
+                                             torch.stack(list(map(_SECOND, pairs))))
+        return rows, task_ids, labels, goals
     rows = np.array(list(map(_ROW, items)), np.uint64)
     task_ids = np.fromiter(map(_TASK_ID, items), np.int32, count=n)
     label_maps = list(map(_LABELS, items))
@@ -223,12 +290,14 @@ class EncodingCollate:
         framework: str | None = None,
         threads: int = 1,
         pool: ThreadPool | None = None,
+        capacities: Mapping[str, int] | None = None,
     ) -> None:
         self.encoder = encoder
         self.actions = actions
         self.framework = framework
         self.threads = threads
         self.pool = pool
+        self.capacities = capacities
 
     def __call__(self, items: StateRows | Sequence[StateRow]) -> EncodedRows:
         from mymyr import rl
@@ -240,6 +309,8 @@ class EncodingCollate:
             rows, task_ids, labels, goals = _pack(items)
         expansion = None
         extra: dict[str, Any] = {}
+        if self.capacities is not None:
+            extra["capacities"] = self.capacities
         if self.actions:
             if isinstance(self.encoder, SuiteEncoder):
                 extra["actions"] = True

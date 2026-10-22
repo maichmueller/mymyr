@@ -114,6 +114,88 @@ __device__ EncodeParams live_params(const EncodeParams& params)
     return p;
 }
 
+/// Whether an instance occurs in the logical rows, including a circular live view.
+__device__ bool static_instance_present(const EncodeParams& p, u32 instance)
+{
+    for (u64 g = 0; g < p.graphs; ++g)
+    {
+        const u64 row = p.row_start ? (*p.row_start + g) % p.row_capacity : g;
+        const i32 id = p.task_ids ? p.task_ids[row] : 0;
+        if (id == static_cast<i32>(instance))
+            return true;
+    }
+    return false;
+}
+
+__global__ void count_statics_kernel(EncodeParams p)
+{
+    p = live_params(p);
+    enc::StaticSizes sizes{};
+    for (u32 i = 0; i < p.context.num_instances; ++i)
+        if (static_instance_present(p, i))
+        {
+            const auto t = ed::static_block_totals(ed::instance_view(p.context, i));
+            ++sizes.instances;
+            sizes.tuples += t.tuples;
+            sizes.args += t.args;
+        }
+    *p.static_totals = sizes;
+    *p.static_sizes = sizes;
+}
+
+template<class I>
+__global__ void fill_statics_kernel(EncodeParams p)
+{
+    p = live_params(p);
+    const auto sizes = *p.static_totals;
+    *p.static_sizes = sizes;
+    const bool overflow = p.sizes->overflow != 0;
+    const auto& a = p.out;
+    auto* offsets = static_cast<I*>(a.static_offsets);
+    auto* arg_offsets = static_cast<I*>(a.static_arg_offsets);
+    auto* args = static_cast<I*>(a.static_args);
+    const u64 relations = p.context.num_static;
+    if (overflow)
+    {
+        if (p.zero_unused)
+        {
+            for (u64 b = 0; b < p.static_capacities.instances; ++b) a.static_task_ids[b] = 0;
+            for (u64 s = 0; s <= p.static_capacities.instances * relations; ++s)
+                offsets[s] = arg_offsets[s] = 0;
+            for (u64 j = 0; j < p.static_capacities.args; ++j) args[j] = 0;
+            for (u64 s = 0; s < relations; ++s) static_cast<I*>(a.static_relations)[s] = 0;
+        }
+        return;
+    }
+    u64 block = 0, tuples = 0, positions = 0;
+    for (u32 i = 0; i < p.context.num_instances; ++i)
+        if (static_instance_present(p, i))
+        {
+            const auto v = ed::instance_view(p.context, i);
+            a.static_task_ids[block] = static_cast<i32>(i);
+            ed::fill_static_block<I>(v, p.context.static_relations, p.context.num_static, block * relations,
+                                     tuples, positions, offsets, arg_offsets, args);
+            const auto t = ed::static_block_totals(v);
+            tuples += t.tuples;
+            positions += t.args;
+            ++block;
+        }
+    offsets[block * relations] = static_cast<I>(tuples);
+    arg_offsets[block * relations] = static_cast<I>(positions);
+    for (u64 s = 0; s < relations; ++s)
+        static_cast<I*>(a.static_relations)[s] = static_cast<I>(p.context.static_relations[s]);
+    if (p.zero_unused)
+    {
+        for (u64 b = block; b < p.static_capacities.instances; ++b) a.static_task_ids[b] = 0;
+        for (u64 s = block * relations + 1; s <= p.static_capacities.instances * relations; ++s)
+        {
+            offsets[s] = static_cast<I>(tuples);
+            arg_offsets[s] = static_cast<I>(positions);
+        }
+        for (u64 j = sizes.args; j < p.static_capacities.args; ++j) args[j] = 0;
+    }
+}
+
 /// The entries of the scanned array of a batch of `graphs` graphs (detail::ScratchLayout::scanned).
 __device__ u64 scanned_entries(const EncodeParams& p, u64 graphs)
 {
@@ -427,6 +509,14 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     if (sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit ||
         sizes.history > limit)
         sizes.overflow |= enc::k_overflow_index;
+    if (p.shared_statics)
+    {
+        const auto s = *p.static_totals;
+        if (s.instances > p.static_capacities.instances || s.args > p.static_capacities.args)
+            sizes.overflow |= enc::k_overflow_capacity;
+        if (s.instances * p.context.num_static >= limit || s.tuples > limit || s.args > limit)
+            sizes.overflow |= enc::k_overflow_index;
+    }
     if (p.flags[0] != 0)
         sizes.overflow |= enc::k_overflow_input;
     if constexpr (Live)
@@ -937,6 +1027,11 @@ cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaS
     const cudaError_t error = shape.live ? launch_counts<true>(p, shape, stream) : launch_counts<false>(p, shape, stream);
     if (error != cudaSuccess)
         return error;
+    if (p.shared_statics)
+    {
+        count_statics_kernel<<<1, 1, 0, stream>>>(p);
+        if (const auto e = cudaPeekAtLastError(); e != cudaSuccess) return e;
+    }
     return launch_fill(p, shape, stream);
 }
 
@@ -945,6 +1040,11 @@ cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, 
     const cudaError_t error = shape.live ? launch_counts<true>(p, shape, stream) : launch_counts<false>(p, shape, stream);
     if (error != cudaSuccess)
         return error;
+    if (p.shared_statics)
+    {
+        count_statics_kernel<<<1, 1, 0, stream>>>(p);
+        if (const auto e = cudaPeekAtLastError(); e != cudaSuccess) return e;
+    }
     const u64 shared = p.relation_major ? align8(u64{p.context.num_relations} * 8) : 0;
     if (shape.live)
         p.relation_major ? sizes_kernel<true, true><<<1, k_block, shared, stream>>>(p)
@@ -957,7 +1057,11 @@ cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, 
 
 cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
-    return shape.live ? launch_fills<true>(p, shape, stream) : launch_fills<false>(p, shape, stream);
+    const auto error = shape.live ? launch_fills<true>(p, shape, stream) : launch_fills<false>(p, shape, stream);
+    if (error != cudaSuccess || !p.shared_statics) return error;
+    if (p.index64) fill_statics_kernel<i64><<<1, 1, 0, stream>>>(p);
+    else fill_statics_kernel<i32><<<1, 1, 0, stream>>>(p);
+    return cudaPeekAtLastError();
 }
 
 }  // namespace mymyr::cuda::detail

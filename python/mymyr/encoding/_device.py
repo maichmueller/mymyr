@@ -52,8 +52,13 @@ _ARRAYS = (
     "history_offsets",
     "history_entity",
     "history_dt",
+    "static_task_ids",
+    "static_offsets",
+    "static_arg_offsets",
+    "static_args",
+    "static_relations",
 )
-_OUTPUTS = (*_ARRAYS, "sizes")
+_OUTPUTS = (*_ARRAYS, "static_sizes", "sizes")
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
 _SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
@@ -85,7 +90,7 @@ def _native() -> Any:
 class _Layout:
     """Which arrays a batch of an encoder stores, and their dtypes."""
 
-    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets")
+    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets", "shared", "static_relations")
 
     def __init__(self, encoder: Any):
         options = encoder.options
@@ -96,9 +101,8 @@ class _Layout:
             raise _error("the device does not encode numeric relations (the table has numeric state words)")
         if tuple(options["outputs"]) != ("relations",):
             raise _error("the device does not encode Simple")
-        if options["statics"] == "shared":
-            raise _error("the device does not encode shared statics (statics='shared'): encode the rows on the host, or "
-                         "with statics='repeat'")
+        self.shared = options["statics"] == "shared"
+        self.static_relations = sum(lane == "static" for lane in encoder.relation_lanes)
         self.index = options["index_dtype"]
         self.relations = encoder.num_relations
         self.entity_arrays = not encoder.implicit_entities
@@ -114,6 +118,8 @@ class _Layout:
             return self.counts
         if name == "goal_complete":
             return self.goal_complete
+        if name.startswith("static_"):
+            return self.shared
         if name.startswith("target_"):
             return self.targets
         if name.startswith("history_"):
@@ -121,7 +127,8 @@ class _Layout:
         return True
 
     def specs(
-        self, torch: Any, graphs: int, entities: int, args: int, targets: int, history: int = 0
+        self, torch: Any, graphs: int, entities: int, args: int, targets: int, history: int = 0,
+        static_instances: int = 0, static_args: int = 0
     ) -> dict[str, tuple[tuple[int, ...], Any]]:
         """The shape and dtype of every output, absent arrays included (as empty arrays)."""
         index = torch.int32 if self.index == "int32" else torch.int64
@@ -143,6 +150,12 @@ class _Layout:
             "history_offsets": ((g + 1,), index),
             "history_entity": ((history,), index),
             "history_dt": ((history,), torch.int32),
+            "static_task_ids": ((static_instances,), torch.int32),
+            "static_offsets": ((static_instances * self.static_relations + 1,), index),
+            "static_arg_offsets": ((static_instances * self.static_relations + 1,), index),
+            "static_args": ((static_args,), index),
+            "static_relations": ((self.static_relations,), index),
+            "static_sizes": ((3,), torch.int64),
         }
         specs = {name: (shape if self.present(name) else (0,), dtype) for name, (shape, dtype) in shapes.items()}
         specs["sizes"] = ((len(_SIZE_FIELDS),), torch.int64)
@@ -430,7 +443,7 @@ def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int]:
     """The (graphs, entities, args, targets, history) capacities of a ``capacities`` dict."""
     if not isinstance(value, dict):
         raise _error(f"capacities must be a dict, not {type(value).__name__}")
-    keys = {"entities", "graphs", "args", "targets", "history"}
+    keys = {"entities", "graphs", "args", "targets", "history", "static_instances", "static_args"}
     unknown = set(value) - keys
     if unknown:
         raise _error(f"capacities has the unknown key '{sorted(unknown, key=str)[0]}'; the keys are 'entities', "
@@ -441,8 +454,12 @@ def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int]:
         raise _error("the schema has targets: capacities needs the key 'targets' as well")
     if "history" not in value and layout.history:
         raise _error("the schema has history: capacities needs the key 'history' as well")
+    if layout.shared and not {"static_instances", "static_args"} <= set(value):
+        raise _error("shared statics need capacities 'static_instances' and 'static_args'")
+    if not layout.shared and (value.get("static_instances", 0) or value.get("static_args", 0)):
+        raise _error("repeated statics take no static capacities")
     out = []
-    for key in ("graphs", "entities", "args", "targets", "history"):
+    for key in ("graphs", "entities", "args", "targets", "history", "static_instances", "static_args"):
         n = value.get(key, 0)
         if isinstance(n, bool) or not isinstance(n, int):
             if hasattr(n, "__index__") and not isinstance(n, bool):
@@ -452,7 +469,7 @@ def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int]:
         if n < 0:
             raise _error(f"capacities['{key}'] must be at least 0, got {n}")
         out.append(n)
-    return out[0], out[1], out[2], out[3], out[4]
+    return tuple(out)
 
 
 # ------------------------------------------------------------------------------------------------ pending inputs
@@ -519,17 +536,18 @@ def encode_arrays(
     stream = _stream(states)
     out: dict[str, Any] = {}
     if capacities is not None:
-        graphs, entities, args, targets, steps = capacities
+        graphs, entities, args, targets, steps, static_instances, static_args = capacities
         if rows.graphs > graphs:
             raise _error("the batch has more graphs than the output capacity")
-        specs = layout.specs(torch, rows.graphs, entities, args, targets, steps)
+        specs = layout.specs(torch, rows.graphs, entities, args, targets, steps, static_instances, static_args)
         out = _outputs(torch, specs, device)
         scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
         native.encode(stream, rows.fields, _pointers(out),
-                      [out["task_ids"].shape[0], entities, args, targets, steps], scratch.data_ptr(), scratch.numel())
+                      [out["task_ids"].shape[0], entities, args, targets, steps, static_instances, static_args], scratch.data_ptr(), scratch.numel())
     else:
 
-        def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int) -> list[int]:
+        def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int,
+                     static_instances: int, static_tuples: int, static_args: int) -> list[int]:
             if flags & _OVERFLOW_INPUT:
                 raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
                              "history step narrower than its instance, a history count outside [0, steps], or a bit "
@@ -538,7 +556,7 @@ def encode_arrays(
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
                                     f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}, "
                                     f"history {steps}): use index_dtype='int64'")
-            specs = layout.specs(torch, rows.graphs, entities, args, targets, steps)
+            specs = layout.specs(torch, rows.graphs, entities, args, targets, steps, static_instances, static_args)
             for name, (shape, dtype) in specs.items():
                 if name != "sizes":
                     out[name] = torch.empty(shape, dtype=dtype, device=device)
@@ -714,7 +732,13 @@ class DeviceFlatBatch:
         self._layout = layout
         self._arrays = {name: arrays[name] for name in _ARRAYS if layout.present(name)}
         self._sizes = None if exact else arrays["sizes"]
+        self._static_sizes = arrays["static_sizes"]
         self._graphs = self._arrays["task_ids"].shape[0]
+
+    @property
+    def device_static_sizes(self) -> Optional[Any]:
+        """The device counts [instances, tuples, args] of the shared static blocks, or None."""
+        return self._static_sizes if self._layout.shared else None
 
     @property
     def device(self) -> Any:
@@ -764,6 +788,8 @@ class DeviceFlatBatch:
         if self._sizes is None:
             return None
         values = dict(zip(_SIZE_FIELDS, self._sizes.tolist(), strict=True))
+        if self._layout.shared:
+            values.update(zip(("static_instances", "static_tuples", "static_args"), self._static_sizes.tolist(), strict=True))
         if not self._layout.history:
             del values["history"]  # a schema without history has the keys of a batch without it
         flags = values["overflow"]
@@ -785,7 +811,7 @@ class DeviceFlatBatch:
             "index_dtype": 1 if self._options["index_dtype"] == "int64" else 0,
             "schema_fingerprint": _signed(self._fingerprint),
             "table_fingerprint": _signed(self._table_fingerprint),
-            "statics": 0,
+            "statics": int(self._layout.shared),
         }
         arrays = self._arrays
         if self._device_graphs is not None:
@@ -797,6 +823,11 @@ class DeviceFlatBatch:
                        "relation_arg_offsets": g * self.num_relations + 1, "entity_role": sizes["entities"],
                        "entity_ref": sizes["entities"], "relation_args": sizes["args"],
                        "target_entity": sizes["targets"], "target_group": sizes["targets"]}
+            if self._layout.shared:
+                instances, _, args = self._static_sizes.tolist()
+                extents.update(static_task_ids=instances, static_offsets=instances * self._layout.static_relations + 1,
+                               static_arg_offsets=instances * self._layout.static_relations + 1, static_args=args,
+                               static_relations=self._layout.static_relations)
             arrays = {key: value[:g] if key == "relation_counts" else value[:extents[key]] for key, value in arrays.items()}
         name = "torch" if framework is None else framework
         if name in ("torch", "pytorch", "dlpack", "array_api"):
@@ -814,7 +845,7 @@ class DeviceFlatBatch:
 
     @classmethod
     def from_arrays(cls, encoder: Any, arrays: Any, exact: bool = False) -> "DeviceFlatBatch":
-        """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its 17 tensors (the arrays in the
+        """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its output tensors (the arrays in the
         order of ``mymyr.encoding.DeviceFlatBatch.array_names``, sizes last), for ``encoder``."""
         if len(arrays) != len(_OUTPUTS):
             raise _error(f"expected the {len(_OUTPUTS)} outputs of encode_flat, got {len(arrays)}")
@@ -934,11 +965,11 @@ class DeviceFlatStream:
         if caps[0] < self.capacity:
             raise _error("flush graph capacity must cover the entire device ring")
         # a ring's schema has no history steps: the history capacity plays no part
-        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:4]), self.device)
+        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:]), self.device)
         graphs = torch.empty(1, dtype=torch.int64, device=self.device)
         scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device, self._derived is not None)
         self._native.flush(self._stream_ptr, self._rows.fields, self.device_status.data_ptr(), _pointers(out),
-                           [self.capacity, *caps[1:4]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
+                           [self.capacity, *caps[1:4], *caps[5:]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(self.encoder, out, exact=False)
         result._device_graphs = graphs
         result._keepalive = (self, scratch)
@@ -978,10 +1009,13 @@ class DeviceCollator:
         encoder = first._encoder
         # Keep capacity storage: empty live views have null data pointers.
         arrays = [batch._arrays.copy() for batch in batches]
-        inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
+        inputs = [_pointers({**a, "sizes": batch._sizes, "static_sizes": batch._static_sizes}) for a, batch in zip(arrays, batches, strict=True)]
         counts = [batch.num_graphs for batch in batches]
         encoders = [batch._encoder for batch in batches]
-        native = NativeCollator(encoders, first.device.index, _stream(first.device), inputs, counts)
+        shapes = [[count, batch.static_task_ids.numel() if batch._layout.shared else 0,
+                   batch.static_args.numel() if batch._layout.shared else 0]
+                  for count, batch in zip(counts, batches, strict=True)]
+        native = NativeCollator(encoders, first.device.index, _stream(first.device), inputs, shapes)
         self._prepared = (torch, first, encoder, native, arrays, batches, counts)
         self._stream = _stream(first.device)
 
@@ -997,12 +1031,13 @@ class DeviceCollator:
         out: dict[str, Any] = {}
         caps = None if capacities is None else _capacities(capacities, layout)
         if caps is None:
-            def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
+            def allocate(entities: int, tuples: int, args: int, targets: int, flags: int,
+                         static_instances: int, static_tuples: int, static_args: int) -> list[int]:
                 if flags & _OVERFLOW_INDEX:
                     raise OverflowError("mymyr: encoding: collated totals exceed the index type")
                 if flags:
                     raise _error("cannot collate an overflowed batch")
-                for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets).items():
+                for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets, 0, static_instances, static_args).items():
                     if name != "sizes":
                         out[name] = torch.empty(shape, dtype=dtype, device=first.device)
                 return _pointers(out)
@@ -1012,8 +1047,8 @@ class DeviceCollator:
             if caps[0] < graphs:
                 raise _error("collated graphs exceed the output capacity")
             # collated batches have no history steps: the history capacity plays no part
-            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:4]), first.device)
-            native.encode(_pointers(out), [graphs, *caps[1:4]], scratch.data_ptr(), scratch.numel())
+            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:]), first.device)
+            native.encode(_pointers(out), [graphs, *caps[1:4], *caps[5:]], scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(encoder, out, exact=caps is None)
         result._keepalive = (native, scratch, batches, arrays)
         return result

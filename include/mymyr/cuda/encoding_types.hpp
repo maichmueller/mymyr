@@ -15,6 +15,8 @@ struct OutputArrays
     bool goal_complete = false;
     bool targets = false;
     bool history = false;  // history_offsets, history_entity and history_dt
+    bool shared_statics = false;
+    u32 static_relations = 0;
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
@@ -30,6 +32,8 @@ struct DeviceOutput
     /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). The per-graph
     /// and per-cell arrays past the live graphs of such an input are zero up to the graph capacity.
     u64* graphs = nullptr;
+    encoding::StaticShape static_capacities{};
+    encoding::StaticSizes* static_sizes = nullptr;
 };
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
 struct DeviceEncodeInput
@@ -83,6 +87,9 @@ struct DeviceCollationBatch
     encoding::Layout layout = encoding::Layout::Graph;
     encoding::IndexType index = encoding::IndexType::I32;
     bool shared_statics = false;
+    u32 static_relations = 0, instances = 0;
+    encoding::StaticShape static_capacities{};
+    const encoding::StaticSizes* static_sizes = nullptr;
     OutputArrays stored;
     u32 max_goal_level = 0;
     bool history = false;

@@ -26,7 +26,9 @@ struct CollationParams
 {
     const CollationSlice* slices = nullptr;
     u64 batches = 0, graphs = 0, relations = 0, cells = 0;
-    bool index64 = false, relation_major = false;
+    bool index64 = false, relation_major = false, shared_statics = false;
+    u32 static_relations = 0, instances = 0;
+    encoding::StaticSizes* static_totals = nullptr;
     u32 grid = 1;  // blocks of the grid-stride count and fill
     GraphCounts* graph_counts = nullptr;
     CellCounts* cell_counts = nullptr;

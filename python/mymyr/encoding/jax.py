@@ -44,7 +44,7 @@ from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
-_ARRAYS = _device._ARRAYS
+_ARRAYS = tuple(name for name in _device._ARRAYS if not name.startswith("static_"))
 _SIZE_FIELDS = _device._SIZE_FIELDS
 _OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
@@ -67,6 +67,8 @@ class _Registration:
         self.fingerprint = encoder.schema_fingerprint
         self.table_fingerprint = encoder.table_fingerprint
         self.options = encoder.options
+        if encoder.options["statics"] == "shared":
+            raise _error("JAX FFI does not encode shared statics: its result signature has no static block arrays")
         self.layout = _device.layout_of(encoder)
         self.info = _encoding_jax.info(handle)
         self.scratch: dict[tuple[int, int, bool], int] = {}
@@ -548,7 +550,7 @@ def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entitie
           history: int, threads: int) -> tuple[dict[str, Any], Any]:
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
     specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
-    del specs["sizes"]
+    specs = {name: specs[name] for name in _ARRAYS}
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
 
@@ -654,7 +656,7 @@ def encode(
         _signed(reg.table_fingerprint),
     )
     if capacities is not None:
-        caps_graphs, entities, args, targets, history_steps = _device._capacities(capacities, reg.layout)
+        caps_graphs, entities, args, targets, history_steps, _, _ = _device._capacities(capacities, reg.layout)
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
         arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)

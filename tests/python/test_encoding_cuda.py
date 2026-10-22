@@ -927,44 +927,7 @@ def test_numeric_relations_and_the_simple_graph_are_refused_by_the_device_before
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
-
-
-def test_shared_statics_are_refused_by_the_device_before_any_launch():
-    dev = gpu()
-    task = text_task("gripper__prob05")
-    states = walk(task, steps=3, walks=1)
-    encoder = encoding.FlatRelationEncoder(task, statics="shared")
-    rows = to_device(np.asarray(task.encode(states)), dev)
-    message = "^mymyr: encoding: the device does not encode shared statics"
-    with pytest.raises(ValueError, match=message):
-        encoder.encode(rows)
-    with pytest.raises(ValueError, match=message):
-        encoder.reserve_device(8)
-    with pytest.raises(ValueError, match=message):
-        encoder.device_stream(8)
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    handle = rt.register(encoder)
-    caps = dict.fromkeys(("graphs", "entities", "args", "targets"), 64)
-    try:
-        with pytest.raises(ValueError, match=message):
-            call_op(handle, rows, None, None, [None] * 4, caps)
-        with FakeTensorMode() as mode, pytest.raises(ValueError, match=message):
-            call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
-    finally:
-        rt.unregister(handle)
-    # the native collator of an empty batch: nothing is read and no kernel is launched
-    from mymyr._core._encoding import DeviceCollator as NativeCollator
-
-    with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
-    assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
-
-
-# ------------------------------------------------------------------------------------------------ the op
-
-OP_ARGS = 8
+        NativeCollator([encoder], dev.index, 0, [[0] * len(encoding.DeviceFlatBatch.array_names)], [[0, 0, 0]])
 
 
 def op_inputs(case, dev, goals=None):

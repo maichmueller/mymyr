@@ -862,7 +862,7 @@ def test_shared_statics_are_refused_before_tracing_on_every_platform(cases):
     rows = halves(case.rows)
     encoder = encoding.FlatRelationEncoder(case.source, statics="shared")
     caps = exact_capacities(host_encode(encoding.FlatRelationEncoder(case.source), case))
-    message = r"^mymyr: encoding: the device does not encode shared statics"
+    message = r"^mymyr: encoding: JAX FFI does not encode shared statics"
     with pytest.raises(ValueError, match=message):
         ej.register(encoder)
     assert ej.registered(encoder) is None

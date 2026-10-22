@@ -627,13 +627,14 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 
 
 def _encode_flat_outputs(
-    encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int, history: int
+    encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int, history: int,
+    static_instances: int = 0, static_args: int = 0
 ) -> list[Tensor]:
     layout = _device.layout_of(lookup(int(encoder)))
     n = states.shape[0] if states.ndim == 2 else 1
     if n > graphs:
         raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
-    specs = layout.specs(torch, n, entities, args, targets, history)
+    specs = layout.specs(torch, n, entities, args, targets, history, static_instances, static_args)
     return [torch.empty(shape, dtype=dtype, device=states.device) for shape, dtype in specs.values()]
 
 
@@ -662,6 +663,8 @@ def encode_flat(
     args: int,
     targets: int,
     history: int,
+    static_instances: int = 0,
+    static_args: int = 0,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -680,7 +683,8 @@ def encode_flat(
         raise ValueError("mymyr: encoding: goals are (goal_pos, goal_neg) or all four masks")
     enc = lookup(encoder)
     caps = _device._capacities(
-        {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history},
+        {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history,
+         "static_instances": static_instances, "static_args": static_args},
         _device.layout_of(enc),
     )
     subgoals = _layer_tuple(
@@ -714,5 +718,6 @@ def _(
     encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, subgoal_pos, subgoal_neg,
     subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
     history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
+    static_instances=0, static_args=0,
 ):  # fmt: skip
-    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history)
+    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history, static_instances, static_args)

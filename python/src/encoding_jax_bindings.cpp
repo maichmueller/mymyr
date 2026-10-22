@@ -196,6 +196,8 @@ struct EncoderEntry : FfiEntry
             auto made = std::make_shared<Device>();
             made->ordinal = ordinal;
             made->ctx = cuda::DeviceContext::create(ordinal);
+            if (encoder->schema().shared_statics())
+                throw std::invalid_argument("mymyr: encoding: JAX FFI has no shared static block outputs");
             made->encoder = std::make_unique<cuda::DeviceEncoder>(made->ctx, encoder);
             made->held.emplace(made->encoder->context().acquire());
             cuda::DeviceGuard guard(ordinal);

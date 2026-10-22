@@ -55,6 +55,9 @@ struct DeviceCollator::Impl
         params.index64 = first.index == encoding::IndexType::I64;
         params.relation_major = first.layout == encoding::Layout::Relation;
         params.batches = batches.size();
+        params.shared_statics = first.shared_statics;
+        params.static_relations = first.static_relations;
+        params.instances = first.instances;
         staging = context->lease_pinned(1, mul(batches.size(), sizeof(detail::CollationSlice)));
         auto* host = static_cast<detail::CollationSlice*>(staging.data(0));
         for (u64 i = 0; i < batches.size(); ++i)
@@ -66,7 +69,13 @@ struct DeviceCollator::Impl
             if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
             if (b.table_fingerprint != first.table_fingerprint)
                 invalid("collate received batches of different tables: their task ids name different instances");
-            if (b.shared_statics) invalid("device collate requires repeated statics");
+            if (b.static_relations != first.static_relations || b.instances != first.instances)
+                invalid("collate received different static catalogs");
+            if (b.shared_statics && (!b.static_sizes || !b.arrays.static_offsets || !b.arrays.static_arg_offsets ||
+                (b.static_capacities.instances && !b.arrays.static_task_ids) ||
+                (b.static_capacities.args && !b.arrays.static_args) ||
+                (b.static_relations && !b.arrays.static_relations)))
+                invalid("shared collation needs the source static blocks and their sizes");
             if (b.max_goal_level != 0 || b.history || b.arrays.history_offsets || b.arrays.history_entity ||
                 b.arrays.history_dt)
                 invalid("device collation carries no subgoal layers or history steps");
@@ -111,6 +120,8 @@ struct DeviceCollator::Impl
         if (!scratch || bytes < total_bytes || reinterpret_cast<std::uintptr_t>(scratch) % 256)
             invalid("device collation scratch is null, too small, or not aligned to 256 bytes");
         if (!output.sizes) invalid("device collation needs output sizes");
+        if (params.shared_statics && !output.static_sizes)
+            invalid("shared collation needs output static sizes");
         if (phase != 1)
         {
             const auto& a = output.arrays;
@@ -130,6 +141,11 @@ struct DeviceCollator::Impl
                                 : (a.target_entity || a.target_group)))
                 invalid("collation target arrays do not match the schema");
             if (output.capacities.args && !a.relation_args) invalid("collation arguments are null");
+            if (params.shared_statics && (!a.static_offsets || !a.static_arg_offsets ||
+                (output.static_capacities.instances && !a.static_task_ids) ||
+                (output.static_capacities.args && !a.static_args) ||
+                (params.static_relations && !a.static_relations)))
+                invalid("shared collation needs the static output arrays");
             if (a.history_offsets || a.history_entity || a.history_dt)
                 invalid("device collation carries no subgoal layers or history steps");
         }
@@ -138,6 +154,7 @@ struct DeviceCollator::Impl
         p.graph_counts = reinterpret_cast<detail::GraphCounts*>(base);
         p.cell_counts = reinterpret_cast<detail::CellCounts*>(base + cell_offset);
         p.bad = reinterpret_cast<u64*>(base + bad_offset);
+        p.static_totals = reinterpret_cast<encoding::StaticSizes*>(base + bad_offset + sizeof(u64));
         p.temp = base + temp_offset;
         p.output = output;
         check(detail::launch_collation(p, phase, stream), "device collation kernels");
@@ -154,10 +171,13 @@ DeviceCollator::~DeviceCollator() = default;
 u64 DeviceCollator::graphs() const noexcept { return m_impl->params.graphs; }
 u64 DeviceCollator::scratch_bytes() const noexcept { return m_impl->total_bytes; }
 void DeviceCollator::encode(void* scratch, u64 bytes, const DeviceOutput& out) const { m_impl->run(0, scratch, bytes, out); }
-void DeviceCollator::count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const
+void DeviceCollator::count(void* scratch, u64 bytes, encoding::FlatSizes* sizes,
+                           encoding::StaticSizes* statics) const
 {
     DeviceOutput out;
     out.sizes = sizes;
+    out.static_sizes = statics;
+    out.static_capacities = {~u64{0}, ~u64{0}};
     out.capacities = {graphs(), ~u64{0}, ~u64{0}, ~u64{0}};
     m_impl->run(1, scratch, bytes, out);
 }
