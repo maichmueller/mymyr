@@ -33,6 +33,7 @@
 #include "mymyr/rl/task_suite.hpp"
 
 #include <memory>
+#include <string>
 
 namespace mymyr::cuda
 {
@@ -61,6 +62,11 @@ public:
     void write(rl::Expansion& out);
     /// count() then write().
     void expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options = {});
+    /// DeviceExpander::async_unsupported and expand_async of a suite of one domain; a suite of several domains reads
+    /// its classification back, so it always needs the host.
+    [[nodiscard]] std::string async_unsupported(u64 rows, const rl::ExpandOptions& options = {}) const;
+    void expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
+                      const rl::ExpandOptions& options = {});
     /// rl::pad on the device (DeviceExpander::pad).
     void pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out);
 

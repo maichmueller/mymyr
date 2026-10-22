@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import weakref
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,9 +11,28 @@ from mymyr.encoding import _device as d
 from mymyr.rl import as_table
 
 
+_COLUMNS = ("schema", "binding", "offsets", "parent", "succ", "derived")
+
+# The columns of device Expansions imported outside capture, for encodes captured into CUDA graphs later: an import
+# makes the current stream wait for the expansion's producer, which a capture cannot do.
+_imported: "weakref.WeakKeyDictionary[Any, SimpleNamespace]" = weakref.WeakKeyDictionary()
+_imported_lock = threading.Lock()
+
+
+def _expansion_type() -> Any:
+    try:
+        from mymyr.cuda import DeviceExpansion
+    except ImportError:
+        return None
+    return DeviceExpansion
+
+
 def _integer(torch: Any, value: Any, name: str, device: Any, keep: list, ndim: int) -> Any:
     if hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] != 2:
         raise d._error(f"'{name}' must be a CUDA array on {device}")
+    if not isinstance(value, torch.Tensor) and torch.cuda.is_current_stream_capturing():
+        raise d._error(f"'{name}' is not a torch tensor: during CUDA graph capture, the arrays of an encode are torch "
+                       "tensors or the columns of an expansion that an encode used before the capture")
     t = d._cuda_tensor(torch, value, name, keep)
     if t.device != device or t.dtype != torch.int32 or t.ndim != ndim or not t.is_contiguous():
         raise d._error(f"'{name}' must be a contiguous int32 CUDA tensor with {ndim} dimensions on {device}")
@@ -19,23 +40,52 @@ def _integer(torch: Any, value: Any, name: str, device: Any, keep: list, ndim: i
     return t
 
 
-def action_arrays(encoder: Any, actions: Any, device: Any, graphs: int, keep: list) -> Any:
-    torch = d._torch()
+def _expansion_columns(torch: Any, expansion: Any) -> SimpleNamespace:
+    """A device Expansion's columns as torch tensors. Outside capture they are imported (the current stream waits for
+    the expansion) and kept with the expansion; during capture the kept columns serve."""
+    if torch.cuda.is_current_stream_capturing():
+        with _imported_lock:
+            columns = _imported.get(expansion)
+        if columns is None:
+            raise d._error("the expansion's columns were never imported: encode with it once before the CUDA graph "
+                           "capture (a warm-up), or pass its columns as torch tensors")
+        return columns
+    keep: list = []
+    columns = SimpleNamespace(table=expansion.table, overflow=expansion.overflow, status=None)
+    for name in _COLUMNS:
+        value = getattr(expansion, name)
+        setattr(columns, name, None if value is None else d._cuda_tensor(torch, value, f"actions.{name}", keep))
+    with _imported_lock:
+        _imported[expansion] = columns
+    return columns
+
+
+def columns_of(torch: Any, actions: Any) -> SimpleNamespace:
+    """The columns of a device expansion, its (schema, binding, offsets), or expand_flat's six outputs."""
     if isinstance(actions, (tuple, list)):
         if len(actions) == 3:
-            actions = SimpleNamespace(schema=actions[0], binding=actions[1], offsets=actions[2], parent=None)
-        elif len(actions) == 6:
-            actions = SimpleNamespace(succ=actions[0], parent=actions[1], schema=actions[2], binding=actions[3],
-                                      offsets=actions[5])
-        else:
-            raise d._error("device actions are an expansion, (schema, binding, offsets), or expand_flat's six outputs")
+            return SimpleNamespace(schema=actions[0], binding=actions[1], offsets=actions[2], parent=None, succ=None,
+                                   derived=None, status=None)
+        if len(actions) == 6:
+            return SimpleNamespace(succ=actions[0], parent=actions[1], schema=actions[2], binding=actions[3],
+                                   offsets=actions[5], derived=None, status=None)
+        raise d._error("device actions are an expansion, (schema, binding, offsets), or expand_flat's six outputs")
+    expansion = _expansion_type()
+    if expansion is not None and isinstance(actions, expansion):
+        return _expansion_columns(torch, actions)
+    return actions
+
+
+def action_arrays(encoder: Any, actions: Any, device: Any, graphs: int, keep: list) -> Any:
+    torch = d._torch()
+    actions = columns_of(torch, actions)
     if getattr(actions, "overflow", False):
         raise d._error("the expansion overflowed")
     if hasattr(actions, "table") and as_table(actions.table).fingerprint != as_table(encoder.table).fingerprint:
         raise d._error("the action expansion belongs to another table")
     arrays = {}
     for name, ndim in (("schema", 1), ("binding", 2), ("offsets", 1)):
-        if not hasattr(actions, name):
+        if getattr(actions, name, None) is None:
             raise d._error(f"the device expansion needs '{name}'")
         arrays[name] = _integer(torch, getattr(actions, name), f"actions.{name}", device, keep, ndim)
     parent = getattr(actions, "parent", None)
@@ -47,7 +97,8 @@ def action_arrays(encoder: Any, actions: Any, device: Any, graphs: int, keep: li
         raise d._error("the expansion needs G + 1 offsets and equally many schema, binding and parent rows")
     if arrays["binding"].shape[1] < as_table(encoder.table).label_width:
         raise d._error("the action label width is narrower than the table's")
-    return SimpleNamespace(**arrays, capacity=capacity, source=actions)
+    return SimpleNamespace(**arrays, capacity=capacity, succ=getattr(actions, "succ", None),
+                           derived=getattr(actions, "derived", None), status=getattr(actions, "status", None))
 
 
 def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
@@ -58,7 +109,8 @@ def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
                           0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1], 0]
 
 
-def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any) -> Any:
+def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any, status: Any = None) -> Any:
+    """The row fields of a horizon view; ``status`` is the device status word of the expansion that produced it."""
     torch = d._torch()
     if getattr(view, "depth", 0) is not None and getattr(view, "depth", 0) >= 2:
         raise d._error("the device does not encode horizons of depth 2 or more")
@@ -99,15 +151,16 @@ def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: An
         width = as_table(encoder.table).label_width
     size = 6 * graphs + 8 * nodes.shape[0] + 5 * edges
     scratch = torch.empty(max(1, size), dtype=torch.int32, device=device)
-    rows.fields[42:53] = [no.data_ptr(), eo.data_ptr(),
+    rows.fields[42:54] = [no.data_ptr(), eo.data_ptr(),
                           *(0 if a is None else a.data_ptr() for a in edge_arrays),
-                          nodes.shape[0], edges, width, scratch.data_ptr(), scratch.numel()]
-    rows.tensors.extend([nodes, scratch, *keep])
+                          nodes.shape[0], edges, width, scratch.data_ptr(), scratch.numel(),
+                          0 if status is None else status.data_ptr()]
+    rows.tensors.extend([nodes, scratch, *keep, *([] if status is None else [status])])
     return rows
 
 
 def encode_horizon(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any,
-                   framework: Any, threads: Any, pool: Any, capacities: Any) -> Any:
+                   framework: Any, threads: Any, pool: Any, capacities: Any, status: Any = None) -> Any:
     if pool is not None:
         raise d._error("pool is a pool of host threads: it has no meaning for rows on the device")
     if framework not in (None, "torch", "pytorch"):
@@ -116,7 +169,7 @@ def encode_horizon(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: 
     d._drain(torch)
     layout = d.layout_of(encoder)
     caps = None if capacities is None else d._capacities(capacities, layout)
-    rows = horizon_rows(encoder, view, derived, goals, subgoals)
+    rows = horizon_rows(encoder, view, derived, goals, subgoals, status)
     arrays = d._encode_rows(encoder, rows, caps, rows.tensors)
     return d.DeviceFlatBatch(encoder, arrays, exact=caps is None)
 
@@ -138,10 +191,12 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     if actions is None:
         actions = rl.expand(encoder.table, states, ids, framework="torch", stream=_stream(states))
     a = action_arrays(encoder, actions, states.device, rows.graphs, keep)
-    source = a.source
-    if not hasattr(source, "succ"):
+    if a.succ is None:
         raise d._error("transition actions need successor rows as well as labels and offsets")
-    children = d._words(torch, d._cuda_tensor(torch, source.succ, "actions.succ", keep), "actions.succ")
+    if not isinstance(a.succ, torch.Tensor) and torch.cuda.is_current_stream_capturing():
+        raise d._error("'actions.succ' is not a torch tensor: during CUDA graph capture, the arrays of an encode are "
+                       "torch tensors or the columns of an expansion that an encode used before the capture")
+    children = d._words(torch, d._cuda_tensor(torch, a.succ, "actions.succ", keep), "actions.succ")
     if children.device != states.device or children.shape[0] != a.capacity:
         raise d._error("the successor rows need the parents' device and the label arrays' row count")
     width = max(states.shape[1], children.shape[1])
@@ -158,20 +213,57 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     dst = torch.empty_like(src)
     schema, binding = torch.empty_like(a.schema), torch.empty_like(a.binding)
     native = d._device_encoder(encoder, states.device.index)
+    scratch = torch.empty(native.horizon_scratch_bytes(a.capacity, merge), dtype=torch.uint8, device=states.device)
     native.build_horizon(_stream(states), rows.fields, children.data_ptr(), d._stride(children),
-                         [nodes.data_ptr(), no.data_ptr(), src.data_ptr(), dst.data_ptr(), schema.data_ptr(), binding.data_ptr()], merge)
-    d._retain(torch, [actions, children, *rows.tensors, *keep], states.device)
+                         [nodes.data_ptr(), no.data_ptr(), src.data_ptr(), dst.data_ptr(), schema.data_ptr(), binding.data_ptr()], merge,
+                         scratch.data_ptr(), scratch.numel())
+    d._retain(torch, [actions, children, scratch, *rows.tensors, *keep], states.device)
     return HorizonView(nodes, no, a.offsets, src, dst, schema, binding, ids)
+
+
+def _bounded_expansion(encoder: Any, states: Any, task_ids: Any, derived: bool, capacities: Any) -> SimpleNamespace:
+    """The expansion of the parents into arrays of the entity capacity's rows, without waiting for the device: every
+    successor is a node with a state entity of its own, so an encoding within the capacities has at most that many.
+    Its total and offsets stay on the device; its status word (bit 0: more successors than rows, bit 1: an invalid
+    row) reaches the encoding's overflow flags."""
+    import mymyr.rl as rl
+    from mymyr.rl.torch._ops import _stream
+
+    torch = d._torch()
+    keep: list = []
+    rows = d._words(torch, d._cuda_tensor(torch, states, "states", keep), "states")
+    ids = None if task_ids is None else d._cuda_tensor(torch, task_ids, "task_ids", keep)
+    table = as_table(encoder.table)
+    m = d._capacities(capacities, d.layout_of(encoder))[1]
+    int32 = dict(dtype=torch.int32, device=rows.device)
+    x = SimpleNamespace(
+        succ=torch.empty((m, rows.shape[1]), dtype=torch.int64, device=rows.device),
+        parent=torch.empty(m, **int32), schema=torch.empty(m, **int32),
+        binding=torch.empty((m, table.label_width), **int32), offsets=torch.empty(rows.shape[0] + 1, **int32),
+        derived=torch.empty((m, table.derived_words), dtype=torch.int64, device=rows.device) if derived else None,
+        status=torch.empty(1, **int32),
+    )
+    rl.expand_into(encoder.table, rows, ids, succ=x.succ, parent=x.parent, schema=x.schema, binding=x.binding,
+                   derived=x.derived, offsets=x.offsets, status=x.status, stream=_stream(rows))
+    d._retain(torch, keep, rows.device)
+    return x
 
 
 def encode_transitions(encoder: Any, states: Any, task_ids: Any, derived: Any, goals: Any, actions: Any,
                        subgoals: Any, framework: Any, threads: Any, pool: Any, capacities: Any) -> Any:
     if pool is not None or framework not in (None, "torch", "pytorch"):
         raise d._error("device transitions need torch output and no host thread pool")
-    if derived is not None and actions is None:
+    torch = d._torch()
+    if actions is None and torch.cuda.is_current_stream_capturing():
+        raise d._error("transitions expand their successors outside CUDA graph capture: to capture an encode, pass "
+                       "actions= (an expansion made before the capture)")
+    if actions is None and capacities is not None:
+        actions = _bounded_expansion(encoder, states, task_ids, derived is not None, capacities)
+    elif actions is None and derived is not None:
         import mymyr.rl as rl
         from mymyr.rl.torch._ops import _stream
         actions = rl.expand(encoder.table, states, task_ids, derived=True, framework="torch", stream=_stream(states))
+    actions = columns_of(torch, actions)
     view = build_horizon(encoder, states, task_ids, actions, merge=False)
     node_derived = None
     if derived is not None:
@@ -181,4 +273,5 @@ def encode_transitions(encoder: Any, states: Any, task_ids: Any, derived: Any, g
         labels = SimpleNamespace(succ=children, schema=actions.schema, binding=actions.binding,
                                  parent=getattr(actions, "parent", None), offsets=actions.offsets)
         node_derived = build_horizon(encoder, derived, task_ids, labels, merge=False).nodes
-    return encode_horizon(encoder, view, node_derived, goals, subgoals, framework, threads, pool, capacities)
+    return encode_horizon(encoder, view, node_derived, goals, subgoals, framework, threads, pool, capacities,
+                          getattr(actions, "status", None))

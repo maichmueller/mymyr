@@ -59,6 +59,10 @@ struct DeviceHorizonInput
     u32 label_width = 0;
     u32* scratch = nullptr;
     u64 scratch_words = 0;
+    /// Optional device status of the expansion that produced the horizon (DeviceExpander::expand_async): bit 0 says
+    /// its successors exceed its capacity, and the batch reports k_overflow_capacity instead of the invalid node
+    /// offsets that follow from it; bit 1 says a parent row is invalid, and the batch reports k_overflow_input.
+    const u32* expansion_status = nullptr;
 };
 
 /// Canonical edges and kinship storage for device depth-one horizons. Cousin lists are empty at this depth.
@@ -132,7 +136,9 @@ namespace mymyr::cuda
 {
 /// Caller-owned output of a depth-one builder. Nodes hold graphs + action capacity rows, node_offsets graphs + 1,
 /// and source/destination/schema action capacity entries, binding capacity * label_width entries. Edges are ordered
-/// by destination and then by their canonical expansion label; edge offsets remain those of the expansion.
+/// by destination and then by their canonical expansion label; edge offsets remain those of the expansion. Scratch
+/// holds depth_one_horizon_scratch_bytes(capacity, merge) bytes, 256-byte aligned, and belongs to the call until its
+/// work on the stream is done.
 struct DeviceHorizonBuild
 {
     u64* nodes = nullptr;
@@ -142,5 +148,7 @@ struct DeviceHorizonBuild
     bool merge = true;
     i32* schema = nullptr;
     i32* binding = nullptr;
+    void* scratch = nullptr;
+    u64 scratch_bytes = 0;
 };
 }

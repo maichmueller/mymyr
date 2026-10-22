@@ -338,8 +338,14 @@ Streams do not encode horizons (a horizon is a batch of graphs with offsets, not
 full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, into torch
 `DeviceFlatBatch` arrays. `horizon(table, cuda_rows, depth=1)` builds compact device nodes from an expansion;
 `merge` controls first-seen state merging. Device construction requires `depth=1`; node limits and host pools raise
-`ValueError`. Encoding views of depth 2 or more is refused. Device transition encoders expand and encode
-on the current stream; supplied expansions reuse their successor rows. The torch op takes node and edge offsets,
+`ValueError`. Encoding views of depth 2 or more is refused. The device builder runs every graph and successor in
+parallel (merging by a hash table over each graph's rows): its time grows with the successors, not with the square of a
+graph's fanout. Device transition encoders expand and encode on the current stream; supplied expansions reuse their
+successor rows. With `capacities`, the expansion is bounded by the entity capacity (every successor is a node with a state
+entity) and nothing waits for the device: an expansion past it makes the batch report `capacity_overflow` (an invalid
+parent row, `invalid_input`). The automatic expansion does not run during CUDA graph capture: capture an encode with
+`actions=` an expansion that an encode used before the capture (that warm-up imports its columns), or with its columns as
+torch tensors; other forms raise `ValueError` before anything is enqueued. The torch op takes node and edge offsets,
 endpoints and labels, or parent rows with `action_succ` and expansion labels to build transitions. JAX FFI refuses
 horizons and transitions because it has no node-offset or edge operands.
 Host invalid views raise `ValueError` naming the graph

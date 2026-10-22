@@ -433,6 +433,15 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     if constexpr (Live)
         if (p.rows_overflow && *p.rows_overflow != 0)
             sizes.overflow |= enc::k_overflow_capacity;
+    // a horizon built from an expansion that overflowed its capacity has invalid node offsets: the capacity is the cause
+    if (p.horizon_mode && p.horizon.expansion_status)
+    {
+        const u32 status = *p.horizon.expansion_status;
+        if (status & 1u)
+            sizes.overflow = (sizes.overflow & ~enc::k_overflow_input) | enc::k_overflow_capacity;
+        if (status & 2u)
+            sizes.overflow |= enc::k_overflow_input;
+    }
     return sizes;
 }
 
@@ -1000,13 +1009,3 @@ cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStr
 }
 
 }  // namespace mymyr::cuda::detail
-
-namespace mymyr::cuda::detail
-{
-cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
-                                  const DeviceHorizonBuild& output, cudaStream_t stream)
-{
-    horizon_build_kernel<<<1, 1, 0, stream>>>(parents, children, child_stride, output);
-    return cudaPeekAtLastError();
-}
-}

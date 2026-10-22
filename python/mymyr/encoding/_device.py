@@ -348,8 +348,8 @@ class _Rows:
         self.tensors = tensors
         self.fields = [graphs, w.data_ptr() if w.numel() else 0, _stride(w), w.shape[1], ids_ptr, derived_ptr,
                        derived_stride, *goal[:4], *goal[4:], *sub, *hist]
-        self.fields += [0] * 18
-        if len(self.fields) != 53:
+        self.fields += [0] * 19
+        if len(self.fields) != 54:
             raise AssertionError("the row fields have a fixed length")
 
     def _same_device(self, t: Any, name: str) -> None:

@@ -2862,3 +2862,141 @@ TEST(DeviceEncodeHorizon, DeeperViewsAndInvalidExpansionOffsetsSetTheInputFlag)
     EXPECT_NE(result.sizes.overflow & encoding::k_overflow_input, 0u);
 }
 }
+
+namespace
+{
+/// The device builder's view of `roots` (merged or not) from their host expansion, read back.
+encoding::HorizonGraphs device_build(const cuda::ContextPtr& ctx, cudaStream_t stream, const rl::TaskTable& table,
+                                     const test::Rows& roots, bool merge)
+{
+    const u64 G = roots.size();
+    const u32 W = roots.words, L = std::max<u32>(1, table.label_width());
+    const rl::StateBatchView rows{roots.data.data(), G, W, 0, 0};
+    rl::Expansion count;
+    rl::expand(table, rows, roots.task_ids.data(), count);
+    const u64 M = count.total;
+    std::vector<u64> succ(std::max<u64>(M, 1) * W);
+    std::vector<i32> schema(std::max<u64>(M, 1)), binding(std::max<u64>(M, 1) * L), parent(std::max<u64>(M, 1)),
+        offsets(G + 1);
+    rl::Expansion x;
+    x.capacity = M;
+    x.words = W;
+    x.label_width = L;
+    x.succ = succ.data(); x.schema = schema.data(); x.binding = binding.data(); x.parent = parent.data();
+    x.offsets = offsets.data();
+    rl::expand(table, rows, roots.task_ids.data(), x);
+    LabelUploads upload{ctx, stream, {}};
+    cuda::DeviceEncodeInput in;
+    in.graphs = G;
+    in.states = upload.put(roots.data);
+    in.task_ids = upload.put(roots.task_ids);
+    in.state_stride = in.state_words = W;
+    in.actions = {upload.put(offsets), upload.put(schema), upload.put(binding), upload.put(parent), M, L, nullptr};
+    const u64 bytes = cuda::depth_one_horizon_scratch_bytes(M, merge);
+    cuda::DeviceBuffer nodes(ctx, std::max<u64>(G + M, 1) * W * sizeof(u64), stream),
+        node_offsets(ctx, (G + 1) * sizeof(i32), stream), src(ctx, std::max<u64>(M, 1) * sizeof(i32), stream),
+        dst(ctx, std::max<u64>(M, 1) * sizeof(i32), stream), out_schema(ctx, std::max<u64>(M, 1) * sizeof(i32), stream),
+        out_binding(ctx, std::max<u64>(M, 1) * L * sizeof(i32), stream), scratch(ctx, bytes, stream);
+    const cuda::DeviceHorizonBuild out{static_cast<u64*>(nodes.data()), static_cast<i32*>(node_offsets.data()),
+                                       static_cast<i32*>(src.data()), static_cast<i32*>(dst.data()), merge,
+                                       static_cast<i32*>(out_schema.data()), static_cast<i32*>(out_binding.data()),
+                                       scratch.data(), bytes};
+    cuda::build_depth_one_horizon(in, upload.put(succ), W, out, stream);
+    auto down = [&]<class T>(const cuda::DeviceBuffer& b, u64 n, T) {
+        std::vector<T> v(n);
+        if (n)
+            cuda::check(cudaMemcpyAsync(v.data(), b.data(), n * sizeof(T), cudaMemcpyDeviceToHost, stream), "download");
+        cuda::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+        return v;
+    };
+    encoding::HorizonGraphs h;
+    h.words = W;
+    h.label_width = L;
+    h.task_ids = roots.task_ids;
+    h.node_offsets = down(node_offsets, G + 1, i32{});
+    h.edge_offsets = offsets;
+    const u64 n = h.node_offsets.back() > 0 ? static_cast<u64>(h.node_offsets.back()) : 0;
+    h.nodes = down(nodes, n * W, u64{});
+    h.edge_src = down(src, M, i32{});
+    h.edge_dst = down(dst, M, i32{});
+    h.edge_schema = down(out_schema, M, i32{});
+    h.edge_binding = down(out_binding, M * L, i32{});
+    return h;
+}
+}  // namespace
+
+TEST(DeviceEncodeHorizon, TheParallelBuilderEqualsTheHostBuilderMergedAndUnmerged)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const auto& table : {table_of("blocks", {"smedium", "probBLOCKS-8-0"}), table_of("philosophers", {"p03-phil4"}),
+                              table_of("gripper", {"p02"})})
+    {
+        auto roots = test::random_walk(*table, 0, 6, 3);
+        if (table->size() > 1)
+        {
+            const auto other = test::random_walk(*table, 1, 2, 3);
+            roots.data.insert(roots.data.end(), other.data.begin(), other.data.end());
+            roots.task_ids.insert(roots.task_ids.end(), other.task_ids.begin(), other.task_ids.end());
+        }
+        // a repeated root: its graph is built again
+        roots.data.insert(roots.data.end(), roots.data.begin(), roots.data.begin() + roots.words);
+        roots.task_ids.push_back(roots.task_ids.front());
+        for (const bool merge : {false, true})
+        {
+            SCOPED_TRACE(merge ? "merged" : "unmerged");
+            encoding::HorizonBuild options;
+            options.depth = 1;
+            options.merge = merge;
+            const auto host = encoding::build_horizon_graphs(*table, {roots.data.data(), roots.size(), roots.words, 0, 0},
+                                                             roots.task_ids.data(), options);
+            const auto device = device_build(ctx, stream, *table, roots, merge);
+            EXPECT_EQ(device.node_offsets, host.node_offsets);
+            EXPECT_EQ(device.edge_offsets, host.edge_offsets);
+            EXPECT_EQ(device.nodes, host.nodes);
+            EXPECT_EQ(device.edge_src, host.edge_src);
+            EXPECT_EQ(device.edge_dst, host.edge_dst);
+            EXPECT_EQ(device.edge_schema, host.edge_schema);
+            EXPECT_EQ(device.edge_binding, host.edge_binding);
+        }
+    }
+}
+
+TEST(DeviceEncodeHorizon, AnExpansionStatusReportsItsOverflowAsACapacityOverflow)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = table_of("blocks", {"smedium"});
+    const auto view = test::horizon_of(*table, test::random_walk(*table, 0, 2, 2), 1);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    LabelUploads upload{ctx, stream, {}};
+    encoding::FlatOptions options;
+    options.horizon.mode = encoding::HorizonMode::Delta;
+    const auto encoder = encoding::FlatEncoder::create(table, options);
+    const auto reference = host_reference(*encoder, view.input());
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve({view.num_nodes(), 0, 0, 0}, stream);
+    const u64 words = cuda::horizon_scratch_words(view.graphs(), view.num_nodes(), view.edge_src.size());
+    cuda::DeviceBuffer canonical(ctx, words * sizeof(u32), stream);
+    cuda::DeviceEncodeInput input;
+    input.graphs = view.graphs(); input.states = upload.put(view.nodes); input.task_ids = upload.put(view.task_ids);
+    input.state_stride = input.state_words = view.words;
+    std::vector<i32> invalid_offsets = view.node_offsets;
+    invalid_offsets.back() = -1;  // what the builder writes past an expansion that overflowed
+    for (const u32 status : {0u, 1u, 2u, 3u})
+        for (const bool valid : {true, false})
+        {
+            SCOPED_TRACE("status " + std::to_string(status) + (valid ? " valid" : " invalid offsets"));
+            input.horizon = {upload.put(valid ? view.node_offsets : invalid_offsets), upload.put(view.edge_offsets),
+                             upload.put(view.edge_src), upload.put(view.edge_dst), upload.put(view.edge_schema),
+                             upload.put(view.edge_binding), view.num_nodes(), view.edge_src.size(), view.label_width,
+                             static_cast<u32*>(canonical.data()), words, upload.put(std::vector<u32>{status})};
+            const auto result = run_device(device, ctx, stream, input, shape_of(input.graphs, reference.sizes));
+            const bool capacity = status & 1u, input_flag = (status & 2u) || (!valid && !capacity);
+            EXPECT_EQ((result.sizes.overflow & encoding::k_overflow_capacity) != 0, capacity);
+            EXPECT_EQ((result.sizes.overflow & encoding::k_overflow_input) != 0, input_flag);
+            if (status == 0 && valid)
+                expect_same_arrays(*reference.bundle, result);
+        }
+}
