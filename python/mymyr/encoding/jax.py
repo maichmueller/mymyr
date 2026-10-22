@@ -632,7 +632,7 @@ def encode(
             raise _error("live rows need capacities (the arrays keep the entries of every row)")
         if reg.layout.history or layers[0].ndim == 3 and layers[0].shape[1] != 0:
             raise _error("a live row count carries no subgoal layers or history steps")
-        live_count = jnp.clip(jnp.asarray(live).reshape(()).astype(jnp.int32), 0, graphs)
+        live_count = jnp.clip(jnp.asarray(live).reshape(()), 0, graphs).astype(jnp.int32)
         live_words = jnp.stack([live_count.astype(jnp.uint32), jnp.uint32(0)])
     operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps,
                 live_words)

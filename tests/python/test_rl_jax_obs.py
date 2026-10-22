@@ -193,9 +193,9 @@ def test_live_rows_are_the_first_rows(gripper, dev, layout):
         state, obs, *_ = env.step(jax.random.key(t), state)
     encode = jax.jit(lambda rows, ids, live: ej.encode(encoder, rows, ids, capacities={"graphs": 12, **CAPS}, live=live))
     r = encoder.num_relations
-    for live in (0, 1, 7, 12, 30):
-        batch = encode(obs.state, obs.task_id, jnp.int32(live))
-        k = min(live, 12)
+    for live in (-3, 0, 1, 7, 12, 30, np.uint32(1 << 31), np.uint32((1 << 32) - 1)):
+        batch = encode(obs.state, obs.task_id, jnp.asarray(live))
+        k = max(0, min(int(live), 12))
         assert int(batch.device_graphs) == k and batch.num_graphs == k
         if k:
             assert_same(batch, host(encoder, obs.state[:k], obs.task_id[:k]))
