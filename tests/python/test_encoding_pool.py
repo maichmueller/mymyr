@@ -166,6 +166,30 @@ def test_the_action_mappings_of_a_batch_without_actions_are_empty(options):
         assert mapped.dtype == np.int64 and mapped.shape == (0,)
 
 
+@pytest.mark.parametrize("framework", ["numpy", "dlpack", "torch", "jax"])
+def test_the_action_mappings_read_a_batch_of_any_framework(framework):
+    if framework in ("torch", "jax"):
+        pytest.importorskip(framework)
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(task, **OPTIONS)
+    states = walk(task, steps=3, walks=2)
+    expansion = rl.expand(rl.as_table(task), states)
+    reference = encoder.encode(states, actions=expansion)
+    batch = encoder.encode(states, actions=expansion, framework=framework)
+    assert type(batch.entity_role) is not np.ndarray or framework == "numpy"
+    entities = encoding.action_entities(reference)
+    assert len(entities) > len(states)
+    assert np.array_equal(encoding.action_entities(batch), entities)
+    assert np.array_equal(encoding.action_indices(batch), encoding.action_indices(reference))
+    assert np.array_equal(encoding.action_rows(batch, expansion), encoding.action_rows(reference, expansion))
+    # the chosen entities in the batch's own framework: its action targets as it exports them
+    chosen = np.asarray(reference.target_entity)
+    assert np.array_equal(encoding.action_indices(batch, batch.target_entity), encoding.action_indices(reference, chosen))
+    assert np.array_equal(
+        encoding.action_rows(batch, expansion, batch.target_entity), encoding.action_rows(reference, expansion, chosen)
+    )
+
+
 def test_action_rows_refuse_what_is_not_an_action_entity_of_the_batch():
     task = text_task("gripper__prob05")
     table = rl.as_table(task)
