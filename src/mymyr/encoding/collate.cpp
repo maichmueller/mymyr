@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -74,12 +75,40 @@ struct StaticSource
     u64 block;
 };
 
+/// The live contents of a static block: per static relation its tuples and its arguments. Refuses offsets that are
+/// negative, not monotone or past the static arguments before any argument is read.
+template<class I> struct StaticBlock
+{
+    const I* offsets;
+    const I* arg_offsets;
+    const I* args;
+    u64 first;  // the block's first segment
+
+    StaticBlock(const StaticSource& s, u64 relations)
+        : offsets(data<I>(*s.batch, "static_offsets")), arg_offsets(data<I>(*s.batch, "static_arg_offsets")),
+          args(data<I>(*s.batch, "static_args")), first(mul(s.block, relations))
+    {
+        const u64 stored = static_cast<u64>(array(*s.batch, "static_args").elements());
+        for (u64 k = first; k < first + relations; ++k)
+            if (offsets[k] < 0 || offsets[k + 1] < offsets[k] || arg_offsets[k] < 0 || arg_offsets[k + 1] < arg_offsets[k] ||
+                static_cast<u64>(arg_offsets[k + 1]) > stored)
+                invalid("collated static offsets must be nonnegative and monotone");
+    }
+    [[nodiscard]] u64 tuples(u64 k) const { return static_cast<u64>(offsets[first + k + 1] - offsets[first + k]); }
+    [[nodiscard]] std::span<const I> arguments(u64 k) const
+    {
+        return {args + arg_offsets[first + k], static_cast<usize>(arg_offsets[first + k + 1] - arg_offsets[first + k])};
+    }
+};
+
 /// The static blocks of the collated batch: one per instance of its graphs, in ascending instance order, each taken
-/// from the first slice that has it (the blocks of one instance are equal in batches of one schema and table). Checks
-/// that every slice holds exactly the blocks of its graphs' instances and that its static arrays are long enough.
+/// from the first slice that has it. Checks that every slice holds exactly the blocks of its graphs' instances, that
+/// its static arrays are long enough, that its catalog of static relations is the first slice's, and that the blocks
+/// of one instance in different slices have the same tuples and arguments (their capacity tails are not compared).
 template<class I> std::vector<StaticSource> static_sources(const std::vector<Slice>& slices, u64 relations)
 {
     std::vector<StaticSource> out;
+    const I* catalog = data<I>(*slices.front().batch, "static_relations");
     for (const auto& s : slices)
     {
         const i32* task_ids = data<i32>(*s.batch, "task_ids");
@@ -92,15 +121,29 @@ template<class I> std::vector<StaticSource> static_sources(const std::vector<Sli
         need(*s.batch, "static_offsets", add(segments, 1));
         need(*s.batch, "static_arg_offsets", add(segments, 1));
         need(*s.batch, "static_args", closing<I>(*s.batch, "static_arg_offsets", segments));
+        if (!std::ranges::equal(std::span(data<I>(*s.batch, "static_relations"), relations), std::span(catalog, relations)))
+            invalid("the static relations of collated batches differ");
         const i32* stored = data<i32>(*s.batch, "static_task_ids");
         for (u64 b = 0; b < blocks; ++b)
         {
             if (stored[b] != ids[b])
                 invalid("the static blocks of a collated batch are not those of its graphs' instances");
             out.push_back({ids[b], s.batch, b});
+            (void)StaticBlock<I>(out.back(), relations);
         }
     }
     std::ranges::stable_sort(out, {}, &StaticSource::id);
+    for (u64 i = 0, first = 0; i < out.size(); ++i)
+    {
+        if (out[i].id != out[first].id)
+            first = i;
+        if (i == first)
+            continue;
+        const StaticBlock<I> a(out[first], relations), b(out[i], relations);
+        for (u64 k = 0; k < relations; ++k)
+            if (a.tuples(k) != b.tuples(k) || !std::ranges::equal(a.arguments(k), b.arguments(k)))
+                invalid("the static blocks of instance " + std::to_string(out[i].id) + " differ between collated batches");
+    }
     out.erase(std::ranges::unique(out, {}, &StaticSource::id).begin(), out.end());
     return out;
 }

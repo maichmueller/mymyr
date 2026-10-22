@@ -3,9 +3,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
 #include <initializer_list>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 using namespace mymyr;
@@ -125,6 +130,104 @@ TEST(EncodingCollate, SharedStaticsIgnoreTheCapacityTailsOfTheBlocks)
         ASSERT_FALSE(sizes.overflowed());
     }
     same(*encoder->encode(input), *encoding::collate(batches));
+}
+
+namespace
+{
+/// A copy of `batch` whose array `name` `change` edited (as elements of type I).
+template<class I, class Change>
+std::shared_ptr<const rl::ArrayBundle> edited(const rl::ArrayBundle& batch, std::string_view name, Change change)
+{
+    rl::ArrayBundle::Builder builder;
+    for (const auto& [key, value] : batch.scalars())
+        builder.scalar(key, value);
+    for (const auto& info : batch.arrays())
+        builder.add_uninitialized(info.name, info.dtype, info.shape);
+    auto out = std::make_shared<rl::ArrayBundle>(builder.build());
+    for (const auto& info : batch.arrays())
+        std::memcpy(out->mutable_data(info.name.view()), batch.data(info), info.elements() * rl::dtype_bytes(info.dtype));
+    const rl::ArrayInfo* info = out->find(name);
+    EXPECT_NE(info, nullptr) << name;
+    if (info)
+        change(std::span(static_cast<I*>(out->mutable_data(*info)), static_cast<usize>(info->elements())));
+    return out;
+}
+
+void expect_refused(const std::vector<std::shared_ptr<const rl::ArrayBundle>>& batches, std::string_view message)
+{
+    try
+    {
+        (void)encoding::collate(batches);
+        ADD_FAILURE() << "collated: " << message;
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string_view(e.what()).find(message), std::string_view::npos) << e.what();
+    }
+}
+}
+
+TEST(EncodingCollate, SharedStaticsRefuseSlicesWhoseStaticRelationsOrBlocksDiffer)
+{
+    const auto table = table_of("blocks", {"smedium", "probBLOCKS-8-0"});
+    const auto rows = make_batch(table, 24, true, 149);
+    auto options = test::encoder_options();
+    options.statics = encoding::Statics::Shared;
+    const auto encoder = encoding::FlatEncoder::create(table, options);
+    const auto input = host_input(rows, 24, {});
+    ThreadPool pool(1);
+    encoding::EncodeScratch scratch;
+    // the second slice with capacity tails behind its blocks
+    const auto slices = parts(input, rows.words, {12u, 12u});
+    const auto first = encoder->encode(slices[0]);
+    encoding::ExtraSizes extra;
+    const encoding::FlatSizes exact = encoder->count(slices[1], pool, scratch, &extra);
+    const encoding::BatchShape caps{12, exact.entities, exact.args, 0};
+    const encoding::StaticShape static_caps{extra.statics.instances + 1, extra.statics.args + 5};
+    encoding::FlatSizes sizes;
+    const auto second = encoder->encode_capacity(slices[1], caps, pool, scratch, sizes, &static_caps, &extra);
+    ASSERT_FALSE(sizes.overflowed());
+    // both slices hold the block of the second slice's first instance
+    const auto ids = [](const rl::ArrayBundle& b)
+    {
+        const auto* info = b.find("static_task_ids");
+        const auto* p = static_cast<const i32*>(b.data(*info));
+        return std::vector<i32>(p, p + info->elements());
+    };
+    const i32 shared_id = ids(*second).front();
+    const std::vector<i32> first_ids = ids(*first);
+    ASSERT_NE(std::ranges::find(first_ids, shared_id), first_ids.end());
+    const auto expected = encoder->encode(input);
+    same(*expected, *encoding::collate(std::vector{first, second}));
+
+    // the capacity tails of the blocks are not compared
+    const u64 live_args = static_cast<u64>(extra.statics.args);
+    same(*expected, *encoding::collate(std::vector{first, edited<i32>(*second, "static_args", [&](std::span<i32> args)
+    {
+        ASSERT_GT(args.size(), live_args);
+        for (u64 j = live_args; j < args.size(); ++j)
+            args[j] = 7;
+    })}));
+    // another catalog of static relations
+    expect_refused({first, edited<i32>(*second, "static_relations", [](std::span<i32> catalog)
+    {
+        ASSERT_GE(catalog.size(), 2u);
+        std::swap(catalog[0], catalog[1]);
+    })}, "the static relations of collated batches differ");
+    // the block of the shared instance with another tuple count (its argument offsets stay) or other arguments
+    const u64 relations = first->find("static_relations")->elements();
+    const auto* offsets = static_cast<const i32*>(second->data(*second->find("static_offsets")));
+    u64 filled = 0;
+    while (filled < relations && offsets[filled + 1] == offsets[filled])
+        ++filled;
+    ASSERT_LT(filled, relations);
+    const std::string differ = "the static blocks of instance " + std::to_string(shared_id) + " differ";
+    expect_refused({first, edited<i32>(*second, "static_offsets", [&](std::span<i32> o) { o[filled + 1] -= 1; })}, differ);
+    expect_refused({first, edited<i32>(*second, "static_args", [](std::span<i32> args)
+    {
+        ASSERT_FALSE(args.empty());
+        args[0] += 1;
+    })}, differ);
 }
 
 TEST(EncodingCollate, RefusesMixedStatics)
