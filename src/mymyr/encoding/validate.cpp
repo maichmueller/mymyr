@@ -1,5 +1,7 @@
 #include "mymyr/encoding/validate.hpp"
 
+#include "mymyr/encoding/detail/lanes.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <map>
@@ -76,6 +78,25 @@ const rl::ArrayInfo* padded_array(const rl::ArrayBundle& batch, const char* name
             fail(std::string("the array ") + name + " is not zero past the batch");
     }
     return info;
+}
+
+/// A two-row array [2, capacity] of an index type holding at least `size` entries per row, zero past them.
+void edge_rows(const rl::ArrayBundle& batch, const char* name, rl::DType dtype, u64 size, bool wide, Ints& row0, Ints& row1)
+{
+    const rl::ArrayInfo* info = batch.find(name);
+    if (!info)
+        fail(std::string("the array ") + name + " is missing");
+    if (info->dtype != dtype)
+        fail(std::string("the array ") + name + " has the wrong dtype");
+    if (info->shape.size() != 2 || info->shape[0] != 2 || info->shape[1] < static_cast<i64>(size))
+        fail(std::string("the array ") + name + " is not [2, edges] or is shorter than the batch needs");
+    const u64 capacity = static_cast<u64>(info->shape[1]);
+    const auto* base = static_cast<const std::byte*>(batch.data(*info));
+    row0 = Ints{base, capacity, wide};
+    row1 = Ints{base + capacity * (wide ? 8 : 4), capacity, wide};
+    for (u64 i = size; i < capacity; ++i)
+        if (row0[i] != 0 || row1[i] != 0)
+            fail(std::string("the array ") + name + " is not zero past the batch");
 }
 
 void check_offsets(const Ints& offsets, u64 end, const char* name)
@@ -222,7 +243,7 @@ StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSch
 }
 }  // namespace
 
-void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+static void validate_relations(const rl::ArrayBundle& batch, const EncodingSchema& schema)
 {
     const i64 version = batch.scalar("version");
     if (version != 1)
@@ -605,5 +626,277 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"
                                                                 : " has an auxiliary entity no tuple uses"));
     }
+}
+
+namespace
+{
+/// The checks of the Simple graph of `batch`: its arrays, and, edge by edge, that it is the incidence graph of the
+/// tuples it encodes (those of the relation arrays when the batch stores them).
+void validate_simple(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+{
+    const i64 graphs_scalar = batch.scalar("num_graphs");
+    if (graphs_scalar < 0)
+        fail("num_graphs is missing");
+    const u64 G = static_cast<u64>(graphs_scalar);
+    const u64 R = schema.num_relations();
+    const u64 K = schema.simple_max_arity();
+    const u64 constants = schema.simple_constants();
+    const bool wide = batch.scalar("index_dtype") == 1;
+    const rl::DType itype = wide ? rl::DType::I64 : rl::DType::I32;
+    const auto g_i64 = static_cast<i64>(G);
+    auto ints = [&](const rl::ArrayInfo& info) { return Ints{batch.data(info), info.elements(), wide}; };
+    if (batch.scalar("simple_node_labels") != static_cast<i64>(schema.simple_node_labels()) ||
+        batch.scalar("simple_edge_labels") != static_cast<i64>(schema.simple_edge_labels()))
+        fail("simple_node_labels or simple_edge_labels does not match the schema");
+
+    const Ints entity_offsets = ints(*array(batch, "entity_offsets", itype, {g_i64 + 1}));
+    const u64 E = static_cast<u64>(entity_offsets[G]);
+    if (batch.find("entity_role") == nullptr)
+        fail("entity_role is missing: the Simple graph labels its entity nodes with the roles");
+    const u8* entity_role =
+        static_cast<const u8*>(batch.data(*padded_array(batch, "entity_role", rl::DType::U8, E, wide)));
+    const Ints node_offsets = ints(*array(batch, "node_offsets", itype, {g_i64 + 1}));
+    const Ints edge_offsets = ints(*array(batch, "edge_offsets", itype, {g_i64 + 1}));
+    const u64 V = static_cast<u64>(node_offsets[G]), M = static_cast<u64>(edge_offsets[G]);
+    check_offsets(node_offsets, V, "node_offsets");
+    check_offsets(edge_offsets, M, "edge_offsets");
+    const i32* node_label =
+        static_cast<const i32*>(batch.data(*padded_array(batch, "node_label", rl::DType::I32, V, false)));
+    const i32* edge_label =
+        static_cast<const i32*>(batch.data(*padded_array(batch, "edge_label", rl::DType::I32, M, false)));
+    Ints source, target;
+    edge_rows(batch, "edge_index", itype, M, wide, source, target);
+    if (V < E)
+        fail("the Simple graph has fewer nodes than the batch has entities");
+
+    Ints relation_offsets, relation_arg_offsets, relation_args;
+    const bool relations = schema.emits_relations();
+    const bool relation_major = schema.options().layout == Layout::Relation;
+    if (relations)
+    {
+        relation_offsets = ints(*array(batch, "relation_offsets", itype, {g_i64 * static_cast<i64>(R) + 1}));
+        relation_arg_offsets = ints(*array(batch, "relation_arg_offsets", itype, {g_i64 * static_cast<i64>(R) + 1}));
+        relation_args = ints(
+            *padded_array(batch, "relation_args", itype, static_cast<u64>(relation_arg_offsets[G * R]), wide));
+    }
+    u64 tuple_base = 0;
+    std::vector<u64> seen(R);
+    for (u64 g = 0; g < G; ++g)
+    {
+        const std::string where = "graph " + std::to_string(g);
+        const u64 first = static_cast<u64>(entity_offsets[g]);
+        const u64 entities = static_cast<u64>(entity_offsets[g + 1]) - first;
+        const u64 node_first = static_cast<u64>(node_offsets[g]);
+        const u64 nodes = static_cast<u64>(node_offsets[g + 1]) - node_first;
+        if (node_first != first + tuple_base)
+            fail("node_offsets of " + where + " is not its first entity plus the tuples before it");
+        if (nodes < entities)
+            fail(where + " has fewer nodes than entities");
+        const u64 tuples = nodes - entities;
+        for (u64 j = 0; j < entities; ++j)
+        {
+            const u8 role = entity_role[first + j];
+            const bool constant = role == static_cast<u8>(EntityRole::Object) && j < constants;
+            const i32 expected = constant ? static_cast<i32>(detail::k_simple_roles + R + j) : static_cast<i32>(role);
+            if (node_label[node_first + j] != expected)
+                fail("the label of entity " + std::to_string(j) + " of " + where + " is not its role" +
+                     (constants ? " or constant" : ""));
+        }
+        const u64 edge_first = static_cast<u64>(edge_offsets[g]);
+        const u64 edges = static_cast<u64>(edge_offsets[g + 1]) - edge_first;
+        if (edge_first % 2 != 0 || edges % 2 != 0)
+            fail("the edges of " + where + " are not forward and reverse in pairs");
+        const u64 args = edges / 2;
+        std::fill(seen.begin(), seen.end(), u64{0});
+        u64 arg = 0;
+        i64 previous = -1;
+        for (u64 t = 0; t < tuples; ++t)
+        {
+            const i32 label = node_label[node_first + entities + t];
+            if (label < static_cast<i32>(detail::k_simple_roles) ||
+                label >= static_cast<i32>(detail::k_simple_roles + R))
+                fail("atom " + std::to_string(t) + " of " + where + " has no relation label");
+            const u32 r = static_cast<u32>(label) - detail::k_simple_roles;
+            if (static_cast<i64>(r) < previous)
+                fail("the atoms of " + where + " are not in the order of their relations");
+            previous = r;
+            const u32 arity = schema.relation(r).arity;
+            const auto roles = schema.slot_roles(r);
+            const i64 atom = static_cast<i64>(node_first + entities + t);
+            if (arg + arity > args)
+                fail("the edges of " + where + " are fewer than its atoms' arguments");
+            for (u32 k = 0; k < arity; ++k)
+            {
+                const u64 forward = edge_first + arg + k, back = forward + args;
+                const i64 entity = source[forward];
+                if (target[forward] != atom || source[back] != atom || target[back] != entity ||
+                    edge_label[forward] != static_cast<i32>(k) || edge_label[back] != static_cast<i32>(K + k))
+                    fail("the edges of atom " + std::to_string(t) + " of " + where + " at position " +
+                         std::to_string(k) + " are not an edge and its reverse with the labels k and K + k");
+                if (entity < static_cast<i64>(node_first) || entity >= static_cast<i64>(node_first + entities))
+                    fail("an edge of " + where + " leaves its entity nodes");
+                if (entity_role[first + static_cast<u64>(entity) - node_first] !=
+                    static_cast<u8>(entity_role_of(roles[k])))
+                    fail("an atom of " + where + " has an entity of the wrong role at position " + std::to_string(k));
+                if (relations)
+                {
+                    const u64 cell = relation_major ? r * G + g : g * R + r;
+                    const u64 at = static_cast<u64>(relation_arg_offsets[cell]) + seen[r] * arity + k;
+                    if (relation_args[at] != entity - static_cast<i64>(tuple_base))
+                        fail("the edges of " + where + " differ from the tuples of its relation " +
+                             schema.relation(r).name);
+                }
+            }
+            ++seen[r];
+            arg += arity;
+        }
+        if (arg != args)
+            fail(where + " has edges that no atom's position explains");
+        if (relations)
+            for (u64 r = 0; r < R; ++r)
+            {
+                const u64 cell = relation_major ? r * G + g : g * R + r;
+                if (static_cast<u64>(relation_offsets[cell + 1] - relation_offsets[cell]) != seen[r])
+                    fail(where + " has atoms that differ in number from the tuples of relation " +
+                         schema.relation(static_cast<u32>(r)).name);
+            }
+        tuple_base += tuples;
+    }
+    if (V != E + tuple_base)
+        fail("node_offsets does not end at the entities plus the tuples");
+}
+}  // namespace
+
+namespace
+{
+/// The value at `i` of a float array of either width, as a double.
+f64 real_at(const void* data, bool wide, u64 i)
+{
+    if (wide)
+        return static_cast<const f64*>(data)[i];
+    return static_cast<f64>(static_cast<const f32*>(data)[i]);
+}
+
+bool same_real(f64 a, f64 b) { return (a != a && b != b) || a == b; }
+
+/// Whether the entries [from, to) of `width` bytes each are zero.
+bool zero_past(const void* data, u64 from, u64 to, usize width)
+{
+    const auto* bytes = static_cast<const std::byte*>(data);
+    for (u64 i = from * width; i < to * width; ++i)
+        if (bytes[i] != std::byte{0})
+            return false;
+    return true;
+}
+
+/// The checks of the numeric values: their arrays exist iff the schema stores them, hold the value of every numeric tuple
+/// in the order of the numeric segments, are zero past the batch, and node_value agrees with them.
+void validate_numeric(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+{
+    const bool values = schema.stores_numeric_values(), node_values = schema.stores_node_value();
+    if (values != (batch.find("numeric_values") != nullptr))
+        fail(values ? "numeric_values is missing" : "numeric_values must be omitted: the schema does not store it");
+    if (node_values != (batch.find("node_value") != nullptr))
+        fail(node_values ? "node_value is missing" : "node_value must be omitted: the schema does not store it");
+    if (!values && !node_values)
+        return;
+    const u64 G = static_cast<u64>(batch.scalar("num_graphs"));
+    const u64 R = schema.num_relations();
+    const bool wide_index = batch.scalar("index_dtype") == 1;
+    const bool relation_major = schema.options().layout == Layout::Relation;
+    const bool wide_values = schema.options().numeric_dtype == NumericDtype::F64;
+    auto ints = [&](const char* name)
+    {
+        const rl::ArrayInfo* info = batch.find(name);
+        if (!info)
+            fail(std::string("the array ") + name + " is missing");
+        return Ints{batch.data(*info), info->elements(), wide_index};
+    };
+    // where the values of each numeric segment start
+    std::vector<u64> start(G * R, 0);
+    u64 total = 0;
+    Ints tuple_offsets;
+    if (values)
+    {
+        tuple_offsets = ints("relation_offsets");
+        auto visit = [&](u64 g, u32 r)
+        {
+            const u64 cell = relation_major ? r * G + g : g * R + r;
+            start[g * R + r] = total;
+            total += static_cast<u64>(tuple_offsets[cell + 1] - tuple_offsets[cell]);
+        };
+        if (relation_major)
+            for (u32 r = schema.first_numeric_relation(); r < R; ++r)
+                for (u64 g = 0; g < G; ++g)
+                    visit(g, r);
+        else
+            for (u64 g = 0; g < G; ++g)
+                for (u32 r = schema.first_numeric_relation(); r < R; ++r)
+                    visit(g, r);
+        const rl::ArrayInfo* info = batch.find("numeric_values");
+        if (info->dtype != (wide_values ? rl::DType::F64 : rl::DType::F32))
+            fail("numeric_values has the wrong dtype");
+        if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(total))
+            fail("numeric_values is shorter than the batch needs");
+        if (!zero_past(batch.data(*info), total, info->elements(), wide_values ? 8 : 4))
+            fail("numeric_values is not zero past the batch");
+        if (batch.scalar("numeric_dtype") != (wide_values ? 1 : 0))
+            fail("numeric_dtype does not match the schema's numeric dtype");
+        if (batch.scalar("numeric_relations") != static_cast<i64>(R - schema.first_numeric_relation()))
+            fail("numeric_relations does not match the schema's numeric relations");
+    }
+    if (!node_values)
+        return;
+    const Ints node_offsets = ints("node_offsets");
+    const Ints entity_offsets = ints("entity_offsets");
+    const u64 V = static_cast<u64>(node_offsets[G]);
+    const rl::ArrayInfo* info = batch.find("node_value");
+    if (info->dtype != rl::DType::F32)
+        fail("node_value has the wrong dtype");
+    if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(V))
+        fail("node_value is shorter than the batch needs");
+    if (!zero_past(batch.data(*info), V, info->elements(), 4))
+        fail("node_value is not zero past the batch");
+    const auto* node_value = static_cast<const f32*>(batch.data(*info));
+    const rl::ArrayInfo* labels = batch.find("node_label");
+    if (!labels)
+        fail("the array node_label is missing");
+    const auto* node_label = static_cast<const i32*>(batch.data(*labels));
+    const void* numeric = values ? batch.data(*batch.find("numeric_values")) : nullptr;
+    std::vector<u64> seen(R);
+    for (u64 g = 0; g < G; ++g)
+    {
+        const u64 first = static_cast<u64>(node_offsets[g]);
+        const u64 entities = static_cast<u64>(entity_offsets[g + 1] - entity_offsets[g]);
+        std::fill(seen.begin(), seen.end(), u64{0});
+        for (u64 n = first; n < static_cast<u64>(node_offsets[g + 1]); ++n)
+        {
+            const bool atom = n >= first + entities;
+            const i64 relation = atom ? node_label[n] - static_cast<i64>(detail::k_simple_roles) : -1;
+            if (!atom || relation < static_cast<i64>(schema.first_numeric_relation()) || relation >= static_cast<i64>(R))
+            {
+                if (node_value[n] != 0.0f)
+                    fail("node_value of a node of graph " + std::to_string(g) + " that is no numeric atom is not 0");
+                continue;
+            }
+            if (numeric)
+            {
+                const u64 at = start[g * R + static_cast<u64>(relation)] + seen[static_cast<u64>(relation)]++;
+                const f32 want = static_cast<f32>(real_at(numeric, wide_values, at));
+                if (!same_real(node_value[n], want))
+                    fail("node_value of a numeric atom of graph " + std::to_string(g) + " differs from its numeric value");
+            }
+        }
+    }
+}
+}  // namespace
+
+void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+{
+    if (schema.emits_relations())
+        validate_relations(batch, schema);
+    if (schema.emits_simple())
+        validate_simple(batch, schema);
+    validate_numeric(batch, schema);
 }
 }  // namespace mymyr::encoding

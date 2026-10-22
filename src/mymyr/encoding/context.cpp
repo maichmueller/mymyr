@@ -153,6 +153,9 @@ struct InstanceRows
                                                      // 2: history, 3: both) and the list k of {cells, row_cells,
                                                      // plain_cells, plain_row_cells}
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
+    std::vector<i32> numeric_args;                          // the same for the numeric slots
+    std::vector<Cell> numeric_cells;                        // one per numeric function that has slots
+    u64 numeric_tuples = 0;
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
     u64 num_objects = 0, words = 0, fluent_slots = 0, derived_words = 0, derived_slots = 0;
@@ -225,6 +228,50 @@ std::optional<u32> find_slot(std::span<const i32> padded, u32 width, u32 begin, 
     if (lo < end && std::equal(objects.begin(), objects.end(), padded.data() + static_cast<u64>(lo) * width))
         return lo;
     return std::nullopt;
+}
+
+/// The cells of an instance's numeric slots, one per numeric relation of the schema whose function has slots in the
+/// instance, and the objects of every slot as rows of `max_arity` entries into `numeric_args`. The slots of a function
+/// are consecutive and ascend in their objects.
+void build_numeric_cells(const Task& task, const EncodingSchema& schema, u32 max_arity, std::vector<Cell>& cells,
+                         std::vector<i32>& numeric_args)
+{
+    const plan::Numeric& numeric = task.numeric();
+    if (!schema.has_numeric() || numeric.slots == 0)
+        return;
+    auto broken = [&](const std::string& what)
+    { throw std::logic_error("mymyr: encoding: the numeric slots of the task are not in function order: " + what); };
+    for (u32 slot = 0; slot < numeric.slots; ++slot)
+    {
+        const u32 begin = numeric.slot_args_begin[slot], end = numeric.slot_args_begin[slot + 1];
+        for (u32 k = 0; k < max_arity; ++k)
+            numeric_args.push_back(k < end - begin ? static_cast<i32>(numeric.slot_args[begin + k].v) : -1);
+    }
+    for (u32 id = schema.first_numeric_relation(); id < schema.num_relations(); ++id)
+    {
+        const Relation& relation = schema.relation(id);
+        const u32 function = static_cast<u32>(relation.function);
+        u32 first = numeric.slots, last = numeric.slots;
+        for (u32 slot = 0; slot < numeric.slots; ++slot)
+            if (numeric.slot_function[slot] == function)
+            {
+                if (first == numeric.slots)
+                    first = slot;
+                else if (last != slot)
+                    broken(relation.name);
+                last = slot + 1;
+            }
+        if (first == numeric.slots)
+            continue;
+        for (u32 slot = first + 1; slot < last; ++slot)
+        {
+            const i32* a = numeric_args.data() + u64{slot - 1} * max_arity;
+            const i32* b = numeric_args.data() + u64{slot} * max_arity;
+            if (!std::lexicographical_compare(a, a + relation.logical_arity, b, b + relation.logical_arity))
+                broken(relation.name);
+        }
+        cells.push_back({id, static_cast<u32>(CellOp::Numeric), first, last, relation.arity, relation.logical_arity});
+    }
 }
 
 InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::vector<i32>& state_relation,
@@ -592,9 +639,12 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
             }
         }
     }
+    build_numeric_cells(task, schema, max_arity, out.numeric_cells, out.numeric_args);
+    out.numeric_tuples = out.numeric_args.size() / max_arity;
     for (std::vector<Cell>* list : {&out.cells, &out.row_cells})
     {
         list->insert(list->end(), action_cells.begin(), action_cells.end());
+        list->insert(list->end(), out.numeric_cells.begin(), out.numeric_cells.end());
         std::sort(list->begin(), list->end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
     }
     for (const auto& [list, plain] :
@@ -706,6 +756,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     for (u32 id = 0; id < own->num_relations(); ++id)
     {
         const Relation& relation = own->relation(id);
+        if (relation.lane == Lane::Numeric)
+            max_arity = std::max(max_arity, relation.logical_arity);
         if (!is_state_relation(relation))
             continue;
         state_relation.at(static_cast<u32>(relation.predicate)) = static_cast<i32>(id);
@@ -838,13 +890,13 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     instances.reserve(table->size());
     for (u32 i = 0; i < table->size(); ++i)
         instances.push_back(build_instance(*table, i, state_relation, goal_relations, layer_relations, action_cells,
-                                           *schema, max_arity, horizon ? &horizon_relations : nullptr));
+                                           *own, max_arity, horizon ? &horizon_relations : nullptr));
 
     auto context = std::shared_ptr<EncodingContext>(new EncodingContext());
     context->m_max_arity = max_arity;
     std::vector<u64> inst;
     std::vector<u32> cells;
-    std::vector<i32> slot_args, derived_args, static_args, goal_args;
+    std::vector<i32> slot_args, derived_args, static_args, goal_args, numeric_args;
     std::vector<u64> goal_words;
     for (u32 i = 0; i < instances.size(); ++i)
     {
@@ -899,6 +951,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_slot_args_offset] = slot_args.size() / max_arity;
         columns[detail::k_derived_args_offset] = derived_args.size() / max_arity;
         columns[detail::k_static_args_offset] = static_args.size() / max_arity;
+        columns[detail::k_numeric_args_offset] = numeric_args.size() / max_arity;
+        columns[detail::k_numeric_tuples] = rows.numeric_tuples;
         columns[detail::k_encoding_fingerprint] = rows.fingerprint;
         columns[detail::k_goal_offset] = goal_words.size();
         columns[detail::k_goal_args_offset] = goal_args.size() / max_arity;
@@ -910,6 +964,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         slot_args.insert(slot_args.end(), rows.slot_args.begin(), rows.slot_args.end());
         derived_args.insert(derived_args.end(), rows.derived_args.begin(), rows.derived_args.end());
         static_args.insert(static_args.end(), rows.static_args.begin(), rows.static_args.end());
+        numeric_args.insert(numeric_args.end(), rows.numeric_args.begin(), rows.numeric_args.end());
         goal_words.insert(goal_words.end(), rows.goal_words.begin(), rows.goal_words.end());
         goal_args.insert(goal_args.end(), rows.goal_args.begin(), rows.goal_args.end());
     }
@@ -932,6 +987,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     builder.add("relation_arity", rl::DType::U32, {static_cast<i64>(relation_arity.size())}, relation_arity);
     builder.add("static_relations", rl::DType::U32, {static_cast<i64>(own->static_relations().size())},
                 std::vector<u32>(own->static_relations().begin(), own->static_relations().end()));
+    builder.add("numeric_args", rl::DType::I32, shape(numeric_args), numeric_args);
     context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
@@ -943,7 +999,8 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations
+    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations,
+    // numeric_args
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -967,6 +1024,10 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     v.relation_arity = reinterpret_cast<const u32*>(at(11));
     v.static_relations = reinterpret_cast<const u32*>(at(12));
     v.num_static = static_cast<u32>(m_schema->static_relations().size());
+    v.numeric_args = reinterpret_cast<const i32*>(at(13));
+    v.numeric_storage = m_table->numeric() && m_table->numeric_storage() == NumericStorage::I32
+                            ? detail::k_numeric_storage_i32
+                            : detail::k_numeric_storage_f64;
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;

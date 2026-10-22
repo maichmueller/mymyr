@@ -452,10 +452,7 @@ def test_invalid_options_raise_like_the_schema(options, error, match):
         encoding.EncodingSchema(task, **{"goal_derivations": (), **options})
 
 
-def test_numeric_tasks_and_bad_tables_are_refused():
-    numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="^mymyr: encoding: numeric"):
-        encoder_of(numeric)
+def test_bad_tables_are_refused():
     with pytest.raises(TypeError):
         encoder_of("gripper")
     task = text_task("gripper__prob05")

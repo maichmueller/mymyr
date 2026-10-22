@@ -4,7 +4,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import BLOCKS, text_task, walk
+from conftest import BLOCKS, ROOT, text_task, walk
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -52,6 +52,28 @@ def test_host_collation_of_shared_statics_equals_one_encoding(layout, index, vir
     repeated = encoding.FlatRelationEncoder(table, **common).encode(rows[:3], ids[:3])
     with pytest.raises(ValueError, match="^mymyr: encoding: collate received"):
         encoding.collate([slices[0], repeated])
+
+
+@pytest.mark.parametrize("task_name", ["cs-drone", "gripper__prob05"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(("layout", "outputs"), [("graph", ("relations",)), ("relation", ("relations",)),
+                                                 ("graph", ("relations", "simple")), ("graph", ("simple",))])
+def test_host_collation_of_numeric_values_and_simple_graphs_equals_one_encoding(task_name, dtype, layout, outputs):
+    if task_name == "cs-drone":
+        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-drone.txt"))
+    else:
+        task = text_task(task_name)
+    rows = np.asarray(task.encode(walk(task, steps=11, walks=2, seed=29)))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, numeric_dtype=dtype, outputs=outputs)
+    expected = encoder.encode(rows)
+    numeric = sum(lane == "numeric" for lane in encoder.relation_lanes)
+    assert expected.as_dict().get("numeric_relations", 0) == (numeric if "relations" in outputs else 0)
+    assert hasattr(expected, "numeric_values") == (task_name == "cs-drone" and "relations" in outputs)
+    slices = [encoder.encode(rows[:3]), encoder.encode(rows[:0]), encoder.encode(rows[3:11]), encoder.encode(rows[11:])]
+    actual = encoding.collate(slices)
+    assert expected.as_dict().keys() == actual.as_dict().keys()
+    for key, value in expected.as_dict().items():
+        assert np.array_equal(value, actual.as_dict()[key], equal_nan=np.asarray(value).dtype.kind == "f"), key
 
 
 @pytest.mark.parametrize("option", [{"layout": "relation"}, {"index_dtype": "int64"}, {"include_static": False}])

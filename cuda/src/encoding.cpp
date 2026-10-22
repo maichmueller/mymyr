@@ -651,8 +651,10 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
+    if (schema.has_numeric()) refuse("numeric relations");
     // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
+    if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
     if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
 }
 
@@ -663,6 +665,8 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
     check_schema(*m_schema);
+    if (m_encoder->table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
     m_context = DeviceEncodingContext::create(m_ctx, m_encoder->context_ptr(), true, nullptr);
     m_bounds = m_context->m_facts->bounds;
 }
@@ -919,6 +923,8 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
 void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
 {
     check_schema(encoder.schema());
+    if (encoder.table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
     if (device_count() == 0)  // the shared memory of the kernels is read from the device
         return;
     const auto facts = context_facts(encoder.context());

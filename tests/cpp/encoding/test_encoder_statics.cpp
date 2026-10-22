@@ -37,6 +37,9 @@ std::vector<i64> values_of(const rl::ArrayBundle& bundle, const rl::ArrayInfo& i
             case rl::DType::U8: out.push_back(std::to_integer<u8>(*at)); break;
             case rl::DType::I32: { i32 v; std::memcpy(&v, at, 4); out.push_back(v); break; }
             case rl::DType::I64: { i64 v; std::memcpy(&v, at, 8); out.push_back(v); break; }
+            // numeric values compare by their bits
+            case rl::DType::F32: { i32 v; std::memcpy(&v, at, 4); out.push_back(v); break; }
+            case rl::DType::F64: { i64 v; std::memcpy(&v, at, 8); out.push_back(v); break; }
             default: ADD_FAILURE() << "unexpected dtype of " << info.name;
         }
     }
@@ -238,6 +241,32 @@ TEST(SharedStatics, RebuildTheRepeatedFormOverTheCorpus)
     }
 }
 
+TEST(SharedStatics, RebuildTheRepeatedFormWithTheNumericLane)
+{
+    // the numeric relations are fluent: they stay in the graphs, and numeric_values is that of the repeated form
+    u64 static_tables = 0;
+    for (const em::Corpus& corpus : em::numeric_corpus())
+    {
+        const test::Rows rows = em::walk_rows(*corpus.table, 20, 13);
+        const EncodeInput in = em::input_of(rows);
+        for (const Shape& shape : k_shapes)
+            for (const NumericDtype dtype : {NumericDtype::F32, NumericDtype::F64})
+            {
+                FlatOptions options = em::with(test::encoder_options(), shape.layout, shape.index);
+                options.numeric_dtype = dtype;
+                const auto schema = FlatEncoder::create(corpus.table, shared_of(options))->schema_ptr();
+                ASSERT_TRUE(schema->stores_numeric_values());
+                for (const u32 r : schema->static_relations())
+                    EXPECT_LT(r, schema->first_numeric_relation()) << corpus.name;
+                static_tables += !schema->static_relations().empty();
+                expect_same_as_repeated(corpus.table, options, in,
+                                        std::string(corpus.name) + "/" + shape.text() + "/" +
+                                            std::string(to_string(dtype)));
+            }
+    }
+    EXPECT_GT(static_tables, 0u);
+}
+
 TEST(SharedStatics, ASingleRowAndAnEmptyBatchHaveTheirBlocks)
 {
     const rl::TaskTablePtr table = em::table_of("blocks", {"smedium", "probBLOCKS-8-0"});
@@ -342,36 +371,36 @@ TEST(SharedStatics, TheCapacityFormPadsTheBlocksAndReportsTheirSizes)
         ThreadPool pool(1);
         EncodeScratch scratch;
         const Arrays exact = read(*encoder->encode(in, pool, scratch));
-        StaticSizes true_statics;
-        const FlatSizes true_sizes = encoder->count(in, pool, scratch, &true_statics);
-        ASSERT_EQ(true_statics.instances, 1u);
-        ASSERT_GT(true_statics.args, 1u);
+        ExtraSizes true_extra;
+        const FlatSizes true_sizes = encoder->count(in, pool, scratch, &true_extra);
+        ASSERT_EQ(true_extra.statics.instances, 1u);
+        ASSERT_GT(true_extra.statics.args, 1u);
         // static capacities that are too small overflow, and an overflow leaves every array zero
         const StaticShape one{1, 1};
-        StaticSizes statics;
+        ExtraSizes extra;
         FlatSizes sizes;
         const auto probe = encoder->encode_capacity(in, {30, true_sizes.entities, true_sizes.args, 0}, pool, scratch,
-                                                    sizes, &one, &statics);
+                                                    sizes, &one, &extra);
         EXPECT_NE(sizes.overflow & k_overflow_capacity, 0u);
-        EXPECT_EQ(statics.args, true_statics.args);
+        EXPECT_EQ(extra.statics.args, true_extra.statics.args);
         for (const rl::ArrayInfo& info : probe->arrays())
             for (const i64 v : values_of(*probe, info))
                 EXPECT_EQ(v, 0) << info.name;
         const BatchShape caps{35, true_sizes.entities + 7, true_sizes.args + 5, 0};
-        const StaticShape static_caps{3, true_statics.args + 9};
-        const auto padded = encoder->encode_capacity(in, caps, pool, scratch, sizes, &static_caps, &statics);
+        const StaticShape static_caps{3, true_extra.statics.args + 9};
+        const auto padded = encoder->encode_capacity(in, caps, pool, scratch, sizes, &static_caps, &extra);
         EXPECT_FALSE(sizes.overflowed());
-        EXPECT_EQ(statics.instances, true_statics.instances);
-        EXPECT_EQ(statics.args, true_statics.args);
+        EXPECT_EQ(extra.statics.instances, true_extra.statics.instances);
+        EXPECT_EQ(extra.statics.args, true_extra.statics.args);
         const Arrays a = read(*padded);
         const u64 Rs = encoder->schema().static_relations().size();
         EXPECT_EQ(a.at("static_task_ids").size(), 3u);
         EXPECT_EQ(a.at("static_offsets").size(), 3 * Rs + 1);
         EXPECT_EQ(a.at("static_arg_offsets").size(), 3 * Rs + 1);
-        EXPECT_EQ(a.at("static_args").size(), true_statics.args + 9);
+        EXPECT_EQ(a.at("static_args").size(), true_extra.statics.args + 9);
         // the first block's entries are the exact ones, the padding is empty blocks and zeros
         EXPECT_TRUE(std::equal(exact.at("static_args").begin(), exact.at("static_args").end(), a.at("static_args").begin()));
-        EXPECT_TRUE(std::all_of(a.at("static_args").begin() + static_cast<std::ptrdiff_t>(true_statics.args), a.at("static_args").end(), [](i64 v) { return v == 0; }));
+        EXPECT_TRUE(std::all_of(a.at("static_args").begin() + static_cast<std::ptrdiff_t>(true_extra.statics.args), a.at("static_args").end(), [](i64 v) { return v == 0; }));
         EXPECT_EQ(a.at("static_task_ids")[0], exact.at("static_task_ids")[0]);
         EXPECT_EQ(a.at("static_task_ids")[1], 0);
         for (u64 i = Rs; i <= 3 * Rs; ++i)
@@ -381,15 +410,15 @@ TEST(SharedStatics, TheCapacityFormPadsTheBlocksAndReportsTheirSizes)
         }
         EXPECT_NO_THROW(validate(*padded, encoder->schema()));
         // capacities one short in either static dimension overflow
-        const StaticShape few_args{3, true_statics.args - 1};
+        const StaticShape few_args{3, true_extra.statics.args - 1};
         FlatSizes short_sizes;
-        (void)encoder->encode_capacity(in, caps, pool, scratch, short_sizes, &few_args, &statics);
+        (void)encoder->encode_capacity(in, caps, pool, scratch, short_sizes, &few_args, &extra);
         EXPECT_NE(short_sizes.overflow & k_overflow_capacity, 0u);
-        EXPECT_EQ(statics.args, true_statics.args);
+        EXPECT_EQ(extra.statics.args, true_extra.statics.args);
         // the capacity form needs static capacities exactly when the statics are shared
         EXPECT_THROW((void)encoder->encode_capacity(in, caps, pool, scratch, sizes), std::invalid_argument);
         const auto repeated = FlatEncoder::create(table, options);
-        EXPECT_THROW((void)repeated->encode_capacity(in, caps, pool, scratch, sizes, &static_caps, &statics),
+        EXPECT_THROW((void)repeated->encode_capacity(in, caps, pool, scratch, sizes, &static_caps, &extra),
                      std::invalid_argument);
     }
 }
@@ -414,21 +443,21 @@ TEST(SharedStatics, StreamsFlushTheSharedForm)
     expect_equal(expected, read(*mutable_stream.flush(pool)), "mutable stream");
     // a capacity flush
     const FlatSizes want = encoder->count(em::host_input(batch, batch.count, {}), pool, scratch);
-    StaticSizes want_statics;
-    (void)encoder->count(em::host_input(batch, batch.count, {}), pool, scratch, &want_statics);
+    ExtraSizes want_extra;
+    (void)encoder->count(em::host_input(batch, batch.count, {}), pool, scratch, &want_extra);
     FlatSizes sizes;
-    StaticSizes statics;
-    const StaticShape static_caps{4, want_statics.args + 3};
+    ExtraSizes extra;
+    const StaticShape static_caps{4, want_extra.statics.args + 3};
     stream.append(em::host_input(batch, batch.count, {}));
-    const auto flushed = stream.flush(pool, {70, want.entities + 2, want.args + 2, 0}, sizes, &static_caps, &statics);
+    const auto flushed = stream.flush(pool, {70, want.entities + 2, want.args + 2, 0}, sizes, &static_caps, &extra);
     EXPECT_FALSE(sizes.overflowed());
-    EXPECT_EQ(statics.instances, 2u);
-    EXPECT_EQ(statics.args, want_statics.args);
+    EXPECT_EQ(extra.statics.instances, 2u);
+    EXPECT_EQ(extra.statics.args, want_extra.statics.args);
     EXPECT_NO_THROW(validate(*flushed, encoder->schema()));
     // an overflowing flush keeps the rows
     stream.append(em::host_input(batch, batch.count, {}));
     const StaticShape small{1, 1};
-    (void)stream.flush(pool, {70, want.entities, want.args, 0}, sizes, &small, &statics);
+    (void)stream.flush(pool, {70, want.entities, want.args, 0}, sizes, &small, &extra);
     EXPECT_TRUE(sizes.overflowed());
     EXPECT_EQ(stream.size(), batch.count);
 }
@@ -715,18 +744,18 @@ TEST(SharedStatics, ACapacityFlushWithHistoryKeepsBothKindsOfBlocks)
     const auto encoder = FlatEncoder::create(table, shared_of(layered_options(k_layered[3])));
     ThreadPool pool(2);
     EncodeScratch scratch;
-    StaticSizes want_statics;
-    const FlatSizes want = encoder->count(in, pool, scratch, &want_statics);
+    ExtraSizes want_extra;
+    const FlatSizes want = encoder->count(in, pool, scratch, &want_extra);
     ASSERT_GT(want.history, 0u);
     const BatchShape capacities{50, want.entities + 3, want.args + 5, want.targets + 2, want.history + 4};
-    const StaticShape static_capacities{3, want_statics.args + 2};
+    const StaticShape static_capacities{3, want_extra.statics.args + 2};
     FlatSizes sizes;
-    StaticSizes statics;
-    const auto padded = encoder->encode_capacity(in, capacities, pool, scratch, sizes, &static_capacities, &statics);
+    ExtraSizes extra;
+    const auto padded = encoder->encode_capacity(in, capacities, pool, scratch, sizes, &static_capacities, &extra);
     EXPECT_FALSE(sizes.overflowed());
     EXPECT_EQ(sizes.history, want.history);
-    EXPECT_EQ(statics.instances, 2u);
-    EXPECT_EQ(statics.args, want_statics.args);
+    EXPECT_EQ(extra.statics.instances, 2u);
+    EXPECT_EQ(extra.statics.args, want_extra.statics.args);
     EXPECT_NO_THROW(validate(*padded, encoder->schema()));
     // the batch equals the exact one in the first entries
     const Arrays exact = read(*encoder->encode(in, pool, scratch));
@@ -735,10 +764,10 @@ TEST(SharedStatics, ACapacityFlushWithHistoryKeepsBothKindsOfBlocks)
         EXPECT_TRUE(std::equal(exact.at(name).begin(), exact.at(name).end(), got.at(name).begin())) << name;
     // a history that does not fit its capacity overflows, and a static block that does not fit does too
     const BatchShape tight{50, want.entities, want.args, want.targets, want.history - 1};
-    (void)encoder->encode_capacity(in, tight, pool, scratch, sizes, &static_capacities, &statics);
+    (void)encoder->encode_capacity(in, tight, pool, scratch, sizes, &static_capacities, &extra);
     EXPECT_TRUE(sizes.overflowed());
     const StaticShape small{1, 1};
-    (void)encoder->encode_capacity(in, capacities, pool, scratch, sizes, &small, &statics);
+    (void)encoder->encode_capacity(in, capacities, pool, scratch, sizes, &small, &extra);
     EXPECT_TRUE(sizes.overflowed());
 }
 

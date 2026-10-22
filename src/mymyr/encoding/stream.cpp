@@ -70,7 +70,8 @@ class RowStore
 {
 public:
     explicit RowStore(const FlatEncoder& encoder)
-        : m_encoder(encoder), m_words(encoder.table().words()), m_derived_words(encoder.context().max_derived_words()),
+        : m_encoder(encoder), m_words(encoder.table().words()), m_numeric_words(encoder.table().numeric_words()),
+          m_row_words(m_words + m_numeric_words), m_derived_words(encoder.context().max_derived_words()),
           m_label_width(encoder.table().label_width()), m_subgoals(encoder.schema().has_subgoals()),
           m_history(encoder.schema().has_history()), m_levels(encoder.schema().options().max_goal_level)
     {
@@ -86,11 +87,12 @@ public:
         const rl::TaskTable& table = m_encoder.table();
         const EncodingSchema& schema = m_encoder.schema();
         const u64 n = in.states.rows;
-        if (in.states.numeric_words != 0)
-            invalid("numeric state rows are not supported");
+        if (in.states.numeric_words != m_numeric_words)
+            invalid("the state rows have " + std::to_string(in.states.numeric_words) + " numeric words, the table's rows have " +
+                    std::to_string(m_numeric_words));
         if (n && !in.states.data)
             invalid("the state buffer is null");
-        if (in.states.stride && in.states.stride < in.states.words)
+        if (in.states.stride && in.states.stride < u64{in.states.words} + in.states.numeric_words)
             invalid("the state row stride is smaller than its width");
         table.check_task_ids(in.task_ids, n);
         m_encoder.check_layer_inputs(in);
@@ -226,7 +228,7 @@ public:
     {
         adopt(given);
         const u64 slots = m_slots + rows;
-        grow(m_states, slots * m_words);
+        grow(m_states, slots * m_row_words);
         grow(m_task_ids, slots);
         grow(m_spans, slots);
         if (m_inputs.derived)
@@ -263,7 +265,7 @@ public:
             if (m_slots >= std::numeric_limits<u32>::max())
                 throw std::length_error("mymyr: encoding: the stream holds too many rows");
             slot = static_cast<u32>(m_slots++);
-            m_states.resize(m_slots * m_words);
+            m_states.resize(m_slots * m_row_words);
             m_task_ids.resize(m_slots);
             m_spans.resize(m_slots);
             if (m_subgoals)
@@ -296,7 +298,10 @@ public:
     /// Writes row g of `in` (checked) into `slot`; a slot that held a row gives up its action rows.
     void write(u32 slot, const EncodeInput& in, u64 g)
     {
-        copy_words(&m_states[usize{slot} * m_words], m_words, in.states.row(g), in.states.words);
+        u64* row = &m_states[usize{slot} * m_row_words];
+        copy_words(row, m_words, in.states.row(g), in.states.words);
+        if (m_numeric_words)
+            std::memcpy(row + m_words, in.states.row(g) + in.states.words, usize{m_numeric_words} * sizeof(u64));
         m_task_ids[slot] = in.task_ids ? in.task_ids[g] : 0;
         if (m_inputs.derived)
             copy_words(&m_derived[usize{slot} * m_derived_words], m_derived_words, in.derived + g * in.derived_stride,
@@ -384,7 +389,7 @@ public:
     [[nodiscard]] EncodeInput assemble(const u32* order, u64 n)
     {
         EncodeInput in;
-        in.states = {nullptr, n, m_words, m_words, 0};
+        in.states = {nullptr, n, m_words, m_row_words, m_numeric_words};
         if (n == 0)
             return in;
         const bool direct = order == nullptr;
@@ -402,7 +407,7 @@ public:
             pointer = to.data();
         };
         const u64* states = nullptr;
-        gather(m_gather_states, m_states, m_words, states);
+        gather(m_gather_states, m_states, m_row_words, states);
         in.states.data = states;
         const i32* ids = nullptr;
         gather(m_gather_ids, m_task_ids, 1, ids);
@@ -726,7 +731,7 @@ private:
     static constexpr u64 k_compact_rows = 4096;
 
     const FlatEncoder& m_encoder;
-    u32 m_words, m_derived_words, m_label_width;
+    u32 m_words, m_numeric_words, m_row_words, m_derived_words, m_label_width;
     bool m_subgoals, m_history;  // the schema has subgoal / history relations: the store holds the rows' layers / steps
     u32 m_levels;                // the subgoal layers stored per row: the schema's levels
     Inputs m_inputs;
@@ -776,10 +781,10 @@ private:
 std::shared_ptr<const rl::ArrayBundle> encode_rows(const FlatEncoder& encoder, const EncodeInput& in, ThreadPool& pool,
                                                    const BatchShape* capacities, FlatSizes* sizes,
                                                    const StaticShape* static_capacities = nullptr,
-                                                   StaticSizes* static_sizes = nullptr)
+                                                   ExtraSizes* extra = nullptr)
 {
     EncodeScratch& scratch = EncodeScratch::of_this_thread();
-    return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes, static_capacities, static_sizes)
+    return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes, static_capacities, extra)
                       : encoder.encode(in, pool, scratch);
 }
 }  // namespace
@@ -840,13 +845,12 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const BatchShape& capacities, FlatSizes& sizes,
-                                                         const StaticShape* static_capacities,
-                                                         StaticSizes* static_sizes)
+                                                         const StaticShape* static_capacities, ExtraSizes* extra)
 {
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
     const EncodeInput in = store.assemble(nullptr, store.live());
-    auto out = encode_rows(*m_impl->encoder, in, pool, &capacities, &sizes, static_capacities, static_sizes);
+    auto out = encode_rows(*m_impl->encoder, in, pool, &capacities, &sizes, static_capacities, extra);
     if (!sizes.overflowed())
         store.reset();
     return out;
@@ -1208,12 +1212,12 @@ std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool
 
 std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const BatchShape& capacities,
                                                                 FlatSizes& sizes, const StaticShape* static_capacities,
-                                                                StaticSizes* static_sizes)
+                                                                ExtraSizes* extra)
 {
     std::lock_guard lock(m_impl->mutex);
     Impl& s = *m_impl;
     s.order();
     const EncodeInput in = s.store.assemble(s.direct() ? nullptr : s.slots.data(), s.slots.size());
-    return encode_rows(*s.encoder, in, pool, &capacities, &sizes, static_capacities, static_sizes);
+    return encode_rows(*s.encoder, in, pool, &capacities, &sizes, static_capacities, extra);
 }
 }  // namespace mymyr::encoding

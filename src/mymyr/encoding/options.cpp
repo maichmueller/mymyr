@@ -29,8 +29,10 @@ constexpr std::array<std::string_view, 2> k_layouts = {"graph", "relation"};
 constexpr std::array<std::string_view, 2> k_entity_arrays = {"auto", "always"};
 constexpr std::array<std::string_view, 2> k_statics = {"repeat", "shared"};
 constexpr std::array<std::string_view, 2> k_index_types = {"int32", "int64"};
+constexpr std::array<std::string_view, 2> k_numeric_dtypes = {"float32", "float64"};
 constexpr std::array<std::string_view, 4> k_modes = {"none", "full", "delta", "action"};
 constexpr std::array<std::string_view, 3> k_roots = {"include", "exclude", "encode_only"};
+constexpr std::array<std::string_view, 2> k_outputs = {"relations", "simple"};
 }
 
 std::string_view to_string(GoalDerivation value) noexcept { return k_derivations[static_cast<usize>(value)]; }
@@ -39,8 +41,10 @@ std::string_view to_string(Layout value) noexcept { return k_layouts[static_cast
 std::string_view to_string(EntityArrays value) noexcept { return k_entity_arrays[static_cast<usize>(value)]; }
 std::string_view to_string(Statics value) noexcept { return k_statics[static_cast<usize>(value)]; }
 std::string_view to_string(IndexType value) noexcept { return k_index_types[static_cast<usize>(value)]; }
+std::string_view to_string(NumericDtype value) noexcept { return k_numeric_dtypes[static_cast<usize>(value)]; }
 std::string_view to_string(HorizonMode value) noexcept { return k_modes[static_cast<usize>(value)]; }
 std::string_view to_string(RootPolicy value) noexcept { return k_roots[static_cast<usize>(value)]; }
+std::string_view to_string(Output value) noexcept { return k_outputs[static_cast<usize>(value)]; }
 
 std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept
 {
@@ -60,6 +64,10 @@ std::optional<IndexType> parse_index_type(std::string_view text) noexcept
 {
     return parse<IndexType>(k_index_types, text);
 }
+std::optional<NumericDtype> parse_numeric_dtype(std::string_view text) noexcept
+{
+    return parse<NumericDtype>(k_numeric_dtypes, text);
+}
 std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept
 {
     return parse<HorizonMode>(k_modes, text);
@@ -68,6 +76,8 @@ std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept
 {
     return parse<RootPolicy>(k_roots, text);
 }
+
+std::optional<Output> parse_output(std::string_view text) noexcept { return parse<Output>(k_outputs, text); }
 
 void require_repeated_statics(const FlatOptions& options, std::string_view family)
 {
@@ -119,6 +129,21 @@ FlatOptions normalized(const FlatOptions& options)
         if (out.horizon.root != RootPolicy::Include)
             invalid("root_policy '" + std::string(to_string(out.horizon.root)) + "' needs a horizon mode");
     }
+    const bool relations = out.outputs.contains(Output::Relations), simple = out.outputs.contains(Output::Simple);
+    if (!relations && !simple)
+        invalid("outputs must name at least one of 'relations' and 'simple'");
+    if (out.constant_labels && !simple)
+        invalid("constant_labels needs the 'simple' output");
+    if (simple && out.predicate_virtual_nodes)
+        invalid("the 'simple' output needs predicate_virtual_nodes off: an atom node's label carries the predicate");
+    if (simple && out.entity_arrays == EntityArrays::Auto)
+        invalid("the 'simple' output stores entity_role and entity_ref: entity_arrays must be 'always'");
+    if (simple)
+        require_repeated_statics(out, "Simple");
+    if (!relations && out.layout != Layout::Graph)
+        invalid("layout 'relation' arranges the relation arrays, which the outputs leave out");
+    if (!relations && !out.emit_counts)
+        invalid("emit_counts=False omits relation_counts, which the outputs leave out");
     return out;
 }
 }

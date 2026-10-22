@@ -8,8 +8,11 @@
 // Relations are named in the convention `[+]on[g][sat]`: a sign prefix `[+]` / `[-]` for goal and history relations,
 // the predicate or action schema name, a modifier `[hist]` for history relations, a goal level `[g]` (the goal) or
 // `[sg]`, `[ssg]`, `[sssg]` (subgoal layers), a derivation `[sat]` / `[unsat]` / `[sat+]` / `[sat-]`, and `[state]` for
-// the state-anchored variant of a full horizon without its root. The catalog is sorted by name, bytewise, which makes
-// the relation ids independent of the declaration order in the domain. State relations carry the plain predicate name.
+// the state-anchored variant of a full horizon without its root; the numeric relations `[num]f` list the ground terms of
+// a numeric function f. The catalog is sorted by name, bytewise, which makes the relation ids independent of the
+// declaration order in the domain, and the numeric relations follow it, sorted by name: their ids are the last ones, so
+// a schema without numeric functions has the ids it would have without that lane. State relations carry the plain
+// predicate name.
 
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/rl/task_table.hpp"
@@ -50,12 +53,32 @@ struct DomainSignature
         /// an existential condition. An action relation holds all of them.
         u32 arity = 0;
     };
+    enum class FunctionKind : u8
+    {
+        Static,     // its values are fixed by the problem
+        Fluent,     // the states give it values
+        Auxiliary,  // total-cost: it only feeds the metric
+    };
+    struct Function
+    {
+        std::string name;
+        u32 arity = 0;
+        FunctionKind kind = FunctionKind::Static;
+    };
     std::vector<Predicate> predicates;
     std::vector<ActionSchema> schemas;
+    /// The numeric functions of the domain, in declaration order. Only the fluent ones have relations.
+    std::vector<Function> functions;
+    /// The constants of the domain, in declaration order: they are the first objects of every instance, so the
+    /// constant with index c is the object with id c.
+    std::vector<std::string> constants;
+    /// Whether `constants` lists the domain's constants: false when an instance was read from mymyr's text format,
+    /// which does not record them (FlatOptions::constant_labels then refuses the domain).
+    bool constants_recorded = true;
 
     /// The domain of a task table: its domain predicates (the front end's helper predicates for quantified conditions
-    /// among them; the predicates only a problem's axioms define are not part of it) and its action schemas. Throws
-    /// std::invalid_argument for a table with numeric functions or constraints.
+    /// among them; the predicates only a problem's axioms define are not part of it), its numeric functions and its
+    /// action schemas. Throws std::invalid_argument if the instances do not declare the same numeric functions.
     [[nodiscard]] static DomainSignature of(const rl::TaskTable& table);
 };
 
@@ -73,6 +96,7 @@ enum class Lane : u8
     Parent,           // the parent relation of a horizon
     Sibling,          // the sibling relation of a horizon
     Cousin,           // the cousin relation of a horizon
+    Numeric,          // the ground terms of a numeric function, each with a value of the state
 };
 
 [[nodiscard]] std::string_view to_string(Lane lane) noexcept;
@@ -152,6 +176,7 @@ struct Relation
     bool state_anchored = false;                // the `[state]` variant of a full horizon without its root
     i32 predicate = -1;                         // domain predicate id, or -1
     i32 schema = -1;                            // first action schema of this name and arity, or -1
+    i32 function = -1;                          // numeric function (DomainSignature::functions), or -1
     u32 arity = 0;                              // encoded arity: the slots of the other roles plus the arguments
                                                 // (one auxiliary slot for a nullary predicate)
     u32 logical_arity = 0;                      // arguments: the arity of the predicate or action schema
@@ -172,7 +197,8 @@ public:
     /// The options in normal form.
     [[nodiscard]] const FlatOptions& options() const noexcept { return m_options; }
 
-    /// The relations, sorted by name (bytewise); a relation's id is its position.
+    /// The relations, sorted by name (bytewise) and followed by the numeric relations, sorted by name; a relation's id is
+    /// its position.
     [[nodiscard]] u32 num_relations() const noexcept { return static_cast<u32>(m_relations.size()); }
     [[nodiscard]] const std::vector<Relation>& relations() const noexcept { return m_relations; }
     [[nodiscard]] const Relation& relation(u32 id) const { return m_relations.at(id); }
@@ -235,6 +261,41 @@ public:
     /// Whether the schema has subgoal relations: goal relations of a level above 0, including the ones of a horizon.
     [[nodiscard]] bool has_subgoals() const noexcept { return m_subgoals; }
 
+    /// Whether a batch stores the relation arrays (relation_counts, relation_offsets, relation_arg_offsets and
+    /// relation_args): FlatOptions::outputs has Relations.
+    [[nodiscard]] bool emits_relations() const noexcept { return m_options.outputs.contains(Output::Relations); }
+    /// Whether the schema has numeric relations (a numeric domain with include_numeric).
+    [[nodiscard]] bool has_numeric() const noexcept { return m_first_numeric != num_relations(); }
+    /// The id of the first numeric relation: the relations from it on are the numeric ones (num_relations() without any).
+    [[nodiscard]] u32 first_numeric_relation() const noexcept { return m_first_numeric; }
+    /// Whether a batch stores `numeric_values`: the schema has numeric relations and stores the relation arrays.
+    [[nodiscard]] bool stores_numeric_values() const noexcept { return has_numeric() && emits_relations(); }
+    /// Whether a batch stores `node_value`: the schema has numeric relations and stores the Simple graph.
+    [[nodiscard]] bool stores_node_value() const noexcept { return has_numeric() && emits_simple(); }
+
+    /// Whether a batch stores the Simple graph (node_offsets, node_label, edge_offsets, edge_index and edge_label):
+    /// FlatOptions::outputs has Simple.
+    [[nodiscard]] bool emits_simple() const noexcept { return m_options.outputs.contains(Output::Simple); }
+    /// The largest encoded arity of a relation, K: slot k of an atom's tuple labels its edge to the entity k, and the
+    /// edge back has the label K + k. At least 1.
+    [[nodiscard]] u32 simple_max_arity() const noexcept { return m_simple_max_arity; }
+    /// The domain's constants a node label of its own is given with FlatOptions::constant_labels (otherwise 0).
+    [[nodiscard]] u32 simple_constants() const noexcept { return m_simple_constants; }
+    /// The number of node labels of the Simple graph: the 9 entity roles, then one per relation, then one per
+    /// constant with constant_labels.
+    [[nodiscard]] u32 simple_node_labels() const noexcept
+    {
+        return static_cast<u32>(k_entity_role_names.size()) + num_relations() + m_simple_constants;
+    }
+    /// The number of edge labels of the Simple graph, 2K.
+    [[nodiscard]] u32 simple_edge_labels() const noexcept { return 2 * m_simple_max_arity; }
+    /// The name of each node label: the entity role names, then the relation names, then the constant names. Label
+    /// 9 + r is relation r; with constant_labels label 9 + R + c is the constant c.
+    [[nodiscard]] std::vector<std::string> simple_label_names() const;
+    /// The name of each edge label: "<k>" for the edge from the entity at position k of an atom to the atom, "<k>^-1"
+    /// for the edge back (label K + k).
+    [[nodiscard]] std::vector<std::string> simple_edge_label_names() const;
+
     /// Whether a batch stores the static tuples once per instance, in static blocks (FlatOptions::statics).
     [[nodiscard]] bool shared_statics() const noexcept { return m_options.statics == Statics::Shared; }
     /// The ids of the relations of the static lane, ascending (catalog order): with shared statics, the relations whose
@@ -243,9 +304,10 @@ public:
 
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
     /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
-    /// are stored, whether the statics are shared, the target sources, the history lane with its step limit, and the
-    /// horizon mode and root policy. It does not depend on the declaration order of the domain, on predicate or schema
-    /// ids, or on the process or the build.
+    /// are stored, whether the statics are shared, the target sources, the history lane with its step limit, the horizon
+    /// mode and root policy, the outputs and constant labels when they differ from the default (relations only, no
+    /// constant labels), and the numeric dtype of a schema that stores numeric values. It does not depend on the
+    /// declaration order of the domain, on predicate or schema ids, or on the process or the build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
 
 private:
@@ -260,6 +322,10 @@ private:
     std::vector<i32> m_virtual_rank;
     std::vector<u32> m_static_relations;
     u32 m_num_virtual_predicates = 0;
+    u32 m_simple_max_arity = 1;
+    u32 m_simple_constants = 0;
+    u32 m_first_numeric = 0;
+    std::vector<std::string> m_constants;
     bool m_implicit_entities = false;
     bool m_goal_complete = false;
     bool m_subgoals = false;

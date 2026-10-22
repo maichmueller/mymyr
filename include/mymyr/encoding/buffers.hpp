@@ -8,9 +8,10 @@
 namespace mymyr::encoding
 {
 /// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
-/// args the entries of relation_args, targets the target_entity and target_group arrays and history the history_entity
-/// and history_dt arrays. Tuple counts have no separate capacity because every tuple has at least one argument and no
-/// array is indexed by tuple alone.
+/// args the entries of relation_args, targets the target_entity and target_group arrays, history the history_entity
+/// and history_dt arrays, and numeric the entries of numeric_values (only a schema that stores numeric values has a
+/// numeric capacity; the true count is FlatEncoder::numeric_tuples). Tuple counts have no separate capacity because every
+/// tuple has at least one argument and no array is indexed by tuple alone.
 struct BatchShape
 {
     u64 graphs = 0;
@@ -18,6 +19,7 @@ struct BatchShape
     u64 args = 0;
     u64 targets = 0;
     u64 history = 0;
+    u64 numeric = 0;
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
@@ -38,6 +40,14 @@ struct StaticSizes
     u64 instances = 0;
     u64 tuples = 0;
     u64 args = 0;
+};
+
+/// The true sizes of a batch that its FlatSizes do not hold (the FlatSizes keep the six words of the device's sizes):
+/// its numeric values and its static blocks.
+struct ExtraSizes
+{
+    u64 numeric = 0;        // the numeric tuples, the length of numeric_values (0 if the schema stores none)
+    StaticSizes statics{};  // the static blocks (all 0 unless the schema shares its statics)
 };
 
 /// Flags of FlatSizes::overflow.
@@ -68,8 +78,17 @@ static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 /// entity_role, entity_ref, target_entity, target_group, history_entity and history_dt must hold at least the sizes of
 /// the batch (FlatSizes). entity_role and entity_ref must be null iff the schema has implicit entity arrays,
 /// relation_counts iff it does not store counts, goal_complete iff it has no goal relations, the three target arrays
-/// iff it has no targets, the three history arrays iff it has no history. Nothing is written past the sizes: the
-/// entries of the variable-size arrays beyond them keep their old values.
+/// iff it has no targets, the three history arrays iff it has no history. The relation arrays (relation_counts,
+/// relation_offsets, relation_arg_offsets, relation_args) are null iff the schema does not store them
+/// (EncodingSchema::emits_relations), the Simple arrays (node_offsets, node_label, edge_offsets, edge_index,
+/// edge_label) are null iff it does not store the Simple graph. numeric_values is null iff the schema does not store
+/// numeric values (EncodingSchema::stores_numeric_values) and node_value iff it does not store node values
+/// (stores_node_value); numeric_values holds at least the batch's numeric tuples, node_value at least its nodes.
+/// Nothing is written past the sizes: the entries of the variable-size arrays beyond them keep their old values.
+///
+/// The Simple arrays hold the nodes (entities + tuples of the batch, at most entities + args) and edges (twice the
+/// args): node_label holds at least the nodes and edge_label at least the edges, and edge_index is two rows of
+/// `edge_stride` entries each (at least the edges), row 0 the sources and row 1 the targets.
 struct FlatBuffers
 {
     i32* task_ids = nullptr;
@@ -88,7 +107,7 @@ struct FlatBuffers
     // The static blocks, present iff the schema shares its statics (EncodingSchema::shared_statics): the arrays
     // static_task_ids [I_b], static_offsets and static_arg_offsets [I_b * R_s + 1], static_args [A_s] and
     // static_relations [R_s]. static_offsets and static_arg_offsets must hold I_b * R_s + 1 entries (the entries of the
-    // blocks), static_task_ids I_b and static_args the arguments of the blocks (StaticSizes); static_relations is always
+    // blocks), static_task_ids I_b and static_args the arguments of the blocks (ExtraSizes::statics); static_relations is always
     // R_s entries. The destination arrays of a capacity form may be longer; the encoder writes only the blocks' entries.
     i32* static_task_ids = nullptr;
     void* static_offsets = nullptr;
@@ -98,5 +117,13 @@ struct FlatBuffers
     void* history_offsets = nullptr;
     void* history_entity = nullptr;
     i32* history_dt = nullptr;
+    void* node_offsets = nullptr;   // [G + 1]
+    i32* node_label = nullptr;
+    void* edge_offsets = nullptr;   // [G + 1]
+    void* edge_index = nullptr;     // [2, edge_stride]
+    u64 edge_stride = 0;
+    i32* edge_label = nullptr;
+    void* numeric_values = nullptr;  // [T_num] float or double (FlatOptions::numeric_dtype)
+    f32* node_value = nullptr;       // [V]
 };
 }

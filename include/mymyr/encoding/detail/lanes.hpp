@@ -7,7 +7,7 @@
 //
 // The functions work on POD views of an EncodingContext (context.hpp): typed pointers into one block of fixed-width
 // arrays, which is either the host block or its uploaded copy. This header is part of the device-code subset: it
-// includes only core/types.hpp, uses no standard containers, exceptions, allocation, virtual calls or lambdas, and
+// includes only core/types.hpp and <bit>, uses no standard containers, exceptions, allocation, virtual calls or lambdas, and
 // compiles as C++23 under nvcc.
 //
 // The tuples of a graph, relation after relation (a relation without a tuple has count 0):
@@ -41,6 +41,10 @@
 //     oldest first), the step's positive (negative) literals of the cell's predicate in ascending slot order; a tuple
 //     is [history target]? + [history step] + [predicate]? + objects. With history targets each tuple has its own
 //     target entity.
+//   - Numeric cell: one tuple per numeric slot [a, b) of the instance, in slot order (the slots of one function are
+//     consecutive and ascend in the objects of their function terms): the objects of the function term (the auxiliary
+//     entity for a nullary function). The cell has the same tuples in every graph of the instance, so its count is a
+//     constant; the value of each tuple is read from the numeric words of the row (RowInput::numeric);
 //   - Action cell: one tuple (action entity, objects...) per distinct ground action of the cell's action relation in the
 //     graph's expansion rows (RowInput::actions), in lexicographic order of the objects. A relation is the one of
 //     several action schemas when the front end split an action over a disjunction: their rows are merged, and a ground
@@ -90,6 +94,7 @@
 // the group, and a barrier. They compute the same sizes and write the same bytes as the plain forms, for any group
 // size; SoloGroup is the group of one lane.
 
+#include <bit>
 #include <cassert>
 
 #include "mymyr/core/types.hpp"
@@ -126,6 +131,7 @@ enum class CellOp : u32
     Static = 2,
     Action = 3,        // the ground actions of the schemas a..b of ContextView::action_schemas
     ActionTarget = 4,  // the same; the action entities are also listed as targets
+    Numeric = 5,       // the numeric slots a..b of the instance
 };
 
 /// The variants of a goal cell: the plain goal literals (with the goal entity in front of each tuple for PlainTarget) and
@@ -169,6 +175,7 @@ MYMYR_HD constexpr bool is_action_op(u32 op)
 {
     return op == static_cast<u32>(CellOp::Action) || op == static_cast<u32>(CellOp::ActionTarget);
 }
+MYMYR_HD constexpr bool is_numeric_op(u32 op) { return op == static_cast<u32>(CellOp::Numeric); }
 
 /// One relation of one instance that can have tuples. An instance's cells are sorted by relation id.
 struct Cell
@@ -178,7 +185,8 @@ struct Cell
     u32 a, b;           // Fluent / Derived: the slot range [a, b); Static: the rows [a, b) of the instance's static tuples;
                         // a goal cell: the slots of its predicate's atoms that the goal masks can set (empty for a
                         // static predicate);
-                        // an action cell: the entries [a, b) of the context's action schema list
+                        // an action cell: the entries [a, b) of the context's action schema list;
+                        // a numeric cell: the instance's numeric slots [a, b)
     u32 arity;          // encoded arity: the logical arity, or 1 for a nullary predicate, plus the slots of the other roles
     u32 logical_arity;  // the predicate's arity
     u32 c = 0, d = 0;   // a goal cell: the rows [c, d) of the instance's constant goal tuples that belong to the cell;
@@ -215,7 +223,9 @@ enum InstanceColumn : u32
     k_needs_derived,        // which derived words its graphs read (k_needs_* bits)
     k_ext_lists,            // 12 pairs (cells, first row in `cells`): the lists of a graph with subgoal layers, history
                             // steps, or both, for each of the four lists above (see cell_list)
-    k_instance_columns = k_ext_lists + 24,
+    k_numeric_args_offset = k_ext_lists + 24,  // first row of the instance's numeric slots in `numeric_args`
+    k_numeric_tuples,                          // the numeric slots of the instance: the tuples of its numeric cells
+    k_instance_columns,
 };
 
 /// The bits of the column k_needs_derived: the instance's state cells list derived atoms, the literals of the instance's
@@ -251,6 +261,9 @@ struct ContextView
     const u32* relation_arity = nullptr;  // [num_relations] the encoded arity of each relation
     const u32* static_relations = nullptr;  // [num_static] the relations of the static lane, ascending
     u32 num_static = 0;
+    const i32* numeric_args = nullptr;  // [numeric slots of all instances, max_arity]: the objects of each numeric slot's
+                                        // function term, -1 padded
+    u32 numeric_storage = 0;            // how the rows store numeric values: k_numeric_storage_f64 or _i32
 };
 
 /// One instance of a context, resolved to pointers and counts.
@@ -262,7 +275,8 @@ struct InstanceView
     u32 num_cells, num_row_cells, num_plain_cells, num_plain_row_cells;
     const Cell *cells, *row_cells, *plain_cells, *plain_row_cells;
     const Cell* cell_base;   // the context's cells: the rows of the extended lists are relative to it
-    const u64* ext_lists;    // 12 pairs (count, first row) of the lists of a graph with subgoal layers and / or history
+    const u64* lazy_columns;  // the instance's columns from k_ext_lists on (the extended lists, the numeric slots):
+                              // not resolved here, read through lazy_column where needed
     const i32* slot_args;
     const i32* derived_args;
     const i32* static_args;
@@ -280,7 +294,20 @@ struct InstanceView
     const u32* relation_virtual;
     const u32* virtual_relation;
     u32 num_virtual;
+    const i32* numeric_args;  // the context's numeric slot rows, max_arity entries each; the instance's start at
+                              // numeric_arg_row(*this)
+    u32 numeric_storage;
 };
+
+/// Column `k` of the instance, one of the columns from k_ext_lists to k_instance_columns.
+MYMYR_HD u64 lazy_column(const InstanceView& v, u32 k) { return v.lazy_columns[k - k_ext_lists]; }
+
+/// The first row of the instance's numeric slots in InstanceView::numeric_args. Read from the instance's columns when
+/// needed: the graphs of an instance without numeric cells never use it.
+MYMYR_HD u64 numeric_arg_row(const InstanceView& v) { return lazy_column(v, k_numeric_args_offset); }
+
+/// The numeric slots of the instance: the tuples of its numeric cells.
+MYMYR_HD u32 numeric_slot_count(const InstanceView& v) { return static_cast<u32>(lazy_column(v, k_numeric_tuples)); }
 
 MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
 {
@@ -300,7 +327,7 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.plain_cells = c.cells + row[k_plain_cell_offset];
     v.plain_row_cells = c.cells + row[k_plain_row_cell_offset];
     v.cell_base = c.cells;
-    v.ext_lists = row + k_ext_lists;
+    v.lazy_columns = row + k_ext_lists;
     v.slot_args = c.slot_args + row[k_slot_args_offset] * c.max_arity;
     v.derived_args = c.derived_args + row[k_derived_args_offset] * c.max_arity;
     v.static_args = c.static_args + row[k_static_args_offset] * c.max_arity;
@@ -320,6 +347,8 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.relation_virtual = c.relation_virtual;
     v.virtual_relation = c.virtual_relation;
     v.num_virtual = c.num_virtual;
+    v.numeric_args = c.numeric_args;
+    v.numeric_storage = c.numeric_storage;
     return v;
 }
 
@@ -567,6 +596,7 @@ struct RowInput
     const u64* goal_derived_neg = nullptr;
     ActionRows actions{};
     const RowLayers* layers = nullptr;
+    const u64* numeric = nullptr;  // the row's numeric words (null: none; the values of its numeric tuples are NaN)
 };
 
 /// The cells of a graph: those of the instance's goal, or, when the row has goals of its own, those of row goals; the
@@ -592,7 +622,7 @@ MYMYR_HD CellList cell_list(const InstanceView& v, bool row_goals, bool actions,
         return cell_list(v, row_goals, actions);
     const u32 extension = (subgoals ? 1u : 0u) | (history ? 2u : 0u);  // 1 to 3
     const u32 base = (row_goals ? 1u : 0u) + (actions ? 0u : 2u);  // the index of the list without layers
-    const u64* entry = v.ext_lists + 2u * ((extension - 1u) * 4u + base);
+    const u64* entry = v.lazy_columns + 2u * ((extension - 1u) * 4u + base);  // its pair of the k_ext_lists columns
     return CellList{v.cell_base + entry[1], static_cast<u32>(entry[0])};
 }
 
@@ -1303,10 +1333,13 @@ MYMYR_HD bool counted_by_group(const Cell& c, const RowInput& in)
     return words && c.a < c.b && ((c.b - 1u) >> 6) - (c.a >> 6) + 1u >= k_shared_count_words;
 }
 
-/// The tuples of a goal, history or action cell in this graph. Kept out of line: the state cells are the hot ones.
+/// The tuples of a goal, history, action or numeric cell in this graph. Kept out of line: the state cells are the hot
+/// ones.
 template<bool Layered>
 MYMYR_HD_COLD u32 special_cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
 {
+    if (is_numeric_op(c.op))
+        return c.b - c.a;
     if (is_goal_op(c.op))
         return goal_cell_count<Layered>(c, goal_words(v, in), in);
     if (Layered && is_history_op(c.op))
@@ -1349,6 +1382,12 @@ MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
     if (c.op <= static_cast<u32>(CellOp::Static))
     {
         if (c.logical_arity == 0 && cell_present(c, n))
+            t.flags |= k_graph_auxiliary;
+        return;
+    }
+    if (is_numeric_op(c.op))
+    {
+        if (c.logical_arity == 0 && n > 0)
             t.flags |= k_graph_auxiliary;
         return;
     }
@@ -1437,7 +1476,7 @@ MYMYR_HD bool has_virtual_nodes(const InstanceView& v) { return v.relation_virtu
 /// of the graph are checked (check_actions, which writes the rows' `starts`): a violation sets k_graph_bad_action_order
 /// or k_graph_bad_action_label, and the counts of the action cells are then meaningless.
 template<bool Layered>
-MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
+MYMYR_HD_HOT GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
                                  u32* virtual_scratch = nullptr)
 {
     GraphTotals t = empty_totals();
@@ -1628,6 +1667,12 @@ struct GraphOut
     I* history_offsets = nullptr;  // [G + 1]; null: no history arrays (they are stored together)
     I* history_entity = nullptr;   // [S] the history step entities of the graphs, in step order
     i32* history_dt = nullptr;     // [S] the dt of each step
+    // The values of the numeric tuples, one array of the two (null: not stored): the k-th numeric tuple of the batch, taking
+    // the tuples of the numeric cells in segment order, has its value at index k. `numeric_block` is the number of
+    // tuples before the first numeric relation in the relation-major layout (the numeric segments follow all others).
+    f32* numeric_f32 = nullptr;
+    f64* numeric_f64 = nullptr;
+    u64 numeric_block = 0;
 };
 
 /// The segment of cell (g, r) among the G * R cells of a batch with R relations: g * R + r graph-major, r * G + g
@@ -1942,6 +1987,64 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
     return fill_cell_dispatch<I, true>(v, c, in, entity_base, auxiliary, pred, dst);
 }
 
+// ------------------------------------------------------------------------------------------------ numeric lane
+
+/// How a row stores its numeric values (ContextView::numeric_storage): one IEEE double per word, or two int32 per word
+/// (slot 2k in the low half of word k).
+inline constexpr u32 k_numeric_storage_f64 = 0;
+inline constexpr u32 k_numeric_storage_i32 = 1;
+
+MYMYR_HD f64 f64_from_bits(u64 bits)
+{
+#if defined(__CUDA_ARCH__)
+    return __longlong_as_double(static_cast<long long>(bits));
+#else
+    return std::bit_cast<f64>(bits);
+#endif
+}
+
+/// The value of numeric slot `slot` in the numeric words of a row; NaN (the undefined value) without words.
+MYMYR_HD f64 numeric_slot_value(const u64* words, u32 storage, u32 slot)
+{
+    if (!words)
+        return f64_from_bits(0x7FF8000000000000ULL);
+    if (storage == k_numeric_storage_i32)
+        return static_cast<f64>(static_cast<i32>(static_cast<u32>(words[slot >> 1] >> ((slot & 1u) * 32u))));
+    return f64_from_bits(words[slot]);
+}
+
+/// A value rounded to the nearest float (ties to even), the same on the host and the device.
+MYMYR_HD f32 numeric_to_f32(f64 value)
+{
+#if defined(__CUDA_ARCH__)
+    return __double2float_rn(value);
+#else
+    return static_cast<f32>(value);
+#endif
+}
+
+/// Writes the arguments of the tuples of numeric cell `c` to `dst` (the objects of each slot's function term as entity
+/// ids; the entity `auxiliary` for a nullary function) and, if the batch stores numeric values, the values of the
+/// tuples from index `first_value` of the numeric values on. Returns the number of tuples (the cell's count).
+template<class I>
+MYMYR_HD u32 fill_numeric_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
+                               const GraphOut<I>& out, u64 first_value, I* dst)
+{
+    const u32 n = c.b - c.a;
+    const u64 A = v.max_arity;
+    const i32* const slot_args = v.numeric_args + numeric_arg_row(v) * A;
+    for (u32 k = 0; k < n; ++k)
+        dst = emit_state_tuple<I>(dst, slot_args + static_cast<u64>(c.a + k) * A, c.logical_arity, entity_base,
+                                  auxiliary, k_no_entity);
+    if (out.numeric_f64)
+        for (u32 k = 0; k < n; ++k)
+            out.numeric_f64[first_value + k] = numeric_slot_value(in.numeric, v.numeric_storage, c.a + k);
+    else if (out.numeric_f32)
+        for (u32 k = 0; k < n; ++k)
+            out.numeric_f32[first_value + k] = numeric_to_f32(numeric_slot_value(in.numeric, v.numeric_storage, c.a + k));
+    return n;
+}
+
 /// Writes the arguments of the tuples of goal cell `c` in this graph to `dst` for a goal cell of K objects (K ==
 /// k_any_arity: of c.logical_arity objects), with goal targets when Target, and returns the number of tuples: the
 /// cell's mask tuples (ascending slots) merged with its constant rows (the instance's goal only), in lexicographic
@@ -2062,6 +2165,7 @@ struct FillCursor
     u64 history_written = 0;
     u64 subgoal_entities = 0;
     u64 history_target_at = 0;  // where the history targets start in the target arrays
+    u64 numeric_at = 0;         // the index of the next numeric value in the batch's numeric values
 };
 
 /// The predicate entity of the tuples of relation `relation` in this graph: k_no_entity if the relation has no predicate
@@ -2310,24 +2414,40 @@ MYMYR_HD_COLD u32 fill_goal_cell_at(const InstanceView& v, const Cell& c, const 
     return n;
 }
 
+/// Writes an action, numeric, history or goal cell of a graph (see fill_cell_at). Kept out of line: the fluent, derived
+/// and static cells are the hot ones.
+template<class I, bool Layered>
+MYMYR_HD_COLD u32 fill_special_cell_at(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
+                                       u64 auxiliary, u64 graph_tuple, FillCursor& cursor, const GraphOut<I>& out,
+                                       I* dst)
+{
+    if (is_action_op(c.op))
+        return fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst);
+    if (is_numeric_op(c.op))
+    {
+        const u32 n = fill_numeric_cell<I>(v, c, in, entity_base, auxiliary, out, cursor.numeric_at, dst);
+        cursor.numeric_at += n;
+        return n;
+    }
+    const u64 pred = predicate_entity(v, cursor, c.relation);
+    if (Layered && !is_goal_op(c.op))
+        return fill_history_cell_at<I>(v, c, in, entity_base, auxiliary, graph_tuple, pred, cursor, out, dst);
+    return fill_goal_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, graph_tuple, pred, cursor, out, dst);
+}
+
 /// Writes one cell of a graph: its tuples' arguments to `dst` (like fill_cell, fill_goal_cell for a goal cell,
-/// fill_history_cell for a history cell and fill_action_cell for an action cell) and, for a plain goal or subgoal cell
-/// with targets and a history cell with history targets, the entities of its tuples and their target entries.
-/// `graph_tuple` is the index of the cell's first tuple among the graph's tuples in graph-major order, the sum of the
-/// counts of the graph's cells before it (the `entity_ref` of its first target entity), whatever the layout. Returns
-/// the number of tuples.
+/// fill_history_cell for a history cell, fill_action_cell for an action cell and fill_numeric_cell for a numeric cell)
+/// and, for a plain goal or subgoal cell with targets and a history cell with history targets, the entities of its
+/// tuples and their target entries. `graph_tuple` is the index of the cell's first tuple among the graph's tuples in
+/// graph-major order, the sum of the counts of the graph's cells before it (the `entity_ref` of its first target
+/// entity), whatever the layout. Returns the number of tuples.
 template<class I, bool Layered>
 MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                           u64 graph_tuple, FillCursor& cursor, const GraphOut<I>& out, I* dst)
 {
-    if (is_action_op(c.op))
-        return fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst);
-    const u64 pred = predicate_entity(v, cursor, c.relation);
-    if (c.op < k_history_op_base)
-        return fill_cell<I>(v, c, in, entity_base, auxiliary, pred, dst);
-    if (Layered && !is_goal_op(c.op))
-        return fill_history_cell_at<I>(v, c, in, entity_base, auxiliary, graph_tuple, pred, cursor, out, dst);
-    return fill_goal_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, graph_tuple, pred, cursor, out, dst);
+    if (c.op > static_cast<u32>(CellOp::Static))
+        return fill_special_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, graph_tuple, cursor, out, dst);
+    return fill_cell<I>(v, c, in, entity_base, auxiliary, predicate_entity(v, cursor, c.relation), dst);
 }
 
 /// The start of a graph's fill: its entities (the objects, the auxiliary entity, and the virtual entities, which need the
@@ -2336,11 +2456,12 @@ MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& 
 template<class I, bool Layered>
 MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g, u64 entity_base,
                                 const GraphTotals& totals, const GraphOut<I>& out, u64 target_base,
-                                const u32* cell_counts, u32* scratch, u64 history_base = 0)
+                                const u32* cell_counts, u32* scratch, u64 history_base = 0, u64 numeric_base = 0)
 {
     const bool auxiliary = (totals.flags & k_graph_auxiliary) != 0;
     fill_entities<I>(v, in, auxiliary, g, entity_base, target_base, out);
     FillCursor cursor{entity_blocks<Layered>(v, totals, entity_base), 0, 0, target_base, totals.goal_entities, nullptr};
+    cursor.numeric_at = numeric_base;
     if constexpr (Layered)
     {
         cursor.subgoal_entities = totals.subgoal_entities;
@@ -2368,11 +2489,12 @@ MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g
 template<class I, bool Layered>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
-                         u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr, u64 history_base = 0)
+                         u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr, u64 history_base = 0,
+                         u64 numeric_base = 0)
 {
     const RowInput& in = given;
     FillCursor cursor = begin_graph<I, Layered>(v, in, g, entity_base, totals, out, target_base, cell_counts,
-                                                virtual_scratch, history_base);
+                                                virtual_scratch, history_base, numeric_base);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
@@ -2457,6 +2579,8 @@ MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u
                 counts[r] = static_cast<I>(0);
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
         I* dst = out.relation_args + positions.args(segment, c.relation);
+        if (is_numeric_op(c.op))  // the numeric segments follow all others: their tuples are the numeric values in order
+            cursor.numeric_at = static_cast<u64>(out.relation_offsets[segment]) - out.numeric_block;
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst)
                       : Layered && cell_counts && cell_counts[i] == 0
@@ -2495,6 +2619,8 @@ MYMYR_HD void advance_cursor(FillCursor& cursor, const Cell& c, u32 n)
 {
     if (is_action_op(c.op))
         cursor.actions_written += n;
+    else if (is_numeric_op(c.op))
+        cursor.numeric_at += n;
     else if (is_goal_op(c.op))
     {
         if (goal_op_mode(c.op) == GoalMode::PlainTarget)
@@ -2510,7 +2636,8 @@ MYMYR_HD void advance_cursor(FillCursor& cursor, const Cell& c, u32 n)
 template<class I, bool Layered, class Group>
 MYMYR_HD FillCursor begin_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g,
                                       u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
-                                      u64 target_base, const u32* cell_counts, u32* scratch, u64 history_base = 0)
+                                      u64 target_base, const u32* cell_counts, u32* scratch, u64 history_base = 0,
+                                      u64 numeric_base = 0)
 {
     const u32 lane = grp.lane(), lanes = grp.size();
     if (lane == 0)
@@ -2520,6 +2647,7 @@ MYMYR_HD FillCursor begin_graph_group(const Group& grp, const InstanceView& v, c
     if (lane == 0 && (totals.flags & k_graph_auxiliary))
         fill_auxiliary_entity<I>(v.num_objects, entity_base, out);
     FillCursor cursor{entity_blocks<Layered>(v, totals, entity_base), 0, 0, target_base, totals.goal_entities, nullptr};
+    cursor.numeric_at = numeric_base;
     if constexpr (Layered)
     {
         cursor.subgoal_entities = totals.subgoal_entities;
@@ -2641,10 +2769,11 @@ MYMYR_HD void fill_empty_relations(const Group& grp, I* offsets, I* arg_offsets,
 template<class I, bool Layered, class Group>
 MYMYR_HD void fill_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g, u64 tuple_base,
                                u64 arg_base, u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
-                               u64 target_base, u32* virtual_scratch, const u32* cell_counts, u64 history_base = 0)
+                               u64 target_base, u32* virtual_scratch, const u32* cell_counts, u64 history_base = 0,
+                               u64 numeric_base = 0)
 {
     FillCursor cursor = begin_graph_group<I, Layered>(grp, v, in, g, entity_base, totals, out, target_base, cell_counts,
-                                                      virtual_scratch, history_base);
+                                                      virtual_scratch, history_base, numeric_base);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
@@ -2696,6 +2825,8 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
         const Cell& c = list.cells[i];
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
         const u32 n = positions.count(segment);
+        if (is_numeric_op(c.op))
+            cursor.numeric_at = static_cast<u64>(out.relation_offsets[segment]) - out.numeric_block;
         if (counts)
         {
             for (u32 q = r + grp.lane(); q < c.relation; q += grp.size())
@@ -2711,6 +2842,150 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
     if (counts)
         for (u32 q = r + grp.lane(); q < R; q += grp.size())
             counts[q] = static_cast<I>(0);
+}
+
+// ------------------------------------------------------------------------------------------------------ Simple
+//
+// The homogeneous atom-object incidence graph of a graph's tuples. Its nodes are the graph's entities, in entity order,
+// then one node per tuple (an atom), in the order of the graph's tuples in the graph-major layout (the cells' tuples in
+// relation order, whatever the layout of the relation arrays). Node j of graph g is the batch-global node
+// node_offsets[g] + j, where node_offsets[g] is the graph's entity base plus the tuples of the graphs before it, so the
+// node of the batch-global entity e of graph g is e + (the tuples before g).
+//
+// The label of an entity node is its role (0 to 8), or, for an object that is one of the first `constants` objects (the
+// domain's constants), 9 + R + its id; the label of an atom node is 9 + the id of its relation. For every tuple t (atom
+// node a) and every position k of its relation, the entity e at that position gives two edges: e -> a with label k and
+// a -> e with label K + k, K the largest encoded arity of a relation. A graph's edges are all its forward edges in
+// (tuple, position) order, then all its reverse edges in the same order: the edges of graph g start at 2 * (the
+// arguments before g), and the argument i of the graph (counted in graph-major tuple order) has the forward edge
+// 2 * (the arguments before g) + i and the reverse edge 2 * (the arguments before g) + (the graph's arguments) + i.
+//
+// The emitters read the arguments that the relation fill has written, so they follow it graph by graph with the cells'
+// counts of the graph.
+
+/// The roles that label an entity node (EntityRole): atom labels follow them.
+inline constexpr u32 k_simple_roles = 9;
+
+/// The vocabulary of the Simple graph.
+struct SimpleParams
+{
+    u32 relations;  // R: the relations of the schema
+    u32 max_arity;  // K: the largest encoded arity of a relation
+    u32 constants;  // the objects that get a label of their own (constant_labels), else 0
+};
+
+/// Where the Simple graph is written: pointers to the batch arrays.
+template<class I>
+struct SimpleOut
+{
+    I* node_offsets;  // [G + 1]
+    I* edge_offsets;  // [G + 1]
+    i32* node_label;  // [V]
+    I* edge_source;   // [E]: row 0 of edge_index
+    I* edge_target;   // [E]: row 1 of edge_index
+    i32* edge_label;  // [E]
+    f32* node_value = nullptr;  // [V]: the value of each numeric atom node, 0 for the other nodes; null: not stored
+};
+
+/// The place and the size of one graph in the batch.
+struct SimpleGraph
+{
+    u64 entity_base;  // the graph's first entity (batch-global)
+    u64 entities;
+    u64 tuple_base;   // the tuples of the graphs before it
+    u64 tuples;
+    u64 arg_base;     // the tuple arguments of the graphs before it
+    u64 args;
+    const u64* numeric = nullptr;  // the graph's row's numeric words, from which node_value is read (null: NaN values)
+    u32 numeric_storage = 0;       // how the row stores them (k_numeric_storage_f64 or _i32)
+};
+
+/// Writes the node labels of the graph's entities. `entity_role` is the batch's entity_role.
+template<class I>
+MYMYR_HD void simple_fill_entities(const SimpleParams& params, const SimpleOut<I>& out, const u8* entity_role,
+                                   const SimpleGraph& graph)
+{
+    i32* label = out.node_label + graph.entity_base + graph.tuple_base;
+    const u8* role = entity_role + graph.entity_base;
+    const i32 constants_at = static_cast<i32>(k_simple_roles + params.relations);
+    for (u64 j = 0; j < graph.entities; ++j)
+        label[j] = role[j] == k_role_object && j < params.constants ? constants_at + static_cast<i32>(j)
+                                                                    : static_cast<i32>(role[j]);
+}
+
+/// Writes the atom nodes and the edges of the `n` tuples of one cell: `args` are the cell's arguments (batch-global
+/// entity ids, `arity` per tuple), `graph_tuple` is the index of the cell's first tuple among the graph's tuples and
+/// `graph_arg` the index of its first argument among the graph's arguments (both in graph-major order).
+template<class I>
+MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
+                               u32 relation, u32 arity, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
+{
+    const i32 atom_label = static_cast<i32>(k_simple_roles + relation);
+    const i32 back = static_cast<i32>(params.max_arity);
+    const u64 shift = graph.tuple_base;
+    I* const forward_source = out.edge_source + 2 * graph.arg_base + graph_arg;
+    I* const forward_target = out.edge_target + 2 * graph.arg_base + graph_arg;
+    i32* const forward_label = out.edge_label + 2 * graph.arg_base + graph_arg;
+    I* const back_source = forward_source + graph.args;
+    I* const back_target = forward_target + graph.args;
+    i32* const back_label = forward_label + graph.args;
+    const u64 first_atom = graph.entity_base + graph.tuple_base + graph.entities + graph_tuple;
+    for (u32 k = 0; k < n; ++k)
+    {
+        const I atom = static_cast<I>(first_atom + k);
+        out.node_label[first_atom + k] = atom_label;
+        const u64 at = static_cast<u64>(k) * arity;
+        for (u32 slot = 0; slot < arity; ++slot)
+        {
+            const I entity = static_cast<I>(static_cast<u64>(args[at + slot]) + shift);
+            forward_source[at + slot] = entity;
+            forward_target[at + slot] = atom;
+            forward_label[at + slot] = static_cast<i32>(slot);
+            back_source[at + slot] = atom;
+            back_target[at + slot] = entity;
+            back_label[at + slot] = back + static_cast<i32>(slot);
+        }
+    }
+}
+
+/// Writes graph `g` of the Simple graph after its relation tuples are written: its entry of node_offsets and
+/// edge_offsets, the labels of its entities and its atoms, and its edges. `cells` are the graph's cells and
+/// `cell_counts` their tuple counts (the counts of count_graph, one per cell); `out` is the destination of the relation
+/// arrays (entity_role, relation_args and, relation-major, relation_arg_offsets). With node_value, the node of a numeric
+/// tuple gets the value of the tuple, rounded to a float, and every other node gets 0. The end entries of the two offset
+/// arrays are the caller's.
+template<class I>
+MYMYR_HD void simple_fill_graph(const SimpleParams& params, const SimpleOut<I>& simple, const GraphOut<I>& out,
+                                const CellList& cells, const u32* cell_counts, bool relation_major, u64 g,
+                                const SimpleGraph& graph)
+{
+    simple.node_offsets[g] = static_cast<I>(graph.entity_base + graph.tuple_base);
+    simple.edge_offsets[g] = static_cast<I>(2 * graph.arg_base);
+    simple_fill_entities<I>(params, simple, out.entity_role, graph);
+    f32* const value = simple.node_value ? simple.node_value + graph.entity_base + graph.tuple_base : nullptr;
+    if (value)
+        for (u64 j = 0; j < graph.entities + graph.tuples; ++j)
+            value[j] = 0;
+    u64 graph_tuple = 0, graph_arg = 0;
+    for (u32 i = 0; i < cells.count; ++i)
+    {
+        const u32 n = cell_counts[i];
+        if (n == 0)
+            continue;
+        const Cell& c = cells.cells[i];
+        if (value && is_numeric_op(c.op))
+            for (u32 k = 0; k < n; ++k)
+                value[graph.entities + graph_tuple + k] =
+                    numeric_to_f32(numeric_slot_value(graph.numeric, graph.numeric_storage, c.a + k));
+        const u64 at = relation_major
+                           ? static_cast<u64>(out.relation_arg_offsets[cell_segment(true, g, c.relation, out.graphs,
+                                                                                    params.relations)])
+                           : graph.arg_base + graph_arg;
+        simple_emit_cell<I>(params, simple, graph, c.relation, c.arity, n, out.relation_args + at, graph_tuple,
+                            graph_arg);
+        graph_tuple += n;
+        graph_arg += static_cast<u64>(n) * c.arity;
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ static blocks

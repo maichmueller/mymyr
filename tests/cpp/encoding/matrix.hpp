@@ -557,6 +557,57 @@ inline std::vector<Corpus> corpus()
     return out;
 }
 
+/// Tables with numeric functions: two instances of different sizes with i32 storage, three with f64 storage, and one
+/// instance whose functions have several arities.
+inline std::vector<Corpus> numeric_corpus()
+{
+    using Mode = TaskOptions::NumericStorageMode;
+    auto counters = [](const char* problem, Mode mode)
+    {
+        const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
+        TaskOptions options;
+        options.numeric_storage = mode;
+        return Task::create(*frontend::load_task(dir + "domain.pddl", dir + problem + ".pddl"), options);
+    };
+    const std::string drone = std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-drone.txt";
+    std::vector<Corpus> out;
+    out.push_back({"counters_i32", rl::TaskTable::create({counters("p01", Mode::Auto), counters("p02", Mode::Auto)}), true});
+    out.push_back({"counters_f64",
+                   rl::TaskTable::create({counters("p01", Mode::F64), counters("p03-half", Mode::F64),
+                                          counters("p02", Mode::F64)}),
+                   true});
+    out.push_back({"drone", rl::TaskTable::single(Task::from_text_file(drone)), true});
+    return out;
+}
+
+/// `per_instance` walk rows of each instance, interleaved, with their numeric words.
+inline test::Rows walk_rows(const rl::TaskTable& table, u64 per_instance, u64 seed)
+{
+    std::vector<test::Rows> sources;
+    for (u32 i = 0; i < table.size(); ++i)
+        sources.push_back(test::random_walk(table, i, per_instance, seed + i));
+    test::Rows out;
+    out.words = table.words();
+    out.numeric_words = table.numeric_words();
+    const u32 width = table.row_words();
+    for (u64 k = 0; k < per_instance; ++k)
+        for (const auto& source : sources)
+        {
+            out.data.insert(out.data.end(), source.data.begin() + static_cast<std::ptrdiff_t>(k * width),
+                            source.data.begin() + static_cast<std::ptrdiff_t>((k + 1) * width));
+            out.task_ids.push_back(source.task_ids[k]);
+        }
+    return out;
+}
+
+inline encoding::EncodeInput input_of(const test::Rows& rows)
+{
+    encoding::EncodeInput in;
+    in.states = rows.view();
+    in.task_ids = rows.task_ids.data();
+    return in;
+}
+
 inline encoding::FlatOptions with(encoding::FlatOptions o, encoding::Layout layout, encoding::IndexType index)
 {
     o.layout = layout;

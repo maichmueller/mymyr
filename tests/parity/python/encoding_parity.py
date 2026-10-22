@@ -1225,12 +1225,10 @@ def is_transition(config):
     return config in TRANSITION_CONFIGS
 
 
-# Configs that are not compared yet, with the lanes they need.
+# Configs that are not compared yet, with the lanes they need. (The HGraph configs, C9A to C9C, are compared by
+# encoding_hgraph_parity.)
 PENDING_CONFIGS = {
     "C8S": "goals, actions, subgoals, transition",
-    "C9A": "goals, HGraph",
-    "C9B": "goals, HGraph",
-    "C9C": "goals, actions, HGraph",
 }
 
 
