@@ -122,6 +122,12 @@ struct DeviceCollator::Impl
         if (!output.sizes) invalid("device collation needs output sizes");
         if (params.shared_statics && !output.static_sizes)
             invalid("shared collation needs output static sizes");
+        const auto& static_arrays = output.arrays;
+        if (!params.shared_statics &&
+            (output.static_sizes || output.static_capacities.instances || output.static_capacities.args ||
+             static_arrays.static_task_ids || static_arrays.static_offsets || static_arrays.static_arg_offsets ||
+             static_arrays.static_args || static_arrays.static_relations))
+            invalid("repeated statics take no static block outputs");
         if (phase != 1)
         {
             const auto& a = output.arrays;
@@ -177,7 +183,8 @@ void DeviceCollator::count(void* scratch, u64 bytes, encoding::FlatSizes* sizes,
     DeviceOutput out;
     out.sizes = sizes;
     out.static_sizes = statics;
-    out.static_capacities = {~u64{0}, ~u64{0}};
+    if (m_impl->params.shared_statics)
+        out.static_capacities = {~u64{0}, ~u64{0}};
     out.capacities = {graphs(), ~u64{0}, ~u64{0}, ~u64{0}};
     m_impl->run(1, scratch, bytes, out);
 }
