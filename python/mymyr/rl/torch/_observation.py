@@ -195,25 +195,33 @@ class Observer:
         )  # fmt: skip
         return _device.DeviceFlatBatch._of(self._templates[k], outs)
 
-    def _group(self, task_ids: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """The domain of each row, its index among its domain's rows, its position in the grouped rows (domain by
-        domain, in row order within one) and the rows of each domain [D] (int64 tensors on the device)."""
+    def _suite_ids(self, task_ids: Tensor) -> tuple[Tensor, Tensor]:
         ids = task_ids.to(torch.int64)
-        domain = self._domain_of[ids].to(torch.int64)
+        valid = (ids >= 0) & (ids < self._domain_of.numel())
+        safe = torch.where(valid, ids, 0)
+        domain = self._domain_of[safe].to(torch.int64)
+        # Invalid rows reach the encoder with an invalid local id, so its validation reports them.
+        local = torch.where(valid, self._local_ids[safe], -1)
+        return domain, local
+
+    def _group(self, domain: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Each row's index among its domain's rows, its position in the grouped rows (domain by
+        domain, in row order within one) and the rows of each domain [D] (int64 tensors on the device)."""
         one_hot = (domain.unsqueeze(1) == self._domains).to(torch.int64)  # no host check of the values
         within = one_hot.cumsum(0)
         counts = within[-1] if within.shape[0] else one_hot.sum(0)
         index = (within - 1).gather(1, domain.unsqueeze(1)).squeeze(1)
         starts = counts.cumsum(0) - counts
-        return domain, index, starts[domain] + index, counts
+        return index, starts[domain] + index, counts
 
     def _encode_suite_device(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> SuiteObservation:
         if torch.compiler.is_compiling():
             raise ValueError("mymyr: the observations of a suite of several domains are not traced by torch.compile: "
                              "capture the steps with BatchedEnv.capture or torch.cuda.graph")
-        domain, index, position, counts = self._group(task_ids)
+        domain, local = self._suite_ids(task_ids)
+        index, position, counts = self._group(domain)
         self._rows_states.index_copy_(0, position, states)
-        self._rows_ids.index_copy_(0, position, self._local_ids[task_ids.to(torch.int64)])
+        self._rows_ids.index_copy_(0, position, local)
         if self._rows_goals is not None and goals is not None:
             self._rows_goals[0].index_copy_(0, position, goals[0])
             self._rows_goals[1].index_copy_(0, position, goals[1])
@@ -241,12 +249,10 @@ class Observer:
 
     def _encode_suite_split(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> SuiteObservation:
         """Groups the rows on the host (a CPU environment, or exact encodings on a device, which wait anyway)."""
-        ids = task_ids.to(torch.int64)
-        domain = self._domain_of[ids].to(torch.int64)
+        domain, local = self._suite_ids(task_ids)
         one_hot = (domain.unsqueeze(1) == self._domains).to(torch.int64)  # no host check of the values
         index = (one_hot.cumsum(0) - 1).gather(1, domain.unsqueeze(1)).squeeze(1)
         host_domain = domain.cpu()
-        local = self._local_ids[ids]
         batches = []
         for k in range(len(self.encoders)):
             rows = torch.nonzero(host_domain == k).reshape(-1).to(states.device)

@@ -313,6 +313,38 @@ def test_obs_under_torch_compile(gripper):
 # ------------------------------------------------------------------------------------------------ suites
 
 
+@pytest.mark.parametrize("dev", devices())
+@pytest.mark.parametrize("capacities", [CAPS, None], ids=["capacities", "exact"])
+@pytest.mark.parametrize("invalid", [-1, "past_end", -(2**31), 2**31 - 1])
+def test_suite_invalid_task_ids_are_reported_without_unsafe_gathers(suite, dev, capacities, invalid, monkeypatch):
+    device = device_of(dev)
+    encoders = [encoding.FlatRelationEncoder(t) for t in suite.tables]
+    env = rt.BatchedEnv(suite, 4, device=device, task_ids=[len(suite) - 1] * 4,
+                        observation=encoders, obs_capacities=capacities)
+    env.task_ids[0] = len(suite) if invalid == "past_end" else invalid
+    original_getitem = torch.Tensor.__getitem__
+    lookups = (env._observer._domain_of, env._observer._local_ids)
+
+    def checked_getitem(tensor, index):
+        if any(tensor is lookup for lookup in lookups):
+            # Check before dispatch: an unsafe CUDA gather must never be submitted, even on a failing test.
+            assert bool(((index >= 0) & (index < tensor.numel())).all())
+        return original_getitem(tensor, index)
+
+    monkeypatch.setattr(torch.Tensor, "__getitem__", checked_getitem)
+    try:
+        if dev == "cuda" and capacities is not None:
+            obs = env.encode_observation()
+            assert any(batch.sizes["invalid_input"] for batch in obs.batches)
+        else:
+            with pytest.raises(ValueError, match="task id|row is invalid"):
+                env.encode_observation()
+    finally:
+        if dev == "cuda":
+            torch.cuda.synchronize(device)
+        env.close()
+
+
 def suite_check(suite, encoders, obs, states, task_ids, goals=None):
     """A SuiteObservation against the host encodings of each domain's rows."""
     ids = task_ids.cpu().numpy().astype(np.int64)
