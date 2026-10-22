@@ -612,14 +612,16 @@ void print_layout(const char* name, const Session& s)
 {
     std::printf("\"%s\":{\"kernels\":%u,\"memsets\":%u,\"other_nodes\":%u,\"scratch_bytes\":%llu,\"cub_bytes\":%llu,"
                 "\"thread_fills\":%u,\"warp_fills\":%u,\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
-                "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu,\"history\":%llu}",
+                "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu,\"history\":%llu,"
+                "\"stores_relations\":%s,\"stores_simple\":%s}",
                 name, s.nodes.kernels, s.nodes.memsets, s.nodes.others,
                 static_cast<unsigned long long>(s.scratch.bytes), static_cast<unsigned long long>(s.scratch.scan_temp_bytes),
                 s.nodes.thread_fills, s.nodes.warp_fills, static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
                 s.scratch.wide ? "true" : "false", static_cast<unsigned long long>(s.layout_of.sizes),
                 s.sizes_match ? "true" : "false", static_cast<unsigned long long>(s.host_sizes.entities),
                 static_cast<unsigned long long>(s.host_sizes.tuples), static_cast<unsigned long long>(s.host_sizes.args),
-                static_cast<unsigned long long>(s.host_sizes.targets), static_cast<unsigned long long>(s.host_sizes.history));
+                static_cast<unsigned long long>(s.host_sizes.targets), static_cast<unsigned long long>(s.host_sizes.history),
+                s.host->schema().emits_relations() ? "true" : "false", s.host->schema().emits_simple() ? "true" : "false");
 }
 }  // namespace
 

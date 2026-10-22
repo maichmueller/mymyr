@@ -10,7 +10,7 @@ struct CollationSlice
     DeviceCollationBatch batch;
     u64 first = 0;
 };
-/// Scanned in place to the entities and targets before each graph (entry 0 stays zero).
+/// Scanned in place to the entities, targets, Simple nodes and edges before each graph (entry 0 stays zero).
 struct GraphCounts
 {
     u64 entities = 0, targets = 0, nodes = 0, edges = 0;

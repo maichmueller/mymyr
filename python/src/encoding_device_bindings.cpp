@@ -155,7 +155,7 @@ constexpr usize k_output_fields = 26;
 cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities)
 {
     if (v.size() != k_output_fields)
-        throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output pointers").c_str());
+        throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output fields").c_str());
     cuda::DeviceOutput out;
     encoding::FlatBuffers& a = out.arrays;
     a.task_ids = ptr<i32>(v[0]);

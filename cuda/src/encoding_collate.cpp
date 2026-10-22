@@ -76,7 +76,7 @@ struct DeviceCollator::Impl
             host[i] = {b, params.graphs};
             params.graphs = add(params.graphs, b.graphs);
         }
-        params.cells = mul(params.graphs, params.relations);
+        params.cells = stored.relations ? mul(params.graphs, params.relations) : 0;
         (void)add(params.cells, 1);
         cell_offset = aligned(mul(add(params.graphs, 1), sizeof(detail::GraphCounts)));
         bad_offset = add(cell_offset, aligned(mul(add(params.cells, 1), sizeof(detail::CellCounts))));

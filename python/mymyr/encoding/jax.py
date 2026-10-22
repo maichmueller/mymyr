@@ -83,8 +83,6 @@ _registrations: dict[int, _Registration] = {}
 def register(encoder: Any) -> int:
     """The FFI handle of ``encoder``, a ``FlatRelationEncoder`` (the same handle for the same encoder while it is
     registered). The registry holds the encoder (its table, options and device contexts) until :func:`unregister`."""
-    if "simple" in encoder.options["outputs"]:
-        raise _error("the JAX FFI does not encode Simple: its fixed result layout has no node or edge arrays")
     with _lock:
         handle = _handles.get(encoder)
         if handle is not None and handle in _registrations:
@@ -101,8 +99,6 @@ def register(encoder: Any) -> int:
 
 def registered(encoder: Any) -> Optional[int]:
     """The handle of ``encoder`` if it is registered, else None."""
-    if "simple" in encoder.options["outputs"]:
-        raise _error("the JAX FFI does not encode Simple: its fixed result layout has no node or edge arrays")
     with _lock:
         handle = _handles.get(encoder)
         return handle if handle in _registrations else None

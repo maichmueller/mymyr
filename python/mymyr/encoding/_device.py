@@ -90,7 +90,8 @@ def _native() -> Any:
 class _Layout:
     """Which arrays a batch of an encoder stores, and their dtypes."""
 
-    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets", "emits_relations", "simple")
+    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets",
+                 "emits_relations", "simple")
 
     def __init__(self, encoder: Any):
         options = encoder.options

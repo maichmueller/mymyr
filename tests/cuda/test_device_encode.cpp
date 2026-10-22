@@ -2772,3 +2772,34 @@ TEST(DeviceEncoderSchema, SimpleOutputsHaveTheirArraysAndPrivateRelationStorage)
         EXPECT_EQ(out.scratch_relation_offsets != nullptr, only);
     }
 }
+
+TEST(DeviceEncoderSchema, SimpleKeepsTheDeviceLaneRefusals)
+{
+    const auto numeric = rl::TaskTable::single(test::pddl_task("counters", "p01"));
+    const auto plain = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    for (const bool only : {false, true})
+    {
+        auto options = test::encoder_options();
+        options.outputs = {encoding::Output::Simple};
+        if (!only) options.outputs.insert(encoding::Output::Relations);
+        for (const bool include : {false, true})
+        {
+            options.include_numeric = include;
+            const auto encoder = encoding::FlatEncoder::create(numeric, options);
+            EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoder), std::invalid_argument);
+            EXPECT_THROW((void)cuda::collation_batch(*encoder, {}, nullptr, 0), std::invalid_argument);
+        }
+        options.include_numeric = true;
+        for (const auto mode : {encoding::HorizonMode::Full, encoding::HorizonMode::Delta,
+                                encoding::HorizonMode::Action})
+        {
+            options.horizon.mode = mode;
+            const auto encoder = encoding::FlatEncoder::create(plain, options);
+            EXPECT_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()), std::invalid_argument);
+        }
+        options.horizon = {};
+        options.targets = {encoding::TargetSource::Action};
+        const auto encoder = encoding::FlatEncoder::create(plain, options);
+        EXPECT_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()), std::invalid_argument);
+    }
+}

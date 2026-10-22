@@ -155,9 +155,12 @@ def test_simple_device_stream_and_collation(form, index):
     assert len(ring) == 0
     ring.append(to_device(case.rows, dev), to_device(case.ids, dev))
     same_batch(host, ring.flush(capacities=caps))
+    empty = encoder.encode(case.rows[:0], case.ids[:0])
+    same_batch(empty, ring.flush(capacities=caps))
     parts = [encoder.encode(to_device(case.rows[a:b], dev), to_device(case.ids[a:b], dev))
              for a, b in ((0, 0), (0, split), (split, case.n))]
     same_batch(host, encoding.collate(parts))
+    same_batch(empty, encoding.collate([parts[0], parts[0]]))
     same_batch(host_encode(encoder, case, capacities=caps), encoding.collate(parts, capacities=caps))
 
 
@@ -201,7 +204,7 @@ def test_simple_jax_refusal_explains_the_fixed_result_layout(outputs):
 
 
 @pytest.mark.parametrize("form", ["graph", "relation", "simple"])
-def test_simple_keeps_device_action_and_horizon_refusals(form):
+def test_simple_keeps_device_action_refusals(form):
     dev = gpu()
     task = text_task("gripper__prob05")
     rows = to_device(np.asarray(task.encode([task.initial_state])), dev)
