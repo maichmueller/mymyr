@@ -676,7 +676,8 @@ whatever the batch holds (of a device batch, making the view waits once for the 
   `ptr('_symbol_')` and the stored `entity_role` are the batch's own device memory (a strided slice of `relation_args`:
   no copy, no kernel); row 0, a relation's `ptr` and implicit entity roles are made on request by torch on the current
   stream. Making the view reads the relations' offsets on the host, so it waits for the device; its methods never wait.
-  `framework='numpy'` copies to the host. Writing into a row writes into the batch.
+  `framework='numpy'` copies to the host. Writing into a row writes into the batch. The view keeps the counts it read:
+  a batch whose arrays are rewritten in place (a CUDA graph replay) needs a new view.
 - **Refusals**: `ValueError` for a graph-major batch (the strided run needs the relation's tuples to be contiguous
   across the graphs), for `predicate_virtual_nodes` (the node type already is the predicate), for shared statics (the
   view needs the static tuples of every graph) and for a batch that overflowed its capacities; `TypeError` for a
@@ -759,10 +760,11 @@ state entities are entity nodes joined through their slots, so a goal literal's 
 | `edge_label` | int32 `[E]` | the label of each edge |
 
 A Simple-only batch has `task_ids`, `num_objects`, `entity_offsets`, `entity_role` and `entity_ref` (to map a node
-back to its entity), the scalars of every batch, and `simple_node_labels` and `simple_edge_labels` (the vocabulary
-sizes), and none of the `relation_*` arrays; with `outputs=('relations', 'simple')` it has them as well. The Simple
-arrays are the same in both layouts, and encoding rows alone, in a batch, in a stream or with capacities gives the same
-graphs: a graph encoded alone is the slice of the batch's arrays with the node ids shifted by `node_offsets[g]`. With
+back to its entity), `goal_complete` and the target and history arrays when its schema has them, the scalars of every
+batch, and `simple_node_labels` and `simple_edge_labels` (the vocabulary sizes), and none of the `relation_*` arrays;
+with `outputs=('relations', 'simple')` it has them as well. The Simple arrays are the same in both layouts, and
+encoding rows alone, in a batch, in a stream or with capacities gives the same graphs: a graph encoded alone is the
+slice of the batch's arrays with the node ids shifted by `node_offsets[g]`. With
 capacities the Simple arrays have `entities + args` nodes and `2 * args` edges; the first `sizes['entities'] +
 sizes['tuples']` nodes and `2 * sizes['args']` edges hold the graphs and the rest is zero. `edge_index` is then
 `[2, 2 * args]`.
@@ -1292,7 +1294,9 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
 - **What it encodes.** What [the device encodes](#what-the-device-encodes), on both platforms: the rows with their
   goals, subgoal layers and history steps. A schema or input the device refuses raises `ValueError` (`mymyr: encoding:
-  ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the CPU encoder does. In
+  ...`) when the function is traced. Where an instance of the table has axioms the device cannot evaluate, a call
+  without `derived` raises `ValueError` when traced, whatever its rows (the torch path flags those rows in
+  `invalid_input` instead). Otherwise the device evaluates missing derived words, as the CPU encoder does. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an
   encoder of a numeric table (with or without `include_numeric`), of the Simple graph or with shared statics
   (`statics='shared'`) has no device form on either target: registering it raises `ValueError`.
@@ -1360,9 +1364,9 @@ Batches and streams are not picklable: encode in the worker, or send the arrays.
 
 **Persistence.** A schema is stored as a record of its version, options, fingerprint and catalog
 (`encoding.schema_to_dict`, `encoding.schema_from_dict(record, table)`, which checks it over a table of the domain),
-and a batch as its arrays and scalars (`batch.as_dict()`, read back and checked by `encoding.FlatBatch.from_arrays(
-schema, arrays, sizes=None)`); [Encoders, schemas and batches](datasets.md#encoders-schemas-and-batches) shows all
-three forms.
+and a batch as its arrays and scalars (`batch.as_dict()`, read back and checked by
+`encoding.FlatBatch.from_arrays(schema, arrays, *, sizes=None, framework=None)`);
+[Encoders, schemas and batches](datasets.md#encoders-schemas-and-batches) shows all three forms.
 
 ## C++
 
