@@ -1487,7 +1487,7 @@ TEST(DeviceEncoder, AnEncoderWhoseLaunchesNeedMoreSharedMemoryThanABlockHasIsRef
     {
         EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), test::encoder_options())));
         auto refused = test::encoder_options();
-        refused.targets = {encoding::TargetSource::Action};
+        refused.statics = encoding::Statics::Shared;
         EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), refused)),
                      std::invalid_argument);
     }
@@ -1601,4 +1601,28 @@ TEST(DeviceEncoderSchema, RowStreamsRefuseHorizonGraphs)
     const auto schema = encoding::EncodingSchema::create(*table, options);
     EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
     EXPECT_THROW(cuda::check_stream_schema(*schema), std::invalid_argument);
+}
+
+
+TEST(DeviceEncoder, CellScratchIncludesActionsAlongsideSubgoalLayersAndHistory)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions options;
+    options.max_goal_level = 3;
+    options.history = true;
+    options.targets = {encoding::TargetSource::Goal, encoding::TargetSource::Subgoal,
+                       encoding::TargetSource::Action, encoding::TargetSource::History};
+    const auto host = encoding::FlatEncoder::create(table, options);
+    const cuda::DeviceEncoder device(device_context(), host);
+    const auto instance = encoding::detail::instance_view(host->context().view(), 0);
+    const auto scratch = cuda::detail::scratch_layout({3, 0, 0, 0}, device.bounds(), encoding::Layout::Graph,
+                                                      host->schema().num_relations());
+    for (const bool row_goals : {false, true})
+        for (const bool actions : {false, true})
+        {
+            const auto list = encoding::detail::cell_list(instance, row_goals, actions, true, true);
+            EXPECT_GE(device.bounds().cells, list.count);
+            EXPECT_GE(scratch.cell_entries, 3u * list.count);
+        }
 }

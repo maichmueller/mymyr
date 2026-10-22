@@ -125,10 +125,10 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             if (goal_reads || layer_reads)
                 modes[i] |= 1u << (m + 3);
         }
-        // the graph of a row has the cells of the instance's goal or of the row's own goal and, with subgoal layers
-        // or history steps, their cells, and no action cells
-        for (const ed::CellList list : {ed::cell_list(inst, false, false, levels, history),
-                                        ed::cell_list(inst, true, false, levels, history)})
+        // Cell scratch covers every optional lane combination. Fixed-row output bounds omit expansion tuples,
+        // whose count belongs to the input.
+        for (const ed::CellList list : {ed::cell_list(inst, false, schema.options().include_actions, levels, history),
+                                        ed::cell_list(inst, true, schema.options().include_actions, levels, history)})
         {
             u64 tuples = 0, args = 0, targets = 0;
             u64 step_tuples = 0, step_args = 0, step_targets = 0;

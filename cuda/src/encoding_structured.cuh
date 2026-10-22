@@ -117,6 +117,8 @@ __global__ void structured_count_kernel(const EncodeParams p)
             auto sink = [&](u32 i, const ed::Cell& c, u32 n)
             {
                 counts[i] = n;
+                if (n == 0xffffffffu)
+                    ok = false;
                 if (p.relation_major)
                     Totals{p.totals, p.wide}.set(p.segments + 1 + ed::cell_segment(true, g, c.relation,
                                                                                  p.graphs, r.v.num_relations), n);

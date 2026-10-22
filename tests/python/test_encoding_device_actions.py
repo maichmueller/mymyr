@@ -337,3 +337,21 @@ def test_rooted_horizon_subclass_encodes_its_state_targets_on_the_device():
     view = encoding.horizon(task, rows, depth=1)
     encoder = encoding.FlatRootedHorizonEncoder(task, sibling_relation=True, cousin_relation=True)
     same(encoder.encode(view), encoder.encode(upload(view, device)))
+
+
+
+def test_horizon_row_goals_and_subgoal_layers_equal_the_host():
+    device = gpu()
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    view = encoding.horizon(task, rows, depth=1)
+    zero = np.zeros_like(rows)
+    layers = np.ascontiguousarray(np.roll(rows, 1, axis=0)[:, None, :])
+    empty = np.zeros_like(layers)
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode="delta", root_policy="encode_only", max_goal_level=1,
+        index_dtype="int64", layout="relation", predicate_virtual_nodes=True,
+        goal_derivations=("plain", "satisfied", "added_satisfied", "added_unsatisfied"))
+    expected = encoder.encode(view, goals=(rows, zero), subgoals=(layers, empty))
+    actual = encoder.encode(upload(view, device), goals=(tensor(rows, device), tensor(zero, device)),
+                            subgoals=(tensor(layers, device), tensor(empty, device)))
+    same(expected, actual)
