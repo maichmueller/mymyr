@@ -115,6 +115,7 @@ def test_shared_collation_requires_the_ordered_blocks_of_each_sources_graphs(cas
     ids = np.array([1, 0, 1, 0], np.int32)
     rows = np.asarray(table.initial_states())[ids]
     caps = capacities(encoder.encode(rows, ids))
+    valid = encoder.encode(to_device(rows, device), to_device(ids, device))
     source = encoder.encode(to_device(rows, device), to_device(ids, device), capacities=caps)
     assert source.static_task_ids.tolist() == [0, 1]
     if blocks == "missing":
@@ -129,8 +130,9 @@ def test_shared_collation_requires_the_ordered_blocks_of_each_sources_graphs(cas
         source.static_task_ids[1] = 0
     else:
         source.static_task_ids[:] = source.static_task_ids.flip(0)
+    caps = capacities(encoder.encode(np.concatenate((rows, rows)), np.tile(ids, 2)))
     # Every pointer and segment remains within its allocated storage.
-    collator = encoding.DeviceCollator([source])
+    collator = encoding.DeviceCollator([valid, source])
     rejected = collator.encode(capacities=caps)
     assert rejected.sizes["invalid_input"]
     assert all(not value.any() for value in rejected.as_dict("numpy").values() if isinstance(value, np.ndarray))
