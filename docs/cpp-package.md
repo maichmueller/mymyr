@@ -10,8 +10,32 @@ find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)
 target_link_libraries(app PRIVATE mymyr::core mymyr::frontend)
 ```
 
-For a source install, build the project and run `cmake --install build --prefix <prefix>`. Set `mymyr_DIR` to
-`<prefix>/lib/cmake/mymyr` when configuring a consumer. An installed wheel contains the same headers and CMake
+For a native source build, install CMake 3.25 or newer and Ninja, and select a C++26 compiler with `CC` and `CXX`
+(GCC 16 on Linux, or a suitable Apple Clang/libc++ toolchain on macOS). Export them for both the dependency and
+main builds: dependency sub-builds inherit the compiler from the environment. From the checkout root:
+
+```bash
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+cmake -S dependencies -B build/dependencies -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMYMYR_DEPS_PREFIX="$PWD/build/deps"
+cmake --build build/dependencies -j 8
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMYMYR_DEPS_PREFIX="$PWD/build/deps" -DMYMYR_BENCH=OFF
+cmake --build build/native -j 8
+ctest --test-dir build/native --output-on-failure
+cmake --install build/native --prefix "$PWD/build/install"
+```
+
+Alternatively, `bash ci/wheel_toolchain.sh "$PWD/build/toolchain"` builds the dependencies under
+`build/toolchain/deps`; use that directory as `MYMYR_DEPS_PREFIX`. On Linux it also downloads conda-forge GCC 16;
+on macOS it uses the Xcode compiler and `MACOSX_DEPLOYMENT_TARGET` (default 15.0) for the dependencies.
+
+For sanitizer builds, configure a separate build directory with `-DMYMYR_SANITIZE='address;undefined'` or
+`-DMYMYR_SANITIZE=thread`. To instrument the parser with ASan too, build its dependencies with ASan as described in
+[the superbuild](../dependencies/CMakeLists.txt), select that prefix and add `-DMYMYR_DEPS_SANITIZED=ON`.
+
+Set `mymyr_DIR` to `<prefix>/lib/cmake/mymyr` when configuring a consumer (`build/install` is the prefix above).
+An installed wheel contains the same headers and CMake
 package; `mymyr.get_include()` returns its header directory and `mymyr.get_cmake_dir()` returns its CMake package
 directory. An editable install (`pip install -e .`) has them too, next to its compiled extension in
 site-packages; a build tree used through `PYTHONPATH` has none.

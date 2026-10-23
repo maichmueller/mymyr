@@ -66,8 +66,8 @@ For your own task files, use `mymyr.Task.from_pddl("domain.pddl", "problem.pddl"
 
 Source builds need CPython 3.14 or newer, a C++26 compiler, CMake 3.25 or newer and Ninja. The commands below run
 from a source checkout on Linux x86_64 with uv, Git, curl and sha256sum on `PATH`. The toolchain script downloads
-GCC 16.1 from conda-forge using micromamba and builds the pinned parser dependencies (loki, Abseil, fmt and Boost
-headers) under `build/toolchain`; no system compiler installation is needed.
+GCC 16.1 from conda-forge using micromamba and builds the pinned dependencies (loki, Abseil, fmt, Boost
+headers and googletest for the C++ tests) under `build/toolchain`; no system compiler installation is needed.
 
 ```bash
 uv venv .venv --python 3.14t
@@ -87,13 +87,15 @@ An existing GCC 16 build also works: set `CC` and `CXX` to its `gcc` and `g++`, 
 their install prefix. `-DMYMYR_FRONTEND=OFF` skips the parser and its dependencies. On macOS use a C++26-capable
 Apple Clang/libc++ toolchain; see the [C++ package guide](docs/cpp-package.md) for native builds and SDK consumers.
 
-For CUDA, first complete the source setup above, put CUDA 13.4 or newer's `nvcc` on `PATH`, then rebuild with CMake
-4.4 or newer and GCC 16 as the host compiler:
+For CUDA, follow the existing-GCC route above with a system or source-built GCC 16 and dependencies built with
+that compiler. CI uses a system GCC 16 as nvcc's host compiler. With `CC` and `CXX` selecting that compiler and
+`CMAKE_ARGS` pointing to its dependency prefix, put CUDA 13.4 or newer's `nvcc` on `PATH`, then rebuild with CMake
+4.4 or newer:
 
 ```bash
 uv pip install --python .venv/bin/python "cmake>=4.4"
 CMAKE_ARGS="$CMAKE_ARGS -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=$(command -v nvcc) -DCMAKE_CUDA_HOST_COMPILER=$CXX" \
-  uv pip install --python .venv/bin/python --reinstall -e ".[test]"
+  uv pip install --python .venv/bin/python --reinstall-package mymyr -e ".[test]"
 ```
 
 The default CUDA architecture is the visible GPU. NVIDIA drivers 580 or newer can run matching SASS; PTX needs a

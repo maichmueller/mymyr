@@ -112,6 +112,7 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+          skip-existing: ${{ github.event_name == 'workflow_dispatch' }}
 
   test-testpypi:
     name: Install the rehearsal from TestPyPI
