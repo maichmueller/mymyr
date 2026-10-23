@@ -117,7 +117,7 @@ def test_expand_into_with_status_returns_before_the_device_and_flags_overflow_an
                    binding=torch.full((capacity, table.label_width), -1, dtype=torch.int32, device=device),
                    offsets=torch.empty(len(rows) + 1, dtype=torch.int32, device=device),
                    status=torch.full((1,), -1, dtype=torch.int32, device=device))
-        result = rl.expand_into(table, words, task_ids, **out)
+        result = rl.expand_into(table, words, task_ids, **out, stream=torch.cuda.current_stream(device))
         return result, out
 
     into(total)
@@ -137,6 +137,10 @@ def test_expand_into_with_status_returns_before_the_device_and_flags_overflow_an
     result, out = into(total, bad)
     assert out["status"].item() == 2
     assert not out["succ"].any() and (out["schema"] == -1).all()
+    # nothing waits for the outputs: the stream that reads them is named
+    status = torch.zeros(1, dtype=torch.int32, device=device)
+    with pytest.raises(ValueError, match="an expansion with 'status' does not wait for the device: pass stream="):
+        rl.expand_into(table, words, device_ids, succ=out["succ"], offsets=out["offsets"], status=status)
 
 
 @pytest.mark.parametrize("kind", ["actions", "transitions"])

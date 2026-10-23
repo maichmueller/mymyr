@@ -68,10 +68,11 @@ the CPU's, and its outputs (a ``mymyr.cuda.DeviceExpansion``, or the caller's de
 the input's framework. ``stream=`` names the CUDA stream (None: the context's), ``ctx=`` the ``mymyr.cuda.Context``
 (None: the table's default context on the input's device); inputs are imported and outputs exported with the DLPack
 stream semantics of ``mymyr.cuda``. Host inputs take the CPU path unchanged (``stream`` and ``ctx`` are then ignored);
-the other functions here stay on the CPU. ``expand_into(..., status=s)`` (s an int32 device array [1]) does not
-wait for the device: the total stays in ``offsets[N]``, ``s[0]`` gets bit 0 for more successors than the capacity and
-bit 1 for an invalid row (nothing is written then), and the result holds only ``capacity`` (tables whose expansion needs
-the host wait and return the usual keys). Numeric tables and suites preserve each instance's CPU encoding on the
+the other functions here stay on the CPU. ``expand_into(..., status=s, stream=)`` (s an int32 device array [1]) does
+not wait for the device, so it needs ``stream=``, the stream that reads its outputs: the total stays in
+``offsets[N]``, ``s[0]`` gets bit 0 for more successors than the capacity and bit 1 for an invalid row (nothing is
+written then), and the result holds only ``capacity`` (tables whose expansion needs the host wait and return the usual
+keys; rows past the total then keep their contents, and an invalid row raises). Numeric tables and suites preserve each instance's CPU encoding on the
 device; their expansion uses per-instance kernels and gathers/scatters rows at the shared atom/numeric boundary.
 
 Environments: :mod:`mymyr.rl.torch` (needs torch) has batched planning environments on the CPU or a CUDA device

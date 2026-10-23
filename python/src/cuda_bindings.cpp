@@ -935,6 +935,10 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             throw nb::value_error("mymyr: expand_into: 'status' needs one entry");
         if (!x.offsets)
             throw nb::value_error("mymyr: expand_into: an expansion with 'status' needs 'offsets' (they carry its total)");
+        // nothing waits for the outputs, so they are written in the order of the stream that reads them
+        if (a.stream.is_none())
+            throw nb::value_error("mymyr: expand_into: an expansion with 'status' does not wait for the device: pass "
+                                  "stream=, the stream that reads its outputs (for instance torch.cuda.current_stream())");
         bool waited = false;
         {
             ExpanderLease ex(ref, c);
