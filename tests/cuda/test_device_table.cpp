@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -454,14 +455,18 @@ TEST(DeviceTableExpand, ExpanderLeasedAcrossThreadsOnTheirStreams)
         constexpr int threads = 4;
         std::vector<cuda::Stream> streams(threads);  // (they outlive the expander's scratch)
         cuda::DeviceExpander ex(ctx, set.table);
-        std::mutex lease;  // one caller at a time, each on its own stream
+        // one caller at a time, the threads in turn (every call moves the expander to another stream)
+        std::mutex lease;
+        std::condition_variable next;
+        int turn = 0;
         std::atomic<int> wrong{0};
         std::vector<std::thread> pool;
         for (int t = 0; t < threads; ++t)
             pool.emplace_back([&, t] {
                 for (int i = 0; i < 16; ++i)
                 {
-                    std::lock_guard lock(lease);
+                    std::unique_lock lock(lease);
+                    next.wait(lock, [&] { return turn % threads == t; });
                     try
                     {
                         ex.set_stream(streams[static_cast<usize>(t)].get());
@@ -474,6 +479,8 @@ TEST(DeviceTableExpand, ExpanderLeasedAcrossThreadsOnTheirStreams)
                     {
                         ++wrong;
                     }
+                    ++turn;
+                    next.notify_all();
                 }
             });
         for (std::thread& th : pool)
