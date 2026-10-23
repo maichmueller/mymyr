@@ -274,7 +274,7 @@ assert arrays["relation_args"].unsafe_buffer_pointer() == batch.relation_args.__
 Relation ids are scoped to a domain, so the rows of a suite of several domains have no common catalog. A
 `encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch of host rows as a dictionary of batches,
 one per domain, together with each row's index in its batch. CUDA rows require a `FlatRelationEncoder` per domain with
-that domain's local task ids:
+that domain's local task ids. This example uses host rows:
 
 ```python
 suite = rl.TaskSuite.group([task, mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt")])
