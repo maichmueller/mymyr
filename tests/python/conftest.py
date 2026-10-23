@@ -132,9 +132,18 @@ def _run_isolated(config, path):
     from python_children import run_code
 
     args = ["-q", "-p", "no:cacheprovider", "--rootdir", str(config.rootpath)]
+    if config.inipath is not None:
+        args += ["-c", str(config.inipath)]
+    confcutdir = config.getoption("confcutdir")
+    if confcutdir is None:
+        confcutdir = config.inipath.parent if config.inipath is not None else config.rootpath
+    args += ["--confcutdir", str(pathlib.Path(confcutdir).resolve()), "--import-mode", config.getoption("importmode")]
+    for override in config.getoption("override_ini") or []:
+        args += ["-o", override]
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
-    proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *_isolated_groups[path],
+    targets = [path + "::" + nodeid.split("::", 1)[1] for nodeid in _isolated_groups[path]]
+    proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *targets,
                     env={**os.environ, ISOLATED_REPORT: report, "PYTHON_GIL": "1"}, timeout=None,
                     capture_output=True, check=False)
     try:
