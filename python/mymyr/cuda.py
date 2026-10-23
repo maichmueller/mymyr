@@ -19,7 +19,8 @@ Only in CUDA builds of mymyr (``CMAKE_ARGS="-DMYMYR_CUDA=ON"``); importing this 
   DLArrays): the expansion runs on the device, byte-equal to the CPU's, and the outputs (a :class:`DeviceExpansion`,
   or the caller's device destinations) are device arrays in the input's framework. ``stream=`` picks the stream (None:
   the context's), ``ctx=`` the context (None: the task's default context on the input's device). Host inputs take the
-  CPU path unchanged.
+  CPU path unchanged. ``expand_into(..., status=)`` leaves the total, the overflow and the validation on the device
+  and does not wait for it.
 - :func:`multi_iw`, :func:`rollouts`, :func:`batched_iw1`: many IW searches at once on the device. Search i of
   ``multi_iw`` equals ``mymyr.search.iw`` from ``starts[i]`` (status, plan, goal state, per-pass counts) whatever the
   group and chunk sizes (exact batch novelty); ``rollouts`` are the CPU's randomized rollouts of the same seeds,

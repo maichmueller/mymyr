@@ -94,9 +94,10 @@ class Observer:
         self.actions = bool(actions)
         self.goals = [_goal_lanes(e) for e in encoders]
         if self.actions:
-            if self.device.type == "cuda":
-                raise ValueError("mymyr: obs_actions: the device does not encode action relations; encode the "
-                                 "observations of a CPU environment, or leave obs_actions off")
+            if self.device.type == "cuda" and self.capacities is not None:
+                raise ValueError("mymyr: obs_actions: device observations with obs_capacities have no action relations "
+                                 "(the expansion of the observed states would wait for the device); leave "
+                                 "obs_capacities off, or obs_actions off")
             for e in encoders:
                 if not e.options["include_actions"]:
                     raise ValueError("mymyr: obs_actions needs an encoder with action relations (include_actions=True)")
@@ -178,8 +179,14 @@ class Observer:
         if self.device.type == "cuda":
             if torch.compiler.is_compiling():
                 return self._encode_op(k, states, task_ids, goals, caps)
+            actions = None
+            if self.actions:  # exact: the expansion waits for its total, as the encoding does for its sizes
+                from mymyr.rl.torch._ops import _stream
+
+                actions = rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states))
             arrays = _device.encode_arrays(encoder, states, task_ids, None, goals,
-                                           None if caps is None else _device._capacities(caps, _device.layout_of(encoder)))
+                                           None if caps is None else _device._capacities(caps, _device.layout_of(encoder)),
+                                           actions=actions)
             return _device.DeviceFlatBatch(encoder, arrays, exact=caps is None)
         actions = None
         if self.actions:

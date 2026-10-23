@@ -67,8 +67,19 @@ struct Rows
     // derived stride, derived words; then the history's dt and count
     std::array<std::uintptr_t, 9> subgoals{}, history{};
     std::uintptr_t history_dt = 0, history_count = 0;
+    // the expansion rows: offsets, schema, binding, parent, capacity, label width, status
+    std::array<std::uintptr_t, 7> actions{};
+    // the horizon view: node offsets, edge offsets, src, dst, schema, binding, nodes, edges, label width, scratch,
+    // scratch words, status (mymyr.encoding._device._ROW_HORIZON and after)
+    std::array<std::uintptr_t, 12> horizon{};
+    static constexpr usize k_horizon_nodes = 6;
+    // the rows the scratch covers: the graphs, or every node of a horizon view
+    [[nodiscard]] u64 input_rows() const noexcept
+    {
+        return horizon[0] ? std::max<u64>(graphs, horizon[k_horizon_nodes]) : graphs;
+    }
 };
-constexpr usize k_row_fields = 35;
+constexpr usize k_row_fields = 54;
 
 Rows rows_of(const std::vector<std::uintptr_t>& v)
 {
@@ -96,6 +107,10 @@ Rows rows_of(const std::vector<std::uintptr_t>& v)
             field = v[i++];
     r.history_dt = v[i++];
     r.history_count = v[i++];
+    for (auto& field : r.actions)
+        field = v[i++];
+    for (auto& field : r.horizon)
+        field = v[i++];
     return r;
 }
 
@@ -144,6 +159,13 @@ cuda::DeviceEncodeInput input_of(const Rows& r, u32 numeric_words = 0)
     in.history.masks = layers_of(r.history);
     in.history.dt = ptr<const i32>(r.history_dt);
     in.history.count = ptr<const i32>(r.history_count);
+    const auto& a = r.actions;
+    in.actions = {ptr<const i32>(a[0]), ptr<const i32>(a[1]), ptr<const i32>(a[2]), ptr<const i32>(a[3]),
+                  a[4], static_cast<u32>(a[5]), ptr<const u64>(a[6])};
+    const auto& h = r.horizon;
+    in.horizon = {ptr<const i32>(h[0]), ptr<const i32>(h[1]), ptr<const i32>(h[2]), ptr<const i32>(h[3]),
+                  ptr<const i32>(h[4]), ptr<const i32>(h[5]), h[6], h[7], static_cast<u32>(h[8]),
+                  ptr<u32>(h[9]), h[10], ptr<const u32>(h[11])};
     return in;
 }
 
@@ -245,6 +267,21 @@ public:
     DeviceEncoderHandle& operator=(const DeviceEncoderHandle&) = delete;
 
     [[nodiscard]] int device() const noexcept { return m_device; }
+
+    void build_horizon(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
+                       std::uintptr_t children, u64 child_stride, const std::vector<std::uintptr_t>& outputs,
+                       bool merge, std::uintptr_t scratch, u64 scratch_bytes)
+    {
+        if (outputs.size() != 6)
+            refuse("the horizon builder needs nodes, node offsets, sources, destinations, schemas and bindings");
+        const auto in = input_of(rows_of(row_fields));
+        const cuda::DeviceHorizonBuild out{ptr<u64>(outputs[0]), ptr<i32>(outputs[1]), ptr<i32>(outputs[2]),
+                                            ptr<i32>(outputs[3]), merge,              ptr<i32>(outputs[4]),
+                                            ptr<i32>(outputs[5]), ptr<void>(scratch), scratch_bytes};
+        nb::gil_scoped_release release;
+        cuda::DeviceGuard guard(m_device);
+        cuda::build_depth_one_horizon(in, ptr<const u64>(children), child_stride, out, cuda_stream(stream));
+    }
 
     void append(std::intptr_t stream, const std::vector<std::uintptr_t>& source,
                 const std::vector<std::uintptr_t>& ring, std::uintptr_t status)
@@ -365,7 +402,8 @@ public:
         std::lock_guard lock(slot->mutex);
         ensure_context(*slot, cuda_stream(stream));
         check_rows(rows);
-        m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes, cuda::BatchShape{rows.graphs, 0, 0, 0, 0},
+        m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes,
+                                 cuda::BatchShape{rows.input_rows(), 0, 0, 0, 0, 0},
                                  input_of(rows, m_encoder->table().numeric_words()), out);
     }
 
@@ -384,7 +422,7 @@ public:
             if (capturing(m_device, s))
                 refuse("an encode without capacities waits for the batch's sizes and cannot be captured in a CUDA graph: "
                        "pass capacities");
-            ensure(*slot, s, rows.graphs);
+            ensure(*slot, s, rows.input_rows());
             if (!slot->sizes)
             {
                 slot->sizes = std::make_shared<cuda::DeviceBuffer>(m_device_encoder->context().context(),
@@ -551,6 +589,11 @@ void bind_encoding_device(nb::module_& parent)
              "Uploads the encoder's context to `device` (on `ctx`, a mymyr.cuda.Context, or the table's default context). "
              "Raises ValueError for options the device does not encode.")
         .def_prop_ro("device", &DeviceEncoderHandle::device, "The CUDA device index.")
+        .def("build_horizon", &DeviceEncoderHandle::build_horizon, "stream"_a, "rows"_a, "children"_a,
+             "child_stride"_a, "outputs"_a, "merge"_a, "scratch"_a, "scratch_bytes"_a,
+             "Builds compact depth-one node slices from a device expansion without a host wait.")
+        .def_static("horizon_scratch_bytes", &cuda::depth_one_horizon_scratch_bytes, "capacity"_a, "merge"_a,
+                    "The scratch bytes of build_horizon over an expansion of `capacity` rows.")
         .def("append", &DeviceEncoderHandle::append, "stream"_a, "source"_a, "ring"_a, "status"_a,
              "Copies source rows into the device ring, then advances its tail.")
         .def("clear", &DeviceEncoderHandle::clear, "stream"_a, "status"_a, "capacity"_a,
@@ -574,7 +617,7 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 23 output "
+             "Encodes the rows (54 integers: the graphs, then the pointers and strides of the arrays) into the 23 output "
              "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric), "
              "on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,

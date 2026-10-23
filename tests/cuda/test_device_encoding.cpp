@@ -685,8 +685,8 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         GTEST_SKIP() << "no PDDL data";
     const cuda::DeviceEncoder device(device_context(), encoder);
     const cuda::GraphBounds& b = device.bounds();
-    // the bounds recomputed from the context's cells: the device has no expansion input, so its graphs have no action cell
-    // (these options have no goal, so the lists of the instance's goal and of a row's goal are the same)
+    // Fixed-row output bounds exclude expansion tuples; cell scratch also holds the optional action cells.
+    // These options have no goal, so the instance and row goal lists agree.
     const auto view = encoder->context().view();
     cuda::GraphBounds expected;
     for (u32 i = 0; i < encoder->table().size(); ++i)
@@ -703,7 +703,7 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         expected.entities = std::max<u64>(expected.entities, inst.num_objects + nullary);
         expected.tuples = std::max(expected.tuples, tuples);
         expected.args = std::max(expected.args, args);
-        expected.cells = std::max<u64>(expected.cells, inst.num_plain_cells);
+        expected.cells = std::max<u64>(expected.cells, inst.num_cells);
         expected.words = std::max<u64>(expected.words, inst.words);
         expected.state_words = std::max<u64>(expected.state_words, inst.words);
         expected.derived_words = std::max<u64>(expected.derived_words, inst.derived_words);
@@ -767,10 +767,10 @@ TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
     EXPECT_EQ(device.bounds().entities, 9u);
     EXPECT_EQ(device.bounds().tuples, 97u);
     EXPECT_EQ(device.bounds().args, 161u);
-    EXPECT_EQ(device.bounds().cells, 6u);
+    EXPECT_EQ(device.bounds().cells, 10u);
     EXPECT_EQ(encoder->schema().num_relations(), 25u);
     const auto scratch = cuda::detail::scratch_layout(device.worst_case(1000), device.bounds(), device.options().layout, device.schema().num_relations());
-    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1041472u);
+    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1117504u);
 }
 
 void touch_scratch(const cuda::DeviceEncoder& device, const cuda::EncodingWorkspace& work, const cuda::ContextPtr& ctx)
@@ -1149,20 +1149,6 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
     EXPECT_THROW(cuda::DeviceEncoder(nullptr, blocks_encoder()), std::invalid_argument);
     EXPECT_THROW(cuda::DeviceEncoder(ctx, nullptr), std::invalid_argument);
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    // action targets
-    encoding::FlatOptions options = test::encoder_options();
-    options.targets = {encoding::TargetSource::Action};
-    try
-    {
-        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, options));
-        ADD_FAILURE() << "action targets were accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode action targets"),
-                  std::string::npos)
-            << e.what();
-    }
     // horizon relations: every mode, the rooted horizon (parent, sibling and cousin relations), the transitions (the
     // depth-one horizons: full or delta, the root excluded)
     struct HorizonCase
@@ -1188,17 +1174,7 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         horizon.horizon.parent_relation = c.parent;
         horizon.horizon.sibling_relation = c.sibling;
         horizon.horizon.cousin_relation = c.cousin;
-        try
-        {
-            cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
-            ADD_FAILURE() << "the " << c.what << " was accepted";
-        }
-        catch (const std::invalid_argument& e)
-        {
-            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
-                      std::string::npos)
-                << c.what << ": " << e.what();
-        }
+        EXPECT_NO_THROW(cuda::DeviceEncoder(ctx, encoding::FlatEncoder::create(table, horizon))) << c.what;
     }
     // subgoal and history relations are encoded
     {
@@ -1263,11 +1239,12 @@ TEST(DeviceEncoderSchema, AcceptsSubgoalLevelsHistoryAndTheirTargets)
     o.targets = {encoding::TargetSource::History};
     EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesActionTargets)
+TEST(DeviceEncoderSchema, AcceptsActionTargets)
 {
     encoding::FlatOptions o;
     o.targets = {encoding::TargetSource::Action};
-    expect_schema_refusal(o, "action targets");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
 TEST(DeviceEncoderSchema, AcceptsNumericRelations)
 {
@@ -1283,24 +1260,27 @@ TEST(DeviceEncoderSchema, RefusesSharedStatics)
     o.statics = encoding::Statics::Shared;
     expect_schema_refusal(o, "shared statics (statics='shared')");
 }
-TEST(DeviceEncoderSchema, RefusesFullHorizons)
+TEST(DeviceEncoderSchema, AcceptsFullHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Full;
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesDeltaHorizons)
+TEST(DeviceEncoderSchema, AcceptsDeltaHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Delta;
     o.goal_derivations = {encoding::GoalDerivation::AddedSatisfied};
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesActionHorizons)
+TEST(DeviceEncoderSchema, AcceptsActionHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Action;
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
 TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstructed)
 {
@@ -1359,9 +1339,13 @@ TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncod
     add("Simple with numeric relations", numeric_table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
     add("Simple with numeric relations", numeric_table,
         [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
+    add("Simple horizons", table,
+        [](auto& o)
+        {
+            o.outputs = {encoding::Output::Relations, encoding::Output::Simple};
+            o.horizon.mode = encoding::HorizonMode::Full;
+        });
     add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
-    add("action targets", table, [](auto& o) { o.targets = {encoding::TargetSource::Action}; });
-    add("horizons", table, [](auto& o) { o.horizon.mode = encoding::HorizonMode::Full; });
     for (const Refused& c : cases)
     {
         const auto encoder = encoding::FlatEncoder::create(c.table, c.options);
@@ -1467,7 +1451,7 @@ TEST(DeviceEncoder, AnEncoderWhoseLaunchesNeedMoreSharedMemoryThanABlockHasIsRef
     {
         EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), test::encoder_options())));
         auto refused = test::encoder_options();
-        refused.targets = {encoding::TargetSource::Action};
+        refused.statics = encoding::Statics::Shared;
         EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), refused)),
                      std::invalid_argument);
     }
@@ -1570,4 +1554,39 @@ TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
                 }
             }
 }
+}
+
+
+TEST(DeviceEncoderSchema, RowStreamsRefuseHorizonGraphs)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions options;
+    options.horizon.mode = encoding::HorizonMode::Full;
+    const auto schema = encoding::EncodingSchema::create(*table, options);
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
+    EXPECT_THROW(cuda::check_stream_schema(*schema), std::invalid_argument);
+}
+
+
+TEST(DeviceEncoder, CellScratchIncludesActionsAlongsideSubgoalLayersAndHistory)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions options;
+    options.max_goal_level = 3;
+    options.history = true;
+    options.targets = {encoding::TargetSource::Goal, encoding::TargetSource::Subgoal,
+                       encoding::TargetSource::Action, encoding::TargetSource::History};
+    const auto host = encoding::FlatEncoder::create(table, options);
+    const cuda::DeviceEncoder device(device_context(), host);
+    const auto instance = encoding::detail::instance_view(host->context().view(), 0);
+    const auto scratch = cuda::detail::scratch_layout({3, 0, 0, 0}, device.bounds(), encoding::Layout::Graph,
+                                                      host->schema().num_relations());
+    for (const bool row_goals : {false, true})
+        for (const bool actions : {false, true})
+        {
+            const auto list = encoding::detail::cell_list(instance, row_goals, actions, true, true);
+            EXPECT_GE(device.bounds().cells, list.count);
+            EXPECT_GE(scratch.cell_entries, 3u * list.count);
+        }
 }

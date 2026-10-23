@@ -83,6 +83,9 @@ _registrations: dict[int, _Registration] = {}
 def register(encoder: Any) -> int:
     """The FFI handle of ``encoder``, a ``FlatRelationEncoder`` (the same handle for the same encoder while it is
     registered). The registry holds the encoder (its table, options and device contexts) until :func:`unregister`."""
+    if encoder.options["horizon_mode"] is not None:
+        raise _error("the JAX FFI does not encode horizons or transitions: its operands carry no node offsets or "
+                     "edges; use the torch device encoder")
     with _lock:
         handle = _handles.get(encoder)
         if handle is not None and handle in _registrations:
@@ -596,6 +599,7 @@ def encode(
     task_ids: Any = None,
     *,
     derived: Any = None,
+    actions: Any = None,
     goals: Any = None,
     subgoals: Any = None,
     history: Any = None,
@@ -637,9 +641,15 @@ def encode(
     as a batch of that many graphs whose per-graph and per-cell arrays keep the entries of N graphs and are zero past
     them (``batch.device_graphs`` holds the count; ``as_dict`` and ``num_graphs`` read it). It needs capacities and
     takes no subgoal layers or history steps."""
+    if actions is not None:
+        raise _error("the JAX FFI does not encode action rows: its operands carry no expansion labels or offsets; use "
+                     "the torch device encoder")
     _ffi.register()
     handle, reg = _registration(encoder)
     info = reg.info
+    if reg.options["horizon_mode"] is not None:
+        raise _error("the JAX FFI does not encode horizons or transitions: its operands carry no node offsets or "
+                     "edges; use the torch device encoder")
     if info["device_refusal"]:
         raise ValueError(info["device_refusal"])
     if reg.options["index_dtype"] == "int64" and not jax.config.read("jax_enable_x64"):

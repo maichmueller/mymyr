@@ -17,6 +17,7 @@
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/encoding/buffers.hpp"
+#include "mymyr/cuda/encoding_types.hpp"
 #include "mymyr/encoding/detail/lanes.hpp"
 
 #include <cuda_runtime_api.h>
@@ -48,6 +49,13 @@ struct EncodeParams
     encoding::detail::LayerSource layers;
     u64* level_storage = nullptr;  // [graphs, level_stride] words
     u64 level_stride = 0;
+    DeviceActionInput actions;
+    DeviceHorizonInput horizon;
+    const i32* schema_relations = nullptr;
+    u32* action_storage = nullptr;
+    u64 action_stride = 0;
+    bool horizon_mode = false, horizon_actions = false, horizon_parents = false, horizon_kin = false;
+    bool horizon_cousins = false, horizon_exclude = false, horizon_root_target = false;
     bool layered = false;          // some row may have subgoal layers or history steps (LayerSource::layered)
     bool classify = false, warp_class = false, first_class = true;
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
@@ -138,6 +146,14 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceVi
 [[nodiscard]] u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major);
 [[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
 [[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
+
+/// The depth-one horizon builder (encoding_horizon.cu); its scratch holds horizon_builder_scratch_bytes() bytes.
+cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
+                                   const DeviceHorizonBuild& output, cudaStream_t stream);
+[[nodiscard]] u64 horizon_builder_scratch_bytes(u64 capacity, bool merge);
+
+/// Maps valid horizon node slices to graph task ids before evaluating the nodes' derived words.
+cudaError_t launch_horizon_instances(const EncodeParams& params, i32* instances, cudaStream_t stream);
 
 /// The clear the counting starts with: the flags, and the scanned totals unless the launch is live. A caller that sets
 /// the input flag before the count (the axiom evaluation) enqueues it first and sets LaunchShape::cleared.

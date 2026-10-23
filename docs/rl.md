@@ -46,6 +46,12 @@ its derived atoms (`expansion.derived`, `[M, D]` words in the encoding of the st
 `table.derived_words` (`suite.derived_words`: the widest domain; `task.derived_words` for one task), and 0 for tasks
 without derived atoms, whose arrays are zero-width. An instance with fewer derived words has zeros past its own. The
 words are exactly what the [relational encoder](encoding.md) evaluates itself, so they can replace its evaluation.
+On the device, `expand_into(..., status=)` (an int32 device array `[1]`) does not wait for the device: the total
+stays in `offsets[N]` (true counts), and `status[0]` gets bit 0 when the successors exceed the capacity and bit 1 when a
+row is invalid (a task id outside the table, bits its instance has no slot for, a successor wider than `succ`; nothing
+is written then); successor rows past the total are zero. The result holds only `capacity`, unless the table's
+expansion needs the host (instances expanded apart, CPU-fallback schemas or axioms, numeric rows, suites of several
+domains, batches beyond one chunk of views), which waits as without `status` and returns the usual keys.
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
 output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
 `k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
@@ -498,8 +504,9 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   its overflow flag set. Without capacities every encoding is exact: on a device it waits for the batch's sizes once,
   and it cannot be captured or jitted.
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
-  A CPU `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states; the device and the JAX
-  encoding do not encode actions.
+  `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
+  without `obs_capacities` (the device expansion waits for its total, as an exact encoding waits for its sizes; with
+  `obs_capacities` it is refused). The JAX environments do not encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
@@ -566,3 +573,8 @@ action-schema one-hot and by the agent's position in the native relational encod
 truncations, elapsed time and a counted subset of live array storage (not process peak memory).
 The scorer is intentionally small: the position is the object index of the successor's `at` tuple, which equals the
 chain position because the example declares its cells in chain order. It is not object-level relational reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.
+
+`torch.BatchedEnv.encode_transitions(encoder, *, actions=None, capacities=None)` encodes its current rows and
+successors with a `FlatTransitionEncoder` or `FlatTransitionEffectsEncoder` on the environment's device. Device
+expansion labels and depth-one horizons are encoded into torch arrays on the current stream; with `capacities` the call
+does not wait for the device (see [the encoding](encoding.md)).

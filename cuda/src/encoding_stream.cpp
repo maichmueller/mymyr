@@ -10,6 +10,8 @@ namespace mymyr::cuda
 void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream)
 {
     if (!in.graphs) return;
+    if (in.actions.offsets || in.horizon.node_offsets || ring.actions.offsets || ring.horizon.node_offsets)
+        throw std::invalid_argument("mymyr: encoding: a device ring carries no expansion labels or horizon views");
     if (in.subgoals.layers || in.history.masks.layers || in.history.count || ring.subgoals.layers ||
         ring.history.masks.layers || ring.history.count)
         throw std::invalid_argument("mymyr: encoding: a device ring carries no subgoal layers or history steps");
@@ -39,6 +41,8 @@ void finish_rows(u64* status, u64 capacity, cudaStream_t stream)
 void check_stream_schema(const encoding::EncodingSchema& schema)
 {
     const auto& o = schema.options();
+    if (schema.has_horizon())
+        throw std::invalid_argument("mymyr: encoding: a device stream carries no horizon nodes or edges");
     if (o.max_goal_level != 0 || o.history)
         throw std::invalid_argument("mymyr: encoding: a device stream carries no subgoal layers or history steps");
 }

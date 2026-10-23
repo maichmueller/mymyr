@@ -135,7 +135,8 @@ class BatchedEnv:
     the true sizes are in the batch's ``device_sizes`` (``sizes``), and a batch that does not fit is all zero with its
     overflow flag set. Without capacities each encoding is exact, which on a device waits for the batch's sizes once
     (and cannot be captured). ``obs_actions=True`` adds the action relations of the observed states (their expansion;
-    a CPU environment only: the device encodes no actions); by default observations hold no action tuples. Over a
+    on a device only without ``obs_capacities``, since the expansion waits for its total); by default observations
+    hold no action tuples. Over a
     suite an observation is a :class:`SuiteObservation`: one batch per domain and each row's index in its batch.
 
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing
@@ -291,6 +292,21 @@ class BatchedEnv:
         if before is None:
             return obs  # without autoreset the reached states are the next observation
         return self._observer.encode(final_states, before[0], before[1])
+    def encode_transitions(self, encoder: Any, *, actions: Any = None, capacities: Any = None) -> Any:
+        """Encode the current rows and successors with a transition or transition-effects encoder on this device.
+
+        ``actions`` may supply an existing expansion; otherwise successors are expanded on the current stream.
+        ``capacities`` has the encoder's usual meaning. The returned arrays own their storage.
+        """
+        from mymyr import encoding
+        from mymyr.rl import as_table
+
+        if not isinstance(encoder, (encoding.FlatTransitionEncoder, encoding.FlatTransitionEffectsEncoder)):
+            raise ValueError("mymyr: encoding: encode_transitions needs a transition encoder")
+        if as_table(encoder.table).fingerprint != as_table(self.core.table).fingerprint:
+            raise ValueError("mymyr: encoding: the transition encoder belongs to another table")
+        return encoder.encode(self.states, self.task_ids, goals=self._goal_masks(), actions=actions,
+                              framework="torch", capacities=capacities)
 
     def is_goal(self) -> Tensor:
         """Whether each environment's current state is a goal (the goal masks' test with goals=True): [N] bool on

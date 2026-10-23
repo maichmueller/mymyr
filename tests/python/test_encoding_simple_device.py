@@ -234,17 +234,14 @@ def test_simple_jax_refusal_explains_the_fixed_result_layout(outputs):
 
 
 @pytest.mark.parametrize("form", ["graph", "relation", "simple"])
-def test_simple_keeps_device_action_refusals(form):
+def test_simple_refuses_device_action_rows(form):
     dev = gpu()
     task = text_task("gripper__prob05")
     rows = to_device(np.asarray(task.encode([task.initial_state])), dev)
-    encoder = encoder_of(task, form, target_sources=("action",))
-    with pytest.raises(ValueError, match="does not encode action targets"):
-        encoder.encode(rows)
-    plain = encoder_of(task, form)
-    actions = rl.expand(rl.as_table(task), np.asarray(task.encode([task.initial_state])))
-    with pytest.raises(ValueError, match="actions are not encoded on the device"):
-        plain.encode(rows, actions=actions)
+    encoder = encoder_of(task, form)
+    actions = rl.expand(rl.as_table(task), rows, framework="torch")
+    with pytest.raises(ValueError, match="device action rows and horizons require relational output"):
+        encoder.encode(rows, actions=actions)
 
 
 @pytest.mark.parametrize("form", ["graph", "relation", "simple"])

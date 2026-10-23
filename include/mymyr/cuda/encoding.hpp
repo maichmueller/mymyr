@@ -123,7 +123,8 @@ enum class DerivedWords : u8
     Supplied,
 };
 
-/// Conservative maxima per graph over the instances of the context, covering every lane the device encodes: the state,
+/// Conservative maxima per graph over the instances of the context for rows without expansion labels or horizon
+/// nodes. External expansion rows and horizon nodes require their own output capacities. These bounds cover the state,
 /// static and derived cells, the nullary (auxiliary) entity, the goal cells of the instance's goal and of a row's own
 /// goal, the subgoal levels, the goal and subgoal targets and one entity per predicate virtual node. `words` is the
 /// widest row of an instance (state or derived words), `cells` the longest cell list of a graph (with its subgoal and
@@ -138,6 +139,8 @@ struct GraphBounds
     u64 step_entities = 0, step_tuples = 0, step_args = 0, step_targets = 0;
     u32 levels = 0;
     bool history = false;
+    bool variable_inputs = false;  // expansion rows and horizon nodes have no per-graph schema bound
+    u32 schemas = 0;
 };
 
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
@@ -171,13 +174,26 @@ struct OutputLayout
 /// [head, live rows, overflow]; a grid copies the rows, then one thread advances the tail. One stream orders all uses.
 /// The ring's columns have table-wide widths, fixed presence, and room for ring.graphs rows. Its status is zeroed
 /// before first use. The input's widths equal the columns' widths; row strides may differ or broadcast goals.
+/// Neither view carries expansion labels or horizon nodes.
 void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream);
 /// Advances the head by the live rows modulo capacity, empties the ring, and clears the overflow flag.
 void clear_rows(u64* status, u64 capacity, cudaStream_t stream);
 /// Empties the ring while preserving its sticky overflow flag.
 void finish_rows(u64* status, u64 capacity, cudaStream_t stream);
-/// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers and history steps.
+/// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers, history steps
+/// and horizon graphs.
 void check_stream_schema(const encoding::EncodingSchema& schema);
+
+/// Builds depth-one horizons from parent and successor rows on the stream. Output storage follows DeviceHorizonBuild;
+/// children hold actions.capacity rows of child_stride words. No host wait; a bad expansion writes invalid offsets.
+/// Graphs and successors run in parallel: merging finds each successor's first equal row of its graph (or its root)
+/// in a hash table over (graph, row), and new nodes take their places from a scan, so the work grows with the
+/// successors and their words, not with the square of a graph's fanout. The result is the host builder's: nodes in
+/// first-seen order, edges stably ordered by destination.
+void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
+                             const DeviceHorizonBuild& output, cudaStream_t stream);
+/// The scratch bytes of build_depth_one_horizon over an expansion of `capacity` rows.
+[[nodiscard]] u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge);
 
 enum class FillMode : u8
 {
@@ -222,8 +238,8 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets, the Simple graph with
-    /// numeric relations, horizons (with the goal derivations that only a delta horizon has) and shared statics.
+    /// Throws std::invalid_argument for a schema the device does not encode: the Simple graph with numeric relations,
+    /// the Simple graph of a horizon and shared statics. Horizons accept only depth-one device views.
     static void check_schema(const encoding::EncodingSchema& schema);
     /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
     /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared

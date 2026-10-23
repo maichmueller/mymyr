@@ -562,7 +562,7 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     rows = to_device(case.rows, dev)
     ids = None if case.ids is None else to_device(case.ids, dev)
     prefix = "^mymyr: encoding: "
-    with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
+    with pytest.raises(ValueError, match=prefix + r"(?:the action expansion belongs to another table|'actions.schema' must be a CUDA array)"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
     with pytest.raises(ValueError, match=prefix + r"'subgoals\[0\] \(pos\)' must be"):
         encoder.encode(rows, ids, subgoals=(rows, rows))
@@ -882,16 +882,16 @@ def test_names_and_descriptions_of_a_device_batch_equal_the_host_ones(cases, lay
         encoder.entity_names(batch, case.n)
 
 
-def test_the_encoder_without_a_device_encoding_is_refused_clearly():
+def test_action_target_schemas_without_expansion_rows_are_encoded():
     dev = gpu()
     task = text_task("gripper__prob05")
     states = walk(task, steps=3, walks=1)
     encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
     rows = to_device(np.asarray(task.encode(states)), dev)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode action targets"):
-        encoder.encode(rows)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode action targets"):
-        encoder.reserve_device(8)
+    batch = encoder.encode(rows)
+    same_batch(encoder.encode(np.asarray(task.encode(states))), batch)
+    assert len(batch.target_entity) == 0
+    encoder.reserve_device(8)
 
 
 @pytest.mark.parametrize("outputs", [("simple",), ("relations", "simple")])

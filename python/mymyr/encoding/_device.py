@@ -19,8 +19,8 @@ and ``release_device`` frees it.
 The subgoal layers and history steps of the rows (``subgoals=``, ``history=``) are CUDA tensors of the same forms as on
 the host: masks [N, L, W] (or [1, L, W] for layers that every row shares) of 64-bit words, ``dt`` int32 [N, H] and the
 valid step ``count`` int32 [N]; device streams and device collation carry neither. What the device does not encode: the
-action relations (``actions=``), action targets and horizons. The device evaluates axioms into scratch when a graph
-needs derived atoms and ``derived=`` is absent; supplied derived words take precedence.
+Simple graph with numeric relations or of a horizon, shared statics and horizons of depth 2 or more. The device evaluates
+axioms into scratch when a graph needs derived atoms and ``derived=`` is absent; supplied derived words take precedence.
 """
 
 from __future__ import annotations
@@ -61,6 +61,17 @@ _OUTPUTS = (*_ARRAYS, "sizes")
 _RELATION_SCRATCH = ("_relation_offsets", "_relation_arg_offsets", "_relation_args")
 # The native output fields: the outputs, the private relation storage and the edge_index row stride.
 _POINTER_FIELDS = len(_OUTPUTS) + len(_RELATION_SCRATCH) + 1
+# The row record (_Rows.fields) the native side decodes by position: the graph count; the states (pointer, row stride,
+# words), task ids and derived words (pointer, row stride); the goal masks (8), subgoal layers (9) and history steps
+# (11, with dt and count); the expansion rows (offsets, schema, binding, parent, capacity, label width, status); the
+# horizon view (node offsets, edge offsets, src, dst, schema, binding, nodes, edges, label width, scratch, scratch
+# words, status).
+_ROW_STATES = 1
+_ROW_DERIVED = 5
+_ROW_ACTIONS = 35
+_ROW_HORIZON = 42
+_ROW_HORIZON_NODES = _ROW_HORIZON + 6
+_ROW_FIELDS = 54
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
 _SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
@@ -101,6 +112,8 @@ class _Layout:
         # the refusals of the device encoder (DeviceEncoder::check_schema), also where the build has no CUDA backend
         if numeric_relations and "simple" in options["outputs"]:
             raise _error("the device does not encode Simple with numeric relations")
+        if options["horizon_mode"] is not None and "simple" in options["outputs"]:
+            raise _error("the device does not encode Simple horizons")
         if options["statics"] == "shared":
             raise _error("the device does not encode shared statics (statics='shared'): encode the rows on the host, or "
                          "with statics='repeat'")
@@ -113,7 +126,7 @@ class _Layout:
         self.emits_relations = "relations" in options["outputs"]
         self.simple = "simple" in options["outputs"]
         self.counts = self.emits_relations and bool(options["emit_counts"])
-        self.targets = bool(options["target_sources"])
+        self.targets = bool(options["target_sources"]) or options["horizon_mode"] is not None
         self.history = bool(options["history"])
         self.goal_complete = any(lane in _GOAL_LANES for lane in encoder.relation_lanes)
 
@@ -371,7 +384,8 @@ class _Rows:
         self.tensors = tensors
         self.fields = [graphs, w.data_ptr() if w.numel() else 0, _stride(w), w.shape[1], ids_ptr, derived_ptr,
                        derived_stride, *goal[:4], *goal[4:], *sub, *hist]
-        if len(self.fields) != 35:
+        self.fields += [0] * (_ROW_FIELDS - _ROW_ACTIONS)  # no expansion rows, no horizon view
+        if len(self.fields) != _ROW_FIELDS:
             raise AssertionError("the row fields have a fixed length")
 
     def _same_device(self, t: Any, name: str) -> None:
@@ -488,7 +502,10 @@ _pending_lock = threading.Lock()
 
 def _retain(torch: Any, keep: list, device: Any) -> None:
     """Keeps the wrappers of foreign arrays alive until the work enqueued so far has completed (their owners free the
-    memory when the wrappers go)."""
+    memory when the wrappers go). During capture, torch owns temporary allocations through the graph, and callers
+    keep external input owners alive across every replay."""
+    if torch.cuda.is_current_stream_capturing():
+        return
     event = torch.cuda.Event()
     event.record(torch.cuda.current_stream(device))
     with _pending_lock:
@@ -545,17 +562,36 @@ def encode_arrays(
     keep: Optional[list] = None,
     subgoals: Any = None,
     history: Any = None,
+    actions: Any = None,
+    horizon: Any = None,
 ) -> dict[str, Any]:
     """The arrays of checked tensors, by name (absent arrays empty), and int64 sizes: entities, tuples, args, targets,
     history, overflow flags, and the numeric count when stored. Sizes are None without capacities."""
     torch = _torch()
     layout = layout_of(encoder)
-    rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
+    if horizon is None:
+        rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
+        if actions is not None:
+            from mymyr.encoding._device_horizon import bind_actions
+            bind_actions(encoder, rows, actions)
+            keep = [*(keep or []), actions, *rows.tensors]
+    else:
+        from mymyr.encoding._device_horizon import horizon_rows
+        rows = horizon_rows(encoder, horizon, derived, goals, subgoals)
+    return _encode_rows(encoder, rows, capacities, keep)
+
+
+def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> dict[str, Any]:
+    torch = _torch()
+    _drain(torch)
+    layout = layout_of(encoder)
     device = rows.device
     native = _device_encoder(encoder, device.index)
     from mymyr.rl.torch._ops import _stream
 
-    stream = _stream(states)
+    stream = _stream(device)
+    horizon = rows.fields[_ROW_HORIZON] != 0
+    scratch_rows = max(rows.graphs, rows.fields[_ROW_HORIZON_NODES]) if horizon else rows.graphs
     out: dict[str, Any] = {}
     if capacities is not None:
         graphs, entities, args, targets, steps, numeric = capacities
@@ -564,7 +600,7 @@ def encode_arrays(
         specs = layout.specs(torch, rows.graphs, entities, args, targets, steps, numeric=numeric)
         out = _outputs(torch, specs, device)
         _relation_scratch(torch, out, layout, rows.graphs, args, device)
-        scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
+        scratch = _scratch(torch, native, stream, scratch_rows, device, rows.fields[_ROW_DERIVED] != 0)
         native.encode(stream, rows.fields, _pointers(out), [out["task_ids"].shape[0], entities, args, targets, steps, numeric],
                       scratch.data_ptr(), scratch.numel())
     else:
@@ -574,8 +610,9 @@ def encode_arrays(
         ) -> list[int]:
             if flags & _OVERFLOW_INPUT:
                 raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
-                             "history step narrower than its instance, a history count outside [0, steps], or a bit "
-                             "that its instance has no atom for")
+                             "history step narrower than its instance, invalid expansion labels or horizon offsets "
+                             "(the device refuses horizons of depth 2 or more), a history count outside [0, steps], "
+                             "or a bit that its instance has no atom for")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
                                     f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}, "
@@ -589,8 +626,7 @@ def encode_arrays(
 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
-    if keep:
-        _retain(torch, keep, device)
+    _retain(torch, [*rows.tensors, *(keep or [])], device)
     return out
 
 
@@ -610,8 +646,6 @@ def encode(
 ) -> "DeviceFlatBatch":
     """``FlatRelationEncoder.encode`` for arguments that are CUDA arrays."""
     torch = _torch()
-    if actions is not None:
-        raise _error("actions are not encoded on the device: encode the rows on the host with actions, or without actions=")
     if pool is not None:
         raise _error("pool is a pool of host threads: it has no meaning for rows on the device")
     if framework is not None and not (isinstance(framework, str) and framework in ("torch", "pytorch")):
@@ -632,7 +666,7 @@ def encode(
         g = tuple(_cuda_tensor(torch, mask, f"goals[{k}]", keep) for k, mask in enumerate(goals))
     sub = _cuda_tuple(torch, subgoals, "subgoals", keep)
     hist = _cuda_tuple(torch, history, "history", keep)
-    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist)
+    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist, actions=actions)
     return DeviceFlatBatch(encoder, arrays, exact=caps is None)
 
 

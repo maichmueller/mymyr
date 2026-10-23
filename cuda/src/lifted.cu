@@ -90,6 +90,19 @@ __global__ void k_state_offsets(const u32* seg, u32 S, u64 rows, u64 base, i32* 
         out[i] = static_cast<i32>(base + seg[i * S]);
 }
 
+__global__ void k_expansion_status(const u32* total, u64 capacity, const u32* bad_id, const u32* bad_row, u32* live,
+                                   u32* status)
+{
+    const bool valid = *bad_id == 0xFFFFFFFFu && *bad_row == 0xFFFFFFFFu;
+    *live = valid ? 1u : 0u;
+    *status = (u64{*total} > capacity ? 1u : 0u) | (valid ? 0u : 2u);
+}
+
+__global__ void k_expansion_written(const u32* words_needed, const u32* error, u32* status)
+{
+    *status |= (*words_needed ? 2u : 0u) | (*error ? 1u : 0u);
+}
+
 __global__ void k_pad(Flat f, u64 rows, Padded o)
 {
     const u64 n = rows * o.K;
@@ -280,6 +293,19 @@ cudaError_t launch_scan(const u32* in, u32* out, u64 n, void* temp, u64 temp_byt
 cudaError_t launch_state_offsets(const u32* seg_offsets, u32 num_schemas, u64 rows, u64 base, i32* offsets_out, cudaStream_t s)
 {
     k_state_offsets<<<grid_for(rows + 1), k_block, 0, s>>>(seg_offsets, num_schemas, rows, base, offsets_out);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_expansion_status(const u32* total, u64 capacity, const u32* bad_id, const u32* bad_row, u32* live,
+                                    u32* status, cudaStream_t s)
+{
+    k_expansion_status<<<1, 1, 0, s>>>(total, capacity, bad_id, bad_row, live, status);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_expansion_written(const u32* words_needed, const u32* error, u32* status, cudaStream_t s)
+{
+    k_expansion_written<<<1, 1, 0, s>>>(words_needed, error, status);
     return cudaGetLastError();
 }
 

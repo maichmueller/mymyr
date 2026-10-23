@@ -3,6 +3,7 @@
 #include "axiom_reads.hpp"
 #include "encoding_kernels.hpp"
 #include "encoding_scratch.hpp"
+#include "mymyr/encoding/detail/horizon.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/rl/task_arrays.hpp"
 
@@ -92,18 +93,23 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     auto out = std::make_shared<detail::EncodingFacts>();
     detail::EncodingFacts& facts = *out;
     facts.derived_words = host.max_derived_words();
+    facts.label_width = host.table().label_width();
+    facts.numeric_table = host.table().numeric();
     GraphBounds& bounds = facts.bounds;
     const bool levels = schema.has_subgoals();
     const bool history = schema.has_history();
     bounds.levels = levels ? schema.options().max_goal_level : 0;
     bounds.history = history;
     bounds.numeric_words = host.table().numeric_words();
+    bounds.schemas = v.num_schemas;
+    bounds.variable_inputs = schema.options().include_actions || schema.has_horizon();
     const u32 instances = host.table().size();
     std::vector<u32> modes(instances, 0);
     for (u32 i = 0; i < instances; ++i)
     {
         const ed::InstanceView inst = ed::instance_view(v, i);
-        facts.widths.push_back(ed::graph_width(inst));
+        facts.widths.push_back(schema.has_horizon() ? ed::GraphWidth{} : ed::graph_width(inst));
+        bounds.cells = std::max<u64>(bounds.cells, std::max(inst.num_cells, inst.num_row_cells));
         if (schema.stores_numeric_values())
             bounds.numeric = std::max<u64>(bounds.numeric, ed::numeric_slot_count(inst));
         bounds.words = std::max<u64>(bounds.words, std::max(inst.words, inst.derived_words));
@@ -121,10 +127,10 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             if (goal_reads || layer_reads)
                 modes[i] |= 1u << (m + 3);
         }
-        // the graph of a row has the cells of the instance's goal or of the row's own goal and, with subgoal layers
-        // or history steps, their cells, and no action cells
-        for (const ed::CellList list : {ed::cell_list(inst, false, false, levels, history),
-                                        ed::cell_list(inst, true, false, levels, history)})
+        // Cell scratch covers every optional lane combination. Fixed-row output bounds omit expansion tuples,
+        // whose count belongs to the input.
+        for (const ed::CellList list : {ed::cell_list(inst, false, schema.options().include_actions, levels, history),
+                                        ed::cell_list(inst, true, schema.options().include_actions, levels, history)})
         {
             u64 tuples = 0, args = 0, targets = 0;
             u64 step_tuples = 0, step_args = 0, step_targets = 0;
@@ -143,6 +149,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                     nullary = nullary || (n > 0 && cell.logical_arity == 0);
                     continue;
                 }
+                if (ed::is_action_op(cell.op) || ed::is_horizon_op(cell.op))
+                    continue;
                 const u64 n = u64{cell.b - cell.a} + (ed::is_goal_op(cell.op) ? cell.d - cell.c : 0u);
                 tuples = add(tuples, n);
                 args = add(args, mul(n, cell.arity));
@@ -350,15 +358,25 @@ void DeviceEncodingContext::copy(const std::shared_ptr<const encoding::EncodingC
     std::shared_ptr<detail::EncodingFacts> facts = with_facts ? context_facts(*host, m_ctx, m_facts.get()) : nullptr;
     const u64 context_bytes = host->arrays().bytes();
     const u64 records_at = round_up(context_bytes);
-    const u64 record_bytes = facts && !facts->axioms.empty() ? axiom_records(*facts, nullptr, nullptr) : 0;
+    const u64 axiom_bytes = facts && !facts->axioms.empty() ? round_up(axiom_records(*facts, nullptr, nullptr)) : 0;
+    const u64 relation_bytes = facts ? mul(host->schema().schema_relations().size(), sizeof(i32)) : 0;
+    const u64 record_bytes = add(axiom_bytes, relation_bytes);
     auto staging = m_ctx->lease_pinned(1, record_bytes ? add(records_at, record_bytes) : context_bytes);
     std::memcpy(staging.data(0), host->arrays().block(), context_bytes);
     auto block = std::make_shared<DeviceBuffer>(m_ctx, context_bytes);
     if (record_bytes)
     {
         facts->axiom_block = std::make_shared<DeviceBuffer>(m_ctx, record_bytes);
-        (void)axiom_records(*facts, static_cast<std::byte*>(staging.data(0)) + records_at,
-                            static_cast<const std::byte*>(facts->axiom_block->data()));
+        if (axiom_bytes)
+            (void)axiom_records(*facts, static_cast<std::byte*>(staging.data(0)) + records_at,
+                                static_cast<const std::byte*>(facts->axiom_block->data()));
+        if (relation_bytes)
+        {
+            std::memcpy(static_cast<std::byte*>(staging.data(0)) + records_at + axiom_bytes,
+                        host->schema().schema_relations().data(), relation_bytes);
+            facts->schema_relations = reinterpret_cast<const i32*>(
+                static_cast<const std::byte*>(facts->axiom_block->data()) + axiom_bytes);
+        }
     }
     Event allocated;
     allocated.record(m_ctx->stream());
@@ -623,18 +641,21 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
         scanned = add(scanned, mul(G, bounds.args));
     scanned = add(scanned, mul(G, bounds.numeric));
     // the steps of a history are not bounded by the schema
-    out.wide = bounds.history || scanned > std::numeric_limits<u32>::max();
+    out.wide = bounds.variable_inputs || bounds.history || scanned > std::numeric_limits<u32>::max();
     out.scan_length = out.scanned(G);
     out.flags = 0;
     out.totals = k_flag_bytes;
     out.cell_counts = round_up(add(k_flag_bytes, mul(out.wide ? 8 : 4, out.scan_length)));
     out.cell_stride = bounds.cells;
-    out.cell_entries = out.relation_major ? 0 : mul(G, bounds.cells);
+    out.cell_entries = out.relation_major && !bounds.variable_inputs ? 0 : mul(G, bounds.cells);
     // the levels of the subgoal layers of a graph: the plain mask of each level, sign and slot kind, over the instance's
     // words (and its derived words)
     out.level_stride = mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words));
     out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
-    out.scan_temp = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
+    out.action_storage = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
+    // Independent cursors per graph: the action merge is serial within a graph.
+    out.action_stride = bounds.variable_inputs ? add(mul(2, bounds.schemas), 3) : 0;
+    out.scan_temp = add(out.action_storage, round_up(mul(4, mul(G, out.action_stride))));
     out.scan_temp_bytes = totals_scan_temp_bytes(out.scan_length, out.wide);
     out.bytes = add(out.scan_temp, round_up(out.scan_temp_bytes));
     return out;
@@ -668,6 +689,8 @@ ScratchView scratch_view(const ScratchLayout& layout, void* block) noexcept
     out.cell_stride = layout.cell_stride;
     out.level_storage = reinterpret_cast<u64*>(base + layout.level_storage);
     out.level_stride = layout.level_stride;
+    out.action_storage = reinterpret_cast<u32*>(base + layout.action_storage);
+    out.action_stride = layout.action_stride;
     out.scan_temp = base + layout.scan_temp;
     out.scan_temp_bytes = layout.scan_temp_bytes;
     out.wide = layout.wide;
@@ -696,10 +719,9 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
 {
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
-    if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
     if (schema.stores_node_value()) refuse("Simple with numeric relations");
-    // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
-    if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
+    // the nodes and edges of a horizon are encoded into relations only
+    if (schema.has_horizon() && schema.emits_simple()) refuse("Simple horizons");
     if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
 }
 
@@ -995,6 +1017,15 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     const u32 mode = goal_mode + (layer_derived ? 3 : 0);
     const bool evaluate =
         graphs && !in.derived && (facts.reads_derived[goal_mode] || (layer_derived && facts.reads_derived_layers));
+    const bool horizon = schema.has_horizon();
+    if (horizon || in.actions.offsets)
+    {
+        if (opts.outputs != encoding::Outputs{encoding::Output::Relations})
+            invalid("device action rows and horizons require relational output");
+        if (facts.numeric_table)
+            invalid("device action rows and horizons do not encode numeric state rows");
+    }
+    const u64 input_rows = horizon ? in.horizon.nodes : graphs;
     const bool live = in.graphs_device || in.row_start || in.dropped || out.graphs;
 
     if (!block || reinterpret_cast<std::uintptr_t>(block) % 256 || bytes < detail::required_bytes(layout, false))
@@ -1007,6 +1038,39 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     if (graphs > scratch_shape.graphs)
         invalid("the batch has " + std::to_string(graphs) + " graphs, more than the " +
                 std::to_string(scratch_shape.graphs) + " the workspace was reserved for");
+    if (input_rows > scratch_shape.graphs)
+        invalid("reserve scratch for every horizon node row");
+    if (horizon != (in.horizon.node_offsets != nullptr))
+        invalid("a horizon schema requires a device horizon view");
+    if (horizon)
+    {
+        if (in.horizon.nodes > 0x7fffffffull || in.horizon.edges > 0x7fffffffull || graphs > 0x7fffffffull)
+            invalid("device horizon node and edge capacities must fit int32 offsets");
+        if (in.actions.offsets || hist.masks.layers || live)
+            invalid("a device horizon takes edges, no expansion rows, history or live row view");
+        if (!in.horizon.edge_offsets || !in.horizon.scratch ||
+            in.horizon.scratch_words < horizon_scratch_words(graphs, in.horizon.nodes, in.horizon.edges))
+            invalid("the device horizon needs edge offsets and canonical-edge scratch");
+        const bool edges = opts.include_actions || opts.horizon.parent_relation || opts.horizon.sibling_relation ||
+                           opts.horizon.cousin_relation;
+        if (in.horizon.edges && edges && (!in.horizon.src || !in.horizon.dst))
+            invalid("the device horizon needs edge endpoints");
+        if (in.horizon.edges && opts.include_actions &&
+            (!in.horizon.schema || (in.horizon.label_width && !in.horizon.binding)))
+            invalid("the device horizon needs action labels");
+        if (opts.include_actions && in.horizon.label_width < facts.label_width)
+            invalid("the horizon label width is narrower than the table's");
+    }
+    if (in.actions.offsets)
+    {
+        if (!opts.include_actions || live)
+            invalid("device expansion rows require action relations and a fixed graph count");
+        if ((in.actions.capacity && !in.actions.schema) ||
+            (in.actions.capacity && in.actions.label_width && !in.actions.binding))
+            invalid("the device expansion needs schema and binding arrays");
+        if (in.actions.label_width < facts.label_width)
+            invalid("the action label width is narrower than the table's");
+    }
     if (graphs > out.capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
     if (layout.relation_major != relation_major || layout.relations != R)
@@ -1015,7 +1079,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("a circular row view needs a positive capacity");
     if (live && launch.order)
         invalid("a launch order needs the graph count on the host: it cannot order a live row count");
-    if (graphs && !in.states)
+    if (graphs && in.state_words && !in.states)
         invalid("the state buffer is null");
     if (in.numeric_words != facts.bounds.numeric_words)
         invalid("the numeric word width differs from the table");
@@ -1167,6 +1231,18 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.goal_derived_neg = in.goal_derived_neg;
     p.goal_derived_stride = in.goal_derived_stride;
     p.goal_derived_words = in.goal_derived_words;
+    p.actions = in.actions;
+    p.horizon = in.horizon;
+    p.schema_relations = facts.schema_relations;
+    p.action_storage = scratch.action_storage;
+    p.action_stride = scratch.action_stride;
+    p.horizon_mode = horizon;
+    p.horizon_actions = opts.include_actions;
+    p.horizon_parents = opts.horizon.parent_relation || opts.horizon.sibling_relation || opts.horizon.cousin_relation;
+    p.horizon_kin = opts.horizon.sibling_relation || opts.horizon.cousin_relation;
+    p.horizon_cousins = opts.horizon.cousin_relation;
+    p.horizon_exclude = opts.horizon.root == encoding::RootPolicy::Exclude;
+    p.horizon_root_target = opts.horizon.root == encoding::RootPolicy::Include;
     p.layers = {sub, hist, opts.history_max_steps.value_or(0)};
     p.layered = p.layers.layered();
     p.level_storage = scratch.level_storage;
@@ -1236,15 +1312,23 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             ax.states = in.states;
             ax.stride = in.state_stride;
             ax.words = in.state_words;
-            ax.rows = graphs;
+            ax.rows = input_rows;
             ax.task_ids = in.task_ids;
+            if (horizon)
+            {
+                // The cursor region is no longer needed after horizon instance mapping; the per-node ids survive
+                // until evaluation completes on this stream.
+                auto* node_ids = reinterpret_cast<i32*>(scratch.action_storage) + 2;
+                check(detail::launch_horizon_instances(p, node_ids, stream), "horizon node instances");
+                ax.task_ids = node_ids;
+            }
             ax.mode = mode;
             ax.views = reinterpret_cast<u64*>(base + layout.axiom_views);
             ax.view_words = facts.axiom_view_words;
             ax.derived = reinterpret_cast<u64*>(base + layout.derived);
             ax.derived_words = facts.derived_words;
             ax.invalid = scratch.flags;
-            ax.live = in.graphs_device;
+            ax.live = horizon ? reinterpret_cast<const u64*>(scratch.action_storage) : in.graphs_device;
             ax.row_start = in.row_start;
             ax.row_capacity = in.row_capacity;
             ax.class_ow = facts.class_ow[mode].data();
@@ -1326,3 +1410,31 @@ void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 
     run(Phase::Fill, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
 }
 }  // namespace mymyr::cuda
+
+namespace mymyr::cuda
+{
+void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
+                             const DeviceHorizonBuild& output, cudaStream_t stream)
+{
+    if ((parents.graphs && parents.state_words && !parents.states) || parents.state_stride < parents.state_words ||
+        !parents.actions.offsets || !output.node_offsets ||
+        (parents.actions.capacity && (!parents.actions.schema ||
+                                     (parents.actions.label_width && !parents.actions.binding))) ||
+        ((parents.graphs + parents.actions.capacity) && parents.state_words && !output.nodes) ||
+        (parents.actions.capacity && (!children || !output.src || !output.dst || !output.schema ||
+                                     (parents.actions.label_width && !output.binding))) || child_stride < parents.state_words)
+        throw std::invalid_argument("mymyr: encoding: depth-one builder needs parent rows, child rows, offsets and output storage");
+    if (parents.graphs + parents.actions.capacity > 0x7fffffffull)
+        throw std::invalid_argument("mymyr: encoding: depth-one horizon node capacity exceeds int32");
+    if (!output.scratch || reinterpret_cast<std::uintptr_t>(output.scratch) % 256 ||
+        output.scratch_bytes < detail::horizon_builder_scratch_bytes(parents.actions.capacity, output.merge))
+        throw std::invalid_argument("mymyr: encoding: the depth-one builder's scratch is null, too small, or not aligned "
+                                    "to 256 bytes");
+    check(detail::launch_horizon_builder(parents, children, child_stride, output, stream), "depth-one horizon builder");
+}
+
+u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge)
+{
+    return detail::horizon_builder_scratch_bytes(capacity, merge);
+}
+}

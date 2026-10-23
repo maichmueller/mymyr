@@ -112,6 +112,18 @@ def horizon(
     Raises ValueError ("mymyr: encoding: ...") for invalid states or task ids, a graph above ``max_nodes``, and more than
     2^31 - 1 nodes or edges in the result, and for numeric tables (horizons of numeric states are not encoded).
     """
+    device = getattr(roots, "device", None)
+    cuda = getattr(device, "type", None) == "cuda" or hasattr(roots, "__cuda_array_interface__")
+    if not cuda and hasattr(roots, "__dlpack_device__"):
+        cuda = roots.__dlpack_device__()[0] == 2
+    if cuda:
+        if depth >= 2:
+            raise ValueError("mymyr: encoding: the device does not encode horizons of depth 2 or more")
+        if depth != 1 or max_nodes is not None or truncate or pool is not None:
+            raise ValueError("mymyr: encoding: device horizon construction needs depth=1 and no node limit or host pool")
+        from mymyr.encoding._device_horizon import build_horizon
+        from mymyr.encoding import FlatHorizonEncoder
+        return build_horizon(FlatHorizonEncoder(table, horizon_mode="full"), roots, task_ids, merge=merge)
     return HorizonView(**_core._build_horizon(
         table, roots, task_ids, depth=depth, max_nodes=max_nodes, truncate=truncate, merge=merge, threads=threads,
         pool=pool,

@@ -351,6 +351,14 @@ With `target_sources=("action",)` the batch also lists the action entities as ta
 subgoal targets of their graph; without it they are entities and tuple arguments only. A call without `actions` has no
 action tuples and no action entities.
 
+Device rows accept a CUDA expansion as `actions=` or `(schema, binding, offsets)` device tensors, including
+`expand_flat`'s six outputs. Split-schema runs use the same k-way merge as the host, and action targets, graph-local
+references, both layouts and both index widths have identical output. The torch `encode_flat` op accepts
+`action_schema`, `action_binding`, `action_offsets` and optional `action_parent` keyword tensors. The device takes
+action rows only for the relation arrays of a classical table, and the JAX FFI refuses them because its operand list
+has no expansion labels or offsets. The action mapping helpers return host NumPy indices;
+reading CUDA offsets or chosen entities through them copies those arrays to the host.
+
 ### Predicate virtual nodes
 
 With `predicate_virtual_nodes=True` a graph has one **predicate virtual node** (the last entities of the graph) for
@@ -514,7 +522,8 @@ literals of nullary predicates are tuples over the graph's auxiliary entity, in 
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon and transition
 encoders have no `stream`, and C++ `FlatStream(encoder)` refuses them with `std::invalid_argument`. Shared statics are
 refused with a horizon mode (the static tuples of a horizon graph are anchored by its root's state node and so are not
-the instance's), and so are fluent numeric functions; the device encodes no horizons.
+the instance's), and so are fluent numeric functions. The device encodes horizons and transitions of depth one
+([Horizons on the device](#horizons-on-the-device)).
 
 ```python
 from mymyr import rl
@@ -645,6 +654,35 @@ tree = encoding.horizon(task, roots, depth=1, merge=False)
 same = encoding.FlatHorizonEncoder(task, horizon_mode="full", root_policy="exclude").encode(tree)
 assert np.array_equal(transitions.encode([task.initial_state]).relation_args, same.relation_args)
 ```
+
+### Horizons on the device
+
+A `HorizonView` whose arrays are on a CUDA device encodes on the device into a torch `DeviceFlatBatch`, equal to the
+host batch: full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, both
+layouts and both index types. Views of depth 2 or more are refused. The device does not read prepared parent pairs
+(`parent_offsets`, `parent_edges`): it canonicalizes the edges itself. `encoding.horizon(table, cuda_rows, depth=1)`
+builds the compact view on the device from an expansion, with `merge` as on the host; it needs `depth=1`, and
+`max_nodes`, `truncate` and `pool` raise `ValueError`. The builder runs every graph and successor in parallel (merging
+by a hash table over each graph's rows): its time grows with the successors, not with the square of a graph's fanout.
+
+The transition encoders expand CUDA parent rows and encode them on the current stream; `actions=` a device expansion
+reuses its successor rows. With `capacities` the expansion is bounded by the entity capacity (every successor is a
+node with a state entity), and nothing waits for the device unless the table's expansion needs the host (instances
+expanded apart, CPU-fallback schemas or axioms, lazy atom slots, batches beyond one chunk of views; `expand_into` in
+[rl.md](rl.md)): an expansion past the capacity makes the batch report `capacity_overflow`, an invalid parent row
+`invalid_input`. That expansion is sized by `capacities["entities"]`, not by the successors the rows have: the
+successor rows, the builder's nodes and scratch and the encoder's horizon scratch each hold that many rows (about
+`16 + 8 * W` bytes a row, `8 * D` more with derived words), and the expansion zeroes and goal-checks all of them, so a
+generous entity capacity costs memory and time in proportion; an expansion of your own as `actions=` bounds it by its
+own capacity. The automatic expansion does not run during CUDA graph capture: capture an encode with `actions=` an
+expansion that an encode used before the capture (that warm-up imports its columns), or with its columns as torch
+tensors; other forms raise `ValueError` before anything is enqueued.
+
+The device refuses horizons and transitions of a numeric table (`"... do not encode numeric state rows"`) and the
+Simple graph of a horizon (`"the device does not encode Simple horizons"`). `BatchedEnv.encode_transitions` encodes the
+rows of an environment ([rl.md](rl.md)). The [torch op](#the-torch-op) takes node and edge offsets, endpoints and
+labels, or parent rows with `action_succ` and expansion labels to build the transitions; the JAX FFI refuses horizons
+and transitions because it has no node-offset or edge operands.
 
 ## The HGraph view
 
@@ -1120,20 +1158,22 @@ The device (the torch path, the torch op, device streams and the CUDA target of 
 of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or evaluated on the device), subgoal
 layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, the
 [numeric relations](#numeric-functions) and their values, the [Simple graph](#the-simple-graph) (alone or next to the
-relation arrays), both layouts, both index types and the omitted arrays. What it does not encode raises `ValueError`
+relation arrays), the action relations and action targets of a device expansion ([Actions](#actions)), horizons and
+transitions of depth one ([Horizons on the device](#horizons-on-the-device)), both layouts, both index types and the
+omitted arrays. What it does not encode raises `ValueError`
 with the `mymyr: encoding:` prefix (the schemas and calls below before any launch):
 
-- **Schemas:** an encoder with action targets, a horizon mode (the horizon, rooted horizon and transition encoders), the
-  Simple graph with numeric relations (`"the device does not encode Simple with numeric relations"`: its `node_value`
-  is not encoded on the device; `include_numeric=False` encodes the Simple graph of a numeric table), shared statics
-  (`statics='shared'`); and a schema whose kernels need more shared memory than a block has (very many predicate
-  virtual nodes or relations).
-- **Calls:** `actions=` (the action relations have no tuples on the device, and JAX cannot pass an expansion),
-  `into=`, `pool=` (a pool of host threads means nothing for device rows), a `framework` other than `'torch'`, inputs
-  of which some are on the device and some on the host, and subgoal layers or history given to an encoder whose schema
-  has no subgoal or history relations; `threads` has no effect.
+- **Schemas:** the Simple graph with numeric relations (`"the device does not encode Simple with numeric relations"`:
+  its `node_value` is not encoded on the device; `include_numeric=False` encodes the Simple graph of a numeric table)
+  or of a horizon (`"the device does not encode Simple horizons"`), shared statics (`statics='shared'`); and a schema
+  whose kernels need more shared memory than a block has (very many predicate virtual nodes or relations).
+- **Calls:** `actions=` with the Simple graph or over a numeric table, horizon views of depth 2 or more, horizons and
+  transitions of a numeric table, `into=`, `pool=` (a pool of host threads means nothing for device rows), a
+  `framework` other than `'torch'`, inputs of which some are on the device and some on the host, and subgoal layers or
+  history given to an encoder whose schema has no subgoal or history relations; `threads` has no effect.
 - **Rows:** an invalid row (a task id outside the table, a row, goal mask, subgoal layer or history step narrower than
-  its instance, a goal, layer or step bit its instance has no atom for, a history count outside `[0, H]`) raises
+  its instance, a goal, layer or step bit its instance has no atom for, a history count outside `[0, H]`, invalid
+  expansion labels or horizon offsets) raises
   without capacities and sets `invalid_input` in `sizes` with them; so do rows without derived words whose instance's
   axioms the device cannot evaluate (below).
 - **Elsewhere:** device streams take no subgoal layers or history steps, device batches of an encoder with them are not
@@ -1210,6 +1250,7 @@ registered encoder traces a graph for that encoder's schema.
 To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, warm it once on the capture stream to
 upload and acquire its context. No scratch reservation is needed. An encoding without capacities waits for the sizes and
 cannot be captured. The graph reads its input tensors where they were captured: write new rows in place and replay.
+Keep input arrays and their owners alive through the final replay.
 Keep the encoder registered or referenced while the graph can replay: a captured `encode` holds raw context pointers
 and does not retain the Python encoder. Graphs of different sizes can share a capture stream; each owns its scratch.
 
@@ -1317,9 +1358,12 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   fingerprint included). It is returned from jitted functions and stacked by
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
-- **What it encodes.** What [the device encodes](#what-the-device-encodes) but numeric tables and the Simple graph, on
-  both platforms: the rows with their goals, subgoal layers and history steps. A schema or input the device refuses
-  raises `ValueError` (`mymyr: encoding: ...`) when the function is traced. Where an instance of the table has axioms the device cannot evaluate, a call
+- **What it encodes.** What [the device encodes](#what-the-device-encodes) but numeric tables, the Simple graph, action
+  rows, horizons and transitions, on both platforms: the rows with their goals, subgoal layers and history steps.
+  Action relations and action targets are accepted without expansion rows (the action relations then have no tuples);
+  `actions=`, horizons and transitions are refused, since the FFI operand list has no expansion labels, node offsets or
+  edges. A schema or input the device refuses raises `ValueError` (`mymyr: encoding: ...`) when the function is
+  traced. Where an instance of the table has axioms the device cannot evaluate, a call
   without `derived` raises `ValueError` when traced, whatever its rows (the torch path flags those rows in
   `invalid_input` instead). Otherwise the device evaluates missing derived words, as the CPU encoder does. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an

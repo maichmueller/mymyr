@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from mymyr._typing import SupportsDLPack
-    from mymyr.encoding import FlatBatch
+    from mymyr._typing import DeviceActionRows, SupportsDLPack
+    from mymyr.encoding import DeviceFlatBatch, FlatBatch
     from mymyr.rl import Expansion
 
 __all__ = ["action_entities", "action_indices", "action_rows"]
@@ -19,18 +19,22 @@ _ACTION_ROLE = 4
 
 def _ints(values: object) -> np.ndarray:
     """`values` as a flat int64 host array: an array that speaks DLPack (NumPy, torch and JAX arrays on the CPU,
-    mymyr.DLArray) is read in place, anything else (a sequence of ints) through NumPy."""
+    mymyr.DLArray) is read in place, anything else (a sequence of ints) through NumPy. CUDA arrays are copied to the
+    host before reading their values."""
+    if hasattr(values, "__dlpack_device__") and values.__dlpack_device__()[0] == 2:
+        import torch
+        values = torch.from_dlpack(values).cpu().numpy()
     if not isinstance(values, np.ndarray) and hasattr(values, "__dlpack__"):
         values = np.from_dlpack(values)
     return np.asarray(values).astype(np.int64, copy=False).reshape(-1)
 
 
-def _columns(batch: FlatBatch) -> Mapping[str, np.ndarray]:
-    """The arrays of `batch` as zero-copy NumPy views, whatever framework the batch exports to."""
+def _columns(batch: FlatBatch | DeviceFlatBatch) -> Mapping[str, np.ndarray]:
+    """The arrays of `batch` as host NumPy views, copying a device batch to the host."""
     return batch.as_dict("numpy")
 
 
-def action_entities(batch: FlatBatch) -> np.ndarray:
+def action_entities(batch: FlatBatch | DeviceFlatBatch) -> np.ndarray:
     """The batch-global ids of the action entities of ``batch``, int64, in entity order (graph after graph).
 
     A batch has action entities when its schema has action relations and the call was given ``actions``; a batch with
@@ -51,7 +55,7 @@ def _graphs_of(columns: Mapping[str, np.ndarray], entities: np.ndarray) -> np.nd
     return np.searchsorted(offsets, entities, side="right") - 1
 
 
-def _chosen(batch: FlatBatch, columns: Mapping[str, np.ndarray], entities: SupportsDLPack | None) -> np.ndarray:
+def _chosen(batch: FlatBatch | DeviceFlatBatch, columns: Mapping[str, np.ndarray], entities: SupportsDLPack | None) -> np.ndarray:
     """The checked action entities `entities` (all of the batch for None) of a batch with explicit entity arrays."""
     roles = columns["entity_role"]
     if entities is None:
@@ -75,12 +79,12 @@ def _implicit(entities: SupportsDLPack | None) -> np.ndarray:
     raise ValueError("mymyr: encoding: the batch has no action entities")
 
 
-def action_indices(batch: FlatBatch, entities: SupportsDLPack | None = None) -> np.ndarray:
+def action_indices(batch: FlatBatch | DeviceFlatBatch, entities: SupportsDLPack | None = None) -> np.ndarray:
     """The position of each action entity among the successors of its own state: its ``entity_ref``, int64.
 
     This is the action an environment takes (``CpuEnvPool.send`` and the environments of ``mymyr.rl`` take an index into
-    the canonical successor order of the state). ``entities`` are batch-global entity ids (an array of any framework on
-    the CPU, or a sequence of ints), for instance ``batch.target_entity`` entries of the action targets a policy chose;
+    the canonical successor order of the state). ``entities`` are batch-global entity ids (an array of any framework,
+    or a sequence of ints; CUDA arrays are copied to the host), for instance ``batch.target_entity`` entries of the action targets a policy chose;
     ``None`` means every action entity of the batch, which is none for a batch with implicit entity arrays. Raises
     ``ValueError`` for an id outside the batch or one that is not an action entity.
     """
@@ -91,7 +95,7 @@ def action_indices(batch: FlatBatch, entities: SupportsDLPack | None = None) -> 
     return columns["entity_ref"][chosen].astype(np.int64)
 
 
-def action_rows(batch: FlatBatch, actions: Expansion, entities: SupportsDLPack | None = None) -> np.ndarray:
+def action_rows(batch: FlatBatch | DeviceFlatBatch, actions: Expansion | DeviceActionRows, entities: SupportsDLPack | None = None) -> np.ndarray:
     """The row of ``actions`` of each action entity, int64: ``actions.offsets[g] + entity_ref`` for the entity of graph
     ``g``. ``actions`` is the expansion the batch was encoded with, so ``actions.succ[row]`` is the successor of the
     chosen action, ``actions.action(row)`` the action and ``actions.schema[row]`` and ``actions.binding[row]`` its label.

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mymyr.encoding import GraphDescription as GraphDescription
     from mymyr.rl import InstanceSampler as InstanceSampler
 
-__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView"]
+__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows"]
 
 
 class SupportsDLPack(Protocol):
@@ -63,3 +63,16 @@ class SupportsHorizonView(Protocol):
     def edge_binding(self) -> Any: ...
     @property
     def task_ids(self) -> Any: ...
+
+
+class DeviceActionRows(Protocol):
+    """Expansion labels on one CUDA device. Offsets delimit the canonical rows of each parent state."""
+
+    @property
+    def schema(self) -> SupportsDLPack: ...
+    @property
+    def binding(self) -> SupportsDLPack: ...
+    @property
+    def offsets(self) -> SupportsDLPack: ...
+    @property
+    def parent(self) -> SupportsDLPack | None: ...

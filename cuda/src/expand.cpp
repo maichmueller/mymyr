@@ -27,7 +27,7 @@ namespace
 constexpr u64 k_view_budget = u64{256} << 20;
 
 // control words (device and pinned host)
-constexpr u32 k_bad_row = 0, k_words_needed = 1, k_error = 2, k_overflow = 3, k_bad_id = 4, k_ctl_words = 5;
+constexpr u32 k_bad_row = 0, k_words_needed = 1, k_error = 2, k_overflow = 3, k_bad_id = 4, k_live = 5, k_ctl_words = 6;
 
 template<class T>
 T* scratch_of(Scratch& sc, const ContextPtr& ctx, u64 n, cudaStream_t s)
@@ -122,13 +122,19 @@ struct DeviceExpander::Impl
                                         " sets atom slots its instance does not have (a state of another task?)");
     }
 
-    /// Chunks of parents: the views (view_words each) within the budget, the (state, schema) segments within int32.
-    void make_chunks(u64 view_words, u32 num_schemas)
+    /// The parents of one chunk: their views (view_words each) within the budget, their (state, schema) segments
+    /// within int32.
+    [[nodiscard]] u64 chunk_limit(u64 view_words, u32 num_schemas) const
     {
         const u64 S = std::max<u32>(num_schemas, 1);
         u64 per = std::max<u64>(1, std::min<u64>(k_view_budget / std::max<u64>(8, view_words * 8), (u64{1} << 30) / S));
-        if (chunk_rows)
-            per = std::min(per, chunk_rows);
+        return chunk_rows ? std::min(per, chunk_rows) : per;
+    }
+
+    /// Chunks of parents of chunk_limit() rows.
+    void make_chunks(u64 view_words, u32 num_schemas)
+    {
+        const u64 per = chunk_limit(view_words, num_schemas);
         chunks.clear();
         for (u64 b = 0; b < in.rows; b += per)
             chunks.push_back({b, std::min(per, in.rows - b), 0, 0});
@@ -546,6 +552,182 @@ struct DeviceExpander::Impl
                   "launch_state_offsets");
         }
         segs_kept = true;
+    }
+
+    // ------------------------------------------------------------------------------------------ asynchronous
+    [[nodiscard]] std::string async_unsupported(u64 rows, const rl::ExpandOptions& o) const
+    {
+        switch (mode)
+        {
+            case Mode::Host: return "the device kernels cannot run the table's instance: it is expanded on the host";
+            case Mode::PerInstance:
+                return "the table's instances are expanded apart (numeric fluents, CPU-fallback schemas, conditional "
+                       "effects or axioms over several instances)";
+            case Mode::Single:
+                if (table->task(0)->numeric_slots())
+                    return "numeric state rows are converted and checked on the host";
+                if (!gen->capturable(o.witness_pruning) || gen->missing_flag())
+                    return "schemas or axioms of the task run on the CPU";
+                return rows > chunk_limit(gen->view_words(), gen->num_schemas()) ? "the batch needs several chunks of views"
+                                                                                   : "";
+            case Mode::Multi:
+                return rows > chunk_limit(plan.view_words, plan.num_schemas) ? "the batch needs several chunks of views" : "";
+        }
+        return "";
+    }
+
+    /// expand_async after the checks: the batch as one chunk, its total, overflow and validation kept on the device.
+    void expand_async(rl::Expansion& out, u32* status)
+    {
+        u32* d = reset_ctl();
+        chunks.clear();
+        host_states.clear();
+        if (in.rows)
+            chunks.push_back({0, in.rows, 0, 0});
+        const bool single = mode == Mode::Single;
+        const u32 S = single ? gen->num_schemas() : plan.num_schemas;
+        if (single)
+        {
+            if (ids)
+                check(lifted::launch_check_ids(ids, 1, in.rows, d + k_bad_id, s), "launch_check_ids");
+            const u32 limit = table->task(0)->atoms().fluent_slots();
+            if (opt.validate && in.rows && static_cast<u64>(in.words) * 64 > limit)
+                check(lifted::launch_check_rows(in.data, stride, in.words, in.rows, limit, d + k_bad_row, s),
+                      "launch_check_rows");
+        }
+        else
+            check(lifted::launch_check_multi(static_cast<const u32*>(limits.data()), plan.instances, ids,
+                                             opt.validate ? in.data : nullptr, stride, in.words, in.rows, d + k_bad_id,
+                                             d + k_bad_row, s),
+                  "launch_check_multi");
+        // rows past the total stay zero rows, whose goal flags and derived words the evaluations below compute
+        if (out.succ && out.capacity)
+            check(cudaMemsetAsync(out.succ, 0, out.capacity * out.words * sizeof(u64), s), "cudaMemsetAsync");
+        if (chunks.empty())
+        {
+            check(cudaMemsetAsync(out.offsets, 0, sizeof(i32), s), "cudaMemsetAsync");
+            check(cudaMemsetAsync(status, 0, sizeof(u32), s), "cudaMemsetAsync");
+            if (out.derived && out.capacity)
+                check(cudaMemsetAsync(out.derived, 0, out.capacity * out.derived_words * sizeof(u64), s), "cudaMemsetAsync");
+            if (out.goal && out.capacity)
+                check(cudaMemsetAsync(out.goal, 0, out.capacity, s), "cudaMemsetAsync");
+            return;
+        }
+        const Chunk& c = chunks[0];
+        const u32* sg = nullptr;
+        if (single)
+        {
+            prepare_single(c);
+            sg = gen->seg_offsets();
+        }
+        else
+        {
+            (void)scratch_of<u32>(seg, ctx, c.rows * S + 1, s);
+            prepare_multi(c, false);
+            sg = static_cast<const u32*>(seg.data());
+        }
+        check(lifted::launch_expansion_status(sg + c.rows * S, out.capacity, d + k_bad_id, d + k_bad_row, d + k_live,
+                                              status, s),
+              "launch_expansion_status");
+        if (single)
+            write_single_async(out, d);
+        else
+            write_multi_async(out, d, sg);
+        check(lifted::launch_state_offsets(sg, S, c.rows, 0, out.offsets, s), "launch_state_offsets");
+        check(lifted::launch_expansion_written(d + k_words_needed, d + k_error, status, s), "launch_expansion_written");
+    }
+
+    /// The labels of an asynchronous write: the caller's arrays at the capacity, nothing written unless the batch is
+    /// valid (k_live).
+    lifted::Labels async_labels(const rl::Expansion& out, u32* d, u32 L, u32* sc) const
+    {
+        lifted::Labels lab;
+        lab.binding = reinterpret_cast<u32*>(out.binding);
+        lab.schema = reinterpret_cast<u32*>(out.schema);
+        lab.parent = reinterpret_cast<u32*>(out.parent);
+        lab.capacity = out.capacity;
+        lab.label_width = L;
+        lab.parent_base = 0;
+        lab.scratch = sc;
+        lab.scratch_rows = sc ? out.capacity : 0;
+        lab.scratch_indexed = 1;
+        lab.error = d + k_error;
+        lab.live = d + k_live;
+        return lab;
+    }
+
+    void write_single_async(rl::Expansion& out, u32* d)
+    {
+        const Task& task = *table->task(0);
+        const u32 W = out.words, L = out.binding ? out.label_width : gen->label_width();
+        const u64 n = out.capacity;
+        u32* sc = nullptr;
+        if (opt.canonical_order && gen->sorts(opt.witness_pruning) && n)
+            sc = static_cast<u32*>(sort.ensure(ctx, n * L * sizeof(u32), s));
+        gen->write(async_labels(out, d, L, sc), out.succ, W, d + k_words_needed);
+        if (out.derived && n)
+            gen->derived_rows(out.succ, W, W, n, out.derived, out.derived_words);
+        if (!out.goal || !n)
+            return;
+        if (out.derived && out.derived_words && task.compiled().goal.uses_derived)
+            check(lifted::launch_goal_rows_derived(gen->view(), out.succ, W, n, out.derived, out.derived_words, out.goal, s),
+                  "launch_goal_rows_derived");
+        else if (!task.compiled().goal.uses_derived)
+            check(lifted::launch_goal_rows(gen->view(), out.succ, W, n, nullptr, out.goal, s), "launch_goal_rows");
+        else
+            gen->goal_flags(out.succ, W, W, n, nullptr, n, out.goal);
+    }
+
+    void write_multi_async(rl::Expansion& out, u32* d, const u32* sg)
+    {
+        const Chunk& c = chunks[0];
+        const u32 W = out.words, L = label_columns(out);
+        const u64 n = out.capacity;
+        u32* sc = nullptr;
+        if (opt.canonical_order && plan.w[opt.witness_pruning ? 0 : 1][0].sorts && n)
+            sc = static_cast<u32*>(sort.ensure(ctx, n * L * sizeof(u32), s));
+        if (out.derived && out.derived_words && n)
+            check(cudaMemsetAsync(out.derived, 0, n * out.derived_words * sizeof(u64), s), "cudaMemsetAsync");
+        lifted::SuccessorRows rows;
+        rows.words = n ? out.succ : nullptr;
+        rows.out_words = W;
+        rows.words_needed = d + k_words_needed;
+        const bool defer = rows.words != nullptr;
+        rows.deferred = defer ? 1 : 0;
+        lifted::Labels lab = async_labels(out, d, L, sc);
+        if (defer)
+        {
+            lab.binding = out.binding ? lab.binding : scratch_of<u32>(t_binding, ctx, n * L, s);
+            lab.schema = out.schema ? lab.schema : scratch_of<u32>(t_schema, ctx, n, s);
+            lab.parent = out.parent ? lab.parent : scratch_of<u32>(t_parent, ctx, n, s);
+        }
+        const lifted::SchemaSet fixed = plan.set(opt.witness_pruning, opt.canonical_order, false);
+        const lifted::SchemaSet fc = plan.set(opt.witness_pruning, opt.canonical_order, true);
+        const lifted::Parents p = parents_of(c);
+        const lifted::Views v{static_cast<u64*>(views.data()), plan.view_words};
+        lifted::Multi m = multi_of(c);
+        const auto& launches = plan.launches(launch);
+        const auto groups = static_cast<u32>(launches.size());
+        fan.fork(s, groups);
+        for (u32 gi = 0; gi < groups; ++gi)
+        {
+            const detail::TableLaunch::Launch& l = launches[gi];
+            m.ow = l.ow;
+            m.words_lo = l.lo;
+            m.words_hi = l.hi;
+            if (fixed.count)
+                check(lifted::launch_write_multi(m, p, v, fixed, sg, lab, rows, l.wb, fan.lane(s, gi)), "launch_write_multi");
+            if (fc.count && l.ow <= lifted::k_max_fc_ow)
+                check(lifted::launch_write_multi(m, p, v, fc, sg, lab, rows, l.wb, fan.lane(s, gi)),
+                      "launch_write_multi (fc)");
+        }
+        fan.join(s, groups);
+        if (defer)
+        {
+            lifted::PutRows to;
+            to.goal = out.goal;
+            check(lifted::launch_put_multi(m, p, sg, lab, rows, to, n, s), "launch_put_multi");
+        }
     }
 
     // ------------------------------------------------------------------------------------------ Host
@@ -1123,6 +1305,46 @@ void DeviceExpander::expand(rl::StateBatchView in, const i32* task_ids, rl::Expa
 {
     count(in, task_ids, options);
     write(out);
+}
+
+std::string DeviceExpander::async_unsupported(u64 rows, const rl::ExpandOptions& options) const
+{
+    return m->async_unsupported(rows, options);
+}
+
+void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
+                                  const rl::ExpandOptions& options)
+{
+    Impl& I = *m;
+    DeviceGuard guard(I.ctx->device());
+    if (const std::string why = I.async_unsupported(in.rows, options); !why.empty())
+        throw std::invalid_argument("mymyr: device expand: the expansion needs the host: " + why);
+    if (!status || !out.offsets)
+        throw std::invalid_argument("mymyr: device expand: an asynchronous expansion needs a status word and offsets");
+    I.counted = false;
+    I.kept = false;
+    I.segs_kept = false;
+    I.views_chunk = -1;
+    if (in.rows && !in.data)
+        throw std::invalid_argument("mymyr: expand: null state buffer");
+    if (in.stride && in.stride < in.words + in.numeric_words)
+        throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
+    if (in.numeric_words != I.table->numeric_words())
+        throw std::invalid_argument("mymyr: device expand: input numeric width differs from the table");
+    if (in.rows > rl::k_max_rows)
+        throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
+    if (!task_ids && in.rows && I.table->size() > 1)
+        throw std::invalid_argument("mymyr: expand: a batch over a table of " + std::to_string(I.table->size()) +
+                                    " instances needs task ids");
+    I.in = in;
+    I.opt = options;
+    I.ids = task_ids;
+    I.stride = in.stride ? in.stride : in.words + in.numeric_words;
+    I.total = 0;
+    I.counted = true;  // the checks of write() on the destinations
+    I.check_write(out);
+    I.counted = false;
+    I.expand_async(out, status);
 }
 
 void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)

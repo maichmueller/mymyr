@@ -178,10 +178,10 @@ def test_actions_opt_in_on_the_cpu(gripper):
     assert arrays(r.obs)["relation_counts"][:, lanes].sum() > 0
 
 
-def test_actions_are_refused_on_the_device_and_without_action_relations(gripper):
+def test_device_actions_are_refused_with_capacities(gripper):
     encoder = encoding.FlatRelationEncoder(gripper)
-    with pytest.raises(ValueError, match="does not encode action relations"):
-        rt.BatchedEnv(gripper, 4, device=gpu_device(), observation=encoder, obs_actions=True)
+    with pytest.raises(ValueError, match="device observations with obs_capacities have no action relations"):
+        rt.BatchedEnv(gripper, 4, device=gpu_device(), observation=encoder, obs_actions=True, obs_capacities=CAPS)
 
 
 def test_refusals(gripper, sets):  # noqa: F811
