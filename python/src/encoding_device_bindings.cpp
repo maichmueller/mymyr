@@ -172,17 +172,25 @@ cuda::DeviceEncodeInput input_of(const Rows& r, u32 numeric_words = 0)
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
 /// target_entity, target_group, history_offsets, history_entity, history_dt, the five Simple arrays (node_offsets,
-/// node_label, edge_offsets, edge_index, edge_label), numeric_values, sizes, then the three private relation arrays of a
-/// Simple-only fill and the edge_index row stride (0: the array is absent or has no entries). With numeric values the
-/// sizes are followed by the numeric value count.
-constexpr usize k_output_fields = 27;
+/// node_label, edge_offsets, edge_index, edge_label), numeric_values, the five static arrays (static_task_ids,
+/// static_offsets, static_arg_offsets, static_args, static_relations), static_sizes, sizes, then the three private
+/// relation arrays of a Simple-only fill and the edge_index row stride (0: the array is absent or has no entries). With
+/// numeric values the sizes are followed by the numeric value count.
+constexpr usize k_output_fields = 33;
+/// The counts an exact encoding or collation reads back in one transfer.
 struct CountedSizes
 {
     encoding::FlatSizes flat;
     u64 numeric = 0;
+    encoding::StaticSizes statics;
 };
+/// allocate(entities, tuples, args, targets, history, numeric, flags, static_instances, static_tuples, static_args)
+using ExactAllocation = std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u64, u32, u64, u64, u64)>;
+/// allocate(entities, tuples, args, targets, numeric, flags, static_instances, static_tuples, static_args)
+using CollationAllocation = std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32, u64, u64, u64)>;
 
-cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities, bool numeric = false)
+cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities,
+                              bool numeric = false, const encoding::StaticShape& statics = {})
 {
     if (v.size() != k_output_fields)
         throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output fields").c_str());
@@ -210,12 +218,19 @@ cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encodin
     a.edge_index = ptr<void>(v[19]);
     a.edge_label = ptr<i32>(v[20]);
     a.numeric_values = ptr<void>(v[21]);
-    out.sizes = ptr<encoding::FlatSizes>(v[22]);
+    a.static_task_ids = ptr<i32>(v[22]);
+    a.static_offsets = ptr<void>(v[23]);
+    a.static_arg_offsets = ptr<void>(v[24]);
+    a.static_args = ptr<void>(v[25]);
+    a.static_relations = ptr<void>(v[26]);
+    out.static_sizes = ptr<encoding::StaticSizes>(v[27]);
+    out.static_capacities = statics;
+    out.sizes = ptr<encoding::FlatSizes>(v[28]);
     if (numeric && out.sizes) out.numeric_size = reinterpret_cast<u64*>(out.sizes + 1);
-    out.scratch_relation_offsets = ptr<void>(v[23]);
-    out.scratch_relation_arg_offsets = ptr<void>(v[24]);
-    out.scratch_relation_args = ptr<void>(v[25]);
-    a.edge_stride = v[26];
+    out.scratch_relation_offsets = ptr<void>(v[29]);
+    out.scratch_relation_arg_offsets = ptr<void>(v[30]);
+    out.scratch_relation_args = ptr<void>(v[31]);
+    a.edge_stride = v[32];
     out.capacities = capacities;
     return out;
 }
@@ -321,13 +336,14 @@ public:
                const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
                std::uintptr_t graphs, std::uintptr_t scratch, u64 bytes, bool zero_unused)
     {
-        if (capacities.size() != 6) refuse("expected six capacities");
+        if (capacities.size() != 8) refuse("expected eight capacities");
         auto in = input_of(rows_of(ring), m_encoder->table().numeric_words());
         in.graphs_device = ptr<const u64>(status) + 1;
         in.row_start = ptr<const u64>(status);
         in.dropped = ptr<const u64>(status) + 2;
         in.row_capacity = in.graphs;
-        auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]}, numeric());
+        auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]},
+                             numeric(), {capacities[6], capacities[7]});
         out.graphs = ptr<u64>(graphs);
         out.zero_unused = zero_unused;
         nb::gil_scoped_release release;
@@ -407,11 +423,11 @@ public:
                 const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
                 std::uintptr_t scratch, u64 bytes)
     {
-        if (capacities.size() != 6)
-            throw nb::value_error("mymyr: expected six capacities");
+        if (capacities.size() != 8)
+            throw nb::value_error("mymyr: expected eight capacities");
         const Rows rows = rows_of(row_fields);
         const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]};
-        cuda::DeviceOutput out = output_of(outputs, caps, numeric());
+        cuda::DeviceOutput out = output_of(outputs, caps, numeric(), {capacities[6], capacities[7]});
         out.zero_unused = true;
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
@@ -423,10 +439,11 @@ public:
                                  input_of(rows, m_encoder->table().numeric_words()), out);
     }
 
-    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, history, numeric, flags)` to check the flags
-    /// and return the graph extent and output pointers (the sizes pointer ignored), then fills them.
+    /// Counts, waits once for the dynamic, numeric and static sizes, and calls `allocate(entities, tuples, args,
+    /// targets, history, numeric, flags, static_instances, static_tuples, static_args)` to check the flags and return the
+    /// graph extent and output pointers (the sizes pointer ignored), then fills them.
     void encode_exact(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
-                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u64, u32)>& allocate)
+                      const ExactAllocation& allocate)
     {
         const Rows rows = rows_of(row_fields);
         std::vector<std::uintptr_t> outputs;
@@ -452,6 +469,8 @@ public:
             counted.capacities.graphs = rows.graphs;
             counted.sizes = device_sizes;
             counted.numeric_size = reinterpret_cast<u64*>(device_sizes + 1);
+            if (m_device_encoder->schema().shared_statics())
+                counted.static_sizes = &static_cast<CountedSizes*>(slot->sizes->data())->statics;
             m_device_encoder->count(*slot->held, in, counted);
             cuda::DeviceGuard guard(m_device);
             cuda::check(cudaMemcpyAsync(slot->staging.data(0), device_sizes, sizeof(CountedSizes), cudaMemcpyDeviceToHost, s),
@@ -459,13 +478,16 @@ public:
             cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize (sizes)");
             ++slot->syncs;
             const encoding::FlatSizes sizes = *static_cast<const encoding::FlatSizes*>(slot->staging.data(0));
-            const u64 n = static_cast<const CountedSizes*>(slot->staging.data(0))->numeric;
-            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.history, n, sizes.overflow);
+            const auto& counts = *static_cast<const CountedSizes*>(slot->staging.data(0));
+            const u64 n = counts.numeric;
+            const auto statics = m_device_encoder->schema().shared_statics() ? counts.statics : encoding::StaticSizes{};
+            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.history, n, sizes.overflow,
+                               statics.instances, statics.tuples, statics.args);
             if (outputs.size() != k_output_fields + 1)
                 refuse("expected the output graph extent and " + std::to_string(k_output_fields) + " output fields");
             const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets, sizes.history, n};
             outputs.erase(outputs.begin());
-            cuda::DeviceOutput out = output_of(outputs, caps, numeric());
+            cuda::DeviceOutput out = output_of(outputs, caps, numeric(), {statics.instances, statics.args});
             out.sizes = device_sizes;
             m_device_encoder->fill(*slot->held, in, out);
         }
@@ -527,10 +549,10 @@ class DeviceCollatorHandle
 {
 public:
     DeviceCollatorHandle(const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,
-                         const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<u64>& graphs)
+                         const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<std::vector<u64>>& shapes)
         : m_device(device), m_stream(cuda_stream(stream))
     {
-        if (inputs.size() != graphs.size() || inputs.size() != encoders.size() || encoders.empty())
+        if (inputs.size() != shapes.size() || inputs.size() != encoders.size() || encoders.empty())
             refuse("collation needs one encoder and one graph count per batch");
         m_context = table_device_context(nb::getattr(encoders.front(), "table"), nb::none(), device);
         m_numeric = flat_encoder_of(encoders.front())->schema().stores_numeric_values();
@@ -538,8 +560,13 @@ public:
         for (usize i = 0; i < inputs.size(); ++i)
         {
             const auto output = output_of(inputs[i], {}, m_numeric);
-            batches.push_back(cuda::collation_batch(*flat_encoder_of(encoders[i]), output.arrays, output.sizes, graphs[i]));
+            if (shapes[i].size() != 3) refuse("collation needs graph and static capacities for every batch");
+            auto batch = cuda::collation_batch(*flat_encoder_of(encoders[i]), output.arrays, output.sizes, shapes[i][0]);
+            batch.static_capacities = {shapes[i][1], shapes[i][2]};
+            batch.static_sizes = output.static_sizes;
+            batches.push_back(batch);
         }
+        m_shared = batches.front().shared_statics;
         nb::gil_scoped_release release;
         m_collator = std::make_unique<cuda::DeviceCollator>(m_context, std::move(batches), m_stream);
     }
@@ -547,14 +574,15 @@ public:
     void encode(const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
                 std::uintptr_t scratch, u64 bytes)
     {
-        if (capacities.size() != 6) refuse("expected six capacities");
-        auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]}, numeric());
+        if (capacities.size() != 8) refuse("expected eight capacities");
+        auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]},
+                             numeric(), {capacities[6], capacities[7]});
         out.zero_unused = true;
         nb::gil_scoped_release release;
         m_collator->encode(ptr<void>(scratch), bytes, out);
     }
     void encode_exact(std::uintptr_t scratch, u64 bytes,
-                       const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32)>& allocate)
+                       const CollationAllocation& allocate)
     {
         nb::gil_scoped_release release;
         std::lock_guard lock(m_mutex);
@@ -566,13 +594,18 @@ public:
             m_staging = m_context->lease_pinned(1, sizeof(CountedSizes));
         }
         auto* sizes = static_cast<encoding::FlatSizes*>(m_sizes->data());
-        m_collator->count(ptr<void>(scratch), bytes, sizes, reinterpret_cast<u64*>(sizes + 1));
+        m_collator->count(ptr<void>(scratch), bytes, sizes, reinterpret_cast<u64*>(sizes + 1),
+                          m_shared ? &static_cast<CountedSizes*>(m_sizes->data())->statics : nullptr);
         cuda::check(cudaMemcpyAsync(m_staging.data(0), sizes, sizeof(CountedSizes), cudaMemcpyDeviceToHost, m_stream), "copy collated sizes");
         cuda::check(cudaStreamSynchronize(m_stream), "wait for collated sizes");
-        const auto counted = *static_cast<const encoding::FlatSizes*>(m_staging.data(0));
-        const u64 n = static_cast<const CountedSizes*>(m_staging.data(0))->numeric;
-        const auto outputs = allocate(counted.entities, counted.tuples, counted.args, counted.targets, n, counted.overflow);
-        auto out = output_of(outputs, {m_collator->graphs(), counted.entities, counted.args, counted.targets, 0, n}, m_numeric);
+        const auto& counts = *static_cast<const CountedSizes*>(m_staging.data(0));
+        const auto counted = counts.flat;
+        const u64 n = counts.numeric;
+        const auto statics = m_shared ? counts.statics : encoding::StaticSizes{};
+        const auto outputs = allocate(counted.entities, counted.tuples, counted.args, counted.targets, n, counted.overflow,
+                                      statics.instances, statics.tuples, statics.args);
+        auto out = output_of(outputs, {m_collator->graphs(), counted.entities, counted.args, counted.targets, 0, n}, m_numeric,
+                             {statics.instances, statics.args});
         out.sizes = sizes;
         m_collator->fill(ptr<void>(scratch), bytes, out);
     }
@@ -580,6 +613,7 @@ private:
     bool numeric() const { return m_numeric; }
     bool m_numeric = false;
     int m_device;
+    bool m_shared = false;
     cudaStream_t m_stream;
     cuda::ContextPtr m_context;
     std::unique_ptr<cuda::DeviceCollator> m_collator;
@@ -638,19 +672,19 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (54 integers: the graphs, then the pointers and strides of the arrays) into the 23 output "
-             "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric), "
-             "on `stream`. No host wait.")
+             "Encodes the rows (54 integers: the graphs, then the pointers and strides of the arrays) into the 29 output "
+             "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric, "
+             "static_instances, static_args), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, numeric, "
-             "flags) to check the flags and return the graph extent and the output fields, then fills them on "
-             "`stream`.");
+             "flags, static_instances, static_tuples, static_args) to check the flags and return the graph extent and "
+             "the output fields, then fills them on `stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")
         .def("__init__", [](DeviceCollatorHandle* self, const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,
-                            const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<u64>& graphs)
-             { new (self) DeviceCollatorHandle(encoders, device, stream, inputs, graphs); },
-             "encoders"_a, "device"_a, "stream"_a, "inputs"_a, "graphs"_a)
+                            const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<std::vector<u64>>& shapes)
+             { new (self) DeviceCollatorHandle(encoders, device, stream, inputs, shapes); },
+             "encoders"_a, "device"_a, "stream"_a, "inputs"_a, "shapes"_a)
         .def_prop_ro("scratch_bytes", &DeviceCollatorHandle::scratch_bytes)
         .def("encode", &DeviceCollatorHandle::encode, "outputs"_a, "capacities"_a, "scratch"_a, "bytes"_a)
         .def("encode_exact", &DeviceCollatorHandle::encode_exact, "scratch"_a, "bytes"_a, "allocate"_a);

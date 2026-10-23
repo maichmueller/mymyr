@@ -658,7 +658,7 @@ def test_count_index_overflow_raises_before_exact_allocation(cases, monkeypatch)
     native = encoding._device._device_encoder(encoder, 0)
 
     def count(self, stream, rows, allocate):
-        return allocate(1 << 31, 0, 0, 0, 0, 0, 2)
+        return allocate(1 << 31, 0, 0, 0, 0, 0, 2, 0, 0, 0)
 
     monkeypatch.setattr(type(native), "encode_exact", count)
     with pytest.raises(OverflowError, match="use index_dtype='int64'"):
@@ -922,39 +922,7 @@ def test_the_simple_graph_with_numeric_relations_is_refused_by_the_device_before
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * _POINTER_FIELDS], [0])
-
-
-def test_shared_statics_are_refused_by_the_device_before_any_launch():
-    dev = gpu()
-    task = text_task("gripper__prob05")
-    states = walk(task, steps=3, walks=1)
-    encoder = encoding.FlatRelationEncoder(task, statics="shared")
-    rows = to_device(np.asarray(task.encode(states)), dev)
-    message = "^mymyr: encoding: the device does not encode shared statics"
-    with pytest.raises(ValueError, match=message):
-        encoder.encode(rows)
-    with pytest.raises(ValueError, match=message):
-        encoder.reserve_device(8)
-    with pytest.raises(ValueError, match=message):
-        encoder.device_stream(8)
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    handle = rt.register(encoder)
-    caps = dict.fromkeys(("graphs", "entities", "args", "targets"), 64)
-    try:
-        with pytest.raises(ValueError, match=message):
-            call_op(handle, rows, None, None, [None] * 4, caps)
-        with FakeTensorMode() as mode, pytest.raises(ValueError, match=message):
-            call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
-    finally:
-        rt.unregister(handle)
-    # the native collator of an empty batch: nothing is read and no kernel is launched
-    from mymyr._core._encoding import DeviceCollator as NativeCollator
-
-    with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * _POINTER_FIELDS], [0])
-    assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
+        NativeCollator([encoder], dev.index, 0, [[0] * _POINTER_FIELDS], [[0, 0, 0]])
 
 
 # ------------------------------------------------------------------------------------------------ the op

@@ -37,11 +37,12 @@ the states again; required on a device).
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
 - ``mymyr::encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
   subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
-  history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0)``: the
-  encoding of device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``,
-  ``entities``, ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane): a list of 23 tensors, the
-  arrays of a batch in the order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty
-  tensor) and ``sizes`` int64 [6] ([7] with the numeric value count appended). It waits for nothing and allocates
+  history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0,
+  static_instances=0, static_args=0)``: the encoding of device rows by a ``FlatRelationEncoder`` (``register``
+  handle) with the capacities ``graphs``, ``entities``, ``args``, ``targets``, ``history``, ``numeric``,
+  ``static_instances`` and ``static_args`` (0 for an absent lane): a list of 29 tensors, the arrays of a batch in the
+  order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty tensor), ``static_sizes``
+  int64 [3] and ``sizes`` int64 [6] ([7] with the numeric value count appended). It waits for nothing and allocates
   only its outputs and scratch, on torch's current stream, so it captures in a CUDA graph (warm it once on the capture
   stream first; no scratch reservation is needed) and traces under ``torch.compile``. The expansion rows and horizon
   views follow as keyword tensors: ``action_schema``, ``action_binding``, ``action_offsets``, ``action_parent``,
@@ -638,13 +639,15 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 
 
 def _encode_flat_outputs(
-    encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int, history: int, numeric: int
+    encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int, history: int, numeric: int,
+    static_instances: int, static_args: int,
 ) -> list[Tensor]:
     layout = _device.layout_of(lookup(int(encoder)))
     n = states.shape[0] if states.ndim == 2 else 1
     if n > graphs:
         raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
-    specs = layout.specs(torch, n, entities, args, targets, history, numeric=numeric)
+    specs = layout.specs(torch, n, entities, args, targets, history, numeric=numeric,
+                         static_instances=static_instances, static_args=static_args)
     return [torch.empty(specs[name][0], dtype=specs[name][1], device=states.device) for name in _device._OUTPUTS]
 
 
@@ -674,6 +677,8 @@ def encode_flat(
     targets: int,
     history: int,
     numeric: int = 0,
+    static_instances: int = 0,
+    static_args: int = 0,
     action_schema: Optional[Tensor] = None,
     action_binding: Optional[Tensor] = None,
     action_offsets: Optional[Tensor] = None,
@@ -690,8 +695,10 @@ def encode_flat(
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
     [N or 1, D], the subgoal layers [N or 1, L, W] (and [N or 1, L, D]), the history masks [N, H, W] (and [N, H, D]),
     ``history_dt`` int32 [N, H] and ``history_count`` int32 [N] or None) with the capacities ``graphs``, ``entities``,
-    ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane). ``encoder`` is a :func:`register`
-    handle of the encoder. Returns the 23 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
+    ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane); shared statics also take
+    ``static_instances`` and ``static_args``, and ``static_sizes`` holds their device counts [instances, tuples, args].
+    ``encoder`` is a :func:`register` handle of the encoder. Returns the 29 arrays of ``DeviceFlatBatch.array_names``
+    (arrays that the schema does not
     store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA
@@ -705,7 +712,8 @@ def encode_flat(
         raise ValueError("mymyr: encoding: goals are (goal_pos, goal_neg) or all four masks")
     enc = lookup(encoder)
     caps = _device._capacities(
-        {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history, "numeric": numeric},
+        {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history, "numeric": numeric,
+         "static_instances": static_instances, "static_args": static_args},
         _device.layout_of(enc),
     )
     subgoals = _layer_tuple(
@@ -761,10 +769,12 @@ def _(
     encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, subgoal_pos, subgoal_neg,
     subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
     history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0,
+    static_instances=0, static_args=0,
     action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None, edge_schema=None, edge_binding=None,
     action_succ=None,
 ):  # fmt: skip
     if node_offsets is not None:
         states = states[:node_offsets.shape[0] - 1]
-    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history, numeric)
+    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history, numeric, static_instances,
+                                static_args)

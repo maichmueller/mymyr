@@ -170,6 +170,22 @@ def test_suite_inputs_are_checked(sets):  # noqa: F811
         encoding.SuiteEncoder([1, 2])
 
 
+@pytest.mark.parametrize("resident", ["states", "task_ids"])
+def test_cuda_suite_inputs_are_refused_without_reading_arrays(sets, resident):  # noqa: F811
+    class DeviceArray:
+        def __dlpack_device__(self):
+            return (2, 0)
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("resident suite inputs must not be downloaded")
+
+    table = rl.TaskTable(sets["gripper"])
+    inputs = {"states": np.asarray(table.initial_states()), "task_ids": np.arange(len(table), dtype=np.int32)}
+    inputs[resident] = DeviceArray()
+    with pytest.raises(ValueError, match="SuiteEncoder.*CUDA.*FlatRelationEncoder"):
+        encoding.SuiteEncoder(table).encode(**inputs)
+
+
 def test_horizon_encoders_work_per_domain(sets):  # noqa: F811
     suite = suite_of(sets, "gripper+blocks")
     states, ids = suite_batch(suite)

@@ -1,4 +1,5 @@
 #include "encoding_collate.hpp"
+#include "encoding_static_collate.cuh"
 
 #include <cub/device/device_scan.cuh>
 
@@ -138,6 +139,14 @@ __device__ encoding::FlatSizes sizes_of(const CollationParams& p)
     if (sizes.entities > p.output.capacities.entities || sizes.args > p.output.capacities.args ||
         sizes.targets > p.output.capacities.targets || cells.numeric > p.output.capacities.numeric)
         sizes.overflow |= encoding::k_overflow_capacity;
+    if (p.shared_statics)
+    {
+        const auto s = *p.static_totals;
+        if (s.instances > p.output.static_capacities.instances || s.args > p.output.static_capacities.args)
+            sizes.overflow |= encoding::k_overflow_capacity;
+        if (s.instances * p.static_relations >= limit || s.tuples > limit || s.args > limit)
+            sizes.overflow |= encoding::k_overflow_index;
+    }
     if (*p.bad) sizes.overflow |= encoding::k_overflow_input;
     return sizes;
 }
@@ -369,9 +378,21 @@ cudaError_t launch_collation(const CollationParams& p, int phase, cudaStream_t s
             e != cudaSuccess)
             return e;
     }
+    if (phase != 2 && p.shared_statics)
+    {
+        if (p.index64) count_static_collation<i64><<<1, 1, 0, stream>>>(p);
+        else count_static_collation<i32><<<1, 1, 0, stream>>>(p);
+        if (const auto e = cudaGetLastError(); e != cudaSuccess) return e;
+    }
     if (phase == 1) sizes_kernel<<<1, 1, 0, stream>>>(p);
     else if (p.index64) fill_kernel<i64><<<p.grid, k_block, 0, stream>>>(p);
     else fill_kernel<i32><<<p.grid, k_block, 0, stream>>>(p);
+    if (const auto e = cudaGetLastError(); e != cudaSuccess) return e;
+    if (phase != 1 && p.shared_statics)
+    {
+        if (p.index64) fill_static_collation<i64><<<1, 1, 0, stream>>>(p);
+        else fill_static_collation<i32><<<1, 1, 0, stream>>>(p);
+    }
     return cudaGetLastError();
 }
 }

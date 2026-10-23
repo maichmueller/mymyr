@@ -19,6 +19,8 @@ struct OutputArrays
     encoding::NumericDtype numeric_dtype = encoding::NumericDtype::F32;
     bool relations = true;
     bool simple = false;
+    bool shared_statics = false;
+    u32 static_relations = 0;
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
@@ -41,6 +43,10 @@ struct DeviceOutput
     u64* graphs = nullptr;
     /// Optional device scalar receiving the number of numeric values, including on count-only calls.
     u64* numeric_size = nullptr;
+    /// Shared-static output capacities and device counts. Required exactly for shared-static schemas; the counts
+    /// remain on the device. FlatSizes::overflow also reports a static capacity or index overflow.
+    encoding::StaticShape static_capacities{};
+    encoding::StaticSizes* static_sizes = nullptr;
 };
 /// Device expansion labels. The offsets delimit one canonical (schema, binding) run per parent row; capacity bounds
 /// every label array, including unused capacity tails. Overflow is a device scalar (nonzero: expansion overflowed).
@@ -172,6 +178,9 @@ struct DeviceCollationBatch
     encoding::Layout layout = encoding::Layout::Graph;
     encoding::IndexType index = encoding::IndexType::I32;
     bool shared_statics = false;
+    u32 static_relations = 0, instances = 0;
+    encoding::StaticShape static_capacities{};
+    const encoding::StaticSizes* static_sizes = nullptr;
     OutputArrays stored;
     u32 max_goal_level = 0;
     bool history = false;
