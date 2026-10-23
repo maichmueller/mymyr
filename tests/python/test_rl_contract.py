@@ -81,23 +81,58 @@ def test_goal_replay_copies_source_masks():
     np.testing.assert_array_equal(item["goal_neg"], obs.goal_neg)
 
 
+ENCODED = ("encoding", "obs", "final_obs")  # the encoded observations of Observation / StepResult
+
+
+def snapshot(result):
+    """Owned copies of an Observation's or StepResult's tensors and of the arrays of its encoded observations."""
+    import torch
+
+    def keep(value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        return {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in value.as_dict("numpy").items()}
+
+    return {field: keep(getattr(result, field)) for field in result._fields}
+
+
+def assert_unchanged(result, saved):
+    import torch
+
+    for field in result._fields:
+        value, expected = getattr(result, field), saved[field]
+        if expected is None or isinstance(expected, torch.Tensor):
+            assert value is None if expected is None else torch.equal(value, expected), field
+        else:
+            actual = value.as_dict("numpy")
+            assert actual.keys() == expected.keys(), field
+            for key in actual:
+                assert np.array_equal(actual[key], expected[key]), (field, key)
+
+
 @needs_frontend
-def test_torch_observations_survive_steps_and_resets():
+@pytest.mark.parametrize("encoded", [False, True], ids=["tensors", "encoded"])
+def test_torch_observations_survive_steps_and_resets(encoded):
     torch = pytest.importorskip("torch")
+    from mymyr import encoding
     from mymyr.rl.torch import BatchedEnv
 
-    env = BatchedEnv(toggle_task(), 2, device="cpu", goals=True, max_steps=1)
+    task = toggle_task()
+    encoder = encoding.FlatRelationEncoder(rl.as_table(task)) if encoded else None
+    env = BatchedEnv(task, 2, device="cpu", goals=True, max_steps=1, observation=encoder)
     source = env.observation()
-    before = tuple(tensor.clone() for tensor in source)
+    before = snapshot(source)
     first = env.step(torch.zeros(2, dtype=torch.int64))
-    saved = tuple(tensor.clone() for tensor in first)
+    saved = snapshot(first)
     assert not torch.equal(first.final_states, first.states)
+    # the encoded observations: None without an encoder, else the encoding of the observed and the reached rows
+    assert all((getattr(r, f) is not None) == encoded for r in (source, first) for f in ENCODED if f in r._fields)
     env.step(torch.zeros(2, dtype=torch.int64))
     env.reset()
-    for actual, expected in zip(source, before):
-        assert torch.equal(actual, expected)
-    for actual, expected in zip(first, saved):
-        assert torch.equal(actual, expected)
+    assert_unchanged(source, before)
+    assert_unchanged(first, saved)
     assert env.observation(copy=False).states is env.states
     env.close()
 
