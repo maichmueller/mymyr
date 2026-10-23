@@ -233,6 +233,20 @@ def test_a_dataset_fetches_a_batch_of_indices_as_one_take():
     assert np.array_equal(fetched.rows, rows[[5, 1, 1]]) and np.array_equal(fetched.labels["step"], [5, 1, 1])
 
 
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.uint64, np.float32])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_device_array_conversion_accepts_reversed_host_views(dtype, axis):
+    torch = pytest.importorskip("torch")
+    from mymyr.datasets._rows import _device_array
+
+    values = np.arange(12, dtype=dtype).reshape(3, 4)
+    reversed_view = values[::-1] if axis == 0 else values[:, ::-1]
+    converted = _device_array(reversed_view, torch.device("cpu"))
+    assert converted.is_contiguous()
+    assert np.array_equal(converted.numpy(), reversed_view)
+    assert np.array_equal(values, np.arange(12, dtype=dtype).reshape(3, 4))
+
+
 def test_collating_items_runs_no_python_code_per_item():
     task = text_task("gripper__prob05")
     rows = walked_rows(task)

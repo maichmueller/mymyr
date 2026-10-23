@@ -104,6 +104,98 @@ def test_shared_stream_collation_and_block_agreement(cases, layout, index):
         encoding.DeviceCollator([pieces[0], changed]).encode()
 
 
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("blocks", ["missing", "wrong-instance", "extra", "duplicate", "misordered"])
+def test_shared_collation_requires_the_ordered_blocks_of_each_sources_graphs(cases, layout, index, blocks):
+    device = gpu()
+    case = cases["blocks_table"]
+    table = rl.TaskTable([case.tasks[0], case.tasks[0]])
+    encoder = encoding.FlatRelationEncoder(table, statics="shared", layout=layout, index_dtype=index)
+    ids = np.array([1, 0, 1, 0], np.int32)
+    rows = np.asarray(table.initial_states())[ids]
+    caps = capacities(encoder.encode(rows, ids))
+    source = encoder.encode(to_device(rows, device), to_device(ids, device), capacities=caps)
+    assert source.static_task_ids.tolist() == [0, 1]
+    if blocks == "missing":
+        source.device_static_sizes[0] = 0
+    elif blocks == "wrong-instance":
+        source.task_ids.fill_(0)
+        source.static_task_ids[0] = 1
+        source.device_static_sizes[0] = 1
+    elif blocks == "extra":
+        source.task_ids.fill_(0)
+    elif blocks == "duplicate":
+        source.static_task_ids[1] = 0
+    else:
+        source.static_task_ids[:] = source.static_task_ids.flip(0)
+    # Every pointer and segment remains within its allocated storage.
+    collator = encoding.DeviceCollator([source])
+    rejected = collator.encode(capacities=caps)
+    assert rejected.sizes["invalid_input"]
+    assert all(not value.any() for value in rejected.as_dict("numpy").values() if isinstance(value, np.ndarray))
+    with pytest.raises(ValueError, match="overflowed batch"):
+        collator.encode()
+
+
+@pytest.mark.parametrize("domains", [1, 2])
+@pytest.mark.parametrize("form", ["direct", "dataset", "items"])
+@pytest.mark.parametrize("actions", [False, True])
+def test_device_suite_encoding_is_refused_before_downloading_ids(cases, domains, form, actions, monkeypatch):
+    device = gpu()
+    tables = [rl.as_table(cases["gripper"].source)]
+    if domains == 2:
+        tables.append(cases["blocks_table"].source)
+    suite = rl.TaskSuite(tables)
+    encoder = encoding.SuiteEncoder(suite, statics="shared")
+    rows = to_device(np.asarray(suite.initial_states()), device)
+    dataset = StateRows(rows, torch.arange(len(suite), dtype=torch.int32, device=device))
+
+    def no_host(*args, **kwargs):
+        raise AssertionError("device suite ids must not be downloaded")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "cpu", no_host)
+        patch.setattr(torch.Tensor, "numpy", no_host)
+        with pytest.raises(ValueError, match="SuiteEncoder.*CUDA.*FlatRelationEncoder"):
+            if form == "direct":
+                encoder.encode(dataset.rows, dataset.task_ids, actions=actions)
+            else:
+                items = dataset if form == "dataset" else [dataset[i] for i in range(len(dataset))]
+                EncodingCollate(encoder, actions=actions)(items)
+
+
+@pytest.mark.parametrize("operation", ["take", "from_state_space"])
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+def test_device_dataset_accepts_reversed_numpy_selections(operation, dtype):
+    from mymyr import datasets
+    from conftest import text_task
+
+    gpu()
+    task = text_task("gripper__prob05", atoms="dense")
+    space = datasets.state_space(task, device=0, remove_if_unsolvable=False)
+    dataset = StateRows.from_state_space(space)
+    picked = np.arange(min(5, len(dataset)), dtype=dtype)[::-1]
+    assert picked.strides[0] < 0
+    selected = dataset.take(picked) if operation == "take" else StateRows.from_state_space(space, picked)
+    assert torch.equal(selected.rows, dataset.rows[picked.copy()])
+    assert torch.equal(selected.task_ids, dataset.task_ids[picked.copy()])
+    for name in dataset.labels:
+        assert torch.equal(selected.labels[name], dataset.labels[name][picked.copy()])
+
+
+def test_device_dataset_accepts_reversed_numpy_metadata(cases):
+    device = gpu()
+    rows = to_device(cases["gripper"].rows[:3], device)
+    ids = np.zeros(3, np.int32)[::-1]
+    labels = np.arange(3, dtype=np.int64)[::-1]
+    goals = cases["gripper"].rows[:3][::-1]
+    dataset = StateRows(rows, ids, labels={"value": labels}, goals=(goals, np.zeros_like(goals)))
+    assert torch.equal(dataset.task_ids, to_device(ids, device))
+    assert torch.equal(dataset.labels["value"], to_device(labels, device))
+    assert torch.equal(dataset.goals[0], to_device(goals, device))
+
+
 @pytest.fixture(scope="module")
 def wide_table():
     if not hasattr(mymyr, "Domain"):

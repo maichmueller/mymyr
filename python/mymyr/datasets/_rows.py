@@ -57,6 +57,8 @@ def _on_device(value: Any) -> bool:
 def _device_array(value: Any, device: Any, dtype: Any = None) -> Any:
     import torch
 
+    if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
+        value = value.copy(order="C")
     if hasattr(value, "__dlpack__") and not isinstance(value, torch.Tensor):
         value = torch.from_dlpack(value)
     return torch.as_tensor(value, device=device, dtype=dtype)
@@ -88,7 +90,8 @@ class StateRows:
     items of a batch into an ``EncodedRows``, so an encoder (and its options) can change without touching the data.
 
     CUDA DLPack rows are retained as torch int64 word views. Task ids, labels and goals stay on the same device;
-    a device ``StateRow.task_id`` is a scalar tensor. ``EncodingCollate`` encodes the stored rows without downloading them.
+    a device ``StateRow.task_id`` is a scalar tensor. ``EncodingCollate`` with a ``FlatRelationEncoder`` encodes the
+    stored rows without downloading them.
 
     ``StateRows(rows, task_ids=None, *, labels=None, goals=None)``: ``rows`` a ``uint64`` array ``[N, W]`` of state
     words of one table's instances (rows of instances with fewer words are padded with zeros), ``task_ids`` the
@@ -282,7 +285,8 @@ class EncodingCollate:
     ``SuiteEncoder`` when the rows are of the instances of a suite (global ids; the graphs are then one batch per domain).
     ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
-    encoded with it. CUDA rows stay on the device and dispatch to the device encoder. ``capacities`` optionally
+    encoded with it. CUDA rows require a ``FlatRelationEncoder`` and stay on the device; ``SuiteEncoder`` accepts
+    host rows only. ``capacities`` optionally
     supplies its output capacities, avoiding the wait for exact allocation. The collate function is a plain callable
     object: it pickles with its encoder, so it works with
     data loader worker processes.

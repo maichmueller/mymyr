@@ -146,8 +146,10 @@ with it, once, and hands the `StateRows` to the collate function whole. A list o
 per item as well.
 
 `StateRows` also accepts CUDA DLPack arrays and keeps its rows, task ids, labels and goal masks on the device.
-`StateRows.from_state_space` accepts a device state space. `EncodingCollate(encoder, capacities=...)` dispatches those
-stored rows directly to CUDA; selecting a batch with `take` and encoding it needs no host copy of the rows or task ids.
+`StateRows.from_state_space` accepts a device state space. `EncodingCollate(encoder, capacities=...)` with a
+`FlatRelationEncoder` dispatches those stored rows directly to CUDA; selecting a batch with `take` and encoding it
+needs no host copy of the rows or task ids. `SuiteEncoder` accepts host rows only. For CUDA datasets, use one flat
+encoder per domain with that domain's local task ids.
 The dataset files continue to store rows and labels only. Tables can mix instances whose rows are 1, 42 and 184 words wide.
 
 `EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`

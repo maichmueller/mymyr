@@ -30,6 +30,41 @@ __global__ void count_static_collation(CollationParams p)
 {
     encoding::StaticSizes totals{};
     const u64 relations = p.static_relations;
+    for (u64 b = 0; b < p.batches; ++b)
+    {
+        const auto& batch = p.slices[b].batch;
+        const auto sizes = *batch.static_sizes;
+        if ((batch.sizes && batch.sizes->overflow) || sizes.instances > batch.static_capacities.instances ||
+            sizes.args > batch.static_capacities.args)
+        {
+            *p.bad = 1;
+            continue;
+        }
+        for (u64 g = 0; g < batch.graphs; ++g)
+            if (batch.arrays.task_ids[g] < 0 || static_cast<u32>(batch.arrays.task_ids[g]) >= p.instances)
+                *p.bad = 1;
+        u64 block = 0;
+        for (u32 instance = 0; instance < p.instances; ++instance)
+        {
+            bool used = false;
+            for (u64 g = 0; g < batch.graphs; ++g)
+                used = used || batch.arrays.task_ids[g] == static_cast<i32>(instance);
+            if (!used) continue;
+            if (block >= sizes.instances || batch.arrays.static_task_ids[block] != static_cast<i32>(instance))
+                *p.bad = 1;
+            ++block;
+        }
+        if (block != sizes.instances) *p.bad = 1;
+        for (u64 s = 0; s < relations; ++s)
+            if (static_cast<const I*>(batch.arrays.static_relations)[s] !=
+                static_cast<const I*>(p.slices[0].batch.arrays.static_relations)[s]) *p.bad = 1;
+    }
+    if (*p.bad)
+    {
+        *p.static_totals = totals;
+        *p.output.static_sizes = totals;
+        return;
+    }
     for (u32 instance = 0; instance < p.instances; ++instance)
     {
         const auto first = static_source(p, instance);
@@ -43,12 +78,6 @@ __global__ void count_static_collation(CollationParams p)
         for (u64 b = 0; b < p.batches; ++b)
         {
             const auto& batch = p.slices[b].batch;
-            if (batch.sizes && batch.sizes->overflow) { *p.bad = 1; continue; }
-            if (batch.static_sizes->instances > batch.static_capacities.instances ||
-                batch.static_sizes->args > batch.static_capacities.args) { *p.bad = 1; continue; }
-            for (u64 s = 0; s < relations; ++s)
-                if (static_cast<const I*>(batch.arrays.static_relations)[s] !=
-                    static_cast<const I*>(a.static_relations)[s]) *p.bad = 1;
             for (u64 block = 0; block < batch.static_sizes->instances; ++block)
             {
                 if (batch.arrays.static_task_ids[block] != static_cast<i32>(instance)) continue;
