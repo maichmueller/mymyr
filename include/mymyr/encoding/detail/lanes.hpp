@@ -1469,20 +1469,22 @@ MYMYR_HD u32 entity_count(const GraphTotals& t, const InstanceView& v)
     return n;
 }
 
-/// Completes the totals once every cell of the graph is accumulated: the entities and the bad-row flags.
-template<bool Layered>
-MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInput& in)
+/// Completes the totals once every cell of the graph is accumulated: the entities and the bad-row flags. The lanes of a
+/// group share the words of the checks and all call this together with the same totals.
+template<bool Layered, class Group = SoloGroup>
+MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInput& in, const Group& grp = {})
 {
     t.entities = entity_count<Layered>(t, v);
-    if (has_foreign_atom_bits(v, in.atoms) || (in.derived && has_foreign_derived_bits(v, in.derived)))
+    if (any_bit_from_group(grp, in.atoms, v.words, v.fluent_slots) ||
+        (in.derived && any_bit_from_group(grp, in.derived, v.derived_words, v.derived_slots)))
         t.flags |= k_graph_bad_row;
-    if (has_foreign_goal_bits(v, in))
+    if (has_foreign_goal_bits_group(grp, v, in))
         t.flags |= k_graph_bad_goal;
     if (Layered && in.layers)
     {
-        if (has_foreign_layer_bits(v, in.layers->subgoals))
+        if (has_foreign_layer_bits_group(grp, v, in.layers->subgoals))
             t.flags |= k_graph_bad_layers;
-        if (has_foreign_layer_bits(v, in.layers->history.masks))
+        if (has_foreign_layer_bits_group(grp, v, in.layers->history.masks))
             t.flags |= k_graph_bad_history;
     }
 }
@@ -1602,19 +1604,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
         t.history_targets = grp.sum(t.history_targets);
     }
     t.flags = grp.bit_or(t.flags);
-    t.entities = entity_count<Layered>(t, v);
-    if (any_bit_from_group(grp, in.atoms, v.words, v.fluent_slots) ||
-        (in.derived && any_bit_from_group(grp, in.derived, v.derived_words, v.derived_slots)))
-        t.flags |= k_graph_bad_row;
-    if (has_foreign_goal_bits_group(grp, v, in))
-        t.flags |= k_graph_bad_goal;
-    if (Layered && in.layers)
-    {
-        if (has_foreign_layer_bits_group(grp, v, in.layers->subgoals))
-            t.flags |= k_graph_bad_layers;
-        if (has_foreign_layer_bits_group(grp, v, in.layers->history.masks))
-            t.flags |= k_graph_bad_history;
-    }
+    finish_totals<Layered>(t, v, in, grp);
     return t;
 }
 
