@@ -286,10 +286,9 @@ class EncodingCollate:
     ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
     encoded with it. CUDA rows require a ``FlatRelationEncoder`` and stay on the device; ``SuiteEncoder`` accepts
-    host rows only. ``capacities`` optionally
-    supplies its output capacities, avoiding the wait for exact allocation. The collate function is a plain callable
-    object: it pickles with its encoder, so it works with
-    data loader worker processes.
+    host rows only. ``capacities`` optionally supplies its output capacities, avoiding the wait for exact allocation.
+    The collate function is a plain callable object: it pickles with its encoder, so it works with data loader worker
+    processes.
     """
 
     def __init__(
