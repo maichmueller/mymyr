@@ -1,4 +1,5 @@
 #include "expr_eval.hpp"
+#include "../third_party/fast_float.h"
 
 #include "mymyr/successor/conditions.hpp"
 #include "mymyr/task/numeric.hpp"
@@ -355,7 +356,7 @@ private:
         if (t != "(")
         {
             f64 v = 0;
-            const auto r = std::from_chars(t.data(), t.data() + t.size(), v);
+            const auto r = fast_float::from_chars(t.data(), t.data() + t.size(), v);
             if (r.ec != std::errc{} || r.ptr != t.data() + t.size())
                 fail("'" + t + "' is not a number (a function term is written \"(" + t + " ...)\")");
             Expr x;
