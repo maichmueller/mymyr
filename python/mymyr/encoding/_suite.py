@@ -101,7 +101,8 @@ class SuiteEncoder:
     ``SuiteEncoder(suite, encoder=FlatRelationEncoder, **options)`` builds ``encoder(table, **options)`` for the table
     of each domain (``encoder`` is any encoder class that takes a table and options; a ``TaskTable`` is a suite of one
     domain). ``encoders[d]`` is domain ``d``'s encoder and ``schemas[d]`` its ``EncodingSchema``. The encoder is
-    reentrant like its parts.
+    reentrant like its parts. Rows and task ids must reside on the host. For CUDA rows, use a
+    ``FlatRelationEncoder`` over one domain's table with that domain's local task ids.
     """
 
     def __init__(self, suite: TaskSuite | TaskTable, encoder: type = _core.FlatRelationEncoder, **options: Any) -> None:
@@ -143,6 +144,10 @@ class SuiteEncoder:
         ``framework``, ``threads`` and ``pool`` are as in ``encode``; ``capacities`` maps a domain to its capacities,
         and every domain with rows needs an entry.
         """
+        if any(hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] == 2
+               for value in (states, task_ids)):
+            raise ValueError("mymyr: encoding: SuiteEncoder does not support CUDA rows or task ids; "
+                             "use FlatRelationEncoder over each domain's table with local task ids")
         suite = self.suite
         if isinstance(states, (list, tuple)):
             rows = len(states)

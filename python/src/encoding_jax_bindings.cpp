@@ -920,6 +920,9 @@ void bind_encoding_jax(nb::module_& parent)
             if (flat->schema().emits_simple())
                 throw nb::value_error("mymyr: encoding: the JAX FFI does not encode Simple: "
                                       "its fixed result layout has no node or edge arrays");
+            if (flat->schema().shared_statics())
+                throw nb::value_error("mymyr: encoding: the JAX FFI does not encode shared statics: "
+                                      "its fixed result layout has no static block arrays");
             auto e = std::make_shared<EncoderEntry>(std::move(flat));
             return ffi_registry().add(std::move(e));
         },

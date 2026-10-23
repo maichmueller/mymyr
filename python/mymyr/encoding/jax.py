@@ -24,7 +24,8 @@ so it keeps working after its encoder is unregistered and every Python reference
 What the target encodes: what the device encodes, on both platforms (a function gives the same arrays wherever it
 runs): the rows with their goals, subgoal layers and history steps, but no action relations (they need an expansion,
 which JAX cannot pass), no schema the device refuses, and the rows' derived words are required where the device cannot
-evaluate the axioms a graph reads (an axiom body or object set beyond the device's matcher limits). Such calls raise
+evaluate the axioms a graph reads (an axiom body or object set beyond the device's matcher limits). Shared statics are
+refused because the fixed FFI result signature has no static-block arrays. Such calls raise
 ``ValueError`` (``mymyr: encoding: ...``) when the function is traced.
 """
 
@@ -44,7 +45,8 @@ from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
-_ARRAYS = tuple(name for name in _device._ARRAYS if name not in (*_device._SIMPLE_ARRAYS, "numeric_values"))
+_ARRAYS = tuple(name for name in _device._ARRAYS
+                if name not in (*_device._SIMPLE_ARRAYS, "numeric_values", *_device._STATIC_ARRAYS))
 _SIZE_FIELDS = _device._SIZE_FIELDS
 _OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
@@ -569,7 +571,8 @@ def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Opt
 def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entities: int, args: int, targets: int,
           history: int, threads: int) -> tuple[dict[str, Any], Any]:
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
-    # the FFI results: the arrays of _ARRAYS, in their order (no Simple arrays, no numeric values), then the sizes
+    # the FFI results: the arrays of _ARRAYS, in their order (no Simple arrays, numeric values or static blocks), then
+    # the sizes
     specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
     specs = {name: specs[name] for name in _ARRAYS}
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
@@ -700,7 +703,7 @@ def encode(
         _signed(reg.table_fingerprint),
     )
     if capacities is not None:
-        caps_graphs, entities, args, targets, history_steps, _ = _device._capacities(capacities, reg.layout)
+        caps_graphs, entities, args, targets, history_steps, *_ = _device._capacities(capacities, reg.layout)
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
         arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)

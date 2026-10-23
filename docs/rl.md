@@ -285,8 +285,9 @@ assert arrays["relation_args"].unsafe_buffer_pointer() == batch.relation_args.__
 ### Several domains
 
 Relation ids are scoped to a domain, so the rows of a suite of several domains have no common catalog. A
-`encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch as a dictionary of batches, one per
-domain, together with each row's index in its batch:
+`encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch of host rows as a dictionary of batches,
+one per domain, together with each row's index in its batch. CUDA rows require a `FlatRelationEncoder` per domain with
+that domain's local task ids. This example uses host rows:
 
 ```python
 suite = rl.TaskSuite.group([task, mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt")])
@@ -585,3 +586,7 @@ chain position because the example declares its cells in chain order. It is not 
 successors with a `FlatTransitionEncoder` or `FlatTransitionEffectsEncoder` on the environment's device. Device
 expansion labels and depth-one horizons are encoded into torch arrays on the current stream; with `capacities` the call
 does not wait for the device (see [the encoding](encoding.md)).
+
+An environment's device observation rows can be passed directly to `encoder.encode(obs.states, obs.task_ids)`.
+The table may mix row widths; each instance reads only its own words. `statics="shared"` keeps one static block per
+instance in the resulting CUDA batch. The same observation tensors can back `datasets.StateRows` for encoding on load.

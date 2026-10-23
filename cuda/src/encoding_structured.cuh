@@ -52,12 +52,10 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
     h.use_cousins = p.horizon_cousins;
     h.exclude = p.horizon_exclude;
     h.root_target = p.horizon_root_target;
-    // With one level every parent is the root; cousins have no far-list entries.
-    h.far = h.kin;
     if (h.src)
         for (u32 e = 0; e < h.edges; ++e)
         {
-            if (h.src[e] != 0 || !h.dst || h.dst[e] < 0 || u32(h.dst[e]) >= h.count)
+            if (u32(h.src[e]) >= h.count || !h.dst || u32(h.dst[e]) >= h.count)
                 return false;
             if (!h.use_actions)
                 continue;
@@ -110,8 +108,12 @@ __global__ void structured_count_kernel(const EncodeParams p)
         if (p.horizon_mode)
         {
             ed::canonical_horizon_edges(h);
-            if (h.kin && ed::horizon_kin_prepare(h) != 0)
-                ok = false;
+            if (h.kin)
+            {
+                auto prepared = h;
+                prepared.use_cousins = false;  // Cousin rows are gathered into linear scratch on demand.
+                ed::horizon_kin_prepare(prepared);
+            }
             const ed::CellList list = r.in.goal_pos ? ed::CellList{r.v.row_cells, r.v.num_row_cells}
                                                    : ed::CellList{r.v.cells, r.v.num_cells};
             auto sink = [&](u32 i, const ed::Cell& c, u32 n)

@@ -21,14 +21,16 @@ struct CellCounts
 {
     u64 tuples = 0, args = 0, numeric = 0;
 };
-/// Scratch: graph counts [graphs + 1], cell counts [cells + 1], the source overflow word, then the scan's temporary
-/// storage, each part 256-byte aligned.
+/// Scratch: graph counts [graphs + 1], cell counts [cells + 1], the source overflow word followed by the shared static
+/// totals, then the scan's temporary storage, each part 256-byte aligned.
 struct CollationParams
 {
     const CollationSlice* slices = nullptr;
     u64 batches = 0, graphs = 0, relations = 0, cells = 0;
-    bool index64 = false, relation_major = false, numeric_f64 = false, relations_stored = true, simple = false;
-    u32 numeric_relations = 0;
+    bool index64 = false, relation_major = false, numeric_f64 = false, relations_stored = true, simple = false,
+         shared_statics = false;
+    u32 numeric_relations = 0, static_relations = 0, instances = 0;
+    encoding::StaticSizes* static_totals = nullptr;
     u32 grid = 1;  // blocks of the grid-stride count and fill
     GraphCounts* graph_counts = nullptr;
     CellCounts* cell_counts = nullptr;

@@ -24,6 +24,10 @@
 
 namespace mymyr::cuda::detail
 {
+u64 space_horizon_builder_scratch_bytes(u32 states, u64 edges, u32 graphs);
+cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
+                                cudaStream_t stream);
+
 /// Everything the kernels read: device pointers and sizes.
 struct EncodeParams
 {
@@ -66,6 +70,10 @@ struct EncodeParams
     bool simple = false;
     encoding::FlatSizes* sizes = nullptr;
     encoding::BatchShape capacities;
+    encoding::StaticShape static_capacities{};
+    encoding::StaticSizes* static_sizes = nullptr;
+    encoding::StaticSizes* static_totals = nullptr;
+    bool shared_statics = false;
     u32 static_overflow = 0;  // the k_overflow_ flags that follow from the shape alone
     bool index64 = false;
     bool zero_unused = false;

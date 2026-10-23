@@ -1,6 +1,7 @@
 // Device context bytes, generation ownership, per-stream scratch and checked batch sizes.
 
 #include "../cpp/encoding/support.hpp"
+#include "../cpp/encoding/matrix.hpp"
 #include "context_probe.hpp"
 #include "mymyr/cuda/encoding.hpp"
 #include "../../cuda/src/encoding_scratch.hpp"
@@ -1213,20 +1214,6 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
 
 namespace
 {
-void expect_schema_refusal(encoding::FlatOptions options, const char* message)
-{
-    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    const auto schema = encoding::EncodingSchema::create(*table, options);
-    try
-    {
-        cuda::DeviceEncoder::check_schema(*schema);
-        FAIL() << "the schema was accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_EQ(std::string(e.what()), std::string("mymyr: encoding: the device does not encode ") + message);
-    }
-}
 TEST(DeviceEncoderSchema, AcceptsSubgoalLevelsHistoryAndTheirTargets)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
@@ -1254,11 +1241,12 @@ TEST(DeviceEncoderSchema, AcceptsNumericRelations)
     ASSERT_TRUE(schema->has_numeric());
     EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
 }
-TEST(DeviceEncoderSchema, RefusesSharedStatics)
+TEST(DeviceEncoderSchema, AcceptsSharedStatics)
 {
     encoding::FlatOptions o;
     o.statics = encoding::Statics::Shared;
-    expect_schema_refusal(o, "shared statics (statics='shared')");
+    const auto schema = encoding::FlatEncoder::create(test::pddl_task("blocks", "smedium"), o)->schema_ptr();
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
 }
 TEST(DeviceEncoderSchema, AcceptsFullHorizons)
 {
@@ -1282,7 +1270,7 @@ TEST(DeviceEncoderSchema, AcceptsActionHorizons)
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
     EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstructed)
+TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamAcceptSharedStaticsWhenConstructed)
 {
     SKIP_WITHOUT_GPU();
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
@@ -1291,10 +1279,10 @@ TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstr
     const auto encoder = encoding::FlatEncoder::create(table, o);
     const auto ctx = device_context();
     cuda::Stream stream;
-    EXPECT_THROW(cuda::DeviceEncoder(ctx, encoder), std::invalid_argument);
-    EXPECT_THROW(cuda::DeviceRowStream(ctx, encoder, 8, stream), std::invalid_argument);
+    EXPECT_NO_THROW(cuda::DeviceEncoder(ctx, encoder));
+    EXPECT_NO_THROW(cuda::DeviceRowStream(ctx, encoder, 8, stream));
 }
-TEST(DeviceEncoderSchema, TheCollatorRefusesTheBatchesOfSharedStaticsWhenConstructed)
+TEST(DeviceEncoderSchema, TheCollatorRequiresSharedStaticSourceBuffers)
 {
     // the descriptor of an empty batch, from the public helper: nothing is read and no kernel is launched
     SKIP_WITHOUT_GPU();
@@ -1307,11 +1295,11 @@ TEST(DeviceEncoderSchema, TheCollatorRefusesTheBatchesOfSharedStaticsWhenConstru
     try
     {
         const cuda::DeviceCollator collator(ctx, {cuda::collation_batch(*encoder, {}, nullptr, 0)}, stream);
-        ADD_FAILURE() << "the collator accepted a batch of shared statics";
+        ADD_FAILURE() << "the collator accepted missing shared static buffers";
     }
     catch (const std::invalid_argument& e)
     {
-        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode shared statics"),
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: shared collation needs the source static blocks"),
                   std::string::npos)
             << e.what();
     }
@@ -1345,7 +1333,6 @@ TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncod
             o.outputs = {encoding::Output::Relations, encoding::Output::Simple};
             o.horizon.mode = encoding::HorizonMode::Full;
         });
-    add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
     for (const Refused& c : cases)
     {
         const auto encoder = encoding::FlatEncoder::create(c.table, c.options);
@@ -1451,7 +1438,8 @@ TEST(DeviceEncoder, AnEncoderWhoseLaunchesNeedMoreSharedMemoryThanABlockHasIsRef
     {
         EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), test::encoder_options())));
         auto refused = test::encoder_options();
-        refused.statics = encoding::Statics::Shared;
+        refused.outputs = {encoding::Output::Relations, encoding::Output::Simple};
+        refused.horizon.mode = encoding::HorizonMode::Full;
         EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), refused)),
                      std::invalid_argument);
     }
@@ -1588,5 +1576,80 @@ TEST(DeviceEncoder, CellScratchIncludesActionsAlongsideSubgoalLayersAndHistory)
             const auto list = encoding::detail::cell_list(instance, row_goals, actions, true, true);
             EXPECT_GE(device.bounds().cells, list.count);
             EXPECT_GE(scratch.cell_entries, 3u * list.count);
+        }
+}
+
+TEST(DeviceEncodingStatics, MixedInstancesMatchTheHostAndReportStaticOverflow)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = test::encoding_matrix::wide_table();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const std::vector<i32> ids{2, 0, 1, 2};
+    std::vector<u64> rows(ids.size() * table->words(), 0);
+    for (usize g = 0; g < ids.size(); ++g)
+    {
+        const auto& init = table->instance(ids[g]).init;
+        std::copy(init.begin(), init.end(), rows.begin() + g * table->words());
+    }
+    cuda::DeviceBuffer states(ctx, rows.size() * sizeof(u64), stream), tasks(ctx, ids.size() * sizeof(i32), stream);
+    cuda::check(cudaMemcpyAsync(states.data(), rows.data(), states.size(), cudaMemcpyHostToDevice, stream), "upload states");
+    cuda::check(cudaMemcpyAsync(tasks.data(), ids.data(), tasks.size(), cudaMemcpyHostToDevice, stream), "upload task ids");
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+        {
+            encoding::FlatOptions options;
+            options.layout = layout;
+            options.index = index;
+            options.statics = encoding::Statics::Shared;
+            options.predicate_virtual_nodes = true;
+            const auto host = encoding::FlatEncoder::create(table, options);
+            encoding::EncodeInput input;
+            input.states = {rows.data(), ids.size(), table->words(), 0, 0};
+            input.task_ids = ids.data();
+            const auto expected = host->encode(input);
+            cuda::DeviceEncoder device(ctx, host);
+            const auto shape = device.worst_case(ids.size());
+            const encoding::StaticShape statics{3, expected->find("static_args")->elements()};
+            const auto offsets = cuda::output_layout(shape, index, host->schema().num_relations(),
+                                                      cuda::output_arrays(host->schema()), statics);
+            cuda::DeviceBuffer storage(ctx, offsets.bytes, stream);
+            auto output = cuda::output_of(offsets, shape, storage.data());
+            cuda::DeviceEncodeInput in;
+            in.graphs = ids.size();
+            in.states = static_cast<const u64*>(states.data());
+            in.state_stride = in.state_words = table->words();
+            in.task_ids = static_cast<const i32*>(tasks.data());
+            device.reserve(shape, stream);
+            device.encode(in, output, stream);
+            std::vector<std::byte> data(offsets.bytes);
+            cuda::check(cudaMemcpyAsync(data.data(), storage.data(), data.size(), cudaMemcpyDeviceToHost, stream), "download encoding");
+            cuda::check(cudaStreamSynchronize(stream), "wait for encoding");
+            const auto sizes = *reinterpret_cast<const encoding::FlatSizes*>(data.data() + offsets.sizes);
+            const auto shared = *reinterpret_cast<const encoding::StaticSizes*>(data.data() + offsets.static_sizes);
+            EXPECT_EQ(sizes.overflow, 0u);
+            EXPECT_EQ(shared.instances, 3u);
+            const std::pair<const char*, u64> arrays[] = {
+                {"task_ids", offsets.task_ids}, {"num_objects", offsets.num_objects},
+                {"entity_offsets", offsets.entity_offsets}, {"entity_role", offsets.entity_role},
+                {"entity_ref", offsets.entity_ref}, {"relation_counts", offsets.relation_counts},
+                {"relation_offsets", offsets.relation_offsets}, {"relation_arg_offsets", offsets.relation_arg_offsets},
+                {"relation_args", offsets.relation_args}, {"static_task_ids", offsets.static_task_ids},
+                {"static_offsets", offsets.static_offsets}, {"static_arg_offsets", offsets.static_arg_offsets},
+                {"static_args", offsets.static_args}, {"static_relations", offsets.static_relations}};
+            for (const auto& [name, offset] : arrays)
+            {
+                const auto* array = expected->find(name);
+                ASSERT_TRUE(array) << name;
+                EXPECT_EQ(std::memcmp(expected->data(*array), data.data() + offset,
+                                      array->elements() * rl::dtype_bytes(array->dtype)), 0) << name;
+            }
+            output.static_capacities.args = 0;
+            device.encode(in, output, stream);
+            encoding::FlatSizes short_sizes;
+            cuda::check(cudaMemcpyAsync(&short_sizes, output.sizes, sizeof(short_sizes), cudaMemcpyDeviceToHost, stream),
+                        "download overflow");
+            cuda::check(cudaStreamSynchronize(stream), "wait for overflow");
+            EXPECT_TRUE(short_sizes.overflow & encoding::k_overflow_capacity);
         }
 }

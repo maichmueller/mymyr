@@ -157,7 +157,7 @@ def test_mixed_instance_batches_match_host(kind):
         same(encoder.encode(rows, ids), encoder.encode(words, device_ids))
 
 
-def test_self_loop_has_no_delta_and_deeper_device_horizons_are_refused():
+def test_self_loop_has_no_delta_and_deeper_device_views_match_host():
     device = gpu()
     task = text_task("blocks__probBLOCKS-8-0")
     row = np.asarray(task.encode([task.initial_state]))
@@ -169,11 +169,10 @@ def test_self_loop_has_no_delta_and_deeper_device_horizons_are_refused():
     same(expected, encoder.encode(upload(view, device)))
     delta = [i for i, name in enumerate(encoder.relation_names) if name.startswith(("[+]", "[-]"))]
     assert delta and all(expected.relation_counts[0, i] == 0 for i in delta)
-    with pytest.raises(ValueError, match="horizons of depth 2 or more"):
+    with pytest.raises(ValueError, match="construction needs depth=1"):
         encoding.horizon(task, tensor(row, device), depth=2)
     deeper = encoding.horizon(task, row, depth=2, merge=False)
-    with pytest.raises(ValueError, match="horizons of depth 2 or more"):
-        encoder.encode(upload(deeper, device))
+    same(encoder.encode(deeper), encoder.encode(upload(deeper, device)))
 
 
 @pytest.mark.needs_gil

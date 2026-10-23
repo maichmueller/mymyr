@@ -146,7 +146,7 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                     step_args = add(step_args, mul(n, cell.arity));
                     if (ed::history_op_target(cell.op))
                         step_targets = add(step_targets, n);
-                    nullary = nullary || (n > 0 && cell.logical_arity == 0);
+                    nullary = nullary || (ed::cell_present(cell, static_cast<u32>(n)) && cell.logical_arity == 0);
                     continue;
                 }
                 if (ed::is_action_op(cell.op) || ed::is_horizon_op(cell.op))
@@ -156,7 +156,7 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                 args = add(args, mul(n, cell.arity));
                 if (ed::is_goal_op(cell.op) && ed::goal_op_mode(cell.op) == ed::GoalMode::PlainTarget)
                     targets = add(targets, n);
-                nullary = nullary || (n > 0 && cell.logical_arity == 0);
+                nullary = nullary || (ed::cell_present(cell, static_cast<u32>(n)) && cell.logical_arity == 0);
             }
             // objects, the auxiliary entity, one entity per goal or subgoal target and one per predicate virtual node
             const u64 entities = add(add(inst.num_objects, nullary ? 1 : 0), add(targets, inst.num_virtual));
@@ -487,13 +487,16 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
 }
 
 DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const encoding::FlatBuffers& arrays,
-                                     const encoding::FlatSizes* sizes, u64 graphs)
+                                     const encoding::FlatSizes* sizes, u64 graphs,
+                                     const encoding::StaticSizes* static_sizes, const encoding::StaticShape& statics)
 {
     check_encodes(encoder);
     const auto& schema = encoder.schema();
     DeviceCollationBatch batch;
     batch.arrays = arrays;
     batch.sizes = sizes;
+    batch.static_sizes = static_sizes;
+    batch.static_capacities = statics;
     batch.graphs = graphs;
     batch.relations = schema.num_relations();
     batch.schema_fingerprint = schema.fingerprint();
@@ -501,6 +504,8 @@ DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const
     batch.layout = schema.options().layout;
     batch.index = schema.options().index;
     batch.shared_statics = schema.shared_statics();
+    batch.static_relations = schema.static_relations().size();
+    batch.instances = encoder.table().size();
     batch.stored = output_arrays(schema);
     batch.max_goal_level = schema.options().max_goal_level;
     batch.history = schema.options().history;
@@ -520,16 +525,20 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
     arrays.numeric_dtype = arrays.numeric ? schema.options().numeric_dtype : encoding::NumericDtype::F32;
     arrays.relations = schema.emits_relations();
     arrays.simple = schema.emits_simple();
+    arrays.shared_statics = schema.shared_statics();
+    arrays.static_relations = schema.shared_statics() ? schema.static_relations().size() : 0;
     return arrays;
 }
 
-OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations, const OutputArrays& arrays)
+OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations, const OutputArrays& arrays,
+                           const encoding::StaticShape& statics)
 {
     const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
     const u64 G = shape.graphs, E = shape.entities, A = shape.args, T = shape.targets, S = shape.history,
               GR = mul(G, relations);
     OutputLayout out;
     out.arrays = arrays;
+    out.static_capacities = statics;
     u64 at = 0;
     auto place = [&](u64& offset, u64 bytes)
     {
@@ -560,6 +569,16 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.numeric_values, arrays.numeric
         ? mul(shape.numeric, arrays.numeric_dtype == encoding::NumericDtype::F64 ? 8 : 4) : 0);
     place(out.numeric_size, arrays.numeric ? sizeof(u64) : 0);
+    if (arrays.shared_statics)
+    {
+        const u64 cells = add(mul(statics.instances, arrays.static_relations), 1);
+        place(out.static_task_ids, mul(4, statics.instances));
+        place(out.static_offsets, mul(I, cells));
+        place(out.static_arg_offsets, mul(I, cells));
+        place(out.static_args, mul(I, statics.args));
+        place(out.static_relations, mul(I, arrays.static_relations));
+        place(out.static_sizes, sizeof(encoding::StaticSizes));
+    }
     place(out.sizes, sizeof(encoding::FlatSizes));
     out.bytes = at;
     return out;
@@ -598,6 +617,16 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
     b.edge_label = static_cast<i32*>(at(layout.edge_label, a.simple));
     b.numeric_values = at(layout.numeric_values, a.numeric);
     out.numeric_size = static_cast<u64*>(at(layout.numeric_size, a.numeric));
+    if (a.shared_statics)
+    {
+        b.static_task_ids = static_cast<i32*>(at(layout.static_task_ids, true));
+        b.static_offsets = at(layout.static_offsets, true);
+        b.static_arg_offsets = at(layout.static_arg_offsets, true);
+        b.static_args = at(layout.static_args, true);
+        b.static_relations = at(layout.static_relations, true);
+        out.static_sizes = static_cast<encoding::StaticSizes*>(at(layout.static_sizes, true));
+        out.static_capacities = layout.static_capacities;
+    }
     out.capacities = shape;
     out.sizes = static_cast<encoding::FlatSizes*>(at(layout.sizes, true));
     return out;
@@ -717,12 +746,10 @@ struct DeviceEncoder::Workspace
 
 void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
 {
-    const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
     if (schema.stores_node_value()) refuse("Simple with numeric relations");
     // the nodes and edges of a horizon are encoded into relations only
     if (schema.has_horizon() && schema.emits_simple()) refuse("Simple horizons");
-    if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
 }
 
 DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder)
@@ -751,7 +778,17 @@ BatchShape DeviceEncoder::worst_case(u64 graphs, u64 history_steps) const
 }
 OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
 {
-    return cuda::output_layout(shape, options().index, schema().num_relations(), output_arrays(schema()));
+    encoding::StaticShape statics{};
+    if (schema().shared_statics())
+    {
+        const auto host = m_context->host();
+        const auto view = host->view();
+        statics.instances = view.num_instances;
+        for (u32 i = 0; i < view.num_instances; ++i)
+            statics.args = add(statics.args, encoding::detail::static_block_totals(
+                encoding::detail::instance_view(view, i)).args);
+    }
+    return cuda::output_layout(shape, options().index, schema().num_relations(), output_arrays(schema()), statics);
 }
 u64 DeviceEncoder::scratch_bytes(const BatchShape& shape, DerivedWords derived) const
 {
@@ -1188,6 +1225,20 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if (arrays.numeric ? (out.capacities.numeric && !a.numeric_values) : a.numeric_values != nullptr)
             invalid("numeric_values must be given iff the schema stores numeric values");
     }
+    if (schema.shared_statics())
+    {
+        if (!out.static_sizes)
+            invalid("shared statics need device static sizes");
+        if (phase != Phase::Count &&
+            (!a.static_offsets || !a.static_arg_offsets ||
+             (context.view.num_static && !a.static_relations) ||
+             (out.static_capacities.instances && !a.static_task_ids) ||
+             (out.static_capacities.args && !a.static_args)))
+            invalid("shared statics need the static block output arrays");
+    }
+    else if (out.static_sizes || out.static_capacities.instances || out.static_capacities.args || a.static_task_ids ||
+             a.static_offsets || a.static_arg_offsets || a.static_args || a.static_relations)
+        invalid("repeated statics take no static block outputs");
     if (launch.count_lanes != 0 && launch.count_lanes != 4 && launch.count_lanes != 8 && launch.count_lanes != 32)
         invalid("the count kernel runs 4, 8 or 32 lanes per graph");
 
@@ -1270,6 +1321,10 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.segments = mul(2, add(graphs, 1));
     p.history_at = layout.history_at(graphs);
     p.numeric_at = layout.numeric_at(graphs);
+    p.shared_statics = schema.shared_statics();
+    p.static_capacities = phase == Phase::Count ? encoding::StaticShape{~u64{0}, ~u64{0}} : out.static_capacities;
+    p.static_sizes = out.static_sizes;
+    p.static_totals = reinterpret_cast<encoding::StaticSizes*>(scratch.flags + 2);
     p.flags = scratch.flags;
     p.cell_counts = scratch.cell_counts;
     p.cell_stride = scratch.cell_stride;
@@ -1413,6 +1468,31 @@ void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 
 
 namespace mymyr::cuda
 {
+u64 space_horizon_scratch_bytes(u32 states, u64 edges, u32 graphs)
+{
+    if (states > 0x7fffffffu || graphs > 0x7fffffffu || (graphs && edges > 0x7fffffffull / graphs))
+        invalid("state-space horizon capacities must fit int32 offsets");
+    return detail::space_horizon_builder_scratch_bytes(states, edges, graphs);
+}
+
+void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream)
+{
+    const u64 limit = output.limit ? std::min(output.limit, space.states) : space.states;
+    if (u64(output.graphs) * limit > 0x7fffffffull ||
+        (output.graphs && space.edges > 0x7fffffffull / output.graphs) || space.states > 0x7fffffffu)
+        invalid("state-space horizon capacities must fit int32 offsets");
+    if (!output.node_offsets || !output.edge_offsets ||
+        (output.graphs && (!space.states || !output.roots || !output.scratch || !space.offsets ||
+                          (space.words && (!space.rows || !output.nodes)) ||
+                          (space.edges && (!space.targets || !space.schemas || !output.src || !output.dst ||
+                                           !output.schema || (space.label_width && (!space.bindings || !output.binding)))))))
+        invalid("state-space horizons need recorded rows, CSR, labels, roots and output storage");
+    if (output.graphs && (reinterpret_cast<std::uintptr_t>(output.scratch) % 256 ||
+        output.scratch_bytes < space_horizon_scratch_bytes(space.states, space.edges, output.graphs)))
+        invalid("state-space horizon scratch must be 256-byte aligned and hold space_horizon_scratch_bytes bytes");
+    check(detail::launch_space_horizons(space, output, stream), "state-space horizon builder");
+}
+
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream)
 {

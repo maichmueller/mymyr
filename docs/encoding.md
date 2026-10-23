@@ -522,7 +522,7 @@ literals of nullary predicates are tuples over the graph's auxiliary entity, in 
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon and transition
 encoders have no `stream`, and C++ `FlatStream(encoder)` refuses them with `std::invalid_argument`. Shared statics are
 refused with a horizon mode (the static tuples of a horizon graph are anchored by its root's state node and so are not
-the instance's), and so are fluent numeric functions. The device encodes horizons and transitions of depth one
+the instance's), and so are fluent numeric functions. The device encodes horizons of any depth and transitions
 ([Horizons on the device](#horizons-on-the-device)).
 
 ```python
@@ -658,12 +658,26 @@ assert np.array_equal(transitions.encode([task.initial_state]).relation_args, sa
 ### Horizons on the device
 
 A `HorizonView` whose arrays are on a CUDA device encodes on the device into a torch `DeviceFlatBatch`, equal to the
-host batch: full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, both
-layouts and both index types. Views of depth 2 or more are refused. The device does not read prepared parent pairs
-(`parent_offsets`, `parent_edges`): it canonicalizes the edges itself. `encoding.horizon(table, cuda_rows, depth=1)`
-builds the compact view on the device from an expansion, with `merge` as on the host; it needs `depth=1`, and
-`max_nodes`, `truncate` and `pool` raise `ValueError`. The builder runs every graph and successor in parallel (merging
-by a hash table over each graph's rows): its time grows with the successors, not with the square of a graph's fanout.
+host batch: full, delta and action horizons of any depth, every root policy, parent relations and rooted kinship,
+both layouts and both index types. The device does not read prepared parent pairs (`parent_offsets`, `parent_edges`):
+it canonicalizes the edges itself, and it validates the offsets and the graph-local endpoints, task ids, labels and
+node bits before it fills anything (an invalid view raises `ValueError` without capacities and sets `invalid_input`
+with them). Equal node rows of an uploaded view stay distinct nodes. Cousin relations gather each node's cousins on
+demand, in scratch linear in the graph's nodes and edges.
+
+There are three ways to a device view. Upload a host view (its arrays as CUDA tensors).
+`encoding.horizon_of_space(device_space, roots, depth=k, *, max_nodes=None, truncate=False)` builds the view of a
+`cuda.DeviceStateSpace` generated with its transition labels by traversing its recorded state ids on the current torch
+stream: the nodes and edges are those of `horizon_of_space` over `device_space.to_host()`, in the same order. `roots`
+are host state ids, CUDA int32 state ids or `None` (every state); the roots are traversed in parallel, each one breadth
+first. It needs `merge=True` (the recorded ids are the merged states) and refuses numeric spaces; it reserves `G *
+min(max_nodes or N, N)` node rows and `G * E` edge rows for `G` roots, `N` states and `E` transitions, and the offsets
+delimit the rows it uses. A device root outside the space, or a graph past `max_nodes` without `truncate`, gives invalid
+offsets, which the encoder refuses. `encoding.horizon(table, cuda_rows, depth=1)` builds the compact view on the device
+from an expansion, with `merge` as on the host; it needs `depth=1` (deeper views come from a state space or an upload),
+and `max_nodes`, `truncate` and `pool` raise `ValueError`. That builder runs every graph and successor in parallel
+(merging by a hash table over each graph's rows): its time grows with the successors, not with the square of a graph's
+fanout.
 
 The transition encoders expand CUDA parent rows and encode them on the current stream; `actions=` a device expansion
 reuses its successor rows. With `capacities` the expansion is bounded by the entity capacity (every successor is a
@@ -967,7 +981,8 @@ The rest of the batch follows the same rules as a repeated one:
 - **Validation.** The C++ `validate` also checks the blocks: the instances, the offsets, the entities against the
   instance's objects and the sort order of the tuples.
 - **Refusals.** Horizons, the Simple graph and the HGraph view refuse shared statics (their graphs hold the static
-  tuples among their own), and the device does not encode them.
+  tuples among their own), and so does the JAX FFI. The device encodes them
+  ([What the device encodes](#what-the-device-encodes)).
 
 ## Capacities and buffer reuse
 
@@ -1152,6 +1167,14 @@ assert fixed.relation_args.shape == (2048,)
 assert not fixed.sizes["overflow"]                        # reads the sizes: waits for the device
 ```
 
+With `statics="shared"`, CUDA batches keep the CPU static-block arrays, sorted by instance, with local entity ids.
+Capacity calls additionally require `static_instances` and `static_args`; `device_static_sizes` holds the true
+`[instances, tuples, args]` on the device. The torch op takes those two capacities after `numeric` and returns the
+static arrays and `static_sizes` before `sizes`. Device streams and collation carry the blocks too; collation rejects
+different blocks for the same instance and blocks that do not match the instances of a batch's graphs. HGraph and
+Simple refuse this storage form. The JAX FFI refuses shared statics because its fixed result layout has no static
+block arrays.
+
 ### What the device encodes
 
 The device (the torch path, the torch op, device streams and the CUDA target of `mymyr.encoding.jax`) encodes the rows
@@ -1159,21 +1182,21 @@ of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or 
 layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, the
 [numeric relations](#numeric-functions) and their values, the [Simple graph](#the-simple-graph) (alone or next to the
 relation arrays), the action relations and action targets of a device expansion ([Actions](#actions)), horizons and
-transitions of depth one ([Horizons on the device](#horizons-on-the-device)), both layouts, both index types and the
-omitted arrays. What it does not encode raises `ValueError`
+transitions ([Horizons on the device](#horizons-on-the-device)), [shared statics](#shared-statics), both layouts,
+both index types and the omitted arrays. What it does not encode raises `ValueError`
 with the `mymyr: encoding:` prefix (the schemas and calls below before any launch):
 
 - **Schemas:** the Simple graph with numeric relations (`"the device does not encode Simple with numeric relations"`:
   its `node_value` is not encoded on the device; `include_numeric=False` encodes the Simple graph of a numeric table)
-  or of a horizon (`"the device does not encode Simple horizons"`), shared statics (`statics='shared'`); and a schema
-  whose kernels need more shared memory than a block has (very many predicate virtual nodes or relations).
-- **Calls:** `actions=` with the Simple graph or over a numeric table, horizon views of depth 2 or more, horizons and
+  or of a horizon (`"the device does not encode Simple horizons"`); and a schema whose kernels need more shared memory
+  than a block has (very many predicate virtual nodes or relations).
+- **Calls:** `actions=` with the Simple graph or over a numeric table, horizons and
   transitions of a numeric table, `into=`, `pool=` (a pool of host threads means nothing for device rows), a
   `framework` other than `'torch'`, inputs of which some are on the device and some on the host, and subgoal layers or
   history given to an encoder whose schema has no subgoal or history relations; `threads` has no effect.
 - **Rows:** an invalid row (a task id outside the table, a row, goal mask, subgoal layer or history step narrower than
   its instance, a goal, layer or step bit its instance has no atom for, a history count outside `[0, H]`, invalid
-  expansion labels or horizon offsets) raises
+  expansion labels, horizon offsets or endpoints) raises
   without capacities and sets `invalid_input` in `sizes` with them; so do rows without derived words whose instance's
   axioms the device cannot evaluate (below).
 - **Elsewhere:** device streams take no subgoal layers or history steps, device batches of an encoder with them are not
@@ -1236,12 +1259,13 @@ Encode the rows on the host for anything the device refuses.
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos,
 goal_derived_neg, subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg,
 history_dt, history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
-numeric=0)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch`
-registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None`
-for an input that is absent) and the six ints are the capacities (`targets` 0 without target sources, `history` 0
-without history, `numeric` 0 without numeric values). It returns the list of 23 tensors that
-`DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema
-does not store is an empty tensor, and `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch.
+numeric=0, static_instances=0, static_args=0)` is the capacity form as a torch custom op, for `torch.compile` and CUDA
+graphs (`import mymyr.rl.torch` registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the
+tensors are as above (`None` for an input that is absent) and the eight ints are the capacities (`targets` 0 without
+target sources, `history` 0 without history, `numeric` 0 without numeric values, `static_instances` and
+`static_args` 0 without shared statics). It returns the list of 29 tensors that `DeviceFlatBatch.array_names` names,
+the arrays in the order of the batch table, then `static_sizes` and `sizes`; an array the schema does not store is an
+empty tensor, and `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch.
 The op waits for nothing, allocates only its outputs and scratch and has a fake implementation that gives their shapes
 from the capacities, so `torch.compile(fullgraph=True)` traces it without a graph break. The registry keeps the
 encoder alive until `unregister(handle)`. A compiled function specializes the handle: calling it with another
@@ -1460,7 +1484,7 @@ batch's: `count(in, pool, scratch, &extra)`, `encode_capacity(..., sizes, &stati
 scratch, &static_shape, &extra)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
 (`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics
 are repeated. `require_repeated_statics(options, family)` is the refusal for an encoding family whose graphs need the
-static tuples among their own tuples; the device encoder refuses shared statics when it is made.
+static tuples among their own tuples.
 
 The numeric lane is a cell kind of the same passes: a numeric cell has one tuple per numeric slot `[a, b)` of an
 instance, written like the tuples of a static cell, and its values come from the numeric words of the row
@@ -1546,3 +1570,8 @@ derived_goals)` with `append`, `flush(DeviceOutput)`, `clear`, and `status()`; a
 batch_views, stream)` with caller scratch sized by `scratch_bytes()`. The batch views come from
 `cuda::collation_batch(encoder, arrays, sizes, graphs)`, which refuses an encoder that the device does not encode.
 `DeviceOutput::graphs` optionally receives a live graph count.
+
+For CUDA capacity encoding with shared statics, `DeviceOutput::static_capacities` bounds the instance blocks and their
+arguments, and `static_sizes` points to a device `StaticSizes`. The overflow flag includes these capacities. The free
+`cuda::output_layout` takes a `StaticShape`; `DeviceEncoder::output_layout` reserves blocks for the entire table.
+`cuda::collation_batch` accepts the source static sizes and capacities alongside its ordinary batch sizes.

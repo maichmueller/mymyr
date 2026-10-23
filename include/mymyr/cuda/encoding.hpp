@@ -148,7 +148,9 @@ struct GraphBounds
 /// std::invalid_argument for an encoder whose batches the device does not encode (DeviceEncoder::check_schema).
 [[nodiscard]] DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder,
                                                    const encoding::FlatBuffers& arrays,
-                                                   const encoding::FlatSizes* sizes, u64 graphs);
+                                                   const encoding::FlatSizes* sizes, u64 graphs,
+                                                   const encoding::StaticSizes* static_sizes = nullptr,
+                                                   const encoding::StaticShape& statics = {});
 
 /// Byte offsets in a caller-owned output block; each array begins at a multiple of 64 bytes. An array that the batch
 /// does not store has no bytes. The last array is the FlatSizes the encoding writes.
@@ -159,12 +161,15 @@ struct OutputLayout
         target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0,
         numeric_values = 0, numeric_size = 0, sizes = 0;
     u64 node_offsets = 0, node_label = 0, edge_offsets = 0, edge_index = 0, edge_label = 0;
+    u64 static_task_ids = 0, static_offsets = 0, static_arg_offsets = 0, static_args = 0,
+        static_relations = 0, static_sizes = 0;
+    encoding::StaticShape static_capacities{};
     u64 bytes = 0;
     OutputArrays arrays;
 };
 /// Throws std::overflow_error if a size product, sum or alignment exceeds u64.
 [[nodiscard]] OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations,
-                                         const OutputArrays& arrays = {});
+                                         const OutputArrays& arrays = {}, const encoding::StaticShape& statics = {});
 
 /// The destinations in the device block `block` of output_layout(shape, ...), with the capacities of `shape`
 /// (the graph capacity bounds every per-graph and per-cell array).
@@ -194,6 +199,13 @@ void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* childr
                              const DeviceHorizonBuild& output, cudaStream_t stream);
 /// The scratch bytes of build_depth_one_horizon over an expansion of `capacity` rows.
 [[nodiscard]] u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge);
+
+/// The scratch bytes for traversing recorded state ids independently for each root.
+[[nodiscard]] u64 space_horizon_scratch_bytes(u32 states, u64 edges, u32 graphs);
+
+/// Builds horizons of any depth by traversing a labelled state space's recorded ids, without comparing state words.
+/// Uses the caller's stream and storage, with no allocation or host wait. Input CSR and labels must be valid.
+void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream);
 
 enum class FillMode : u8
 {
@@ -238,8 +250,8 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: the Simple graph with numeric relations,
-    /// the Simple graph of a horizon and shared statics. Horizons accept only depth-one device views.
+    /// Throws std::invalid_argument for a schema the device does not encode: the Simple graph with numeric relations
+    /// and the Simple graph of a horizon.
     static void check_schema(const encoding::EncodingSchema& schema);
     /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
     /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
@@ -262,6 +274,7 @@ public:
     /// (std::invalid_argument without it).
     [[nodiscard]] BatchShape worst_case(u64 graphs, u64 history_steps = 0) const;
     /// The arrays a batch of this schema stores, and their layout in a block.
+    /// The shared-static capacities cover the whole table; the free output_layout accepts explicit static capacities.
     [[nodiscard]] OutputLayout output_layout(const BatchShape& shape) const;
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
@@ -421,7 +434,8 @@ public:
     void encode(void* scratch, u64 bytes, const DeviceOutput& out) const;
     /// count writes sizes with capacity unbounded; fill reuses its scratch and unchanged source arrays,
     /// with no intervening use of that scratch.
-    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes, u64* numeric_size = nullptr) const;
+    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes, u64* numeric_size = nullptr,
+               encoding::StaticSizes* statics = nullptr) const;
     void fill(void* scratch, u64 bytes, const DeviceOutput& out) const;
 private:
     struct Impl;
