@@ -4,6 +4,8 @@
 //     or each instance's rows apart) equals rl::expand byte for byte, flat (with capacity clipping) and padded, for
 //     any chunk size and bucket launch (rl::expand's mixed batch equals the single-instance expansions:
 //     tests/cpp/rl/test_table.cpp);
+//   - an expander moved between streams (alternating, or handed between threads each on its own stream) expands as on
+//     the host, its memory bounded by one move's;
 //   - the device env over a table (cuda::DeviceEnv, fast and general path) equals rl::HostEnv step by step on a mixed
 //     batch: random and given actions (invalid ones too), truncation, autoreset into the rows' instances and into
 //     next_task_ids, per-env goals, both dead-end modes; with the bucket launch changing between steps, tiny chunks, a
@@ -21,9 +23,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace mymyr;
@@ -377,6 +382,106 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
                 EXPECT_EQ(to_host<u64>(psu.data(), N * K * W, s), succ);
             }
         }
+}
+
+/// The tables of one expander per mode: every set's (one pass or per instance) and its first instance alone (single).
+std::vector<Set> mode_tables(TaskOptions::Atoms atoms)
+{
+    std::vector<Set> out;
+    for (Set& set : sets(atoms))
+    {
+        Set one{set.name + " (one instance)", {set.tasks[0]}, rl::TaskTable::create(std::vector<TaskPtr>{set.tasks[0]})};
+        out.push_back(std::move(set));
+        out.push_back(std::move(one));
+    }
+    return out;
+}
+
+TEST(DeviceTableExpand, StreamChangesKeepTheScratchSize)
+{
+    SKIP_WITHOUT_GPU();
+    for (const Set& set : mode_tables(TaskOptions::Atoms::Dense))
+    {
+        SCOPED_TRACE(set.name);
+        cuda::ContextOptions o;
+        o.max_bytes = u64{256} << 20;
+        auto ctx = cuda::DeviceContext::create(0, o);  // its own pool: the expander's memory alone
+        const rl::TaskTable& T = *set.table;
+        std::vector<u64> rows;
+        std::vector<i32> ids;
+        table_rows(T, 4, rows, ids);
+        const u32 W = T.words(), L = std::max<u32>(1, T.label_width());
+        const u64 N = ids.size();
+        const Flat h = host_expand(T, rows, ids, host_expand(T, rows, ids, 1, L).total, L);
+        const cuda::Stream a, b;  // (they outlive the expander's scratch)
+        const cuda::DeviceBuffer d_rows = to_device(ctx, rows, a.get());
+        const cuda::DeviceBuffer d_ids = to_device(ctx, ids, a.get());
+        cuda::DeviceExpander ex(ctx, set.table);
+        u64 early = 0;
+        for (int i = 0; i < 48; ++i)
+        {
+            ex.set_stream(i % 2 ? b.get() : a.get());
+            u64 total = 0;
+            expect_flat_equal(device_expand(ctx, ex, d_rows, d_ids, N, W, h.total, L, &total), h);
+            if (::testing::Test::HasFatalFailure())
+                return;
+            if (i == 3)
+                early = ctx->usage().used_high;
+        }
+        EXPECT_LE(ctx->usage().used_high, early + (u64{1} << 20));
+        ex.set_stream(nullptr);
+    }
+}
+
+TEST(DeviceTableExpand, ExpanderLeasedAcrossThreadsOnTheirStreams)
+{
+    SKIP_WITHOUT_GPU();
+    for (const Set& set : mode_tables(TaskOptions::Atoms::Dense))
+    {
+        SCOPED_TRACE(set.name);
+        cuda::ContextOptions o;
+        o.max_bytes = u64{256} << 20;
+        auto ctx = cuda::DeviceContext::create(0, o);
+        const rl::TaskTable& T = *set.table;
+        std::vector<u64> rows;
+        std::vector<i32> ids;
+        table_rows(T, 4, rows, ids);
+        const u32 W = T.words(), L = std::max<u32>(1, T.label_width());
+        const u64 N = ids.size();
+        const Flat h = host_expand(T, rows, ids, host_expand(T, rows, ids, 1, L).total, L);
+        const cuda::DeviceBuffer d_rows = to_device(ctx, rows, ctx->stream());
+        const cuda::DeviceBuffer d_ids = to_device(ctx, ids, ctx->stream());
+        constexpr int threads = 4;
+        std::vector<cuda::Stream> streams(threads);  // (they outlive the expander's scratch)
+        cuda::DeviceExpander ex(ctx, set.table);
+        std::mutex lease;  // one caller at a time, each on its own stream
+        std::atomic<int> wrong{0};
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t)
+            pool.emplace_back([&, t] {
+                for (int i = 0; i < 16; ++i)
+                {
+                    std::lock_guard lock(lease);
+                    try
+                    {
+                        ex.set_stream(streams[static_cast<usize>(t)].get());
+                        u64 total = 0;
+                        const Flat d = device_expand(ctx, ex, d_rows, d_ids, N, W, h.total, L, &total);
+                        if (d.total != h.total || d.offsets != h.offsets || d.succ != h.succ || d.binding != h.binding)
+                            ++wrong;
+                    }
+                    catch (const std::exception&)
+                    {
+                        ++wrong;
+                    }
+                }
+            });
+        for (std::thread& th : pool)
+            th.join();
+        EXPECT_EQ(wrong.load(), 0);
+        EXPECT_LE(ctx->usage().used_high, u64{64} << 20);
+        ex.set_stream(nullptr);
+    }
 }
 
 TEST(DeviceTableExpand, TaskIdsAreChecked)

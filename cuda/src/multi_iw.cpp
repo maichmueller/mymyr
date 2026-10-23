@@ -59,12 +59,14 @@ public:
     {
         if (n <= m_cap && m_buf.stream() == s)
             return data();
-        const u64 cap = exact ? n : std::max<u64>({n, m_cap + m_cap / 2, 64});
+        // a stream change keeps the capacity when it suffices (growing then would compound with every change)
+        const u64 cap = n <= m_cap ? m_cap : exact ? n : std::max<u64>({n, m_cap + m_cap / 2, 64});
         DeviceBuffer nb(ctx, cap * sizeof(T), s);
         if (keep)
             check(cudaMemcpyAsync(nb.data(), m_buf.data(), std::min(keep, m_cap) * sizeof(T), cudaMemcpyDeviceToDevice, s),
                   "cudaMemcpyAsync (grow)");
-        m_buf = std::move(nb);  // the old buffer is freed after the copy (stream-ordered on s)
+        m_buf.reset(s);  // freed on s after the copy (and after the work on its own stream)
+        m_buf = std::move(nb);
         m_cap = cap;
         return data();
     }

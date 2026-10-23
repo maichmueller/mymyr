@@ -26,7 +26,9 @@ void* Scratch::ensure(const ContextPtr& ctx, u64 bytes, cudaStream_t s)
     bytes = std::max<u64>(bytes, 64);
     if (m_buf.size() >= bytes && m_buf.stream() == s)
         return m_buf.data();
-    DeviceBuffer nb(ctx, std::max(bytes, m_buf.size() + m_buf.size() / 2), s);
+    // a stream change keeps the size when it suffices (growing then would compound with every change)
+    const u64 size = m_buf.size() >= bytes ? m_buf.size() : std::max(bytes, m_buf.size() + m_buf.size() / 2);
+    DeviceBuffer nb(ctx, size, s);
     if (m_last)
         nb.track(m_last);
     m_buf.reset(s);  // (on the current call's stream: its allocation stream may be gone)
