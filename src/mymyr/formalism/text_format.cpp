@@ -1,7 +1,8 @@
 #include "mymyr/formalism/text_format.hpp"
+#include "../third_party/fast_float.h"
 
 #include <charconv>
-#include <cstdio>
+#include <cmath>
 #include <fstream>
 #include <istream>
 #include <sstream>
@@ -192,9 +193,10 @@ private:
     f64 number()
     {
         const std::string w = word();
-        char* end = nullptr;
-        const f64 v = std::strtod(w.c_str(), &end);
-        if (end != w.c_str() + w.size())
+        f64 v = 0;
+        const auto [p, ec] = fast_float::from_chars(w.data(), w.data() + w.size(), v);
+        if (ec != std::errc{} || p != w.data() + w.size() ||
+            (!std::isfinite(v) && w != "inf" && w != "-inf" && w != "nan" && w != "-nan"))
             fail("expected number, got '" + w + "'");
         return v;
     }
@@ -537,9 +539,14 @@ public:
 private:
     static std::string num(f64 v)
     {
+        // Canonical NaN spellings keep the format independent of the standard library's payload notation.
+        if (std::isnan(v))
+            return std::signbit(v) ? "-nan" : "nan";
         char b[64];
-        std::snprintf(b, sizeof b, "%.17g", v);
-        return b;
+        const auto [p, ec] = std::to_chars(b, b + sizeof b, v);
+        if (ec != std::errc{})
+            fail("number has no decimal form");
+        return std::string(b, p);
     }
     static const char* assign_op(AssignOp op)
     {

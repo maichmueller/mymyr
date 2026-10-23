@@ -4,6 +4,8 @@
 // and schemas; objects become "o<i>" and parameters "x<i>".
 //
 // write_task_text() writes it; read_task_text() and read_task_text_file() read it back.
+// Numbers use locale-independent decimal notation, with inf, -inf, nan and -nan for non-finite values.
+// NaN payloads and signaling bits are not serialized.
 
 #include "mymyr/formalism/task_data.hpp"
 
