@@ -7,117 +7,105 @@
 A data-oriented, lifted-first rewrite of the [mimir](https://github.com/maichmueller/mimir) classical-planning
 core, with free-threaded Python bindings and an optional CUDA backend.
 
-- Flat POD data with no global repositories: states are values, and containers are local and droppable.
-- Python bindings for CPython 3.14 and newer. Free-threaded CPython (3.14t, 3.15t) is the main target: there
-  Python callbacks (observers, heuristics, goal tests) of parallel searches and concurrent Python callers run in
-  parallel. The bindings also build and run on the GIL build of CPython, where these Python parts take turns on
-  the GIL; the native work (searches, state spaces, environment pools, encoders) releases it either way.
-- A CUDA backend with classical and numeric tasks, and RL/JAX/PyTorch/Gymnasium interop are core features.
+mymyr parses PDDL, searches for plans, builds state spaces and provides batched reinforcement-learning environments
+and relational state encodings for NumPy, JAX and PyTorch. Native work releases the GIL. Free-threaded Python also
+lets Python callbacks and concurrent Python callers run in parallel; on a GIL interpreter, Python callbacks take
+turns on the GIL.
 
-## Installing from PyPI
+## Install from PyPI
+
+With [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
 uv venv .venv --python 3.14t
 uv pip install --python .venv/bin/python mymyr
 ```
 
-The extra `mymyr[gym]` adds Gymnasium for the environments of `mymyr.rl.gym` ([Gymnasium](docs/rl.md#gymnasium)).
+CPU wheels support CPython 3.14 and 3.15, both GIL (`3.14`, `3.15`) and free-threaded (`3.14t`, `3.15t`), on Linux
+x86_64 with glibc 2.34 or newer and macOS arm64 with macOS 15 or newer. Change `--python` to select an interpreter.
+Wheels include the PDDL parser and C++ SDK. For Gymnasium environments, install `mymyr[gym]`; install JAX or PyTorch
+separately when using those integrations. CUDA requires a source build.
 
-Releases carry CPU wheels for free-threaded CPython 3.14t and 3.15t on Linux (x86_64, glibc 2.34 or newer) and
-macOS (arm64). The CUDA backend is not part of them; build from source with `-DMYMYR_CUDA=ON` for it. The badges above
-show the state of the continuous integration (Linux build, tests and sanitizers; CUDA compile check; macOS) and of the
-wheel builds.
+## Try it
 
-## Requirements
-
-- A C++26 compiler (GCC >= 16)
-- CMake >= 3.25 and Ninja
-- Optional: CUDA 13.4 or newer (`-DMYMYR_CUDA=ON`; its device code is C++23, with GCC 16 as nvcc's host compiler) and CMake >= 4.4 (the first to map CUDA C++23 to nvcc), on a driver >= 580
-- Optional: CPython 3.14 or newer for the Python bindings (free-threaded 3.14t or 3.15t recommended)
-
-## Building the dependencies
-
-The PDDL front end (`-DMYMYR_FRONTEND=ON`, the default) needs loki, abseil, fmt and boost, pinned and built by the
-dependency superbuild:
-
-```bash
-cmake -S dependencies -B dependencies/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build dependencies/build
-```
-
-This installs into `dependencies/installs`, which the main build picks up automatically. Set `CC`/`CXX` in the
-environment of both commands to choose a compiler; point `-DMYMYR_DEPS_PREFIX=<prefix>` at an existing install to
-reuse one built elsewhere, or configure the main build with `-DMYMYR_FRONTEND=OFF` to skip the front end (and this
-step) entirely.
-
-## Building and testing the library
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build
-```
-
-Add `-DMYMYR_CUDA=ON` (and, if needed, `-DCMAKE_CUDA_COMPILER=<path to nvcc>`) for the CUDA backend and its tests; it
-needs CUDA 13.4 or newer and CMake 4.4 or newer, and the binaries run on NVIDIA drivers 580 or newer
-(`-DCMAKE_CUDA_ARCHITECTURES` defaults to the visible GPU; see [CUDA](docs/cuda.md)).
-Sanitizers: `-DMYMYR_SANITIZE="address;undefined"` or `-DMYMYR_SANITIZE=thread`.
-
-The tests that compare mymyr with recorded reference results live in `tests/parity` (ctest label `parity`, pytest
-marker `parity`); they skip when the reference data is not available. See [tests/parity/README.md](tests/parity/README.md).
-
-## Using mymyr from C++
-
-`cmake --install build --prefix <prefix>` installs the headers, the static libraries and a CMake package; the wheel
-carries the same under `mymyr/include` and `mymyr/lib`. A consumer needs only that install and a C++26 compiler (GCC 16,
-or clang 22 with libc++): the front end's parser dependencies are part of `libmymyr_frontend.a`.
-
-```cmake
-find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)   # components: core, encoding, frontend, cuda
-target_link_libraries(app PRIVATE mymyr::core mymyr::frontend)
-```
-
-Pass `-Dmymyr_DIR=<prefix>/lib/cmake/mymyr`, or for the wheel `-Dmymyr_DIR=$(python -c "import mymyr; print(mymyr.get_cmake_dir())")`
-(`mymyr.get_include()` is the header directory). The C++ package is a source-level interface: rebuild consumers when
-mymyr changes, and use the C++ standard library the install was built with. The plain-C API (`mymyr/ext.h`) is the
-stable binary interface. `tests/cmake_consumer/` is a complete example.
-
-## Python
-
-```bash
-uv venv .venv --python 3.14t
-uv pip install --python .venv/bin/python -e ".[test]"
-.venv/bin/python -m pytest
-```
-
-(or the equivalent with plain `python -m venv` and `pip`, given a CPython 3.14 or newer interpreter, free-threaded
-preferably). Pass CMake options through `CMAKE_ARGS`, e.g. `CMAKE_ARGS="-DMYMYR_CUDA=ON" uv pip install ...` for the
-CUDA backend, or `-DMYMYR_DEPS_PREFIX=<prefix>` to reuse an existing dependency install.
-
-### Example
+Run this with `.venv/bin/python`; it needs no task files:
 
 ```python
 import mymyr
-import mymyr.rl as rl
-from mymyr import search
+from mymyr import rl, search
 
-task = mymyr.Task.from_pddl("domain.pddl", "problem.pddl")
-plan = search.astar(task, heuristic="max")
-print(plan.status, len(plan.plan), plan.cost)
+domain = mymyr.Domain.from_string("""
+(define (domain switch)
+  (:requirements :strips)
+  (:predicates (ready) (done))
+  (:action finish
+    :parameters ()
+    :precondition (ready)
+    :effect (and (not (ready)) (done))))
+""")
+problem = domain.instantiate_string("""
+(define (problem example) (:domain switch)
+  (:init (ready))
+  (:goal (done)))
+""")
+task = mymyr.Task(problem)
+result = search.astar(task, heuristic="max")
+assert result.solved and len(result.plan) == 1 and result.cost == 1
+print(search.format_plan(task, result.plan))
 
 pool = rl.CpuEnvPool(task, num_envs=4, seed=0)
-batch = pool.reset()
+pool.reset()
 batch = pool.step()
+assert batch.terminated.all()
 print(batch.states.shape, batch.reward, batch.terminated)
 ```
 
-User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/); the option names, defaults
-and result fields every module shares are in [API conventions](docs/conventions.md).
+For your own task files, use `mymyr.Task.from_pddl("domain.pddl", "problem.pddl")`.
 
-`mymyr.encoding.FlatRelationEncoder(task_or_table)` encodes states into relational graphs: the
-objects are the entities, and the fluent, derived, static and goal atoms are the tuples of the relations of an
-`EncodingSchema`. The batches are flat integer arrays that NumPy, Torch, JAX and DLPack import without a copy, with no
-PyG dependency. See [native encoding](docs/encoding.md) for the array contract and the options.
+## Build from source
+
+Source builds need CPython 3.14 or newer, a C++26 compiler, CMake 3.25 or newer and Ninja. The commands below run
+from a source checkout on Linux x86_64 with uv, Git, curl and sha256sum on `PATH`. The toolchain script downloads
+GCC 16.1 from conda-forge using micromamba and builds the pinned parser dependencies (loki, Abseil, fmt and Boost
+headers) under `build/toolchain`; no system compiler installation is needed.
+
+```bash
+uv venv .venv --python 3.14t
+uv pip install --python .venv/bin/python "cmake>=3.25" ninja
+export PATH="$PWD/.venv/bin:$PATH"
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+bash ci/wheel_toolchain.sh "$PWD/build/toolchain"
+export CC="$PWD/build/toolchain/gcc/bin/x86_64-conda-linux-gnu-gcc"
+export CXX="$PWD/build/toolchain/gcc/bin/x86_64-conda-linux-gnu-g++"
+export CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$PWD/build/toolchain/deps"
+uv pip install --python .venv/bin/python -e ".[test]"
+.venv/bin/python -m pytest -W error tests/python
+```
+
+An existing GCC 16 build also works: set `CC` and `CXX` to its `gcc` and `g++`, build the
+[dependencies](dependencies/CMakeLists.txt) with that compiler, and set `MYMYR_DEPS_PREFIX` through `CMAKE_ARGS` to
+their install prefix. `-DMYMYR_FRONTEND=OFF` skips the parser and its dependencies. On macOS use a C++26-capable
+Apple Clang/libc++ toolchain; see the [C++ package guide](docs/cpp-package.md) for native builds and SDK consumers.
+
+For CUDA, first complete the source setup above, put CUDA 13.4 or newer's `nvcc` on `PATH`, then rebuild with CMake
+4.4 or newer and GCC 16 as the host compiler:
+
+```bash
+uv pip install --python .venv/bin/python "cmake>=4.4"
+CMAKE_ARGS="$CMAKE_ARGS -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=$(command -v nvcc) -DCMAKE_CUDA_HOST_COMPILER=$CXX" \
+  uv pip install --python .venv/bin/python --reinstall -e ".[test]"
+```
+
+The default CUDA architecture is the visible GPU. NVIDIA drivers 580 or newer can run matching SASS; PTX needs a
+driver that understands the toolkit's PTX version. See [CUDA](docs/cuda.md) for architecture selection and backend
+limits. Reference-comparison tests need the separate data described in [tests/parity/README.md](tests/parity/README.md).
+
+## Documentation
+
+Start with the [user guides](docs/README.md), [API conventions](docs/conventions.md) and runnable
+[examples](examples/). See [parsing and task options](docs/parsing-and-tasks.md), [search](docs/search.md),
+[RL and Gymnasium](docs/rl.md), [relational encodings](docs/encoding.md), [the CLI](docs/cli.md),
+[the C API](docs/c-api.md) and [the C++ SDK](docs/cpp-package.md).
 
 ## License
 

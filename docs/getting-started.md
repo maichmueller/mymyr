@@ -1,8 +1,8 @@
 # Getting started
 
-mymyr is a lifted-first planning library with Python bindings. Python wheels target free-threaded CPython 3.14t and
-3.15t on Linux x86_64 (glibc 2.34 or newer) and macOS arm64. The published wheels contain the CPU backend. A CUDA
-backend is built from source.
+mymyr is a lifted-first planning library with Python bindings. Python wheels support GIL and free-threaded CPython
+3.14 and 3.15 on Linux x86_64 (glibc 2.34 or newer) and macOS arm64 (macOS 15 or newer). The published wheels contain
+the CPU backend. A CUDA backend is built from source.
 
 ## Install a wheel
 
@@ -13,7 +13,7 @@ uv venv .venv --python 3.14t
 uv pip install --python .venv/bin/python mymyr
 ```
 
-Use a 3.15t interpreter instead by changing the Python version passed to `uv venv`.
+Change the Python version passed to `uv venv` to `3.15t`, or to `3.14` or `3.15` for a GIL interpreter.
 
 ## Build from source
 
