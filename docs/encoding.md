@@ -522,7 +522,7 @@ literals of nullary predicates are tuples over the graph's auxiliary entity, in 
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon and transition
 encoders have no `stream`, and C++ `FlatStream(encoder)` refuses them with `std::invalid_argument`. Shared statics are
 refused with a horizon mode (the static tuples of a horizon graph are anchored by its root's state node and so are not
-the instance's), and so are fluent numeric functions. The device encodes horizons and transitions of depth one
+the instance's), and so are fluent numeric functions. The device encodes horizons of any depth and transitions
 ([Horizons on the device](#horizons-on-the-device)).
 
 ```python
@@ -658,12 +658,26 @@ assert np.array_equal(transitions.encode([task.initial_state]).relation_args, sa
 ### Horizons on the device
 
 A `HorizonView` whose arrays are on a CUDA device encodes on the device into a torch `DeviceFlatBatch`, equal to the
-host batch: full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, both
-layouts and both index types. Views of depth 2 or more are refused. The device does not read prepared parent pairs
-(`parent_offsets`, `parent_edges`): it canonicalizes the edges itself. `encoding.horizon(table, cuda_rows, depth=1)`
-builds the compact view on the device from an expansion, with `merge` as on the host; it needs `depth=1`, and
-`max_nodes`, `truncate` and `pool` raise `ValueError`. The builder runs every graph and successor in parallel (merging
-by a hash table over each graph's rows): its time grows with the successors, not with the square of a graph's fanout.
+host batch: full, delta and action horizons of any depth, every root policy, parent relations and rooted kinship,
+both layouts and both index types. The device does not read prepared parent pairs (`parent_offsets`, `parent_edges`):
+it canonicalizes the edges itself, and it validates the offsets and the graph-local endpoints, task ids, labels and
+node bits before it fills anything (an invalid view raises `ValueError` without capacities and sets `invalid_input`
+with them). Equal node rows of an uploaded view stay distinct nodes. Cousin relations gather each node's cousins on
+demand, in scratch linear in the graph's nodes and edges.
+
+There are three ways to a device view. Upload a host view (its arrays as CUDA tensors).
+`encoding.horizon_of_space(device_space, roots, depth=k, *, max_nodes=None, truncate=False)` builds the view of a
+`cuda.DeviceStateSpace` generated with its transition labels by traversing its recorded state ids on the current torch
+stream: the nodes and edges are those of `horizon_of_space` over `device_space.to_host()`, in the same order. `roots`
+are host state ids, CUDA int32 state ids or `None` (every state); the roots are traversed in parallel, each one breadth
+first. It needs `merge=True` (the recorded ids are the merged states) and refuses numeric spaces; it reserves `G *
+min(max_nodes or N, N)` node rows and `G * E` edge rows for `G` roots, `N` states and `E` transitions, and the offsets
+delimit the rows it uses. A device root outside the space, or a graph past `max_nodes` without `truncate`, gives invalid
+offsets, which the encoder refuses. `encoding.horizon(table, cuda_rows, depth=1)` builds the compact view on the device
+from an expansion, with `merge` as on the host; it needs `depth=1` (deeper views come from a state space or an upload),
+and `max_nodes`, `truncate` and `pool` raise `ValueError`. That builder runs every graph and successor in parallel
+(merging by a hash table over each graph's rows): its time grows with the successors, not with the square of a graph's
+fanout.
 
 The transition encoders expand CUDA parent rows and encode them on the current stream; `actions=` a device expansion
 reuses its successor rows. With `capacities` the expansion is bounded by the entity capacity (every successor is a
@@ -1159,7 +1173,7 @@ of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or 
 layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, the
 [numeric relations](#numeric-functions) and their values, the [Simple graph](#the-simple-graph) (alone or next to the
 relation arrays), the action relations and action targets of a device expansion ([Actions](#actions)), horizons and
-transitions of depth one ([Horizons on the device](#horizons-on-the-device)), both layouts, both index types and the
+transitions ([Horizons on the device](#horizons-on-the-device)), both layouts, both index types and the
 omitted arrays. What it does not encode raises `ValueError`
 with the `mymyr: encoding:` prefix (the schemas and calls below before any launch):
 
@@ -1167,13 +1181,13 @@ with the `mymyr: encoding:` prefix (the schemas and calls below before any launc
   its `node_value` is not encoded on the device; `include_numeric=False` encodes the Simple graph of a numeric table)
   or of a horizon (`"the device does not encode Simple horizons"`), shared statics (`statics='shared'`); and a schema
   whose kernels need more shared memory than a block has (very many predicate virtual nodes or relations).
-- **Calls:** `actions=` with the Simple graph or over a numeric table, horizon views of depth 2 or more, horizons and
+- **Calls:** `actions=` with the Simple graph or over a numeric table, horizons and
   transitions of a numeric table, `into=`, `pool=` (a pool of host threads means nothing for device rows), a
   `framework` other than `'torch'`, inputs of which some are on the device and some on the host, and subgoal layers or
   history given to an encoder whose schema has no subgoal or history relations; `threads` has no effect.
 - **Rows:** an invalid row (a task id outside the table, a row, goal mask, subgoal layer or history step narrower than
   its instance, a goal, layer or step bit its instance has no atom for, a history count outside `[0, H]`, invalid
-  expansion labels or horizon offsets) raises
+  expansion labels, horizon offsets or endpoints) raises
   without capacities and sets `invalid_input` in `sizes` with them; so do rows without derived words whose instance's
   axioms the device cannot evaluate (below).
 - **Elsewhere:** device streams take no subgoal layers or history steps, device batches of an encoder with them are not

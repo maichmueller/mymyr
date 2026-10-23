@@ -2780,7 +2780,7 @@ void bind_encoding(nb::module_& parent)
         "deletes from its root (the delta mode) and the edges of the horizon: one action tuple (the action relations, "
         "with the action's objects) and, with parent_relation, one `_parent_` tuple per edge. The nodes and edges are "
         "given as a HorizonView (mymyr.encoding.HorizonView; `rl.expand` rows have this form). Streams do not encode "
-        "horizons. The device encodes depth-one horizons into torch arrays.");
+        "horizons. The device encodes horizon views of any depth into torch arrays.");
     static const std::string horizon_doc =
         std::string("The horizon encoder of a Task, TaskHandle or one-domain TaskTable. horizon_mode ('full', 'delta' or "
                     "'action') is required; `history` is not an option of a horizon. ") +

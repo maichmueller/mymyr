@@ -2831,12 +2831,62 @@ TEST(DeviceEncodeHorizon, DepthOneModesRootPoliciesAndDerivedEqualTheHost)
     }
 }
 
-TEST(DeviceEncodeHorizon, DeeperViewsAndInvalidExpansionOffsetsSetTheInputFlag)
+TEST(DeviceEncodeHorizon, DeepModesRootPoliciesAndDerivedEqualTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const u32 depth : {2u, 3u})
+    for (const auto& table : {table_of("blocks", {"smedium", "probBLOCKS-8-0"}),
+                              table_of("philosophers", {"p03-phil4"})})
+    {
+        auto roots = test::random_walk(*table, 0, 3, 2);
+        if (table->size() > 1)
+        {
+            const auto other = test::random_walk(*table, 1, 1, 3);
+            roots.data.insert(roots.data.end(), other.data.begin(), other.data.end());
+            roots.task_ids.insert(roots.task_ids.end(), other.task_ids.begin(), other.task_ids.end());
+        }
+        const auto view = test::horizon_of(*table, roots, depth);
+        LabelUploads upload{ctx, stream, {}};
+        cuda::DeviceEncodeInput input;
+        input.graphs = view.graphs(); input.states = upload.put(view.nodes); input.task_ids = upload.put(view.task_ids);
+        input.state_stride = input.state_words = view.words;
+        const u64 words = cuda::horizon_scratch_words(view.graphs(), view.num_nodes(), view.edge_src.size());
+        cuda::DeviceBuffer canonical(ctx, words * sizeof(u32), stream);
+        input.horizon = {upload.put(view.node_offsets), upload.put(view.edge_offsets), upload.put(view.edge_src),
+                         upload.put(view.edge_dst), upload.put(view.edge_schema), upload.put(view.edge_binding),
+                         view.num_nodes(), view.edge_src.size(), view.label_width,
+                         static_cast<u32*>(canonical.data()), words};
+        for (const auto mode : {encoding::HorizonMode::Full, encoding::HorizonMode::Delta, encoding::HorizonMode::Action})
+            for (const auto root : {encoding::RootPolicy::Include, encoding::RootPolicy::Exclude, encoding::RootPolicy::EncodeOnly})
+                for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                    for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                    {
+                        encoding::FlatOptions options;
+                        options.layout = layout; options.index = index;
+                        options.horizon = {mode, root, true, true, true};
+                        options.predicate_virtual_nodes = true;
+                        const auto encoder = encoding::FlatEncoder::create(table, options);
+                        const auto reference = host_reference(*encoder, view.input());
+                        cuda::DeviceEncoder device(ctx, encoder);
+                        device.reserve({view.num_nodes(), 0, 0, 0}, stream);
+                        const auto result = run_device(device, ctx, stream, input, shape_of(input.graphs, reference.sizes));
+                        expect_sizes(reference.sizes, result.sizes);
+                        expect_same_arrays(*reference.bundle, result);
+                        if (HasFailure())
+                            return;
+                    }
+    }
+}
+
+TEST(DeviceEncodeHorizon, InvalidEndpointsAndExpansionOffsetsSetTheInputFlag)
 {
     SKIP_WITHOUT_GPU();
     const auto table = table_of("blocks", {"smedium"});
     const auto roots = test::random_walk(*table, 0, 1, 1);
-    const auto view = test::horizon_of(*table, roots, 2, 2);
+    auto view = test::horizon_of(*table, roots, 2, 2);
+    view.edge_src[0] = -1;
     const auto ctx = device_context();
     cuda::Stream stream;
     LabelUploads upload{ctx, stream, {}};
@@ -2966,6 +3016,75 @@ TEST(DeviceEncodeHorizon, TheParallelBuilderEqualsTheHostBuilderMergedAndUnmerge
             EXPECT_EQ(device.edge_binding, host.edge_binding);
         }
     }
+}
+
+TEST(DeviceEncodeHorizon, RecordedStateTraversalMatchesTheHostAndChecksScratch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const std::vector<u64> rows{0, 1, 2, 3}, offsets{0, 3, 5, 8, 8};
+    const std::vector<u32> targets{1, 1, 2, 0, 3, 1, 3, 2}, schemas{0, 1, 0, 0, 0, 0, 1, 2};
+    const std::vector<u32> bindings{0, ~0u, 1, 2, 2, ~0u, 0, ~0u, 1, ~0u, 2, ~0u, 1, 2, 0, 1};
+    const encoding::SuccessorGraph host_space{4, 1, rows.data(), 1, offsets.data(), targets.data(), schemas.data(),
+                                               bindings.data(), 2};
+    LabelUploads upload{ctx, stream, {}};
+    const cuda::DeviceHorizonSpace space{upload.put(rows), upload.put(offsets), upload.put(targets), upload.put(schemas),
+                                          upload.put(bindings), 4, 1, 2, 8};
+    for (const u32 graphs : {0u, 1u, 5u, 129u})
+        for (const u32 depth : {0u, 2u, 3u})
+            for (const bool truncate : {false, true})
+            {
+                SCOPED_TRACE(::testing::Message() << graphs << " roots, depth " << depth << ", truncate " << truncate);
+                std::vector<u32> roots(graphs);
+                std::vector<i32> ids(graphs);
+                for (u32 g = 0; g < graphs; ++g)
+                    ids[g] = static_cast<i32>(roots[g] = g % 4);
+                encoding::HorizonBuild options;
+                options.depth = depth;
+                options.max_nodes = truncate ? 2 : 4;
+                options.truncate = truncate;
+                const auto reference = encoding::build_horizon_graphs(host_space, roots, 0, options);
+                const u64 bytes = cuda::space_horizon_scratch_bytes(4, 8, graphs);
+                cuda::DeviceBuffer nodes(ctx, std::max<u64>(1, graphs * 4) * sizeof(u64), stream),
+                    no(ctx, (u64(graphs) + 1) * sizeof(i32), stream), eo(ctx, (u64(graphs) + 1) * sizeof(i32), stream),
+                    src(ctx, std::max<u64>(1, graphs * 8) * sizeof(i32), stream),
+                    dst(ctx, src.size(), stream), schema(ctx, src.size(), stream), binding(ctx, src.size() * 2, stream),
+                    cut(ctx, std::max<u64>(1, graphs), stream), scratch(ctx, bytes, stream);
+                cuda::DeviceSpaceHorizonBuild out{upload.put(ids), graphs, depth, truncate ? 2u : 0u, truncate,
+                    static_cast<u64*>(nodes.data()), static_cast<i32*>(no.data()), static_cast<i32*>(eo.data()),
+                    static_cast<i32*>(src.data()), static_cast<i32*>(dst.data()), static_cast<i32*>(schema.data()),
+                    static_cast<i32*>(binding.data()), scratch.data(), bytes, static_cast<u8*>(cut.data())};
+                if (graphs)
+                {
+                    auto bad = out;
+                    bad.scratch_bytes = bytes - 1;
+                    EXPECT_THROW(cuda::build_space_horizons(space, bad, stream), std::invalid_argument);
+                    bad = out;
+                    bad.scratch = static_cast<std::byte*>(scratch.data()) + 4;
+                    EXPECT_THROW(cuda::build_space_horizons(space, bad, stream), std::invalid_argument);
+                    bad.scratch = nullptr;
+                    EXPECT_THROW(cuda::build_space_horizons(space, bad, stream), std::invalid_argument);
+                }
+                cuda::build_space_horizons(space, out, stream);
+                auto down = [&]<class T>(const cuda::DeviceBuffer& buffer, u64 n, T)
+                {
+                    std::vector<T> values(n);
+                    if (n)
+                        cuda::check(cudaMemcpyAsync(values.data(), buffer.data(), n * sizeof(T), cudaMemcpyDeviceToHost,
+                                                    stream), "download horizon");
+                    cuda::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+                    return values;
+                };
+                EXPECT_EQ(down(no, u64(graphs) + 1, i32{}), reference.node_offsets);
+                EXPECT_EQ(down(eo, u64(graphs) + 1, i32{}), reference.edge_offsets);
+                EXPECT_EQ(down(nodes, reference.nodes.size(), u64{}), reference.nodes);
+                EXPECT_EQ(down(src, reference.edge_src.size(), i32{}), reference.edge_src);
+                EXPECT_EQ(down(dst, reference.edge_dst.size(), i32{}), reference.edge_dst);
+                EXPECT_EQ(down(schema, reference.edge_schema.size(), i32{}), reference.edge_schema);
+                EXPECT_EQ(down(binding, reference.edge_binding.size(), i32{}), reference.edge_binding);
+                EXPECT_EQ(down(cut, graphs, u8{}), reference.truncated);
+            }
 }
 
 TEST(DeviceEncodeHorizon, AnExpansionStatusReportsItsOverflowAsACapacityOverflow)

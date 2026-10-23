@@ -1413,6 +1413,31 @@ void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 
 
 namespace mymyr::cuda
 {
+u64 space_horizon_scratch_bytes(u32 states, u64 edges, u32 graphs)
+{
+    if (states > 0x7fffffffu || graphs > 0x7fffffffu || (graphs && edges > 0x7fffffffull / graphs))
+        invalid("state-space horizon capacities must fit int32 offsets");
+    return detail::space_horizon_builder_scratch_bytes(states, edges, graphs);
+}
+
+void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream)
+{
+    const u64 limit = output.limit ? std::min(output.limit, space.states) : space.states;
+    if (u64(output.graphs) * limit > 0x7fffffffull ||
+        (output.graphs && space.edges > 0x7fffffffull / output.graphs) || space.states > 0x7fffffffu)
+        invalid("state-space horizon capacities must fit int32 offsets");
+    if (!output.node_offsets || !output.edge_offsets ||
+        (output.graphs && (!space.states || !output.roots || !output.scratch || !space.offsets ||
+                          (space.words && (!space.rows || !output.nodes)) ||
+                          (space.edges && (!space.targets || !space.schemas || !output.src || !output.dst ||
+                                           !output.schema || (space.label_width && (!space.bindings || !output.binding)))))))
+        invalid("state-space horizons need recorded rows, CSR, labels, roots and output storage");
+    if (output.graphs && (reinterpret_cast<std::uintptr_t>(output.scratch) % 256 ||
+        output.scratch_bytes < space_horizon_scratch_bytes(space.states, space.edges, output.graphs)))
+        invalid("state-space horizon scratch must be 256-byte aligned and hold space_horizon_scratch_bytes bytes");
+    check(detail::launch_space_horizons(space, output, stream), "state-space horizon builder");
+}
+
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream)
 {

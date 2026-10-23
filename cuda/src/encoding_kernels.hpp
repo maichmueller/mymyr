@@ -24,6 +24,10 @@
 
 namespace mymyr::cuda::detail
 {
+u64 space_horizon_builder_scratch_bytes(u32 states, u64 edges, u32 graphs);
+cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
+                                cudaStream_t stream);
+
 /// Everything the kernels read: device pointers and sizes.
 struct EncodeParams
 {
