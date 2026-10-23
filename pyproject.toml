@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Data-oriented, lifted-first classical planning core with free-threaded Python bindings"
 readme = "README.md"
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "src/mymyr/third_party/fast_float.LICENSE"]
 requires-python = ">=3.14"
 dependencies = ["numpy>=2.3"]
 

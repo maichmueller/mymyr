@@ -56,6 +56,8 @@ if(TARGET mymyr_cuda)
 endif()
 
 install(TARGETS ${_sdk_targets} EXPORT mymyrTargets ARCHIVE DESTINATION "${_sdk_lib}")
+install(FILES "${PROJECT_SOURCE_DIR}/src/mymyr/third_party/fast_float.LICENSE"
+    DESTINATION "${MYMYR_SDK_DIR}share/mymyr/licenses")
 
 set(_sdk_header_filter PATTERN "*.hpp" PATTERN "*.h")
 if(NOT TARGET mymyr_cuda)
