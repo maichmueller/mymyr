@@ -946,7 +946,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                                   "stream=, the stream that reads its outputs (for instance torch.cuda.current_stream())");
         bool waited = false;
         {
-            ExpanderLease ex(ref, c);
+            ExpanderLease ex(ref, c, os.s);
             nb::gil_scoped_release release;
             ex->set_stream(os.s);
             if (ex->async_unsupported(w.rows, opt).empty())
