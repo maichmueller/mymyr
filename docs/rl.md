@@ -110,8 +110,11 @@ bonuses/failure penalties consistently with the episode horizon and discount. Th
 optimize a PDDL action-cost metric.
 
 Torch `BatchedEnv.observation()` snapshots states, task ids, counts and per-environment goals. `step()` returns those
-next-observation tensors in `StepResult`, along with `final_states`, the reached states before autoreset. These
-snapshots survive subsequent steps and resets. The public environment tensors are live buffers for native calls and
+next-observation tensors in `StepResult`, along with `final_states`, the reached states before autoreset. With an
+observation encoder (see [Encoded observations](#encoded-observations)), `Observation.encoding` and
+`StepResult.obs` / `final_obs` hold their encodings, in new arrays of every call; without one these fields are None,
+so iterate the fields by name rather than treating either tuple as all tensors. These snapshots survive subsequent
+steps and resets. The public environment tensors are live buffers for native calls and
 CUDA graphs: use `observation(copy=False)` or `step(copy=False)` only when intentionally borrowing them, and consume
 or copy them before the next mutation. Captured rollout results remain borrowed graph outputs overwritten on replay.
 
