@@ -13,11 +13,13 @@ without them, so the floor depends on what the job installs:
 Seven tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
 with RLIMIT_AS and read /proc (4 + 1 cases), and two in test_block_cache.py that read the resident set from /proc. The
 floor on macOS is lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
+On GIL builds, the floor is lower by pytest_free_threaded_only_tests, which need a free-threaded interpreter.
 """
 
 import argparse
 import json
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,8 @@ def main(argv: list[str]) -> int:
     minimum = expected["pytest_min_passed_rl" if args.runtimes == "rl" else "pytest_min_passed_plain"]
     if args.platform == "macos":
         minimum -= expected["pytest_linux_only_tests"]
+    if not sysconfig.get_config_var("Py_GIL_DISABLED"):
+        minimum -= expected["pytest_free_threaded_only_tests"]
     counter = Counter()
     code = int(pytest.main(pytest_args, plugins=[counter]))
     print(f"run_pytest: {counter.passed} passed, at least {minimum} expected")
