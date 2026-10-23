@@ -133,7 +133,7 @@ __global__ void structured_count_kernel(const EncodeParams p)
         }
         else
         {
-            ed::bind_levels(ed::SoloGroup{}, r.v, r.in, r.layers, p.level_storage + g * p.level_stride);
+            count_levels(ed::SoloGroup{}, p, r, g);
             t = ed::count_graph<true>(r.v, r.in, counts, rank);
             if (p.relation_major)
             {
@@ -219,7 +219,7 @@ __global__ void structured_fill_kernel(const EncodeParams p)
     const u64 arg = p.relation_major ? 0 : totals.get(3 * row + g) - totals.get(3 * row);
     if (!p.horizon_mode)
     {
-        ed::bind_levels(ed::SoloGroup{}, r.v, r.in, r.layers, p.level_storage + g * p.level_stride);
+        fill_levels(p, r, g);
         const ed::GraphTotals t = ed::totals_from_counts<true>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
         const u64 history = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
         if (p.relation_major)

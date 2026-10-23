@@ -1208,6 +1208,17 @@ MYMYR_HD void bind_levels(const Group& grp, const InstanceView& v, const RowInpu
     layers.levels = effective_layers_group(grp, v, goal_words(v, row), layers.subgoals, row.atoms, row.derived, storage);
 }
 
+/// bind_levels of levels that a bind_levels of the same row computed into `storage` before, from their
+/// LevelPlanes::present: the planes are not recomputed.
+MYMYR_HD void bind_stored_levels(const InstanceView& v, const RowInput& row, RowLayers& layers, const u64* storage,
+                                 u64 present)
+{
+    if (row.layers != &layers || layers.subgoals.layers == 0)
+        return;
+    layers.levels = LevelPlanes{storage, present, level_plane_offset(v, layers.subgoals, true, 0, 0), v.words,
+                                v.derived_words};
+}
+
 /// The mask a goal cell takes its literals from: the positive or negative literals over the fluent or derived slots of
 /// the goal, or, for a cell of a subgoal level (1 to 3), of that level of the row's subgoal layers (effective_layers);
 /// null if there is none (no tuples).

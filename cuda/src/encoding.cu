@@ -286,6 +286,23 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
     return true;
 }
 
+/// The subgoal levels of graph g in the scratch: the count binds the row's levels (bind_levels) into the graph's
+/// level_stride words and keeps their LevelPlanes::present in the last of them; the fill binds them from there.
+template<class Group>
+__device__ __forceinline__ void count_levels(const Group& grp, const EncodeParams& p, RowView& r, u64 g)
+{
+    u64* storage = p.level_storage + g * p.level_stride;
+    ed::bind_levels(grp, r.v, r.in, r.layers, storage);
+    if (p.level_stride && grp.lane() == 0)
+        storage[p.level_stride - 1] = r.layers.levels.present;
+}
+
+__device__ __forceinline__ void fill_levels(const EncodeParams& p, RowView& r, u64 g)
+{
+    const u64* storage = p.level_storage + g * p.level_stride;
+    ed::bind_stored_levels(r.v, r.in, r.layers, storage, p.level_stride ? storage[p.level_stride - 1] : 0);
+}
+
 // ------------------------------------------------------------------------------------------------ count
 
 /// The count of the graphs. A live launch writes entry i + 1 of the scanned array at i (LiveTotals), every one of them
@@ -362,7 +379,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
     if (ok)
     {
         if constexpr (Layered)
-            ed::bind_levels(grp, r.v, r.in, r.layers, p.level_storage + g * p.level_stride);
+            count_levels(grp, p, r, g);
         if (p.relation_major)
         {
             const u64 cells = p.segments + 1 - shift;
@@ -1008,7 +1025,6 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     const u64 target_base = totals.get(row + g) - totals.get(row);
     const u64 history_base = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
     const u64 numeric_base = p.numeric_at ? totals.get(p.numeric_at + g) - totals.get(p.numeric_at) : 0;
-    u64* level_storage = Layered ? p.level_storage + g * p.level_stride : nullptr;
     const u32 instance = r.instance;
     auto close_graph = [&]
     {
@@ -1021,7 +1037,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
         {
             const LaneGroup<Lanes> grp;
             if constexpr (Layered)
-                ed::bind_levels(grp, r.v, r.in, r.layers, level_storage);
+                fill_levels(p, r, g);
             const ed::GraphTotals graph = ed::totals_from_counts<Layered>(
                 r.v, r.in, [&](u32, const ed::Cell& c) { return positions.count(ed::cell_segment(true, g, c.relation, G, R)); });
             if (grp.lane() == 0)
@@ -1033,7 +1049,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
         else
         {
             if constexpr (Layered)
-                ed::bind_levels(ed::SoloGroup{}, r.v, r.in, r.layers, level_storage);
+                fill_levels(p, r, g);
             const ed::GraphTotals graph = ed::totals_from_counts<Layered>(
                 r.v, r.in, [&](u32, const ed::Cell& c) { return positions.count(ed::cell_segment(true, g, c.relation, G, R)); });
             close_graph();
@@ -1051,7 +1067,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
         {
             const LaneGroup<Lanes> grp;
             if constexpr (Layered)
-                ed::bind_levels(grp, r.v, r.in, r.layers, level_storage);
+                fill_levels(p, r, g);
             const ed::GraphTotals graph =
                 ed::totals_from_counts<Layered>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
             if (grp.lane() == 0)
@@ -1063,7 +1079,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
         else
         {
             if constexpr (Layered)
-                ed::bind_levels(ed::SoloGroup{}, r.v, r.in, r.layers, level_storage);
+                fill_levels(p, r, g);
             const ed::GraphTotals graph =
                 ed::totals_from_counts<Layered>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
             close_graph();

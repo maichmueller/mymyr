@@ -678,8 +678,9 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
     out.cell_stride = bounds.cells;
     out.cell_entries = out.relation_major && !bounds.variable_inputs ? 0 : mul(G, bounds.cells);
     // the levels of the subgoal layers of a graph: the plain mask of each level, sign and slot kind, over the instance's
-    // words (and its derived words)
-    out.level_stride = mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words));
+    // words (and its derived words), and a last word for which of them have literals
+    out.level_stride =
+        bounds.levels ? add(mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words)), 1) : 0;
     out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
     out.action_storage = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
     // Independent cursors per graph: the action merge is serial within a graph.
