@@ -390,7 +390,8 @@ MYMYR_HD RowValidity row_validity(const ContextView& context, i32 instance, u32 
 }
 
 /// Conservative work of one instance without expansion rows, including either instance or row goals: its words, its
-/// cells, a bound of its arguments, and the arguments of its static cells that every graph writes.
+/// cells, a bound of the arguments of its cells other than goal cells (whose tuples one lane writes), and the arguments
+/// of its static cells that every graph writes.
 struct GraphWidth
 {
     u64 words = 0, cells = 0, args = 0, static_args = 0;
@@ -408,7 +409,8 @@ MYMYR_HD GraphWidth graph_width(const InstanceView& v)
         for (u32 i = 0; i < count; ++i)
         {
             const Cell& c = cells[i];
-            args += (u64{c.b - c.a} + (is_goal_op(c.op) ? c.d - c.c : 0u)) * c.arity;
+            if (!is_goal_op(c.op))
+                args += u64{c.b - c.a} * c.arity;
             if (own == 0 && c.op == static_cast<u32>(CellOp::Static) && !is_shared_static(c))
                 out.static_args += u64{c.b - c.a} * c.arity;
         }

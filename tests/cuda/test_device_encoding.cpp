@@ -1461,6 +1461,22 @@ TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
         }
 }
 
+TEST(DeviceEncoder, FillClassesFollowTheWidthTheLayersAndTheFloor)
+{
+    using encoding::detail::GraphWidth;
+    const GraphWidth narrow{4, 16, 100, 0}, sparse{40, 16, 2000, 100}, statics{4, 16, 2000, 1000};
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, false), 1u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(sparse, false), 8u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, false), 32u);
+    // the cells of levels and history steps are written by one lane of a group
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, true), 1u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, true), 8u);
+    // a class below the floor takes the floor's lanes, on the host and in the kernels alike
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, false, 8), 8u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, false, 8), 32u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(sparse, true, 32), 32u);
+}
+
 }
 
 namespace

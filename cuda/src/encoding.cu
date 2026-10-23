@@ -366,7 +366,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
     RowView r;
     ed::GraphTotals t = ed::empty_totals();
     bool ok = row_of<Live, Layered>(p, g, r);
-    if (p.classify && (ok ? fill_lanes_for(r.v) != p.fill_class : !p.first_class))
+    if (p.classify && (ok ? fill_lanes_for(p, r.v) != p.fill_class : !p.first_class))
         return;
     if constexpr (Live)
         if (p.relation_major)
@@ -892,7 +892,7 @@ __device__ void fill_thread_graphs(const EncodeParams& p, const Totals& totals, 
             atomicOr(p.flags, 1u);
         // an invalid row is not reached: it has set the input flag
         else if (row_of<Live, false>(p, g, r))
-            mine = !p.classify || fill_lanes_for(r.v) == p.fill_class;
+            mine = !p.classify || fill_lanes_for(p, r.v) == p.fill_class;
     }
     const u64 tuple_base = mine ? totals.get(2 * row + g) - totals.get(2 * row) : 0;
     const u64 arg_base = mine ? totals.get(3 * row + g) - totals.get(3 * row) : 0;
@@ -1016,7 +1016,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     RowView r;
     if (!row_of<Live, Layered>(p, g, r))
         return;  // not reached: an invalid row has set the input flag
-    if (p.classify && fill_lanes_for(r.v) != p.fill_class)
+    if (p.classify && fill_lanes_for(p, r.v) != p.fill_class)
         return;
     const u32 virtual_nodes = p.context.num_virtual;
     u32* virtual_scratch =

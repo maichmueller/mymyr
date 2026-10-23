@@ -63,6 +63,7 @@ struct EncodeParams
     bool layered = false;          // some row may have subgoal layers or history steps (LayerSource::layered)
     bool classify = false, first_class = true;
     u32 fill_class = 1;  // with `classify`: the lanes per graph (fill_lanes_for) of the graphs this launch takes
+    u32 fill_floor = 1;  // the fewest lanes per graph of a fill class (fill_lanes_for)
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
     // the graph-major thread fill: the dynamic shared memory holds a table of R words per warp after the virtual-node
     // scratch (fill_shared_bytes)
@@ -133,17 +134,23 @@ inline constexpr u64 k_shared_limit = 48 * 1024;
 
 /// The fill classes: the lanes that fill one graph of an instance. One lane while the graph's words, cells and arguments
 /// are few; a warp when every graph writes many static arguments, whose rows the lanes share; else eight lanes, four
-/// graphs per warp, which keeps the lanes of sparse fluent words and small cells busy.
+/// graphs per warp, which keeps the lanes of sparse fluent words and small cells busy. A layered call (subgoal layers or
+/// history steps) takes at most eight lanes: the first lane of a group writes the cells of its levels and steps alone.
+/// No class takes fewer lanes than `floor`, the fewest whose scratch fits a block's shared memory.
 inline constexpr u32 k_fill_classes[3] = {1, 8, 32};
-__host__ __device__ inline u32 fill_lanes_for(const encoding::detail::GraphWidth& width)
+__host__ __device__ inline u32 fill_lanes_for(const encoding::detail::GraphWidth& width, bool layered, u32 floor = 1)
 {
+    u32 lanes = 8;
     if (width.words <= 8u && width.cells <= 128u && width.args <= 128u)
-        return 1;
-    return width.static_args >= 512u ? 32u : 8u;
+        lanes = 1;
+    else if (width.static_args >= 512u && !layered)
+        lanes = 32;
+    return lanes > floor ? lanes : floor;
 }
-__host__ __device__ inline u32 fill_lanes_for(const encoding::detail::InstanceView& v)
+/// The fill class lanes of the graphs of instance `v` in the launch of `p`.
+__host__ __device__ inline u32 fill_lanes_for(const EncodeParams& p, const encoding::detail::InstanceView& v)
 {
-    return fill_lanes_for(encoding::detail::graph_width(v));
+    return fill_lanes_for(encoding::detail::graph_width(v), p.layered, p.fill_floor);
 }
 /// The fill class (an index into k_fill_classes) of a fill with `lanes` lanes per graph.
 __host__ __device__ inline u32 fill_class_of(u32 lanes) { return lanes == 1 ? 0u : lanes == 8 ? 1u : 2u; }
