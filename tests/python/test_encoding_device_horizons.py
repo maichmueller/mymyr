@@ -215,6 +215,21 @@ def test_device_space_node_limits_and_invalid_roots(space):
         encoding.horizon_of_space(space, [0], depth=2, merge=False)
 
 
+def test_device_space_builder_releases_completed_calls(space):
+    import gc
+    import weakref
+
+    view = encoding.horizon_of_space(space, [0], depth=3)
+    nodes = weakref.ref(view.nodes)
+    del view
+    torch.cuda.synchronize()
+    gc.collect()
+    following = encoding.horizon_of_space(space, [0], depth=3)
+    gc.collect()
+    assert nodes() is None
+    assert following.nodes.is_cuda
+
+
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])

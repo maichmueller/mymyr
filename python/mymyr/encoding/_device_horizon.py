@@ -284,6 +284,7 @@ def build_space_horizons(space: Any, roots: Any, depth: int, max_nodes: int | No
     from mymyr.rl.torch._ops import _stream
 
     torch = d._torch()
+    d._drain(torch)
     depth = operator.index(depth)
     if not 0 <= depth <= 0xffffffff:
         raise d._error("depth must be between 0 and 4294967295")
