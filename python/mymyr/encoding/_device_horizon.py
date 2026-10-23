@@ -292,7 +292,7 @@ def build_space_horizons(space: Any, roots: Any, depth: int, max_nodes: int | No
     if not merge:
         raise d._error("device state-space horizons traverse recorded unique ids and require merge=True")
     if space.numeric_words:
-        raise d._error("horizons do not encode numeric state spaces")
+        raise d._error("horizon encodings do not encode numeric state rows")
     if not space.has_labels:
         raise d._error("the state space needs transition labels: generate it with labels=True")
     limit = 0 if max_nodes is None else operator.index(max_nodes)

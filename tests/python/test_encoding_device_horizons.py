@@ -215,6 +215,19 @@ def test_device_space_node_limits_and_invalid_roots(space):
         encoding.horizon_of_space(space, [0], depth=2, merge=False)
 
 
+def test_device_spaces_without_labels_or_with_numeric_rows_are_refused(space):
+    import mymyr.cuda as cuda
+
+    context = cuda.Context(0, max_bytes=256 << 20)
+    numeric = cuda.state_space(mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt")), ctx=context,
+                               labels=True, remove_if_unsolvable=False)
+    with pytest.raises(ValueError, match="^mymyr: encoding: horizon encodings do not encode numeric state rows"):
+        encoding.horizon_of_space(numeric, [0], depth=2)
+    unlabelled = cuda.state_space(space.task, ctx=context, labels=False, remove_if_unsolvable=False)
+    with pytest.raises(ValueError, match="needs transition labels"):
+        encoding.horizon_of_space(unlabelled, [0], depth=2)
+
+
 def test_device_space_builder_releases_completed_calls(space):
     import gc
     import weakref

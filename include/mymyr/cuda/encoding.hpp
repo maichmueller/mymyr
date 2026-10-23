@@ -246,7 +246,7 @@ class DeviceEncoder
 {
 public:
     /// Throws std::invalid_argument for a schema the device does not encode: the Simple graph with numeric relations,
-    /// the Simple graph of a horizon and shared statics. Horizons accept only depth-one device views.
+    /// the Simple graph of a horizon and shared statics.
     static void check_schema(const encoding::EncodingSchema& schema);
     /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
     /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
