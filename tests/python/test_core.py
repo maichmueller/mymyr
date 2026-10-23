@@ -1,4 +1,6 @@
 import threading
+import tomllib
+from pathlib import Path
 
 import numpy as np
 
@@ -7,7 +9,8 @@ from conftest import FREE_THREADED, gil_stays_off
 
 
 def test_version_and_build():
-    assert mymyr.__version__ == "0.1.0"
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    assert mymyr.__version__ == tomllib.loads(pyproject.read_text())["project"]["version"]
     assert mymyr.__version__ in mymyr.build_info()
 
 

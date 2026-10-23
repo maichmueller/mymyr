@@ -1,6 +1,6 @@
 name: Wheels
 
-# CPU wheels for free-threaded CPython 3.14 and 3.15 (Linux x86_64 manylinux_2_34, macOS arm64) and the
+# CPU wheels for GIL and free-threaded CPython 3.14 and 3.15 (Linux x86_64 manylinux_2_34, macOS arm64) and the
 # source distribution. Every wheel is tested with the CPU suite by cibuildwheel (see [tool.cibuildwheel] in
 # pyproject.toml). Pull requests that touch the packaging build the Linux wheels only; a manual run builds the
 # macOS wheels when asked (macOS runners bill about ten times the Linux minutes); the release workflow calls
@@ -14,6 +14,10 @@ on:
         default: false
   workflow_call:
     inputs:
+      rehearsal-version:
+        description: Development version for a TestPyPI rehearsal
+        type: string
+        default: ""
       macos:
         description: Also build the macOS arm64 wheels
         type: boolean
@@ -46,9 +50,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [cp314t, cp315t]
+        python: [cp314, cp314t, cp315, cp315t]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set the rehearsal version
+        if: inputs.rehearsal-version != ''
+        env:
+          REHEARSAL_VERSION: ${{ inputs.rehearsal-version }}
+        run: python3 ci/set_rehearsal_version.py --version "$REHEARSAL_VERSION"
       # GCC 16 and the dependency superbuild, installed by ci/wheel_toolchain.sh inside the build container
       # and mounted into it from this cache.
       - name: Restore the toolchain
@@ -85,9 +94,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [cp314t, cp315t]
+        python: [cp314, cp314t, cp315, cp315t]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set the rehearsal version
+        if: inputs.rehearsal-version != ''
+        env:
+          REHEARSAL_VERSION: ${{ inputs.rehearsal-version }}
+        run: python3 ci/set_rehearsal_version.py --version "$REHEARSAL_VERSION"
       - name: Restore the dependency prefix
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -109,6 +123,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set the rehearsal version
+        if: inputs.rehearsal-version != ''
+        env:
+          REHEARSAL_VERSION: ${{ inputs.rehearsal-version }}
+        run: python3 ci/set_rehearsal_version.py --version "$REHEARSAL_VERSION"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: 0.12.6
