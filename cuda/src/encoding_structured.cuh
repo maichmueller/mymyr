@@ -1,4 +1,6 @@
-// Serial graph operations share the host's canonical merges while independent graphs run in parallel.
+// Serial graph operations share the host's canonical merges while independent graphs run in parallel: a thread per
+// graph (EncodeParams::structured_lanes 1), or one lane of every 4, 8 or 32 when the shared memory of a block holds the
+// predicate scratch of fewer graphs.
 // Included inside encoding.cu's implementation namespace, after its scan and output helpers.
 
 __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::HorizonGraph& h)
@@ -86,9 +88,10 @@ __global__ void structured_count_kernel(const EncodeParams p)
             (p.horizon_mode && (p.horizon.node_offsets[0] != 0 || p.horizon.edge_offsets[0] != 0)))
             atomicOr(p.flags, 1u);
     }
-    if (threadIdx.x % k_warp)
+    const u32 lanes = p.structured_lanes;
+    if (threadIdx.x % lanes)
         return;
-    const u64 gi = u64(blockIdx.x) * (k_block / k_warp) + threadIdx.x / k_warp;
+    const u64 gi = (u64(blockIdx.x) * k_block + threadIdx.x) / lanes;
     if (gi >= p.graphs)
         return;
     const u64 g = p.order ? p.order[gi] : gi;
@@ -97,7 +100,7 @@ __global__ void structured_count_kernel(const EncodeParams p)
         atomicOr(p.flags, 1u);
         return;
     }
-    u32* rank = reinterpret_cast<u32*>(shared_bytes) + (threadIdx.x / k_warp) * p.context.num_virtual;
+    u32* rank = reinterpret_cast<u32*>(shared_bytes) + (threadIdx.x / lanes) * p.context.num_virtual;
     RowView r;
     ed::HorizonGraph h;
     ed::GraphTotals t = ed::empty_totals();
@@ -195,9 +198,10 @@ __global__ void structured_fill_kernel(const EncodeParams p)
             out.relation_offsets[s] = I(positions.tuples_before(s));
             out.relation_arg_offsets[s] = I(positions.args(s, u32(s / G)));
         }
-    if (threadIdx.x % k_warp)
+    const u32 lanes = p.structured_lanes;
+    if (threadIdx.x % lanes)
         return;
-    const u64 gi = u64(blockIdx.x) * (k_block / k_warp) + threadIdx.x / k_warp;
+    const u64 gi = (u64(blockIdx.x) * k_block + threadIdx.x) / lanes;
     if (gi >= G)
         return;
     const u64 g = p.order ? p.order[gi] : gi;
@@ -206,7 +210,7 @@ __global__ void structured_fill_kernel(const EncodeParams p)
     if (!structured_row(p, g, r, h))
         return;
     u32* rank = reinterpret_cast<u32*>(shared_bytes + (p.relation_major ? align8(R * 8) : 0)) +
-                (threadIdx.x / k_warp) * p.context.num_virtual;
+                (threadIdx.x / lanes) * p.context.num_virtual;
     const u32* counts = p.cell_counts + g * p.cell_stride;
     const u64 entity = totals.get(g), target = totals.get(row + g) - totals.get(row);
     p.out.task_ids[g] = i32(r.instance);

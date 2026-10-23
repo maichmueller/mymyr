@@ -1193,6 +1193,16 @@ template<class Kernel> u64 static_shared(Kernel kernel)
 }
 #include "encoding_structured.cuh"
 
+/// The lanes per graph of the action and horizon kernels: one, else the fewest of 4, 8 and 32 for which a block's
+/// predicate scratch (one graph per that many lanes), with `fixed` bytes besides, fits the shared memory of a block.
+u32 structured_lanes_for(const EncodeParams& p, u64 fixed)
+{
+    for (const u32 lanes : {1u, 4u, 8u, 32u})
+        if (fixed + count_shared_bytes(p.context.num_virtual, lanes) <= k_shared_limit)
+            return lanes;
+    return k_warp;
+}
+
 template<class I, u32 Lanes, bool Relation> u64 fill_static()
 {
     static const u64 bytes = std::max({static_shared(fill_kernel<I, Lanes, Relation, false, false>),
@@ -1248,8 +1258,10 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
     const bool structured = p.actions.offsets || p.horizon_mode;
     if (structured)
     {
-        structured_count_kernel<<<std::max<u32>(1, blocks_for(p.graphs * k_warp)), k_block,
-                                  count_shared_bytes(p.context.num_virtual, k_warp), stream>>>(p);
+        EncodeParams q = p;
+        q.structured_lanes = structured_lanes_for(p, 0);
+        structured_count_kernel<<<std::max<u32>(1, blocks_for(p.graphs * q.structured_lanes)), k_block,
+                                  count_shared_bytes(p.context.num_virtual, q.structured_lanes), stream>>>(q);
         error = cudaPeekAtLastError();
         if (error != cudaSuccess)
             return error;
@@ -1300,10 +1312,15 @@ cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaSt
 {
     if (p.actions.offsets || p.horizon_mode)
     {
-        const u32 blocks = std::max<u32>(1, blocks_for(p.graphs * k_warp));
-        const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, k_warp, p.relation_major);
-        p.index64 ? structured_fill_kernel<i64><<<blocks, k_block, shared, stream>>>(p)
-                  : structured_fill_kernel<i32><<<blocks, k_block, shared, stream>>>(p);
+        EncodeParams q = p;
+        const u64 table = p.relation_major ? align8(u64{p.context.num_relations} * 8) : 0;
+        q.structured_lanes = structured_lanes_for(p, table + (p.index64 ? static_shared(structured_fill_kernel<i64>)
+                                                                       : static_shared(structured_fill_kernel<i32>)));
+        const u32 blocks = std::max<u32>(1, blocks_for(p.graphs * q.structured_lanes));
+        const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, q.structured_lanes,
+                                             p.relation_major);
+        p.index64 ? structured_fill_kernel<i64><<<blocks, k_block, shared, stream>>>(q)
+                  : structured_fill_kernel<i32><<<blocks, k_block, shared, stream>>>(q);
         const cudaError_t error = cudaPeekAtLastError();
         if (error != cudaSuccess)
             return error;

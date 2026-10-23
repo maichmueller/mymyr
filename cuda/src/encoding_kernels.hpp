@@ -67,6 +67,7 @@ struct EncodeParams
     // the graph-major thread fill: the dynamic shared memory holds a table of R words per warp after the virtual-node
     // scratch (fill_shared_bytes)
     bool relation_table = false;
+    u32 structured_lanes = 32;  // the action and horizon kernels: one graph per this many lanes (structured_lanes_for)
     // the batch
     encoding::FlatBuffers out;
     encoding::FlatBuffers core;  // relation arrays may be temporary storage for a Simple-only output
