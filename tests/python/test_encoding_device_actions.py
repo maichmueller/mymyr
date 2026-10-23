@@ -428,3 +428,55 @@ def test_transition_builder_normalizes_parent_and_child_word_padding(padding):
                               parent=expansion.parent, offsets=expansion.offsets)
     encoder = encoding.FlatTransitionEffectsEncoder(task)
     same(encoder.encode(rows), encoder.encode(words, actions=actions))
+
+
+NUMERIC_TASK = "tests/data/numeric_tasks/cs-counters.txt"
+
+
+@pytest.mark.parametrize("include_numeric", [True, False])
+def test_numeric_tables_refuse_device_action_rows_horizons_and_transitions(include_numeric):
+    device = gpu()
+    from conftest import ROOT
+
+    task = mymyr.Task.from_text(str(ROOT / NUMERIC_TASK))
+    rows = np.asarray(task.encode([task.initial_state]))
+    words = tensor(rows, device)
+    encoder = encoding.FlatRelationEncoder(task, include_numeric=include_numeric)
+    actions = rl.expand(task, words, framework="torch")
+    torch.cuda.synchronize(device)
+    before = torch.cuda.memory_allocated(device)
+    with pytest.raises(ValueError, match="^mymyr: encoding: device action rows and horizons do not encode numeric state rows"):
+        encoder.encode(words, actions=actions)
+    with pytest.raises(ValueError, match="do not encode numeric state rows"):
+        encoder.encode(words, actions=actions, capacities=dict(graphs=1, entities=64, args=256, numeric=64))
+    assert torch.cuda.memory_allocated(device) <= before
+    # the horizon and transition encoders of a numeric table do not exist, on the device or the host
+    for make in (lambda: encoding.FlatHorizonEncoder(task, horizon_mode="full", include_numeric=include_numeric),
+                 lambda: encoding.FlatTransitionEncoder(task, include_numeric=include_numeric)):
+        with pytest.raises(ValueError, match="horizon encodings do not encode numeric functions"):
+            make()
+    import mymyr.rl.torch as rt
+    env = rt.BatchedEnv(task, 2, device=device)
+    with pytest.raises(ValueError, match="encode_transitions needs a transition encoder"):
+        env.encode_transitions(encoder)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("targets", [(), ("goal", "action")], ids=["actions", "action_targets"])
+def test_numeric_relations_with_action_relations_and_targets_without_expansion_rows(layout, dtype, targets):
+    """The numeric scan row and the action cursor storage of one scratch layout: device == host, exact and in the
+    capacity form."""
+    device = gpu()
+    from conftest import ROOT
+
+    task = mymyr.Task.from_text(str(ROOT / NUMERIC_TASK))
+    rows = np.asarray(task.encode(walk(task, steps=4, walks=2)))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, numeric_dtype=dtype, include_actions=True,
+                                           target_sources=targets)
+    expected = encoder.encode(rows)
+    assert len(expected.numeric_values) > 0
+    words = tensor(rows, device)
+    same(expected, encoder.encode(words))
+    capacities = dict(caps(expected), numeric=len(expected.numeric_values))
+    same(encoder.encode(rows, capacities=capacities), encoder.encode(words, capacities=capacities))

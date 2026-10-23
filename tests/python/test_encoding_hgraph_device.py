@@ -389,3 +389,62 @@ def test_the_device_view_refuses_what_the_host_view_refuses(cases):
         encoding.hgraph(batch)
     with pytest.raises(TypeError, match="^mymyr: encoding: a DeviceHGraphView is of a DeviceFlatBatch"):
         encoding.DeviceHGraphView(host_encode(encoders_of(case, include_actions=False), case))
+
+
+HORIZON_KINDS = ["full", "delta", "action", "rooted", "transitions", "effects"]
+
+
+def horizon_batches(kind, index, dev):
+    """A host batch and the device batch of the same depth-one horizons (relation-major): views built on the host and
+    uploaded, or the transitions of device rows."""
+    from conftest import text_task, walk
+
+    task = text_task("philosophers__p03-phil4")  # derived atoms and several schemas
+    rows = np.asarray(task.encode(walk(task, steps=3, walks=1)))
+    words = torch.from_numpy(rows.view(np.int64).copy()).to(dev)
+    common = dict(layout="relation", index_dtype=index)
+    if kind in ("transitions", "effects"):
+        cls = encoding.FlatTransitionEncoder if kind == "transitions" else encoding.FlatTransitionEffectsEncoder
+        encoder = cls(task, parent_relation=True, **common)
+        return encoder.encode(rows), encoder.encode(words)
+    view = encoding.horizon(task, rows, depth=1)
+    if kind == "rooted":
+        encoder = encoding.FlatRootedHorizonEncoder(task, sibling_relation=True, cousin_relation=True, **common)
+    else:
+        encoder = encoding.FlatHorizonEncoder(task, horizon_mode=kind, parent_relation=True, **common)
+    fields = ("nodes", "node_offsets", "edge_offsets", "edge_src", "edge_dst", "edge_schema", "edge_binding", "task_ids")
+    uploaded = encoding.HorizonView(**{
+        k: None if getattr(view, k) is None else
+        torch.from_numpy(np.asarray(getattr(view, k)).view(np.int64) if k == "nodes" else
+                         np.asarray(getattr(view, k)).copy()).to(dev)
+        for k in fields})
+    return encoder.encode(view), encoder.encode(uploaded)
+
+
+@pytest.mark.parametrize("kind", HORIZON_KINDS)
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_device_horizon_batches_are_viewed_like_the_host_batch(kind, index):
+    dev = gpu()
+    host, device = horizon_batches(kind, index, dev)
+    assert device.num_graphs == host.num_graphs > 0
+    view = encoding.hgraph(device)
+    expect_same_view(encoding.hgraph(host), view)
+    expect_zero_copy(view, device)
+
+
+@pytest.mark.parametrize("kind", ["delta", "transitions"])
+def test_creating_the_view_of_a_device_horizon_batch_waits_once(kind):
+    dev = gpu()
+    host, batch = horizon_batches(kind, "int32", dev)
+    torch.cuda.synchronize(dev)
+    previous = torch.cuda.get_sync_debug_mode()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        torch.cuda.set_sync_debug_mode("warn")
+        try:
+            view = encoding.hgraph(batch)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+    waits = [w for w in caught if "synchronizing CUDA operation" in str(w.message)]
+    assert len(waits) == 1, [str(w.message) for w in waits]
+    expect_same_view(encoding.hgraph(host), view)

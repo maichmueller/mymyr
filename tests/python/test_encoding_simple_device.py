@@ -256,3 +256,50 @@ def test_simple_invalid_rows_zero_every_public_array(form):
     batch = encoder.encode(to_device(case.rows, dev), ids, capacities=caps)
     assert batch.sizes["invalid_input"]
     assert all(torch.count_nonzero(array).item() == 0 for array in batch._arrays.values())
+
+
+@pytest.mark.parametrize("outputs", [("simple",), BOTH])
+def test_simple_horizons_are_refused_before_any_launch(outputs):
+    """The host encodes the Simple graph of a horizon; the device refuses it up front (layout, encode, transitions),
+    not after allocating for it."""
+    dev = gpu()
+    torch = pytest.importorskip("torch")
+    from mymyr.encoding import _device
+    from test_encoding_device_actions import upload
+
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode([task.initial_state]))
+    message = "^mymyr: encoding: the device does not encode Simple horizons"
+    horizon = encoding.FlatHorizonEncoder(task, horizon_mode="full", outputs=outputs)
+    view = encoding.horizon(task, rows, depth=1)
+    assert horizon.encode(view).num_graphs == 1  # the host encodes it
+    with pytest.raises(ValueError, match=message):
+        _device.layout_of(horizon)
+    uploaded, words = upload(view, dev), to_device(rows, dev)
+    transitions = encoding.FlatTransitionEncoder(task, outputs=outputs)
+    torch.cuda.synchronize(dev)
+    before = torch.cuda.memory_allocated(dev)
+    with pytest.raises(ValueError, match=message):
+        horizon.encode(uploaded)
+    with pytest.raises(ValueError, match=message):
+        transitions.encode(words)
+    with pytest.raises(ValueError, match=message):
+        transitions.encode(words, capacities=dict(graphs=1, entities=64, args=256, targets=64))
+    assert torch.cuda.memory_allocated(dev) <= before
+
+
+@pytest.mark.parametrize("name", ["philosophers__p03-phil4", "mixed_blocks"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("form", ["graph", "relation", "simple"])
+@pytest.mark.parametrize("targets", [(), ("goal", "action")], ids=["actions", "action_targets"])
+def test_simple_with_action_relations_and_targets_without_expansion_rows(name, index, form, targets):
+    """Action relations and action targets without supplied expansions have no tuples and no targets; the Simple fill
+    then runs over the wide scans and the relation-major cell entries that action relations take."""
+    dev = gpu()
+    case = make_case(name)
+    encoder = encoder_of(case.source, form, index_dtype=index, include_actions=True, target_sources=targets,
+                         goal_derivations=GOALS)
+    host = host_encode(encoder, case)
+    same_batch(host, device_encode(encoder, case, dev))
+    caps = capacities(host, 2)
+    same_batch(host_encode(encoder, case, capacities=caps), device_encode(encoder, case, dev, capacities=caps))

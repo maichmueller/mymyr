@@ -609,3 +609,30 @@ def test_one_table_without_the_front_end():
     env = rt.BatchedEnv(task, 5, seed=1, observation=encoder, obs_capacities=CAPS)
     r = env.step()
     assert_same(r.obs, host(encoder, r.states, r.task_ids))
+
+
+@pytest.mark.parametrize("over", ["table", "suite"])
+def test_device_actions_are_the_expansion_of_the_observed_states(gripper, suite, over):
+    device = gpu_device()
+    table = gripper if over == "table" else suite
+    encoders = [encoding.FlatRelationEncoder(t) for t in ([gripper] if over == "table" else suite.tables)]
+    ids = None if over == "table" else [0, len(suite) - 1] * 3
+    env = rt.BatchedEnv(table, 6, device=device, seed=4, max_steps=4, task_ids=ids, observation=encoders,
+                        obs_actions=True)
+    lanes = [np.asarray([lane == "action" for lane in e.relation_lanes]) for e in encoders]
+    for _ in range(3):
+        r = env.step()
+        batches = [r.obs] if over == "table" else list(r.obs.batches)
+        for k, batch in enumerate(batches):
+            if over == "table":
+                states, task_ids = r.states, r.task_ids
+            else:
+                rows = (r.obs.domain == k).nonzero().reshape(-1)
+                states = r.states[rows]
+                task_ids = torch.as_tensor(np.asarray(suite.local_ids, np.int32), device=device)[r.task_ids[rows].long()]
+            t = encoders[k].table
+            expected = host(encoders[k], states, task_ids,
+                            actions=rl.expand(t, np.ascontiguousarray(states.cpu().numpy()),
+                                              np.ascontiguousarray(task_ids.cpu().numpy())))
+            assert_same(batch, expected)
+            assert arrays(batch)["relation_counts"][:, lanes[k]].sum() > 0
