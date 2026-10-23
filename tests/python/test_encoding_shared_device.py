@@ -387,3 +387,49 @@ def test_shared_statics_with_layers_history_and_empty_batches(cases, layout, ind
     empty = encoder.encode(rows)
     same_batch(empty, encoder.encode(to_device(rows, device)))
     same_batch(empty, encoder.encode(to_device(rows, device), capacities=capacities(empty)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_shared_statics_with_numeric_relations_equal_cpu(layout, dtype):
+    """The numeric values stay in the graphs while the static blocks are shared: exact, capacity, stream and
+    collated forms equal the host batch."""
+    from conftest import walk
+
+    device = gpu()
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/m-zenotravel-numeric.txt"))
+    rows = np.asarray(task.encode(walk(task, steps=4, walks=2)))
+    encoder = encoding.FlatRelationEncoder(task, statics="shared", layout=layout, numeric_dtype=dtype)
+    assert encoder.relation_lanes.count("static") and encoder.relation_lanes.count("numeric")
+    host = encoder.encode(rows)
+    words = to_device(rows, device)
+    same_batch(host, encoder.encode(words))
+    caps = {**capacities(host), "numeric": len(host.numeric_values)}
+    batch = encoder.encode(words, capacities=caps)
+    same_batch(encoder.encode(rows, capacities=caps), batch)
+    assert batch.sizes["numeric"] == len(host.numeric_values)
+    assert batch.sizes["static_instances"] == 1
+    stream = encoder.device_stream(len(rows), device=device)
+    stream.append(words)
+    same_batch(encoder.encode(rows, capacities=caps), stream.flush(capacities=caps))
+    half = len(rows) // 2
+    pieces = [encoder.encode(words[:half]), encoder.encode(words[half:])]
+    same_batch(host, encoding.DeviceCollator(pieces).encode())
+    same_batch(encoder.encode(rows, capacities=caps), encoding.DeviceCollator(pieces).encode(capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_shared_statics_with_device_action_rows_equal_cpu(cases, layout, index):
+    device = gpu()
+    case = cases["blocks_table"]
+    encoder = encoding.FlatRelationEncoder(case.source, statics="shared", layout=layout, index_dtype=index,
+                                            include_actions=True)
+    rows, ids = to_device(case.rows, device), to_device(case.ids, device)
+    expected = encoder.encode(case.rows, case.ids, actions=rl.expand(case.source, case.rows, case.ids))
+    actions = rl.expand(case.source, rows, ids, framework="torch")
+    same_batch(expected, encoder.encode(rows, ids, actions=actions))
+    caps = capacities(expected)
+    same_batch(encoder.encode(case.rows, case.ids, actions=rl.expand(case.source, case.rows, case.ids),
+                              capacities=caps),
+               encoder.encode(rows, ids, actions=actions, capacities=caps))
