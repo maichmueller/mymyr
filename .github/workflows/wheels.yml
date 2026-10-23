@@ -1,6 +1,6 @@
 name: Wheels
 
-# CPU wheels for free-threaded CPython 3.14 and 3.15 (Linux x86_64 manylinux_2_34, macOS arm64) and the
+# CPU wheels for GIL and free-threaded CPython 3.14 and 3.15 (Linux x86_64 manylinux_2_34, macOS arm64) and the
 # source distribution. Every wheel is tested with the CPU suite by cibuildwheel (see [tool.cibuildwheel] in
 # pyproject.toml). Pull requests that touch the packaging build the Linux wheels only; a manual run builds the
 # macOS wheels when asked (macOS runners bill about ten times the Linux minutes); the release workflow calls
@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [cp314t, cp315t]
+        python: [cp314, cp314t, cp315, cp315t]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # GCC 16 and the dependency superbuild, installed by ci/wheel_toolchain.sh inside the build container
@@ -85,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [cp314t, cp315t]
+        python: [cp314, cp314t, cp315, cp315t]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Restore the dependency prefix
