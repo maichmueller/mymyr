@@ -61,8 +61,12 @@ struct EncodeParams
     bool horizon_mode = false, horizon_actions = false, horizon_parents = false, horizon_kin = false;
     bool horizon_cousins = false, horizon_exclude = false, horizon_root_target = false;
     bool layered = false;          // some row may have subgoal layers or history steps (LayerSource::layered)
-    bool classify = false, warp_class = false, first_class = true;
+    bool classify = false, first_class = true;
+    u32 fill_class = 1;  // with `classify`: the lanes per graph (fill_lanes_for) of the graphs this launch takes
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
+    // the graph-major thread fill: the dynamic shared memory holds a table of R words per warp after the virtual-node
+    // scratch (fill_shared_bytes)
+    bool relation_table = false;
     // the batch
     encoding::FlatBuffers out;
     encoding::FlatBuffers core;  // relation arrays may be temporary storage for a Simple-only output
@@ -106,8 +110,8 @@ struct EncodeParams
 struct LaunchShape
 {
     u32 lanes = 4;            // lanes per graph of the count kernel: 4, 8 or 32
-    u32 fill_mask = 1;         // bit 0: thread fill, bit 1: warp fill
-    bool warp_fill = false;   // a warp per graph in the fill kernel, else a thread
+    u32 fill_mask = 1;         // the fill classes: bit 0 a thread per graph, bit 1 eight lanes, bit 2 a warp
+    u32 fill_lanes = 1;        // the lanes per graph of one fill launch: 1, 8 or 32
     u64 scan_length = 0;      // entries of the scanned array
     void* scan_temp = nullptr;
     u64 scan_temp_bytes = 0;
@@ -126,21 +130,22 @@ inline constexpr u32 k_encode_block = 128;
 /// The dynamic shared memory a launch may use without opting in.
 inline constexpr u64 k_shared_limit = 48 * 1024;
 
-/// Fill policy for the work of one instance. Graph-major cells benefit from cooperation sooner than relation-major
-/// cells, whose adjacent graphs write adjacent segments.
-__host__ __device__ inline bool warp_fill_for(const encoding::detail::GraphWidth& width, bool relation_major)
+/// The fill classes: the lanes that fill one graph of an instance. One lane while the graph's words, cells and arguments
+/// are few; a warp when every graph writes many static arguments, whose rows the lanes share; else eight lanes, four
+/// graphs per warp, which keeps the lanes of sparse fluent words and small cells busy.
+inline constexpr u32 k_fill_classes[3] = {1, 8, 32};
+__host__ __device__ inline u32 fill_lanes_for(const encoding::detail::GraphWidth& width)
 {
-    return width.words > 8u || width.cells > 128u ||
-           width.args > (relation_major ? 1024u : 128u);
+    if (width.words <= 8u && width.cells <= 128u && width.args <= 128u)
+        return 1;
+    return width.static_args >= 512u ? 32u : 8u;
 }
-
-/// Word and cell bounds can select a warp without reading the cell lists for an argument bound.
-__host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceView& v, bool relation_major)
+__host__ __device__ inline u32 fill_lanes_for(const encoding::detail::InstanceView& v)
 {
-    const encoding::detail::GraphWidth rough{v.words > v.derived_words ? v.words : v.derived_words,
-        v.num_plain_cells > v.num_plain_row_cells ? v.num_plain_cells : v.num_plain_row_cells, 0};
-    return warp_fill_for(rough, relation_major) || warp_fill_for(encoding::detail::graph_width(v), relation_major);
+    return fill_lanes_for(encoding::detail::graph_width(v));
 }
+/// The fill class (an index into k_fill_classes) of a fill with `lanes` lanes per graph.
+__host__ __device__ inline u32 fill_class_of(u32 lanes) { return lanes == 1 ? 0u : lanes == 8 ? 1u : 2u; }
 
 /// The temporary storage of the scan of `length` entries, u64 entries when `wide`: CUB's storage, or the tile states of
 /// the live scan if they are larger.
@@ -151,9 +156,9 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceVi
 /// The dynamic shared memory of the count and fill kernels: the virtual-node scratch of every graph in flight, and, for
 /// the relation-major fill, the argument position of every relation.
 [[nodiscard]] u64 count_shared_bytes(u32 virtual_nodes, u32 lanes);
-[[nodiscard]] u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major);
+[[nodiscard]] u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, u32 lanes, bool relation_major);
 [[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
-[[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
+[[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, u32 lanes, bool relation_major, bool index64);
 
 /// The depth-one horizon builder (encoding_horizon.cu); its scratch holds horizon_builder_scratch_bytes() bytes.
 cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,

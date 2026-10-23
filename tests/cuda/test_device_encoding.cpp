@@ -1449,15 +1449,15 @@ TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
 {
     SKIP_WITHOUT_GPU();
     for (const bool index64 : {false, true})
-        for (const bool warp : {false, true})
+        for (const u32 lanes : cuda::detail::k_fill_classes)
         {
-            const u64 dynamic = cuda::detail::fill_shared_bytes(0, 32, warp, true);
-            const u64 total = cuda::detail::fill_shared_required(0, 32, warp, true, index64);
+            const u64 dynamic = cuda::detail::fill_shared_bytes(0, 32, lanes, true);
+            const u64 total = cuda::detail::fill_shared_required(0, 32, lanes, true, index64);
             ASSERT_GT(total, dynamic);
             const u64 extra = total - dynamic;
             const u32 relations = static_cast<u32>((cuda::detail::k_shared_limit - extra) / 8 + 1);
-            EXPECT_LE(cuda::detail::fill_shared_bytes(0, relations, warp, true), cuda::detail::k_shared_limit);
-            EXPECT_GT(cuda::detail::fill_shared_required(0, relations, warp, true, index64), cuda::detail::k_shared_limit);
+            EXPECT_LE(cuda::detail::fill_shared_bytes(0, relations, lanes, true), cuda::detail::k_shared_limit);
+            EXPECT_GT(cuda::detail::fill_shared_required(0, relations, lanes, true, index64), cuda::detail::k_shared_limit);
         }
 }
 

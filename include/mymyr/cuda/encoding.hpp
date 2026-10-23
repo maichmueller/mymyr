@@ -207,11 +207,13 @@ void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* childr
 /// Uses the caller's stream and storage, with no allocation or host wait. Input CSR and labels must be valid.
 void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream);
 
+/// The lanes that fill one graph.
 enum class FillMode : u8
 {
-    Auto,  // per-instance work and layout select a thread or warp; shared-memory limits may require a warp
-    Thread,
-    Warp,
+    Auto,    // per-instance work selects a thread, a group of eight lanes or a warp; shared-memory limits may require more lanes
+    Thread,  // one lane
+    Group,   // eight lanes of a warp, four graphs per warp
+    Warp,    // the 32 lanes of a warp
 };
 
 /// How a batch is launched. None of it changes the output: the launch order only decides which thread or warp takes

@@ -517,7 +517,8 @@ def device_bench_modes(binary, args, rows, files, encoders, wants):
         mode.fields.update(kernels=info["kernels"], memsets=info["memsets"], other_nodes=info["other_nodes"],
                            scratch_bytes=info["scratch_bytes"], cub_bytes=info["cub_bytes"], cells=info["cells"],
                            relations=info["relations"], wide_totals=info["wide"], device_bench=True,
-                           thread_fills=info.get("thread_fills"), warp_fills=info.get("warp_fills"))
+                           thread_fills=info.get("thread_fills"), group_fills=info.get("group_fills"),
+                           warp_fills=info.get("warp_fills"))
         encoder, reason = encoders[layout]
         if encoder is None:
             mode.skipped(f"layout {layout} unavailable: {reason}", True)
@@ -1255,7 +1256,9 @@ def run_mixed_table(args, gpu, pool):
             record.update(status="skipped", reason=mode.skip)
         else:
             record.update(status="ok", **summarize(mode))
-            if mode.name.startswith("device_encode") and (mode.fields.get("thread_fills") != 1 or mode.fields.get("warp_fills") != 0):
+            fills = mode.fields
+            if mode.name.startswith("device_encode") and (fills.get("thread_fills") != 1 or fills.get("group_fills") or
+                                                          fills.get("warp_fills")):
                 record.update(status="error", reason="the small rows must use one thread fill")
             if mode.stats is not None:
                 record["bytes_per_state"], record["ints_per_state"] = stats_of(mode, cache)

@@ -87,11 +87,11 @@ TEST(DeviceEncodingNumeric, AllArraysMatchHostForBothStoragesLayoutsAndWidths)
                         {"entity_ref", offsets.entity_ref}, {"relation_counts", offsets.relation_counts},
                         {"relation_offsets", offsets.relation_offsets}, {"relation_arg_offsets", offsets.relation_arg_offsets},
                         {"relation_args", offsets.relation_args}, {"numeric_values", offsets.numeric_values}};
-                    for (const auto fill : {cuda::FillMode::Thread, cuda::FillMode::Warp})
+                    for (const auto fill : {cuda::FillMode::Thread, cuda::FillMode::Group, cuda::FillMode::Warp})
                     {
                         cuda::LaunchConfig launch;
                         launch.fill = fill;
-                        launch.count_lanes = fill == cuda::FillMode::Thread ? 4 : 32;
+                        launch.count_lanes = fill == cuda::FillMode::Thread ? 4 : fill == cuda::FillMode::Group ? 8 : 32;
                         encoder.encode(input, output, stream, launch);
                         std::vector<std::byte> result(block.size());
                         cuda::check(cudaMemcpyAsync(result.data(), block.data(), result.size(), cudaMemcpyDeviceToHost, stream), "batch");

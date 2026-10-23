@@ -389,10 +389,11 @@ MYMYR_HD RowValidity row_validity(const ContextView& context, i32 instance, u32 
                         derived_goals, goal_derived_words);
 }
 
-/// Conservative work of one instance without expansion rows, including either instance or row goals.
+/// Conservative work of one instance without expansion rows, including either instance or row goals: its words, its
+/// cells, a bound of its arguments, and the arguments of its static cells that every graph writes.
 struct GraphWidth
 {
-    u64 words = 0, cells = 0, args = 0;
+    u64 words = 0, cells = 0, args = 0, static_args = 0;
 };
 MYMYR_HD GraphWidth graph_width(const InstanceView& v)
 {
@@ -408,6 +409,8 @@ MYMYR_HD GraphWidth graph_width(const InstanceView& v)
         {
             const Cell& c = cells[i];
             args += (u64{c.b - c.a} + (is_goal_op(c.op) ? c.d - c.c : 0u)) * c.arity;
+            if (own == 0 && c.op == static_cast<u32>(CellOp::Static) && !is_shared_static(c))
+                out.static_args += u64{c.b - c.a} * c.arity;
         }
         out.args = args > out.args ? args : out.args;
     }
@@ -2501,8 +2504,9 @@ MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g
 /// which start at `tuple_base` and `arg_base`, and the tuples' arguments. `totals` is count_graph's result for the same
 /// graph; `target_base` is where the graph's targets start in the target arrays; `virtual_scratch` is as in count_graph.
 /// The end entries of the offset arrays are the caller's. A loop over begin_graph and fill_cell_at: the cells of an
-/// instance are sorted by relation, and the relations between them are empty.
-template<class I, bool Layered>
+/// instance are sorted by relation, and the relations between them are empty. `CellArrays` false leaves the counts and
+/// offsets of the segments to the caller (they follow from the cell counts alone).
+template<class I, bool Layered, bool CellArrays = true>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
                          u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr, u64 history_base = 0,
@@ -2526,34 +2530,39 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
     for (u32 i = 0; i < num_cells; ++i)
     {
         const Cell& c = cells[i];
-        for (; r < c.relation; ++r)
+        if constexpr (CellArrays)
         {
+            for (; r < c.relation; ++r)
+            {
+                offsets[r] = static_cast<I>(tuples);
+                arg_offsets[r] = static_cast<I>(args);
+                if (counts)
+                    counts[r] = static_cast<I>(0);
+            }
             offsets[r] = static_cast<I>(tuples);
             arg_offsets[r] = static_cast<I>(args);
-            if (counts)
-                counts[r] = static_cast<I>(0);
         }
-        offsets[r] = static_cast<I>(tuples);
-        arg_offsets[r] = static_cast<I>(args);
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, args_out + args)
                       : Layered && cell_counts && cell_counts[i] == 0
                           ? 0u
                           : fill_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor,
                                                      out, args_out + args);
-        if (counts)
-            counts[r] = static_cast<I>(n);
+        if constexpr (CellArrays)
+            if (counts)
+                counts[r] = static_cast<I>(n);
         tuples += n;
         args += static_cast<u64>(n) * c.arity;
-        ++r;
+        r = c.relation + 1;
     }
-    for (; r < R; ++r)
-    {
-        offsets[r] = static_cast<I>(tuples);
-        arg_offsets[r] = static_cast<I>(args);
-        if (counts)
-            counts[r] = static_cast<I>(0);
-    }
+    if constexpr (CellArrays)
+        for (; r < R; ++r)
+        {
+            offsets[r] = static_cast<I>(tuples);
+            arg_offsets[r] = static_cast<I>(args);
+            if (counts)
+                counts[r] = static_cast<I>(0);
+        }
 }
 
 /// Where the arguments of a relation-major cell go, read from the batch's scanned segment arrays: the segment's entry of

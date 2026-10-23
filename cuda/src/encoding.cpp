@@ -980,7 +980,7 @@ namespace
 {
 [[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
 
-/// The count kernel's lanes per graph and the fill classes (bit 0: one thread per graph, bit 1: a warp per graph) that
+/// The count kernel's lanes per graph and the fill classes (bit c: the lanes detail::k_fill_classes[c] per graph) that
 /// the first `instances` instances of `widths` launch with. Throws std::invalid_argument when the shared memory of a
 /// block does not hold what a kernel needs.
 struct LaunchPlan
@@ -1001,21 +1001,24 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
             }
     if (detail::count_shared_required(virtual_nodes, lanes) > detail::k_shared_limit)
         invalid("the schema has too many predicate virtual nodes for the count kernel");
-    auto fits = [&](bool warp)
+    auto fits = [&](u32 fill_lanes)
     {
-        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(relations), warp, relation_major, index64) <=
-               detail::k_shared_limit;
+        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(relations), fill_lanes, relation_major,
+                                            index64) <= detail::k_shared_limit;
     };
     u32 fill_mask = 0;
     for (u64 instance = 0; instance < std::min<u64>(instances, widths.size()); ++instance)
     {
-        bool warp = launch.fill == FillMode::Warp ||
-                    (launch.fill == FillMode::Auto && detail::warp_fill_for(widths[instance], relation_major));
-        if (!fits(warp) && launch.fill == FillMode::Auto)
-            warp = true;
-        if (!fits(warp))
+        u32 fill_lanes = launch.fill == FillMode::Thread ? 1u
+                         : launch.fill == FillMode::Group ? 8u
+                         : launch.fill == FillMode::Warp  ? 32u
+                                                          : detail::fill_lanes_for(widths[instance]);
+        // more lanes per graph keep fewer graphs' scratch in a block
+        while (launch.fill == FillMode::Auto && fill_lanes < 32 && !fits(fill_lanes))
+            fill_lanes = fill_lanes == 1 ? 8u : 32u;
+        if (!fits(fill_lanes))
             invalid("the schema has too many predicate virtual nodes or relations for the fill kernel");
-        fill_mask |= warp ? 2u : 1u;
+        fill_mask |= 1u << detail::fill_class_of(fill_lanes);
     }
     return {lanes, fill_mask ? fill_mask : 1u};
 }

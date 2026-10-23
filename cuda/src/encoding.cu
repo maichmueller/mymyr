@@ -349,7 +349,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
     RowView r;
     ed::GraphTotals t = ed::empty_totals();
     bool ok = row_of<Live, Layered>(p, g, r);
-    if (p.classify && (ok ? warp_fill_for(r.v, p.relation_major) != p.warp_class : !p.first_class))
+    if (p.classify && (ok ? fill_lanes_for(r.v) != p.fill_class : !p.first_class))
         return;
     if constexpr (Live)
         if (p.relation_major)
@@ -764,9 +764,155 @@ __device__ void fill_simple(const Group& grp, const EncodeParams& p, const RowVi
     }
 }
 
+/// The counts and offsets of the R segments of graph g of a graph-major batch from the counts of its cells, by the lanes
+/// of a warp together; the values are those fill_graph writes, and the stores of a round fall into the graph's
+/// segments, which are contiguous. With `table` (R words of shared memory for the warp) the cells' counts are scattered
+/// to their relations and a lane takes a relation: a scan over the relations gives every segment's offsets, three
+/// coalesced stores per 32 relations. Without it a lane takes a cell, a scan over the cells places it, and the lane
+/// writes the cell's segment and the empty segments up to the next cell.
+template<class I>
+__device__ void fill_cell_arrays(const EncodeParams& p, const ed::GraphOut<I>& out, u64 g, const ed::CellList& list,
+                                 u64 tuple_base, u64 arg_base, u32* table)
+{
+    const LaneGroup<k_warp> grp;
+    const u32 lane = grp.lane();
+    const u32 R = p.context.num_relations;
+    const u32* counts = p.cell_counts + g * p.cell_stride;
+    I* const offsets = out.relation_offsets + g * R;
+    I* const arg_offsets = out.relation_arg_offsets + g * R;
+    I* const relation_counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
+    u64 tuples = tuple_base, args = arg_base;
+    if (table)
+    {
+        for (u32 r = lane; r < R; r += k_warp)
+            table[r] = 0;
+        grp.sync();
+        for (u32 i = lane; i < list.count; i += k_warp)
+            table[list.cells[i].relation] = counts[i];
+        grp.sync();
+        for (u32 round = 0; round < R; round += k_warp)
+        {
+            const u32 r = round + lane;
+            const u32 n = r < R ? table[r] : 0u;
+            const u32 a = r < R ? n * p.context.relation_arity[r] : 0u;
+            u32 round_tuples = 0, round_args = 0;
+            const u32 tuples_before = grp.exclusive_scan(n, round_tuples);
+            const u32 args_before = grp.exclusive_scan(a, round_args);
+            if (r < R)
+            {
+                offsets[r] = static_cast<I>(tuples + tuples_before);
+                arg_offsets[r] = static_cast<I>(args + args_before);
+                if (relation_counts)
+                    relation_counts[r] = static_cast<I>(n);
+            }
+            tuples += round_tuples;
+            args += round_args;
+        }
+        grp.sync();  // the table is the next graph's
+        return;
+    }
+    auto empty = [&](u32 from, u32 to, u64 t, u64 a)
+    {
+        for (u32 r = from; r < to; ++r)
+        {
+            offsets[r] = static_cast<I>(t);
+            arg_offsets[r] = static_cast<I>(a);
+            if (relation_counts)
+                relation_counts[r] = static_cast<I>(0);
+        }
+    };
+    const u32 first = list.count ? list.cells[0].relation : R;
+    for (u32 r = lane; r < first; r += k_warp)
+        empty(r, r + 1, tuple_base, arg_base);
+    for (u32 round = 0; round < list.count; round += k_warp)
+    {
+        const u32 i = round + lane;
+        const bool cell = i < list.count;
+        const u32 n = cell ? counts[i] : 0u;
+        const u32 arity = cell ? list.cells[i].arity : 0u;
+        u32 round_tuples = 0, round_args = 0;
+        const u32 tuples_before = grp.exclusive_scan(n, round_tuples);
+        const u32 args_before = grp.exclusive_scan(n * arity, round_args);
+        if (cell)
+        {
+            const u32 r = list.cells[i].relation;
+            const u32 next = i + 1 < list.count ? list.cells[i + 1].relation : R;
+            const u64 t = tuples + tuples_before, a = args + args_before;
+            offsets[r] = static_cast<I>(t);
+            arg_offsets[r] = static_cast<I>(a);
+            if (relation_counts)
+                relation_counts[r] = static_cast<I>(n);
+            empty(r + 1, next, t + n, a + u64{n} * arity);
+        }
+        tuples += round_tuples;
+        args += round_args;
+    }
+}
+
+/// The thread fill of a graph-major batch without subgoal layers or history: a thread writes its graph's entities and
+/// arguments, then the warp writes the segment counts and offsets of its graphs (fill_cell_arrays), one graph after the
+/// other. Every lane of a warp with a graph of the batch takes part.
+template<class I, bool Live>
+__device__ void fill_thread_graphs(const EncodeParams& p, const Totals& totals, const ed::GraphOut<I>& out,
+                                   I* entity_offsets, u32* virtual_base, const ScanPositions& positions)
+{
+    u32* table = p.relation_table
+                     ? virtual_base + k_block * p.context.num_virtual + (threadIdx.x / k_warp) * p.context.num_relations
+                     : nullptr;
+    const u64 G = p.graphs;
+    const u64 row = G + 1;
+    const u64 gi = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const u32 lane = threadIdx.x % k_warp;
+    if (gi - lane >= G)
+        return;  // the whole warp
+    u64 g = 0;
+    bool mine = false;
+    RowView r;
+    if (gi < G)
+    {
+        g = p.order ? p.order[gi] : gi;
+        if (g >= G)
+            atomicOr(p.flags, 1u);
+        // an invalid row is not reached: it has set the input flag
+        else if (row_of<Live, false>(p, g, r))
+            mine = !p.classify || fill_lanes_for(r.v) == p.fill_class;
+    }
+    const u64 tuple_base = mine ? totals.get(2 * row + g) - totals.get(2 * row) : 0;
+    const u64 arg_base = mine ? totals.get(3 * row + g) - totals.get(3 * row) : 0;
+    ed::CellList list{nullptr, 0};
+    if (mine)
+    {
+        const u32 virtual_nodes = p.context.num_virtual;
+        u32* virtual_scratch = virtual_nodes ? virtual_base + threadIdx.x * virtual_nodes : nullptr;
+        const u64 entity_base = totals.get(g);
+        const u64 target_base = totals.get(row + g) - totals.get(row);
+        const u64 history_base = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
+        const u64 numeric_base = p.numeric_at ? totals.get(p.numeric_at + g) - totals.get(p.numeric_at) : 0;
+        const u32* counts = p.cell_counts + g * p.cell_stride;
+        const ed::GraphTotals graph =
+            ed::totals_from_counts<false>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
+        p.out.task_ids[g] = static_cast<i32>(r.instance);
+        entity_offsets[g] = static_cast<I>(entity_base);
+        ed::fill_graph<I, false, false>(r.v, r.in, g, tuple_base, arg_base, entity_base, graph, out, target_base,
+                                        virtual_scratch, virtual_nodes ? counts : nullptr, history_base, numeric_base);
+        fill_simple<I, false, false>(ed::SoloGroup{}, p, r, g, graph, out, positions, entity_base, tuple_base, arg_base,
+                                     counts);
+        list = ed::cell_list<false>(r.v, r.in);
+    }
+    for (u32 filled = __ballot_sync(~0u, mine); filled; filled &= filled - 1)
+    {
+        const u32 j = __ffs(filled) - 1;
+        const ed::CellList cells{reinterpret_cast<const ed::Cell*>(__shfl_sync(
+                                     ~0u, reinterpret_cast<unsigned long long>(list.cells), j)),
+                                 __shfl_sync(~0u, list.count, j)};
+        fill_cell_arrays<I>(p, out, __shfl_sync(~0u, g, j), cells, __shfl_sync(~0u, tuple_base, j),
+                            __shfl_sync(~0u, arg_base, j), table);
+    }
+}
+
 /// The fill of the graphs. `blocks` is the grid the loops over the cells and the tails stride with: the whole grid, or a
 /// live launch's active blocks.
-template<class I, bool Warp, bool RelationMajor, bool Live, bool Layered>
+template<class I, u32 Lanes, bool RelationMajor, bool Live, bool Layered>
 __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
 {
     extern __shared__ __align__(8) unsigned char shared_bytes[];
@@ -835,8 +981,13 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     }
 
     // the graphs
+    if constexpr (Lanes == 1 && !RelationMajor && !Layered)
+    {
+        fill_thread_graphs<I, Live>(p, totals, out, entity_offsets, virtual_base, positions);
+        return;
+    }
     const u64 thread = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const u64 gi = Warp ? thread / k_warp : thread;
+    const u64 gi = thread / Lanes;
     if (gi >= G)
         return;
     const u64 g = p.order ? p.order[gi] : gi;
@@ -848,11 +999,11 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     RowView r;
     if (!row_of<Live, Layered>(p, g, r))
         return;  // not reached: an invalid row has set the input flag
-    if (p.classify && warp_fill_for(r.v, p.relation_major) != p.warp_class)
+    if (p.classify && fill_lanes_for(r.v) != p.fill_class)
         return;
     const u32 virtual_nodes = p.context.num_virtual;
     u32* virtual_scratch =
-        virtual_nodes ? virtual_base + (Warp ? threadIdx.x / k_warp : threadIdx.x) * virtual_nodes : nullptr;
+        virtual_nodes ? virtual_base + (threadIdx.x / Lanes) * virtual_nodes : nullptr;
     const u64 entity_base = totals.get(g);
     const u64 target_base = totals.get(row + g) - totals.get(row);
     const u64 history_base = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
@@ -866,9 +1017,9 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     };
     if constexpr (RelationMajor)
     {
-        if constexpr (Warp)
+        if constexpr (Lanes > 1)
         {
-            const LaneGroup<k_warp> grp;
+            const LaneGroup<Lanes> grp;
             if constexpr (Layered)
                 ed::bind_levels(grp, r.v, r.in, r.layers, level_storage);
             const ed::GraphTotals graph = ed::totals_from_counts<Layered>(
@@ -896,9 +1047,9 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
         const u32* counts = p.cell_counts + g * p.cell_stride;
         const u64 tuple_base = totals.get(2 * row + g) - totals.get(2 * row);
         const u64 arg_base = totals.get(3 * row + g) - totals.get(3 * row);
-        if constexpr (Warp)
+        if constexpr (Lanes > 1)
         {
-            const LaneGroup<k_warp> grp;
+            const LaneGroup<Lanes> grp;
             if constexpr (Layered)
                 ed::bind_levels(grp, r.v, r.in, r.layers, level_storage);
             const ed::GraphTotals graph =
@@ -925,14 +1076,14 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
 
 /// A live launch is sized for the capacity: the blocks past those of the live graphs (and past the k_zero_blocks that
 /// zero the tails) exit at once.
-template<class I, bool Warp, bool RelationMajor, bool Live, bool Layered>
+template<class I, u32 Lanes, bool RelationMajor, bool Live, bool Layered>
 __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
 {
     static_assert(!(Live && Layered));
     if constexpr (Live)
     {
         const EncodeParams q = live_params(p);
-        const u64 threads = Warp ? q.graphs * k_warp : q.graphs;
+        const u64 threads = q.graphs * Lanes;
         u64 active = (threads + k_block - 1) / k_block;
         if (active < k_zero_blocks)
             active = k_zero_blocks < gridDim.x ? k_zero_blocks : gridDim.x;
@@ -940,10 +1091,10 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
             active = 1;
         if (blockIdx.x >= active)
             return;
-        fill_graphs<I, Warp, RelationMajor, true, false>(q, active);
+        fill_graphs<I, Lanes, RelationMajor, true, false>(q, active);
     }
     else
-        fill_graphs<I, Warp, RelationMajor, false, Layered>(p, gridDim.x);
+        fill_graphs<I, Lanes, RelationMajor, false, Layered>(p, gridDim.x);
 }
 
 // ------------------------------------------------------------------------------------------------ launches
@@ -969,28 +1120,42 @@ cudaError_t launch_count(const EncodeParams& p, cudaStream_t stream)
     return cudaPeekAtLastError();
 }
 
-template<class I, bool Warp, bool RelationMajor, bool Live>
-cudaError_t launch_fill_of(const EncodeParams& p, cudaStream_t stream)
+template<class I, u32 Lanes, bool RelationMajor, bool Live>
+cudaError_t launch_fill_of(const EncodeParams& params, cudaStream_t stream)
 {
-    const u64 threads = Warp ? p.graphs * k_warp : p.graphs;
-    const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, Warp, RelationMajor);
+    EncodeParams p = params;
+    const u64 threads = p.graphs * Lanes;
+    u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, Lanes, RelationMajor);
+    if constexpr (Lanes == 1 && !RelationMajor)
+    {
+        // the relation table of fill_cell_arrays when it fits, else its per-cell form
+        const u64 table = u64{k_block / k_warp} * p.context.num_relations * sizeof(u32);
+        p.relation_table = fill_shared_required(p.context.num_virtual, p.context.num_relations, 1, false,
+                                                p.index64) + table <= k_shared_limit;
+        if (p.relation_table)
+            shared += table;
+    }
     // the argument table of a relation-major batch is built by every block, and its offsets copy needs at least one
     // thread per cell round: a grid of the graphs' blocks is enough, the loop strides over the cells
     if constexpr (Live)
-        fill_kernel<I, Warp, RelationMajor, true, false><<<blocks_for(threads), k_block, shared, stream>>>(p);
+        fill_kernel<I, Lanes, RelationMajor, true, false><<<blocks_for(threads), k_block, shared, stream>>>(p);
     else if (p.layered)
-        fill_kernel<I, Warp, RelationMajor, false, true><<<blocks_for(threads), k_block, shared, stream>>>(p);
+        fill_kernel<I, Lanes, RelationMajor, false, true><<<blocks_for(threads), k_block, shared, stream>>>(p);
     else
-        fill_kernel<I, Warp, RelationMajor, false, false><<<blocks_for(threads), k_block, shared, stream>>>(p);
+        fill_kernel<I, Lanes, RelationMajor, false, false><<<blocks_for(threads), k_block, shared, stream>>>(p);
     return cudaPeekAtLastError();
 }
 
 template<class I, bool Live>
 cudaError_t launch_fill_index(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
-    if (shape.warp_fill)
-        return p.relation_major ? launch_fill_of<I, true, true, Live>(p, stream) : launch_fill_of<I, true, false, Live>(p, stream);
-    return p.relation_major ? launch_fill_of<I, false, true, Live>(p, stream) : launch_fill_of<I, false, false, Live>(p, stream);
+    switch (shape.fill_lanes)
+    {
+    case 1: return p.relation_major ? launch_fill_of<I, 1, true, Live>(p, stream) : launch_fill_of<I, 1, false, Live>(p, stream);
+    case 8: return p.relation_major ? launch_fill_of<I, 8, true, Live>(p, stream) : launch_fill_of<I, 8, false, Live>(p, stream);
+    case 32: return p.relation_major ? launch_fill_of<I, 32, true, Live>(p, stream) : launch_fill_of<I, 32, false, Live>(p, stream);
+    default: return cudaErrorInvalidValue;
+    }
 }
 
 u64 live_scan_bytes(u64 length) { return live_scan::buffer_words(live_scan::tiles_for(length - 1), 1) * sizeof(u64); }
@@ -1012,9 +1177,9 @@ u64 count_shared_bytes(u32 virtual_nodes, u32 lanes)
     return u64{k_block / lanes} * virtual_nodes * sizeof(u32);
 }
 
-u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major)
+u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, u32 lanes, bool relation_major)
 {
-    const u64 graphs_in_flight = warp_fill ? k_block / k_warp : k_block;
+    const u64 graphs_in_flight = k_block / lanes;
     return (relation_major ? align8(u64{relations} * 8) : 0) + graphs_in_flight * virtual_nodes * sizeof(u32);
 }
 
@@ -1028,12 +1193,16 @@ template<class Kernel> u64 static_shared(Kernel kernel)
 }
 #include "encoding_structured.cuh"
 
-template<class I, bool Warp, bool Relation> u64 fill_static()
+template<class I, u32 Lanes, bool Relation> u64 fill_static()
 {
-    static const u64 bytes = std::max({static_shared(fill_kernel<I, Warp, Relation, false, false>),
-                                       static_shared(fill_kernel<I, Warp, Relation, false, true>),
-                                       static_shared(fill_kernel<I, Warp, Relation, true, false>)});
+    static const u64 bytes = std::max({static_shared(fill_kernel<I, Lanes, Relation, false, false>),
+                                       static_shared(fill_kernel<I, Lanes, Relation, false, true>),
+                                       static_shared(fill_kernel<I, Lanes, Relation, true, false>)});
     return bytes;
+}
+template<class I, bool Relation> u64 fill_static_of(u32 lanes)
+{
+    return lanes == 1 ? fill_static<I, 1, Relation>() : lanes == 8 ? fill_static<I, 8, Relation>() : fill_static<I, 32, Relation>();
 }
 }
 u64 count_shared_required(u32 virtual_nodes, u32 lanes)
@@ -1046,13 +1215,11 @@ u64 count_shared_required(u32 virtual_nodes, u32 lanes)
                                    static_shared(count_kernel<32, true, false>)});
     return count_shared_bytes(virtual_nodes, lanes) + (lanes == 4 ? a : lanes == 8 ? b : c);
 }
-u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp, bool relation, bool index64)
+u64 fill_shared_required(u32 virtual_nodes, u32 relations, u32 lanes, bool relation, bool index64)
 {
-    const u64 bytes = index64 ? (warp ? (relation ? fill_static<i64, true, true>() : fill_static<i64, true, false>())
-                                     : (relation ? fill_static<i64, false, true>() : fill_static<i64, false, false>()))
-                             : (warp ? (relation ? fill_static<i32, true, true>() : fill_static<i32, true, false>())
-                                     : (relation ? fill_static<i32, false, true>() : fill_static<i32, false, false>()));
-    return fill_shared_bytes(virtual_nodes, relations, warp, relation) + bytes;
+    const u64 bytes = index64 ? (relation ? fill_static_of<i64, true>(lanes) : fill_static_of<i64, false>(lanes))
+                              : (relation ? fill_static_of<i32, true>(lanes) : fill_static_of<i32, false>(lanes));
+    return fill_shared_bytes(virtual_nodes, relations, lanes, relation) + bytes;
 }
 
 cudaError_t launch_horizon_instances(const EncodeParams& p, i32* instances, cudaStream_t stream)
@@ -1088,13 +1255,13 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
             return error;
     }
     bool first = true;
-    for (u32 kind = 0; !structured && kind < 2; ++kind)
+    for (u32 kind = 0; !structured && kind < 3; ++kind)
     {
         if (!(shape.fill_mask & (1u << kind)))
             continue;
         EncodeParams row = p;
-        row.classify = shape.fill_mask == 3;
-        row.warp_class = kind != 0;
+        row.classify = (shape.fill_mask & (shape.fill_mask - 1)) != 0;
+        row.fill_class = k_fill_classes[kind];
         row.first_class = first;
         first = false;
         switch (shape.lanes)
@@ -1134,7 +1301,7 @@ cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaSt
     if (p.actions.offsets || p.horizon_mode)
     {
         const u32 blocks = std::max<u32>(1, blocks_for(p.graphs * k_warp));
-        const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, true, p.relation_major);
+        const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, k_warp, p.relation_major);
         p.index64 ? structured_fill_kernel<i64><<<blocks, k_block, shared, stream>>>(p)
                   : structured_fill_kernel<i32><<<blocks, k_block, shared, stream>>>(p);
         const cudaError_t error = cudaPeekAtLastError();
@@ -1150,17 +1317,17 @@ cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaSt
         return cudaPeekAtLastError();
     }
     bool first = true;
-    for (u32 kind = 0; kind < 2; ++kind)
+    for (u32 kind = 0; kind < 3; ++kind)
     {
         if (!(shape.fill_mask & (1u << kind)))
             continue;
         EncodeParams row = p;
-        row.classify = shape.fill_mask == 3;
-        row.warp_class = kind != 0;
+        row.classify = (shape.fill_mask & (shape.fill_mask - 1)) != 0;
+        row.fill_class = k_fill_classes[kind];
         row.first_class = first;
         first = false;
         LaunchShape launch = shape;
-        launch.warp_fill = kind != 0;
+        launch.fill_lanes = k_fill_classes[kind];
         const cudaError_t error = p.index64 ? launch_fill_index<i64, Live>(row, launch, stream)
                                           : launch_fill_index<i32, Live>(row, launch, stream);
         if (error != cudaSuccess)

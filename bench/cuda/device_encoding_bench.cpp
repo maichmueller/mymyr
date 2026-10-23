@@ -3,7 +3,7 @@
 //
 //   mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W [--n 16384] [--rounds 20]
 //                               [--replays 10] [--device 0] [--secondary-problem P.pddl]
-//                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams] [--collate-slices K]
+//                               [--lanes 4|8|32] [--fill auto|thread|group|warp] [--streams] [--collate-slices K]
 //                               [--ring-rows L] [--instances K]
 //                               [--levels L] [--history H] [--max-steps M] [--literals K] [--targets]
 //                               [--cpu-threads T] [--outputs relations|simple|both]
@@ -53,7 +53,7 @@ namespace
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W "
-                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp] [--streams] "
+                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|group|warp] [--streams] "
                  "[--levels L] [--history H] [--max-steps M] [--literals K] [--targets] [--cpu-threads T]\n",
                  message);
     std::exit(2);
@@ -135,10 +135,12 @@ Args parse(int argc, char** argv)
                 a.launch.fill = cuda::FillMode::Auto;
             else if (mode == "thread")
                 a.launch.fill = cuda::FillMode::Thread;
+            else if (mode == "group")
+                a.launch.fill = cuda::FillMode::Group;
             else if (mode == "warp")
                 a.launch.fill = cuda::FillMode::Warp;
             else
-                usage("--fill takes auto, thread or warp");
+                usage("--fill takes auto, thread, group or warp");
         }
         else
             usage(("unknown flag " + flag).c_str());
@@ -233,7 +235,7 @@ struct LayerRows
 
 struct NodeCounts
 {
-    u32 kernels = 0, memsets = 0, others = 0, thread_fills = 0, warp_fills = 0;
+    u32 kernels = 0, memsets = 0, others = 0, thread_fills = 0, group_fills = 0, warp_fills = 0;
 };
 
 NodeCounts count_nodes(cudaGraph_t graph)
@@ -254,9 +256,13 @@ NodeCounts count_nodes(cudaGraph_t graph)
             const char* symbol = nullptr;
             cuda::check(cudaFuncGetName(&symbol, params.func), "cudaFuncGetName");
             const std::string name(symbol);
+            // the lanes per graph are the fill kernel's first unsigned template argument (1, 8 or 32)
             const auto fill = name.find("fill_kernel");
-            if (fill != std::string::npos)
-                (name.find("Lb1E", fill) < name.find("Lb0E", fill) ? counts.warp_fills : counts.thread_fills) += 1;
+            const auto lanes = fill == std::string::npos ? fill : name.find("Lj", fill);
+            if (lanes != std::string::npos)
+                (name.compare(lanes, 4, "Lj1E") == 0   ? counts.thread_fills
+                 : name.compare(lanes, 4, "Lj8E") == 0 ? counts.group_fills
+                                                       : counts.warp_fills) += 1;
         }
         (type == cudaGraphNodeTypeKernel ? counts.kernels : type == cudaGraphNodeTypeMemset ? counts.memsets : counts.others) += 1;
     }
@@ -611,12 +617,12 @@ void print_streams(const char* name, const StreamSession& s)
 void print_layout(const char* name, const Session& s)
 {
     std::printf("\"%s\":{\"kernels\":%u,\"memsets\":%u,\"other_nodes\":%u,\"scratch_bytes\":%llu,\"cub_bytes\":%llu,"
-                "\"thread_fills\":%u,\"warp_fills\":%u,\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
+                "\"thread_fills\":%u,\"group_fills\":%u,\"warp_fills\":%u,\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
                 "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu,\"history\":%llu,"
                 "\"stores_relations\":%s,\"stores_simple\":%s}",
                 name, s.nodes.kernels, s.nodes.memsets, s.nodes.others,
                 static_cast<unsigned long long>(s.scratch.bytes), static_cast<unsigned long long>(s.scratch.scan_temp_bytes),
-                s.nodes.thread_fills, s.nodes.warp_fills, static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
+                s.nodes.thread_fills, s.nodes.group_fills, s.nodes.warp_fills, static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
                 s.scratch.wide ? "true" : "false", static_cast<unsigned long long>(s.layout_of.sizes),
                 s.sizes_match ? "true" : "false", static_cast<unsigned long long>(s.host_sizes.entities),
                 static_cast<unsigned long long>(s.host_sizes.tuples), static_cast<unsigned long long>(s.host_sizes.args),
