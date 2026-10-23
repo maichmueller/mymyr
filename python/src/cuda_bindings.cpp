@@ -481,19 +481,24 @@ PyContextPtr table_context(const SuiteRef& ref, nb::handle ctx, int device)
     return slot_context(ref.cuda_mutex(), ref.cuda(), ctx, device);
 }
 
-/// An idle device expander of (suite, context), or a new one; it goes back to the idle list when the lease ends.
+/// An idle device expander of (suite, context), or a new one; it goes back to the idle list when the lease ends. An
+/// idle expander last used on stream s is preferred, so that callers on their own streams keep their expanders (a
+/// stream change orders the new stream after the old one and moves the expander's scratch).
 class ExpanderLease
 {
 public:
-    ExpanderLease(const SuiteRef& ref, const PyContextPtr& c) : m_ref(ref), m_ctx(c->ctx)
+    ExpanderLease(const SuiteRef& ref, const PyContextPtr& c, cudaStream_t s) : m_ref(ref), m_ctx(c->ctx)
     {
         {
             std::lock_guard lock(ref.cuda_mutex());
             auto& v = slot_cuda(ref.cuda()).idle[m_ctx.get()];
             if (!v.empty())
             {
-                m_x = std::move(v.back());
-                v.pop_back();
+                const cudaStream_t want = s ? s : m_ctx->stream();
+                auto it = std::find_if(v.rbegin(), v.rend(), [&](const auto& x) { return x->stream() == want; });
+                auto at = it == v.rend() ? v.end() - 1 : std::prev(it.base());
+                m_x = std::move(*at);
+                v.erase(at);
             }
         }
         if (!m_x)
@@ -710,7 +715,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     out.derived_words = f.derived_words;
     out.derived = f.has_derived && f.derived_words ? reinterpret_cast<u64*>(b + p.off_derived) : nullptr;
     {
-        ExpanderLease ex(ref, c);
+        ExpanderLease ex(ref, c, f.os.s);
         nb::gil_scoped_release release;
         ex->set_stream(f.os.s);
         ex->pad(f.view(), f.rows, out);
@@ -743,7 +748,7 @@ nb::object device_expand(const ExpandArgs& a)
     const u32 L = tt.label_width();
     DeviceFlat f;
     {
-        ExpanderLease ex(ref, c);
+        ExpanderLease ex(ref, c, os.s);
         nb::gil_scoped_release release;
         ex->set_stream(os.s);
         const u64 total = ex->count({w.data, w.rows, atom_words, w.stride, NN}, ids, opt);
@@ -967,7 +972,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         return r;
     }
     {
-        ExpanderLease ex(ref, c);
+        ExpanderLease ex(ref, c, os.s);
         nb::gil_scoped_release release;
         ex->set_stream(os.s);
         ex->expand(view, ids, x, opt);

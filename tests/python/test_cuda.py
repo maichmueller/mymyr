@@ -13,6 +13,7 @@ import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # JAX would take 75% of the GPU otherwise
 
 import random  # noqa: E402
+import threading  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
@@ -396,3 +397,60 @@ def test_presizing_hints_above_the_state_id_limit_raise(ctx, blocks):
     with pytest.raises(ValueError, match=rf"^mymyr: device state space: expected_states above the state id limit \({STATE_ID_LIMIT}\)$"):
         mc.generate_state_space(blocks, ctx=ctx, expected_states=2**63)
     assert mc.brfs(blocks, ctx=ctx, expected_states=1000).solved
+
+
+def test_device_expand_alternating_streams_keeps_its_scratch_size():
+    # one table's expander serves calls on whatever stream they name: moving it between streams reallocates its
+    # scratch on the new stream at the size it has, so any number of moves costs no more memory than one
+    torch = torch_cuda()
+    c = mc.Context(0, max_bytes=256 << 20)
+    task = text_task("gripper__prob05")
+    host = np.asarray(task.encode(walk(task, steps=3, walks=1)))
+    want = np.asarray(rl.expand(task, host).offsets)
+    rows = torch.from_numpy(host.view(np.int64)).cuda()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    high = None
+    for i in range(64):
+        s = streams[i % 2]
+        with torch.cuda.stream(s):
+            x = rl.expand(task, rows, framework="torch", stream=s, ctx=c)
+            s.synchronize()
+            np.testing.assert_array_equal(x.offsets.cpu().numpy(), want)
+        del x
+        if i == 3:
+            high = c.usage()["used_high"]
+    assert c.usage()["used_high"] <= high + (1 << 20)
+    c.synchronize()
+
+
+def test_device_expand_from_threads_on_their_own_streams():
+    # free-threaded callers share the table's idle expanders: each call leases one, on the caller's stream
+    torch = torch_cuda()
+    c = mc.Context(0, max_bytes=256 << 20)
+    task = text_task("gripper__prob05")
+    host = np.asarray(task.encode(walk(task, steps=3, walks=1)))
+    want = rl.expand(task, host, goal=True)
+    rows = torch.from_numpy(host.view(np.int64)).cuda()
+    torch.cuda.synchronize()
+    errors = []
+
+    def work():
+        try:
+            s = torch.cuda.Stream()
+            with torch.cuda.stream(s):
+                for i in range(48):
+                    x = rl.expand(task, rows, framework="torch", stream=s, ctx=c, goal=True, k=16 if i % 2 else None)
+                    s.synchronize()
+                    np.testing.assert_array_equal(x.offsets.cpu().numpy(), np.asarray(want.offsets))
+                    np.testing.assert_array_equal(x.succ.cpu().numpy().view(np.uint64), np.asarray(want.succ))
+                    np.testing.assert_array_equal(x.goal.cpu().numpy(), np.asarray(want.goal))
+        except Exception as e:  # noqa: BLE001 (reported below, on the test's thread)
+            errors.append(e)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[0]
+    c.synchronize()
