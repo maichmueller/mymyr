@@ -40,5 +40,7 @@ def test_child_interpreter_configuration(flags, tmp_path):
     assert observed["ignore_environment"] == int("-I" in flags or "-E" in flags)
     if "-X" in flags:
         assert observed["xoptions"]["utf8"] == "1"
-    assert observed["path"] == [str(pathlib.Path(path or ".").resolve()) for path in parent_path]
+    assert [pathlib.Path(path or ".").resolve() for path in observed["path"]] == [
+        pathlib.Path(path or ".").resolve() for path in parent_path
+    ]
     assert observed["package"] == parent_package
