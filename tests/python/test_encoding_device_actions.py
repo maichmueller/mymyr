@@ -1,5 +1,6 @@
 """Canonical action labels and depth-one device horizons equal their host encodings."""
 
+from functools import lru_cache
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,7 +31,9 @@ def same(host, device):
     expected, actual = host.as_dict(), device.as_dict("numpy")
     assert expected.keys() == actual.keys()
     for name in expected:
-        np.testing.assert_array_equal(actual[name], expected[name], err_msg=name)
+        a, b = np.asarray(actual[name]), np.asarray(expected[name])
+        assert a.dtype == b.dtype, name
+        np.testing.assert_array_equal(a, b, err_msg=name)
 
 
 def caps(batch):
@@ -479,3 +482,55 @@ def test_numeric_relations_with_action_relations_and_targets_without_expansion_r
     same(expected, encoder.encode(words))
     capacities = dict(caps(expected), numeric=len(expected.numeric_values))
     same(encoder.encode(rows, capacities=capacities), encoder.encode(words, capacities=capacities))
+
+
+@lru_cache(maxsize=3)
+def many_predicate_task(predicates):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    names = " (link ?x ?y) (fixed ?x ?y) (armed)" + "".join(f" (p{p} ?x)" for p in range(predicates))
+    effects = "".join(f" (p{p} ?x)" for p in range(predicates))
+    domain = mymyr.Domain.from_string(
+        "(define (domain many) (:requirements :strips) (:predicates" + names +
+        ") (:action set :parameters (?x) :precondition (and) :effect (and" + effects +
+        ")) (:action connect :parameters (?x ?y) :precondition (and) :effect (link ?x ?y))"
+        " (:action arm :parameters () :precondition (and) :effect (armed)))")
+    return mymyr.Task(domain.instantiate_string(
+        "(define (problem q) (:domain many) (:objects o0 o1 o2)"
+        " (:init (p0 o0) (fixed o0 o1)) (:goal (and (link o0 o1) (p1 o1) (armed))))"))
+
+
+@pytest.mark.parametrize("predicates", [150, 450, 900])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_actions_past_each_shared_memory_limit_equal_host(predicates, index):
+    device = gpu()
+    task = many_predicate_task(predicates)
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    for layout in ("graph", "relation"):
+        goals = ("plain", "satisfied", "unsatisfied") if layout == "graph" else ()
+        targets = ("goal", "action") if layout == "graph" else ("action",)
+        encoder = encoding.FlatRelationEncoder(task, layout=layout, index_dtype=index,
+            target_sources=targets, predicate_virtual_nodes=True, goal_derivations=goals)
+        expected = encoder.encode(rows, actions=rl.expand(task, rows))
+        words = tensor(rows, device)
+        actions = rl.expand(task, words, framework="torch")
+        same(expected, encoder.encode(words, actions=actions))
+        same(expected, encoder.encode(words, actions=actions, capacities=caps(expected)))
+
+
+@pytest.mark.parametrize("predicates", [150, 450, 900])
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_horizons_past_each_shared_memory_limit_equal_host(predicates, mode, index):
+    device = gpu()
+    task = many_predicate_task(predicates)
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    goals = ("plain", "satisfied", "added_satisfied", "added_unsatisfied") if mode == "delta" else (
+        "plain", "satisfied", "unsatisfied")
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode=mode, layout="graph", index_dtype=index,
+        parent_relation=True, sibling_relation=True, predicate_virtual_nodes=True, goal_derivations=goals)
+    view = encoding.horizon(task, rows, depth=2)
+    expected = encoder.encode(view)
+    uploaded = upload(view, device)
+    same(expected, encoder.encode(uploaded))
+    same(expected, encoder.encode(uploaded, capacities=caps(expected)))

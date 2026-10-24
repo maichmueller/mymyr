@@ -82,9 +82,11 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `sibling_relation`, `cousin_relation` | bool | `False` | the [kinship](#rooted-horizons) relations of a horizon's nodes |
 
 `FlatRootedHorizonEncoder` defaults to `horizon_mode='full'`, `root_policy='encode_only'` and `parent_relation=True`;
-the transition encoders to `root_policy='exclude'`. A value outside its choices raises `ValueError` naming the allowed
-ones, an option a class does not take `TypeError` (`FlatRelationEncoder(task, horizon_mode='full')`), and a
-`FlatHorizonEncoder` with `horizon_mode=None` raises `ValueError`: a horizon encoder has no mode without a horizon.
+the transition encoders to `root_policy='exclude'`. For `EncodingSchema` without a horizon, `root_policy` reads `None`
+(`None` and `'include'` are accepted, and `'encode_only'` and `'exclude'` raise `ValueError`). A value outside its choices
+raises `ValueError` naming the allowed ones, an option a class does not take `TypeError`
+(`FlatRelationEncoder(task, horizon_mode='full')`), and a `FlatHorizonEncoder` with `horizon_mode=None` raises
+`ValueError`: a horizon encoder has no mode without a horizon.
 
 **Invalid combinations** raise `ValueError` when the schema is made:
 

@@ -8,6 +8,7 @@
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/cuda/encoding.hpp"
 #include "../../cuda/src/encoding_scratch.hpp"
+#include "../../cuda/src/encoding_kernels.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -1563,9 +1564,8 @@ TEST(DeviceEncode, MixedWidthsUseTheirFillClassesAndKeepBatchOrder)
         // the narrow instance takes a thread per graph, the wide ones more lanes; at most four kernels per class
         const u32 classes = thread_fills + group_fills + warp_fills;
         EXPECT_EQ(thread_fills, 1u);
-        EXPECT_GE(classes, 2u);
-        EXPECT_LE(group_fills, 1u);
-        EXPECT_LE(warp_fills, 1u);
+        EXPECT_EQ(group_fills, 1u);
+        EXPECT_EQ(warp_fills, 0u);
         EXPECT_LE(kernels, 4 * classes);
         cuda::check(cudaGraphDestroy(graph), "destroy");
         const auto result = run_device(device, ctx, stream, input, shape, nullptr, launch);
@@ -3254,4 +3254,122 @@ TEST(DeviceEncoderSchema, SimpleRefusesNumericRelationsAndHorizonsAndTakesAction
         const auto encoder = encoding::FlatEncoder::create(plain, options);
         EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()));
     }
+}
+
+namespace
+{
+rl::TaskTablePtr many_predicate_table(u32 predicates)
+{
+    std::string names = " (link ?x ?y) (fixed ?x ?y) (armed)", effects;
+    for (u32 p = 0; p < predicates; ++p)
+    {
+        names += " (p" + std::to_string(p) + " ?x)";
+        effects += " (p" + std::to_string(p) + " ?x)";
+    }
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain many) (:requirements :strips) (:predicates" + names +
+        ") (:action set :parameters (?x) :precondition (and) :effect (and" + effects +
+        ")) (:action connect :parameters (?x ?y) :precondition (and) :effect (link ?x ?y))"
+        " (:action arm :parameters () :precondition (and) :effect (armed)))");
+    std::vector<TaskPtr> tasks;
+    for (const u32 n : {2u, 5u})
+    {
+        std::string objects;
+        for (u32 i = 0; i < n; ++i)
+            objects += " o" + std::to_string(i);
+        tasks.push_back(Task::create(*domain->instantiate_string(
+            "(define (problem q) (:domain many) (:objects" + objects +
+            ") (:init (armed) (p0 o0) (fixed o0 o1)) (:goal (and (link o0 o1) (p1 o1) (armed))))")));
+    }
+    return rl::TaskTable::create(tasks);
+}
+
+TEST(DeviceEncode, ThreadFillWithoutARelationTableEqualsTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto table = many_predicate_table(1000);
+    const auto batch = make_batch(table, 33, false, 101);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = configs()[8];
+    for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+    {
+        const auto encoder = encoding::FlatEncoder::create(table, with(config.options, encoding::Layout::Graph, index));
+        const u32 nv = encoder->context().view().num_virtual, relations = encoder->schema().num_relations();
+        ASSERT_EQ(nv, 0u);
+        const u64 shared = cuda::detail::fill_shared_required(nv, relations, 1, false, index == encoding::IndexType::I64);
+        ASSERT_LE(shared, cuda::detail::k_shared_limit);
+        const u64 relation_table = u64{cuda::detail::k_encode_block / 32} * sizeof(u32) * relations;
+        ASSERT_GT(shared + relation_table, cuda::detail::k_shared_limit);
+        const auto reference = host_reference(*encoder, host_input(batch, 33, config.inputs));
+        cuda::DeviceEncoder device(ctx, encoder);
+        const auto shape = shape_of(33, reference.sizes);
+        device.reserve(shape, stream);
+        cuda::LaunchConfig launch;
+        launch.fill = cuda::FillMode::Thread;
+        const auto result = run_device(device, ctx, stream, rows.input(batch, 33, config.inputs),
+                                       shape, nullptr, launch);
+        expect_sizes(reference.sizes, result.sizes);
+        expect_same_arrays(*reference.bundle, result);
+    }
+}
+
+TEST(DeviceEncode, AutomaticSharedMemoryFloorsEqualTheHostForFlatAndLayeredRows)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const auto& [predicates, floor] : {std::pair{150u, 8u}, std::pair{400u, 8u}, std::pair{900u, 32u}})
+    {
+        SCOPED_TRACE(floor);
+        const auto table = many_predicate_table(predicates);
+        const auto batch = layered_batch(table, 33, false, 103);
+        const DeviceRows rows(ctx, stream, batch);
+        for (const bool layered : {false, true})
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                {
+                    SCOPED_TRACE(layered);
+                    SCOPED_TRACE(static_cast<int>(layout));
+                    SCOPED_TRACE(static_cast<int>(index));
+                    Config config = layered ? layered_configs()[9] : configs().back();
+                    if (layout == encoding::Layout::Relation)
+                    {
+                        // State and history cells leave room for the virtual-node scratch beside the argument table.
+                        config = layered ? layered_configs()[7] : configs()[3];
+                        config.options.goal_derivations = {};
+                        config.options.targets = {};
+                        if (layered)
+                            config.options.targets = {TargetSource::History};
+                    }
+                    const auto encoder = encoding::FlatEncoder::create(table, with(config.options, layout, index));
+                    const u32 nv = encoder->context().view().num_virtual, relations = encoder->schema().num_relations();
+                    const bool relation = layout == encoding::Layout::Relation, index64 = index == encoding::IndexType::I64;
+                    const u32 count_lanes = predicates == 150 ? 4u : predicates == 400 ? 8u : 32u;
+                    ASSERT_LE(cuda::detail::count_shared_required(nv, count_lanes), cuda::detail::k_shared_limit);
+                    if (count_lanes != 4)
+                    {
+                        ASSERT_GT(cuda::detail::count_shared_required(nv, count_lanes == 8 ? 4u : 8u),
+                                  cuda::detail::k_shared_limit);
+                    }
+                    const u32 previous = floor == 8 ? 1u : 8u;
+                    ASSERT_GT(cuda::detail::fill_shared_required(nv, relations, previous, relation, index64),
+                              cuda::detail::k_shared_limit);
+                    ASSERT_LE(cuda::detail::fill_shared_required(nv, relations, floor, relation, index64),
+                              cuda::detail::k_shared_limit);
+                    const auto reference = host_reference(*encoder, host_input(batch, 33, config.inputs));
+                    cuda::DeviceEncoder device(ctx, encoder);
+                    const auto input = rows.input(batch, 33, config.inputs);
+                    const auto shape = shape_of(33, reference.sizes);
+                    device.reserve(shape, stream);
+                    cuda::LaunchConfig small;
+                    small.fill = floor == 8 ? cuda::FillMode::Thread : cuda::FillMode::Group;
+                    EXPECT_THROW((void)run_device(device, ctx, stream, input, shape, nullptr, small), std::invalid_argument);
+                    const auto result = run_device(device, ctx, stream, input, shape);
+                    expect_sizes(reference.sizes, result.sizes);
+                    expect_same_arrays(*reference.bundle, result);
+                }
+    }
+}
 }

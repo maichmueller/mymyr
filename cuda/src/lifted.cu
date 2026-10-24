@@ -15,6 +15,17 @@ namespace mymyr::cuda::lifted
 {
 namespace
 {
+// The successor capacity is at most 2^31 - 1. Saturating prefixes preserve the exact capacity comparison even when
+// the total exceeds u32, and keep later segments beyond the capacity instead of wrapping into earlier output rows.
+struct SaturatingAdd
+{
+    __host__ __device__ u32 operator()(u32 a, u32 b) const
+    {
+        const u64 sum = u64{a} + b;
+        return static_cast<u32>(sum > 0xFFFFFFFFull ? 0xFFFFFFFFull : sum);
+    }
+};
+
 // ------------------------------------------------------------------------------------------------ goals, checks
 
 __global__ void k_goal_count(TaskView t, Parents p, u32* out)
@@ -275,8 +286,8 @@ cudaError_t launch_scatter_counts(const u32* segment, const u32* value, u64 n, u
 u64 scan_temp_bytes(u64 n)
 {
     size_t bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, bytes, static_cast<const u32*>(nullptr), static_cast<u32*>(nullptr),
-                                  static_cast<int>(n > 0x7FFFFFFFull ? 0x7FFFFFFF : n));
+    cub::DeviceScan::ExclusiveScan(nullptr, bytes, static_cast<const u32*>(nullptr), static_cast<u32*>(nullptr),
+                                   SaturatingAdd{}, u32{0}, static_cast<int>(n > 0x7FFFFFFFull ? 0x7FFFFFFF : n));
     return bytes;
 }
 
@@ -287,7 +298,7 @@ cudaError_t launch_scan(const u32* in, u32* out, u64 n, void* temp, u64 temp_byt
     if (n > 0x7FFFFFFFull)
         return cudaErrorInvalidValue;
     size_t bytes = temp_bytes;
-    return cub::DeviceScan::ExclusiveSum(temp, bytes, in, out, static_cast<int>(n), s);
+    return cub::DeviceScan::ExclusiveScan(temp, bytes, in, out, SaturatingAdd{}, u32{0}, static_cast<int>(n), s);
 }
 
 cudaError_t launch_state_offsets(const u32* seg_offsets, u32 num_schemas, u64 rows, u64 base, i32* offsets_out, cudaStream_t s)

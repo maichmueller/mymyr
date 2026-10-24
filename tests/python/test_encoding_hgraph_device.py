@@ -446,3 +446,44 @@ def test_creating_the_view_of_a_device_horizon_batch_waits_once(kind):
     waits = [w for w in caught if "synchronizing CUDA operation" in str(w.message)]
     assert len(waits) == 1, [str(w.message) for w in waits]
     expect_same_view(encoding.hgraph(host), view)
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_capture_query_uses_the_batch_device_context_and_current_stream(cases, monkeypatch, capturing):
+    dev = gpu()
+    stream = torch.cuda.Stream(dev)
+    device_context = torch.cuda.device
+    entered = []
+
+    class BatchDevice(device_context):
+        def __init__(self, device):
+            self.selected = device
+            super().__init__(device)
+
+        def __enter__(self):
+            result = super().__enter__()
+            entered.append(self.selected)
+            return result
+
+        def __exit__(self, *args):
+            try:
+                return super().__exit__(*args)
+            finally:
+                entered.pop()
+
+    def is_capturing():
+        assert entered == [dev]
+        assert torch.cuda.current_device() == dev.index
+        assert torch.cuda.current_stream(dev) == stream
+        return capturing
+
+    with device_context(dev), torch.cuda.stream(stream):
+        host, batch = batch_form(sliced(cases["gripper"], 3), dev, "int32", "exact")
+        monkeypatch.setattr(torch.cuda, "device", BatchDevice)
+        monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", is_capturing)
+        if capturing:
+            with pytest.raises(ValueError, match="create a DeviceHGraphView outside capture"):
+                encoding.hgraph(batch)
+        else:
+            expect_same_view(encoding.hgraph(host), encoding.hgraph(batch))
+        assert not entered
