@@ -421,7 +421,7 @@ public:
     /// Encodes with caller-owned scratch. Its owner keeps it alive until the stream or captured graph is done.
     void encode(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
                 const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
-                std::uintptr_t scratch, u64 bytes)
+                std::uintptr_t scratch, u64 bytes, std::uintptr_t graph_count)
     {
         if (capacities.size() != 8)
             throw nb::value_error("mymyr: expected eight capacities");
@@ -429,6 +429,9 @@ public:
         const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3], capacities[4], capacities[5]};
         cuda::DeviceOutput out = output_of(outputs, caps, numeric(), {capacities[6], capacities[7]});
         out.zero_unused = true;
+        out.graphs = ptr<u64>(graph_count);
+        auto in = input_of(rows, m_encoder->table().numeric_words());
+        in.graphs_device = ptr<const u64>(graph_count);
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
@@ -436,7 +439,7 @@ public:
         check_rows(rows);
         m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes,
                                  cuda::BatchShape{rows.input_rows(), 0, 0, 0, 0, 0},
-                                 input_of(rows, m_encoder->table().numeric_words()), out);
+                                 in, out);
     }
 
     /// Counts, waits once for the dynamic, numeric and static sizes, and calls `allocate(entities, tuples, args,
@@ -671,10 +674,11 @@ void bind_encoding_device(nb::module_& parent)
                     "Raises ValueError for an encoder whose schema a device stream cannot carry (subgoal layers, "
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
-             "scratch"_a, "bytes"_a,
+             "scratch"_a, "bytes"_a, "graph_count"_a = 0,
              "Encodes the rows (54 integers: the graphs, then the pointers and strides of the arrays) into the 29 output "
              "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric, "
-             "static_instances, static_args), on `stream`. No host wait.")
+             "static_instances, static_args), on `stream`. Optional graph_count is the pointer to an int64 device "
+             "scalar counting the live prefix, bounded by the row count; per-graph tails are zeroed. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, numeric, "
              "flags, static_instances, static_tuples, static_args) to check the flags and return the graph extent and "

@@ -5,8 +5,10 @@
 
 __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::HorizonGraph& h)
 {
-    if (!row_of<false, true>(p, g, r))
+    if (!row_of<true, true>(p, g, r))
         return false;
+    if (!p.horizon_mode && !p.actions.offsets)
+        return true;
     if (!p.horizon_mode)
     {
         const auto& a = p.actions;
@@ -79,8 +81,9 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
     return true;
 }
 
-__global__ void structured_count_kernel(const EncodeParams p)
+__global__ void structured_count_kernel(const EncodeParams params)
 {
+    const EncodeParams p = live_params(params);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
@@ -161,11 +164,14 @@ __global__ void structured_count_kernel(const EncodeParams p)
     }
     if (p.history_at)
         totals.set(p.history_at + 1 + g, t.history_steps);
+    if (p.numeric_at)
+        totals.set(p.numeric_at + 1 + g, ok ? ed::numeric_slot_count(r.v) : 0);
 }
 
 template<class I>
-__global__ void structured_fill_kernel(const EncodeParams p)
+__global__ void structured_fill_kernel(const EncodeParams params)
 {
+    const EncodeParams p = live_params(params);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const Totals totals{p.totals, p.wide};
     u64 base = 0;
@@ -173,8 +179,16 @@ __global__ void structured_fill_kernel(const EncodeParams p)
     const enc::FlatSizes sizes = p.relation_major ? batch_sizes<true, false>(p, totals, first, base)
                                                  : batch_sizes<false, false>(p, totals, first, base);
     if (!blockIdx.x && !threadIdx.x)
+    {
         *p.sizes = sizes;
-    if (p.zero_unused)
+        if (p.output_graphs)
+            *p.output_graphs = p.graphs;
+        if (p.numeric_size)
+            *p.numeric_size = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
+    }
+    if (p.graphs_device)
+        zero_unused_live<I>(p, sizes, u64(gridDim.x) * blockDim.x);
+    else if (p.zero_unused)
         zero_unused<I>(p, sizes);
     if (sizes.overflow)
         return;
@@ -222,11 +236,19 @@ __global__ void structured_fill_kernel(const EncodeParams p)
         fill_levels(p, r, g);
         const ed::GraphTotals t = ed::totals_from_counts<true>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
         const u64 history = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
+        const u64 numeric = p.numeric_at ? totals.get(p.numeric_at + g) - totals.get(p.numeric_at) : 0;
         if (p.relation_major)
             ed::fill_graph_positioned<I, ScanPositions, true>(r.v, r.in, g, entity, t, out, positions,
                                                              target, rank, counts, history);
         else
-            ed::fill_graph<I, true>(r.v, r.in, g, tuple, arg, entity, t, out, target, rank, counts, history);
+            ed::fill_graph<I, true>(r.v, r.in, g, tuple, arg, entity, t, out, target, rank, counts, history, numeric);
+        if (p.simple)
+        {
+            if (p.relation_major)
+                fill_simple<I, true, true>(ed::SoloGroup{}, p, r, g, t, out, positions, entity, tuple, arg, counts);
+            else
+                fill_simple<I, false, true>(ed::SoloGroup{}, p, r, g, t, out, positions, entity, tuple, arg, counts);
+        }
         return;
     }
     const ed::CellList list = r.in.goal_pos ? ed::CellList{r.v.row_cells, r.v.num_row_cells}

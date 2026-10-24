@@ -31,19 +31,24 @@ class SuiteBatch(Mapping):
     - ``rows[d]``: int64, the rows of the call that domain ``d``'s batch holds, in graph order (the inverse of
       ``index``): graph ``k`` of ``batches[d]`` encodes row ``rows[d][k]``.
     - ``task_ids``: int32 ``[N]``, the rows' global instance numbers.
-    - ``expansions[d]``: the ``rl.Expansion`` of domain ``d``'s rows when the call expanded them (``actions=True``),
-      else the expansions that were given; empty without actions. Graph ``k`` of ``batches[d]`` is state ``k`` of
+    - ``expansions[d]``: the expansion of domain ``d``'s rows when the call expanded them (``actions=True``), else the
+      expansions that were given; empty without actions. CUDA capacity calls return device label/state arrays and a
+      status word. Graph ``k`` of ``batches[d]`` is state ``k`` of
       ``expansions[d]``, so ``mymyr.encoding.action_rows(batches[d], expansions[d])`` maps its action entities back.
+
+    CUDA results keep all arrays on the device. Capacity calls include every domain, including those without rows;
+    each batch has graph capacity N and ``device_graphs`` counts its live prefix. ``rows[d]`` has N entries with -1
+    past that prefix. ``graph`` and batch scalar accessors read device values and wait; tensor access does not.
     """
 
     def __init__(
         self,
         batches: dict[int, FlatBatch],
-        domain: np.ndarray,
-        index: np.ndarray,
-        rows: dict[int, np.ndarray],
-        task_ids: np.ndarray,
-        expansions: dict[int, Expansion],
+        domain: Any,
+        index: Any,
+        rows: dict[int, Any],
+        task_ids: Any,
+        expansions: dict[int, Any],
     ) -> None:
         self.batches = batches
         self.domain = domain
@@ -101,8 +106,7 @@ class SuiteEncoder:
     ``SuiteEncoder(suite, encoder=FlatRelationEncoder, **options)`` builds ``encoder(table, **options)`` for the table
     of each domain (``encoder`` is any encoder class that takes a table and options; a ``TaskTable`` is a suite of one
     domain). ``encoders[d]`` is domain ``d``'s encoder and ``schemas[d]`` its ``EncodingSchema``. The encoder is
-    reentrant like its parts. Rows and task ids must reside on the host. For CUDA rows, use a
-    ``FlatRelationEncoder`` over one domain's table with that domain's local task ids.
+    reentrant like its parts. CUDA rows and task ids are grouped on their device and produce torch batches.
     """
 
     def __init__(self, suite: TaskSuite | TaskTable, encoder: type = _core.FlatRelationEncoder, **options: Any) -> None:
@@ -143,11 +147,24 @@ class SuiteEncoder:
         over the domain's table with the domain's instance numbers) is used instead where it names a domain.
         ``framework``, ``threads`` and ``pool`` are as in ``encode``; ``capacities`` maps a domain to its capacities,
         and every domain with rows needs an entry.
+
+        On CUDA, exact calls over several domains copy only the per-domain counts to the host to size the groups;
+        one domain uses the known input row count. Each domain's exact expansion and encoding also waits for its
+        output sizes. Capacity calls need an entry for every domain with
+        ``graphs >= N`` and keep all counts and arrays on the device. They allocate at capacity, zero unused output
+        tails and report overflow in ``device_sizes``. ``actions=True`` bounds expansions by each domain's entity
+        capacity and returns its device label arrays in ``expansions``. Automatic device action expansion requires
+        an asynchronous backend, including for exact calls, so the grouping never falls back to downloading rows.
+        Warm a capacity call on the capture stream before CUDA graph capture; keep the encoder, inputs and results
+        alive through the final replay. Relations and actions use each domain's local task ids.
         """
-        if any(hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] == 2
+        if any(hasattr(value, "__cuda_array_interface__") or
+               hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] == 2
                for value in (states, task_ids)):
-            raise ValueError("mymyr: encoding: SuiteEncoder does not support CUDA rows or task ids; "
-                             "use FlatRelationEncoder over each domain's table with local task ids")
+            from mymyr.encoding._suite_device import encode
+
+            return encode(self, states, task_ids, derived=derived, goals=goals, actions=actions, subgoals=subgoals,
+                          history=history, framework=framework, threads=threads, pool=pool, capacities=capacities)
         suite = self.suite
         if isinstance(states, (list, tuple)):
             rows = len(states)

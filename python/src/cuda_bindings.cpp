@@ -823,8 +823,14 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                              "device); host states take host destinations");
     const dl::Device dev = dl::dlpack_device(a.states);
     PyContextPtr c = table_context(ref, a.ctx, dev.device_id);
-    c->drain();
     const OpStream os = c->stream_of(a.stream);
+    cudaStreamCaptureStatus capture;
+    {
+        cuda::DeviceGuard guard(dev.device_id);
+        cuda::check(cudaStreamIsCapturing(os.s, &capture), "cudaStreamIsCapturing");
+    }
+    if (capture == cudaStreamCaptureStatusNone)
+        c->drain();
     DeviceInput in = import_device(a.states, *c, os, "states");
     const WordsLayout w = device_words(in);
     std::vector<std::shared_ptr<void>> keep{in.im.keep};
@@ -960,7 +966,9 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                 waited = true;
             }
         }
-        c->release_after(os.s, std::move(keep));
+        // Captured allocations belong to the graph's pool; external inputs stay alive through its last replay.
+        if (capture == cudaStreamCaptureStatusNone)
+            c->release_after(os.s, std::move(keep));
         nb::dict r;
         if (waited)
         {
@@ -1480,6 +1488,18 @@ void bind_cuda(nb::module_& parent)
 
     device_hooks().expand = &device_expand;
     device_hooks().expand_into = &device_expand_into;
+    m.def("_check_async_expansion",
+          [](TableArg table, u64 rows, int device, std::intptr_t stream)
+          {
+              const SuiteRef ref = suite_of(table);
+              PyContextPtr c = table_context(ref, nb::none(), device);
+              ExpanderLease ex(ref, c, cuda_stream(stream));
+              nb::gil_scoped_release release;
+              if (const std::string why = ex->async_unsupported(rows, rl::ExpandOptions{}); !why.empty())
+                  throw std::invalid_argument("mymyr: device action expansion needs an asynchronous backend: " + why);
+          },
+          "table"_a, "rows"_a, "device"_a, "stream"_a,
+          "Checks that the table can expand this many rows without waiting for the device.");
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")

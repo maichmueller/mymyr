@@ -1106,8 +1106,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     }
     if (in.actions.offsets)
     {
-        if (!opts.include_actions || live)
-            invalid("device expansion rows require action relations and a fixed graph count");
+        if (!opts.include_actions || in.row_start)
+            invalid("device expansion rows require action relations and a linear row view");
         if ((in.actions.capacity && !in.actions.schema) ||
             (in.actions.capacity && in.actions.label_width && !in.actions.binding))
             invalid("the device expansion needs schema and binding arrays");
@@ -1178,8 +1178,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             invalid("history masks or dt are given without steps");
         check_layers(hist.masks, "history steps", false);
     }
-    if (live && (layout.history || sub.layers != 0))
-        invalid("a live row view carries no subgoal layers or history steps");
+    if (in.row_start && (layout.history || sub.layers != 0))
+        invalid("a circular row view carries no subgoal layers or history steps");
     // the rows of a batch without task ids are instance 0's: a refusal of its axioms refuses the call; otherwise the
     // rows of a refused instance are invalid rows (the input flag)
     if (evaluate && !in.task_ids && !facts.axioms.empty() && ((facts.axioms[0].modes >> mode) & 1u) &&

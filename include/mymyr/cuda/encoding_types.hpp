@@ -49,7 +49,8 @@ struct DeviceOutput
     encoding::StaticSizes* static_sizes = nullptr;
 };
 /// Device expansion labels. The offsets delimit one canonical (schema, binding) run per parent row; capacity bounds
-/// every label array, including unused capacity tails. Overflow is a device scalar (nonzero: expansion overflowed).
+/// every label array, including unused capacity tails. Overflow is a device uint64 status word: bit 0 reports
+/// expansion capacity overflow, bit 1 reports invalid input.
 struct DeviceActionInput
 {
     const i32* offsets = nullptr;  // [graphs + 1]
