@@ -302,6 +302,22 @@ struct PyFlatBatch
     encoding::ExtraSizes extra;                // with sizes: the numeric count and the static block sizes
 };
 
+nb::typed<nb::dict, std::string, u64> batch_nbytes_by_array(const PyFlatBatch& batch)
+{
+    nb::dict out;
+    for (const auto& array : batch.arrays->arrays())
+        out[nb::str(array.name.view().data(), array.name.view().size())] = array.elements() * rl::dtype_bytes(array.dtype);
+    return nb::typed<nb::dict, std::string, u64>(out);
+}
+
+u64 batch_nbytes(const PyFlatBatch& batch)
+{
+    u64 bytes = 0;
+    for (const auto& array : batch.arrays->arrays())
+        bytes += array.elements() * rl::dtype_bytes(array.dtype);
+    return bytes;
+}
+
 // ------------------------------------------------------------------------------------------------ options
 
 [[noreturn]] void option_error(const char* name, const std::string& allowed, nb::handle got)
@@ -2362,6 +2378,10 @@ void bind_hgraph(nb::module_& module)
             "tuples.")
         .def_prop_ro(
             "batch", [](const PyHGraphView& self) { return self.batch; }, "The FlatBatch that the view is of.")
+        .def_prop_ro("nbytes", [](const PyHGraphView& self) { return batch_nbytes(self.batch); },
+                     "The bytes of the backing batch; excludes arrays made on request by the view.")
+        .def_prop_ro("nbytes_by_array", [](const PyHGraphView& self) { return batch_nbytes_by_array(self.batch); },
+                     "The backing batch's array names and payload bytes, as in FlatBatch.nbytes_by_array.")
         .def_prop_ro(
             "num_graphs", [](const PyHGraphView& self) { return self.view.num_graphs(); },
             "The number of graphs of the batch.")
@@ -2547,6 +2567,12 @@ void bind_encoding(nb::module_& parent)
         "are read-only and keep the batch alive; every export shares their memory.");
     batch.def_prop_ro("num_graphs", [](const PyFlatBatch& self) { return self.arrays->scalar("num_graphs"); },
                       "The number of graphs (states) in the batch.")
+        .def_prop_ro("nbytes", &batch_nbytes,
+                     "The sum of the output arrays' bytes, including unused capacity. Excludes scalars, alignment, "
+                     "allocator overhead, inputs, schema and scratch.")
+        .def_prop_ro("nbytes_by_array", &batch_nbytes_by_array,
+                     "A dict of output array names to payload bytes (shape times dtype size), including unused "
+                     "capacity. Computed from metadata without exporting the arrays.")
         .def_prop_ro("num_relations", [](const PyFlatBatch& self) { return self.arrays->scalar("num_relations"); },
                      "The number of relations of the schema the batch was encoded with.")
         .def_prop_ro(

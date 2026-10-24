@@ -98,6 +98,16 @@ class DeviceHGraphView:
         return self._batch
 
     @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """The backing batch's array names and bytes. Excludes arrays made on request by the view; never waits."""
+        return self._batch.nbytes_by_array
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the backing batch, including unused capacity; never waits."""
+        return self._batch.nbytes
+
+    @property
     def device(self) -> Any:
         """The ``torch.device`` of the batch and of every tensor of the view."""
         return self._batch.device

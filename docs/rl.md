@@ -515,7 +515,10 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   captured with the step (`CapturedRollout`, `torch.cuda.graph`, `torch.compile`, `jax.jit`, `lax.scan`). The true
   sizes are in the batch's `device_sizes` (`sizes` reads them on the host); a batch that does not fit is all zero with
   its overflow flag set. Without capacities every encoding is exact: on a device it waits for the batch's sizes once,
-  and it cannot be captured or jitted.
+  and it cannot be captured or jitted. `obs.nbytes` and `obs.nbytes_by_array` report the allocated output payload,
+  including unused capacity and device counters, without waiting. The same API covers `SuiteObservation`, including
+  its domain/index mappings. See
+  [observation bytes](encoding.md#observation-bytes) and [device status](encoding.md#capacities-status-and-synchronization).
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
   with or without `obs_capacities`. Exact device expansion waits for its total, and the encoding waits for its
@@ -574,6 +577,7 @@ rollout = env.capture(4)
 result = rollout.replay()
 batch = encoding.collate(result.obs)
 print(len(result.obs), batch.num_graphs, result.obs[0].device)
+assert result.obs[0].nbytes == sum(result.obs[0].nbytes_by_array.values())
 ```
 
 Action observations use the same capacity form, including the reached states before an autoreset:
@@ -587,7 +591,8 @@ action_rollout = action_env.capture(3, final=True)
 action_result = action_rollout.replay()
 torch.cuda.synchronize()
 assert len(action_result.obs) == len(action_result.final_obs) == 3
-assert all(not batch.sizes["overflow"] for batch in action_result.obs)
+assert all(not batch.sizes["overflow"] for batch in (*action_result.obs, *action_result.final_obs))
+assert all(batch.nbytes == sum(batch.nbytes_by_array.values()) for batch in action_result.obs)
 ```
 
 The JAX environment carries the encoding in its observations, under `jax.jit` and `lax.scan`:
@@ -608,6 +613,7 @@ env = Env(table, device="cpu", max_steps=6, observation=encoder, obs_capacities=
 state, observation = env.reset(jax.random.key(0), 8)
 state, observation, reward, terminated, truncated, info = jax.jit(env.step)(jax.random.key(1), state)
 print(observation.encoding.num_graphs, int(observation.encoding.overflow))
+assert observation.encoding.nbytes == sum(observation.encoding.nbytes_by_array.values())
 ```
 
 ## A learning smoke example

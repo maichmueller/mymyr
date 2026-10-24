@@ -190,6 +190,22 @@ class JaxFlatBatch:
         return cls(dict(zip(names, children[:-2], strict=True)), children[-2], static, children[-1])
 
     @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Output array names and payload bytes, including unused capacity, device counters and stacked axes.
+        Uses static shape/dtype metadata only, including inside ``jax.jit``; never waits for the device."""
+        arrays = dict(self._arrays)
+        if self._sizes is not None:
+            arrays["device_sizes"] = self._sizes
+        if self._graphs is not None:
+            arrays["device_graphs"] = self._graphs
+        return {name: int(value.nbytes) for name, value in arrays.items()}
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``; excludes allocator overhead, inputs, schema and scratch."""
+        return sum(self.nbytes_by_array.values())
+
+    @property
     def num_graphs(self) -> int:
         """The number of graphs (states) in the batch: its rows, or its live rows (``device_graphs``, read on the
         host)."""
