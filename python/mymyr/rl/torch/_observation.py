@@ -92,12 +92,10 @@ class Observer:
         self.tables = tables
         self.capacities = _capacities(capacities, len(encoders), n)
         self.actions = bool(actions)
+        if self.actions and self.capacities is not None and self.device.type == "cuda":
+            self._warm_rows = (env.states, env.task_ids, (env.goal_pos, env.goal_neg) if env.goals else None)
         self.goals = [_goal_lanes(e) for e in encoders]
         if self.actions:
-            if self.device.type == "cuda" and self.capacities is not None:
-                raise ValueError("mymyr: obs_actions: device observations with obs_capacities have no action relations "
-                                 "(the expansion of the observed states would wait for the device); leave "
-                                 "obs_capacities off, or obs_actions off")
             for e in encoders:
                 if not e.options["include_actions"]:
                     raise ValueError("mymyr: obs_actions needs an encoder with action relations (include_actions=True)")
@@ -134,6 +132,8 @@ class Observer:
         stream = _stream(self.device)
         for e in self.encoders:
             _device._device_encoder(e, self.device.index).scratch_bytes(stream, rows, False)
+        if self.actions and self.capacities is not None:
+            self.encode(*self._warm_rows)
 
     # ------------------------------------------------------------------------------------------ the device rings
 
@@ -180,10 +180,15 @@ class Observer:
             if torch.compiler.is_compiling():
                 return self._encode_op(k, states, task_ids, goals, caps)
             actions = None
-            if self.actions:  # exact: the expansion waits for its total, as the encoding does for its sizes
+            if self.actions:
                 from mymyr.rl.torch._ops import _stream
 
-                actions = rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states))
+                if caps is None:
+                    actions = rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states))
+                else:
+                    from mymyr.encoding._device_actions import bounded_actions
+
+                    actions = bounded_actions(encoder, states, task_ids, caps["entities"])
             arrays = _device.encode_arrays(encoder, states, task_ids, None, goals,
                                            None if caps is None else _device._capacities(caps, _device.layout_of(encoder)),
                                            actions=actions)
@@ -200,6 +205,7 @@ class Observer:
         outs = torch.ops.mymyr.encode_flat(
             self.handles[k], states, task_ids, None, gp, gn, None, None, None, None, None, None, None, None, None,
             None, None, None, *self._op_capacities[k],
+            expand_actions=self.actions,
         )  # fmt: skip
         return _device.DeviceFlatBatch._of(self._templates[k], outs)
 
@@ -242,6 +248,26 @@ class Observer:
         batches = []
         for k, encoder in enumerate(self.encoders):
             caps = _device._capacities(self.capacities[k], _device.layout_of(encoder))
+            if self.actions:
+                from mymyr.encoding._device_actions import bounded_actions
+                from mymyr.encoding._device_horizon import bind_actions
+
+                live = counts[k:k + 1].clone()
+                row = torch.arange(n, device=self.device)
+                idx = (starts[k] + row).clamp(max=n - 1)
+                mask = row < live
+                table = self.tables[k]
+                states_k = torch.where(mask[:, None], self._rows_states[idx, :table.words], 0)
+                ids_k = torch.where(mask, self._rows_ids[idx], 0)
+                goals_k = None if goals is None or not self.goals[k] else tuple(g[idx] for g in self._rows_goals)
+                actions = bounded_actions(encoder, states_k, ids_k, caps[1], live=live)
+                checked = _device._Rows(torch, states_k, ids_k, None, goals_k)
+                bind_actions(encoder, checked, actions)
+                arrays = _device._encode_rows(encoder, checked, caps, [actions], graph_count=live)
+                batch = _device.DeviceFlatBatch(encoder, arrays, exact=False)
+                batch._device_graphs = live
+                batches.append(batch)
+                continue
             batch, scratch = _device._flush_rows(torch, self._natives[k], stream, self._ring[k], self._status[k], encoder,
                                                  n, caps, self.device, False, zero_unused=True)
             batch._keepalive = (scratch,)
