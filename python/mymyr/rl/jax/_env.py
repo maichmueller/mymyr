@@ -84,6 +84,21 @@ class SuiteObservation(NamedTuple):
     domain: Any
     index: Any
 
+    @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Payload bytes of domain batches and row mappings, including capacity and device counters; never waits.
+        Names are ``batches.<domain>.<array>``, ``domain`` and ``index``. Aliases are counted by name."""
+        out = {f"batches.{d}.{name}": size for d, batch in enumerate(self.batches)
+               for name, size in batch.nbytes_by_array.items()}
+        out.update(domain=int(self.domain.nbytes), index=int(self.index.nbytes))
+        return out
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``; excludes allocator overhead, inputs, schema and scratch."""
+        return sum(self.nbytes_by_array.values())
+
+
 
 class PaddedExpansion(NamedTuple):
     """The padded [N, K] expansion in canonical order (rl.expand's padded view): succ [N, K, 2 row_words], schema

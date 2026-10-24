@@ -834,6 +834,22 @@ class DeviceFlatBatch:
         self._graphs = self._arrays["task_ids"].shape[0]
 
     @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Output array names and payload bytes, including unused capacity and device counters. Reads only host
+        metadata: no device wait, tensor export or device allocation. Excludes inputs, schema and scratch."""
+        arrays = dict(self._arrays)
+        for name, value in (("device_sizes", self._sizes), ("device_static_sizes", self.device_static_sizes),
+                            ("device_graphs", self._device_graphs)):
+            if value is not None:
+                arrays[name] = value
+        return {name: int(value.nbytes) for name, value in arrays.items()}
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``; includes unused capacity, excludes allocator overhead. Does not wait."""
+        return sum(self.nbytes_by_array.values())
+
+    @property
     def device_static_sizes(self) -> Optional[Any]:
         """The device counts [instances, tuples, args] of the shared static blocks, or None."""
         return self._static_sizes if self._layout.shared else None
