@@ -1563,9 +1563,8 @@ TEST(DeviceEncode, MixedWidthsUseTheirFillClassesAndKeepBatchOrder)
         // the narrow instance takes a thread per graph, the wide ones more lanes; at most four kernels per class
         const u32 classes = thread_fills + group_fills + warp_fills;
         EXPECT_EQ(thread_fills, 1u);
-        EXPECT_GE(classes, 2u);
-        EXPECT_LE(group_fills, 1u);
-        EXPECT_LE(warp_fills, 1u);
+        EXPECT_EQ(group_fills, 1u);
+        EXPECT_EQ(warp_fills, 0u);
         EXPECT_LE(kernels, 4 * classes);
         cuda::check(cudaGraphDestroy(graph), "destroy");
         const auto result = run_device(device, ctx, stream, input, shape, nullptr, launch);
