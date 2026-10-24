@@ -445,7 +445,7 @@ rl::DType dtype_of(const nb::dlpack::dtype& d)
 
 // ------------------------------------------------------------------------------------------------ device expand
 
-using ExpansionShape = std::array<u64, 12>;
+using ExpansionShape = std::array<u64, 13>;
 
 struct ExpansionWorkspace
 {
@@ -991,6 +991,16 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (static_cast<u64>(d.im.shape[0]) < w.rows + 1)
             throw nb::value_error("mymyr: 'offsets' needs N + 1 entries");
     }
+    const u32* rows_dev = nullptr;
+    if (!a.row_count.is_none())
+    {
+        if (a.status.is_none())
+            throw nb::value_error("mymyr: expand_into: row_count requires status=");
+        DeviceInput d = dest(a.row_count, "row_count");
+        rows_dev = device_dest<u32>(d, "row_count", {i32t, u32t}, 1);
+        if (d.im.shape[0] != 1)
+            throw nb::value_error("mymyr: expand_into: row_count needs one entry");
+    }
     x.capacity = cap.value_or(0);
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
     const rl::StateBatchView view{w.data, w.rows, w.words - NN, w.stride, NN};
@@ -1009,7 +1019,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         const u64 outputs = (x.succ ? 1u : 0u) | (x.parent ? 2u : 0u) | (x.schema ? 4u : 0u) |
                             (x.binding ? 8u : 0u) | (x.goal ? 16u : 0u) | (x.derived ? 32u : 0u);
         const ExpansionShape shape{w.rows, w.words, w.stride, x.capacity, x.words, x.label_width, x.derived_words,
-                                   outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate};
+                                   outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate, rows_dev ? 1u : 0u};
         bool waited = false;
         std::shared_ptr<ExpansionWorkspace> owner;
         if (capture != cudaStreamCaptureStatusNone)
@@ -1018,7 +1028,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             cuda::check(cudaStreamGetCaptureInfo(os.s, &capture, &id), "cudaStreamGetCaptureInfo");
             owner = captured_workspace(ref, c, os.s, id, &shape);
             nb::gil_scoped_release release;
-            owner->expander->expand_async(view, ids, x, status, opt);
+            owner->expander->expand_async(view, ids, x, status, opt, rows_dev);
         }
         else
         {
@@ -1027,11 +1037,13 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             ex->set_stream(os.s);
             if (ex->async_unsupported(w.rows, opt).empty())
             {
-                ex->expand_async(view, ids, x, status, opt);
+                ex->expand_async(view, ids, x, status, opt, rows_dev);
                 ex.warmed(shape);
             }
             else
             {
+                if (rows_dev)
+                    throw nb::value_error("mymyr: expand_into: row_count requires an asynchronous device expansion");
                 ex->expand(view, ids, x, opt);
                 const u32 flags = (x.overflow() ? 1u : 0u) | (x.words_needed > x.words ? 2u : 0u);
                 cuda::check(cudaMemcpyAsync(status, &flags, sizeof(u32), cudaMemcpyHostToDevice, os.s), "cudaMemcpyAsync");

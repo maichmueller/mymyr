@@ -24,8 +24,9 @@ __global__ void k_goal_rows_multi(const TaskView* views, u32 instances, const u3
 }
 
 __global__ void k_check_multi(const u32* limits, u32 instances, const i32* inst, const u64* data, u64 stride, u32 words,
-                              u64 rows, u32* bad_id, u32* bad_row)
+                              u64 rows, u32* bad_id, u32* bad_row, const u32* rows_dev)
 {
+    rows = rows_dev && *rows_dev < rows ? *rows_dev : rows;
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
     {
         const i32 k = inst[i];
@@ -48,8 +49,9 @@ __global__ void k_check_multi(const u32* limits, u32 instances, const i32* inst,
     }
 }
 
-__global__ void k_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id)
+__global__ void k_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id, const u32* rows_dev)
 {
+    rows = rows_dev && *rows_dev < rows ? *rows_dev : rows;
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
         if (inst[i] < 0 || static_cast<u32>(inst[i]) >= instances)
             atomicMin(bad_id, static_cast<u32>(i));
@@ -314,19 +316,19 @@ cudaError_t launch_goal_rows_multi(const rl::dev::TaskView* views, u32 instances
 }
 
 cudaError_t launch_check_multi(const u32* limits, u32 instances, const i32* inst, const u64* data, u64 stride, u32 words,
-                               u64 rows, u32* bad_id, u32* bad_row, cudaStream_t s)
+                               u64 rows, u32* bad_id, u32* bad_row, cudaStream_t s, const u32* rows_dev)
 {
     if (rows && (!inst || (data && !limits)))
         return cudaErrorInvalidValue;
     if (rows)
-        k_check_multi<<<grid_for(rows), k_block, 0, s>>>(limits, instances, inst, data, stride, words, rows, bad_id, bad_row);
+        k_check_multi<<<grid_for(rows), k_block, 0, s>>>(limits, instances, inst, data, stride, words, rows, bad_id, bad_row, rows_dev);
     return cudaGetLastError();
 }
 
-cudaError_t launch_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id, cudaStream_t s)
+cudaError_t launch_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id, cudaStream_t s, const u32* rows_dev)
 {
     if (rows)
-        k_check_ids<<<grid_for(rows), k_block, 0, s>>>(inst, instances, rows, bad_id);
+        k_check_ids<<<grid_for(rows), k_block, 0, s>>>(inst, instances, rows, bad_id, rows_dev);
     return cudaGetLastError();
 }
 

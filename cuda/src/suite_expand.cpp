@@ -369,12 +369,12 @@ std::string SuiteExpander::async_unsupported(u64 rows, const rl::ExpandOptions& 
 }
 
 void SuiteExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
-                                 const rl::ExpandOptions& options)
+                                 const rl::ExpandOptions& options, const u32* rows_dev)
 {
     if (!m->one())
         throw std::invalid_argument("mymyr: device expand: the expansion needs the host: " + async_unsupported(in.rows, options));
     m->counted = false;
-    m->subs[0]->expand_async(in, task_ids, out, status, options);
+    m->subs[0]->expand_async(in, task_ids, out, status, options, rows_dev);
 }
 
 void SuiteExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)

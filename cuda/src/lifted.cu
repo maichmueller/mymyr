@@ -48,8 +48,9 @@ __global__ void k_goal_rows(TaskView t, const u64* states, u32 words, u64 n, con
         out[i] = goal_holds(t, states + i * words, words, nullptr, 0) ? 1 : 0;
 }
 
-__global__ void k_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad)
+__global__ void k_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad, const u32* rows_dev)
 {
+    rows = rows_dev && *rows_dev < rows ? *rows_dev : rows;
     const u32 lw = limit >> 6;
     const u64 first = limit & 63 ? ~((1ull << (limit & 63)) - 1) : ~0ull;
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
@@ -194,10 +195,10 @@ cudaError_t launch_goal_rows(const rl::dev::TaskView& t, const u64* states, u32 
     return cudaGetLastError();
 }
 
-cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad_row, cudaStream_t s)
+cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad_row, cudaStream_t s, const u32* rows_dev)
 {
     if (rows && u64{words} * 64 > limit)
-        k_check_rows<<<grid_for(rows), k_block, 0, s>>>(data, stride, words, rows, limit, bad_row);
+        k_check_rows<<<grid_for(rows), k_block, 0, s>>>(data, stride, words, rows, limit, bad_row, rows_dev);
     return cudaGetLastError();
 }
 

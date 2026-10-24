@@ -56,6 +56,9 @@ expansion needs the host (instances expanded apart, CPU-fallback schemas or axio
 domains, batches beyond one chunk of views), which waits as without `status` and returns the usual keys (`total`
 among them): then rows past the total keep what the destination held, and an invalid row raises `ValueError` instead
 of setting bit 1.
+The optional `row_count=` is a contiguous int32 or uint32 CUDA array `[1]`, read as an unsigned count clamped to
+`N`. Only that prefix is expanded or validated; offsets past it repeat the live total. This needs `status=` and an
+asynchronous device table: host expansion is rejected when a device live count is supplied.
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
 output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
 `k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
@@ -521,7 +524,7 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
   zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
-  raw expansion overflow is preserved even when staged rows past a domain's live prefix cause it.
+  expansion reads each domain's live-row count on the device; staged padding contributes no successors or overflow.
   A captured graph owns an exclusive expansion workspace per table, retained by its result tensors; eager calls and
   other graphs use different workspaces. Warm on the capture stream with the same shapes and options. All expansions
   over the same table within one graph must keep those shapes and options fixed. Keep the results alive through the

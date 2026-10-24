@@ -74,6 +74,9 @@ not wait for the device, so it needs ``stream=``, the stream that reads its outp
 written then), and the result holds only ``capacity`` (tables whose expansion needs the host wait and return the usual
 keys; rows past the total then keep their contents, and an invalid row raises). Numeric tables and suites preserve each instance's CPU encoding on the
 device; their expansion uses per-instance kernels and gathers/scatters rows at the shared atom/numeric boundary.
+``row_count=`` optionally bounds this asynchronous expansion to a live prefix: a contiguous int32 or uint32
+CUDA array [1], read as an unsigned count and clamped to N. Padding contributes no successors or validation
+errors; offsets past the prefix repeat its total. It requires ``status=`` and an asynchronous device table.
 Under CUDA graph capture, warm ``expand_into`` on the capture stream with identical shapes, destinations present
 and options. Every expansion over the same table within that graph must keep these fixed. The result dictionary's
 ``_keepalive`` owns the graph's exclusive workspace: keep the dictionary alive through the final replay. Captured

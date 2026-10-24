@@ -352,3 +352,53 @@ def test_captured_expansions_have_distinct_owners_and_refuse_workspace_growth():
             bounded_actions(encoder, rows, ids, 200)
     graph.replay()
     torch.cuda.synchronize(device)
+
+
+@pytest.mark.parametrize("capacity", [20, 21, 40, 60])
+@pytest.mark.parametrize("captured", [False, True])
+def test_action_expansion_ignores_padding(sets, capacity, captured):  # noqa: F811
+    import mymyr
+
+    device = gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("PDDL front end unavailable")
+    domain = mymyr.Domain.from_string("""(define (domain toggle) (:requirements :strips)
+      (:predicates (link ?x ?y) (on ?x) (lit))
+      (:action flip :parameters (?x ?y) :precondition (link ?x ?y) :effect (on ?x))
+      (:action light :parameters () :precondition (and) :effect (lit)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem p) (:domain toggle) (:objects o0 o1 o2 o3 o4)
+      (:init (on o0) """ + " ".join(f"(link o{i} o{j})" for i in range(5) for j in range(5) if i != j)
+      + ") (:goal (lit)))"))
+    suite = rl.TaskSuite([rl.as_table(task), rl.TaskTable(sets["gripper"])])
+    ids = np.arange(5, dtype=np.int32)
+    states = np.asarray(suite.initial_states())[ids].copy()
+    encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+    expected = encoder.encode(states, ids, actions=True)
+    words, task_ids = tensor(states, device), tensor(ids, device)
+    caps = capacities(encoder, len(ids))
+    # The action buffer has 21 live labels; encoding itself has a separate entity budget.
+    caps[0]["entities"] = capacity
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        actual = encoder.encode(words, task_ids, actions=True, capacities=caps)
+    stream.synchronize()
+    if captured:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = encoder.encode(words, task_ids, actions=True, capacities=caps)
+        graph.replay()
+    x, host = actual.expansions[0], expected.expansions[0]
+    assert int(np.asarray(host.offsets)[-1]) == 21
+    assert x.status.item() == int(capacity < 21)
+    np.testing.assert_array_equal(x.offsets.cpu(), [0, 21, 21, 21, 21, 21])
+    if capacity >= 21:
+        for name in ("schema", "binding", "parent"):
+            raw = getattr(x, name).cpu().numpy()
+            np.testing.assert_array_equal(raw[:21], np.asarray(getattr(host, name)))
+            assert not raw[21:].any()
+    if capacity >= len(expected[0].entity_ref):
+        compare(actual, expected, len(ids))
+    else:
+        assert actual[0].sizes["capacity_overflow"]
+        assert_same(actual[1], expected[1])

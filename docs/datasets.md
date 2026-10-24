@@ -158,7 +158,7 @@ by the entity capacity and schema multiplicity. Automatic device action expansio
 asynchronous backend for every domain, so encoding never falls back to downloading the stored rows.
 Capacity suite calls accept automatic actions (`actions=True`); given per-domain expansions require exact calls.
 Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not allocated.
-The raw expansion status is preserved, including overflow from staged rows past a domain's live prefix.
+The device live-row count bounds action expansion: staged padding contributes no successors or overflow.
 Invalid global task ids are grouped into instance 0's domain and set that batch's `invalid_input` flag; host calls
 raise instead. Device suites accept relational schemas; horizon and transition encoders take host rows or an
 explicit `HorizonView` encoded separately per domain.

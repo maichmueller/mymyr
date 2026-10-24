@@ -57,6 +57,7 @@ struct DeviceExpander::Impl
         u64 seg_base = 0;  // Multi: the chunk's segment offsets in `seg`
     };
     rl::StateBatchView in{};
+    const u32* rows_dev = nullptr;
     rl::ExpandOptions opt{};
     const i32* ids = nullptr;
     u64 stride = 0;
@@ -170,6 +171,7 @@ struct DeviceExpander::Impl
         x.stride = slots ? row_words : stride;
         x.words = row_words;
         x.rows = static_cast<u32>(c.rows);
+        x.rows_dev = rows_dev;
         x.host_states = host_states.empty() ? nullptr : host_states.data() + c.first * row_words;
         x.host_stride = row_words;
         x.parent_base = static_cast<u32>(c.first);
@@ -346,13 +348,14 @@ struct DeviceExpander::Impl
     [[nodiscard]] lifted::Multi multi_of(const Chunk& c) const
     {
         lifted::Multi m = plan.multi(*dt, opt.witness_pruning, opt.canonical_order, ids + c.first);
-        m.order = static_cast<const u32*>(order.data()) + c.first;
+        // A live prefix is in input order; sorted padding must not displace its rows.
+        m.order = rows_dev ? nullptr : static_cast<const u32*>(order.data()) + c.first;
         return m;
     }
 
     [[nodiscard]] lifted::Parents parents_of(const Chunk& c) const
     {
-        return lifted::Parents{in.data + c.first * stride, stride, in.words, static_cast<u32>(c.rows), nullptr, 0};
+        return lifted::Parents{in.data + c.first * stride, stride, in.words, static_cast<u32>(c.rows), nullptr, 0, rows_dev};
     }
 
     /// The chunk's launch order, views, counts and segment offsets (views_only: its views, from the kept order). The
@@ -589,16 +592,16 @@ struct DeviceExpander::Impl
         if (single)
         {
             if (ids)
-                check(lifted::launch_check_ids(ids, 1, in.rows, d + k_bad_id, s), "launch_check_ids");
+                check(lifted::launch_check_ids(ids, 1, in.rows, d + k_bad_id, s, rows_dev), "launch_check_ids");
             const u32 limit = table->task(0)->atoms().fluent_slots();
             if (opt.validate && in.rows && static_cast<u64>(in.words) * 64 > limit)
-                check(lifted::launch_check_rows(in.data, stride, in.words, in.rows, limit, d + k_bad_row, s),
+                check(lifted::launch_check_rows(in.data, stride, in.words, in.rows, limit, d + k_bad_row, s, rows_dev),
                       "launch_check_rows");
         }
         else
             check(lifted::launch_check_multi(static_cast<const u32*>(limits.data()), plan.instances, ids,
                                              opt.validate ? in.data : nullptr, stride, in.words, in.rows, d + k_bad_id,
-                                             d + k_bad_row, s),
+                                             d + k_bad_row, s, rows_dev),
                   "launch_check_multi");
         // rows past the total stay zero rows, whose goal flags and derived words the evaluations below compute
         if (out.succ && out.capacity)
@@ -1206,6 +1209,7 @@ void DeviceExpander::set_stream(cudaStream_t s)
 u64 DeviceExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::ExpandOptions& opt)
 {
     Impl& I = *m;
+    I.rows_dev = nullptr;
     DeviceGuard guard(I.ctx->device());
     I.counted = false;
     I.kept = false;
@@ -1313,7 +1317,7 @@ std::string DeviceExpander::async_unsupported(u64 rows, const rl::ExpandOptions&
 }
 
 void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
-                                  const rl::ExpandOptions& options)
+                                  const rl::ExpandOptions& options, const u32* rows_dev)
 {
     Impl& I = *m;
     DeviceGuard guard(I.ctx->device());
@@ -1337,6 +1341,7 @@ void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl
         throw std::invalid_argument("mymyr: expand: a batch over a table of " + std::to_string(I.table->size()) +
                                     " instances needs task ids");
     I.in = in;
+    I.rows_dev = rows_dev;
     I.opt = options;
     I.ids = task_ids;
     I.stride = in.stride ? in.stride : in.words + in.numeric_words;
