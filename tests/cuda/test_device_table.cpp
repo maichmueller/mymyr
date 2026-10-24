@@ -948,7 +948,6 @@ TEST(DeviceTableWide, EnvEqualsHost)
         }
 }
 
-
 TEST(DeviceTableExpand, SaturatedScanKeepsCapacityStatusExactPastTheU32Boundary)
 {
     SKIP_WITHOUT_GPU();

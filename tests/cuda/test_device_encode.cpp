@@ -3300,7 +3300,8 @@ TEST(DeviceEncode, ThreadFillWithoutARelationTableEqualsTheHost)
         ASSERT_EQ(nv, 0u);
         const u64 shared = cuda::detail::fill_shared_required(nv, relations, 1, false, index == encoding::IndexType::I64);
         ASSERT_LE(shared, cuda::detail::k_shared_limit);
-        ASSERT_GT(shared + u64{16} * relations, cuda::detail::k_shared_limit);
+        const u64 relation_table = u64{cuda::detail::k_encode_block / 32} * sizeof(u32) * relations;
+        ASSERT_GT(shared + relation_table, cuda::detail::k_shared_limit);
         const auto reference = host_reference(*encoder, host_input(batch, 33, config.inputs));
         cuda::DeviceEncoder device(ctx, encoder);
         const auto shape = shape_of(33, reference.sizes);

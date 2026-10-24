@@ -77,15 +77,16 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `outputs` | a collection of `'relations'`, `'simple'` | `('relations',)` | the relation arrays, the [Simple graph](#the-simple-graph) or both |
 | `constant_labels` | bool | `False` | a Simple node label of its own for each constant of the domain |
 | `horizon_mode` | `'full'`, `'delta'`, `'action'`, `None` | per encoder | the [horizon](#horizons-and-transitions) variant; `None` is no horizon |
-| `root_policy` | `None`, `'include'`, `'encode_only'`, `'exclude'` | `None` without a horizon; `'include'` with `horizon_mode='full'` | whether a horizon's root is a state entity and a target |
+| `root_policy` | `None`, `'include'`, `'encode_only'`, `'exclude'` | `None` without a horizon; `'include'` with one | whether a horizon's root is a state entity and a target |
 | `parent_relation` | bool | `False` | the `_parent_` relation of a horizon's edges |
 | `sibling_relation`, `cousin_relation` | bool | `False` | the [kinship](#rooted-horizons) relations of a horizon's nodes |
 
 `FlatRootedHorizonEncoder` defaults to `horizon_mode='full'`, `root_policy='encode_only'` and `parent_relation=True`;
-the transition encoders to `root_policy='exclude'`. For `EncodingSchema` without a horizon, `root_policy=None`
-is the default; `root_policy='exclude'` raises `ValueError`. A value outside its choices raises `ValueError` naming the allowed
-ones, an option a class does not take `TypeError` (`FlatRelationEncoder(task, horizon_mode='full')`), and a
-`FlatHorizonEncoder` with `horizon_mode=None` raises `ValueError`: a horizon encoder has no mode without a horizon.
+the transition encoders to `root_policy='exclude'`. For `EncodingSchema` without a horizon, `root_policy` reads `None`
+(`None` and `'include'` are accepted, and `'encode_only'` and `'exclude'` raise `ValueError`). A value outside its choices
+raises `ValueError` naming the allowed ones, an option a class does not take `TypeError`
+(`FlatRelationEncoder(task, horizon_mode='full')`), and a `FlatHorizonEncoder` with `horizon_mode=None` raises
+`ValueError`: a horizon encoder has no mode without a horizon.
 
 **Invalid combinations** raise `ValueError` when the schema is made:
 

@@ -500,14 +500,10 @@ def many_predicate_task(predicates):
         " (:init (p0 o0) (fixed o0 o1)) (:goal (and (link o0 o1) (p1 o1) (armed))))"))
 
 
-@pytest.mark.parametrize("predicates,lanes", [(150, 4), (450, 8), (900, 32)])
+@pytest.mark.parametrize("predicates", [150, 450, 900])
 @pytest.mark.parametrize("index", ["int32", "int64"])
-def test_actions_past_each_shared_memory_limit_equal_host(predicates, lanes, index):
+def test_actions_past_each_shared_memory_limit_equal_host(predicates, index):
     device = gpu()
-    # Declared and built-in predicates share each graph's scratch; the preceding lane class cannot hold it.
-    previous = {4: 1, 8: 4, 32: 8}[lanes]
-    assert 128 // previous * (predicates + 5) * 4 > 48 * 1024
-    assert 128 // lanes * (predicates + 5) * 4 <= 48 * 1024
     task = many_predicate_task(predicates)
     rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
     for layout in ("graph", "relation"):
@@ -522,14 +518,11 @@ def test_actions_past_each_shared_memory_limit_equal_host(predicates, lanes, ind
         same(expected, encoder.encode(words, actions=actions, capacities=caps(expected)))
 
 
-@pytest.mark.parametrize("predicates,lanes", [(150, 4), (450, 8), (900, 32)])
+@pytest.mark.parametrize("predicates", [150, 450, 900])
 @pytest.mark.parametrize("mode", ["full", "delta", "action"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
-def test_horizons_past_each_shared_memory_limit_equal_host(predicates, lanes, mode, index):
+def test_horizons_past_each_shared_memory_limit_equal_host(predicates, mode, index):
     device = gpu()
-    previous = {4: 1, 8: 4, 32: 8}[lanes]
-    assert 128 // previous * (predicates + 5) * 4 > 48 * 1024
-    assert 128 // lanes * (predicates + 5) * 4 <= 48 * 1024
     task = many_predicate_task(predicates)
     rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
     goals = ("plain", "satisfied", "added_satisfied", "added_unsatisfied") if mode == "delta" else (
