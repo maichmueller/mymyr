@@ -895,6 +895,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     if (w.words < NN)
         throw nb::value_error("mymyr: numeric states have no numeric block");
     x.numeric_words = NN;
+    x.words = w.words - NN;
     std::optional<u64> cap;
     auto take_cap = [&](i64 n) { cap = cap ? std::min<u64>(*cap, static_cast<u64>(n)) : static_cast<u64>(n); };
     auto dest = [&](nb::handle obj, const char* name) {

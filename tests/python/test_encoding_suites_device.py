@@ -32,6 +32,20 @@ def compare(actual, expected, n):
             assert batch.num_graphs == 0
             assert not batch.sizes["overflow"]
         assert torch.all(actual.rows[k][batch.num_graphs:] == -1)
+        host = expected[k].as_dict() if k in expected else batch._encoder.encode(
+            np.empty((0, batch._encoder.table.words + batch._encoder.table.numeric_words), np.uint64),
+            np.empty(0, np.int32)).as_dict()
+        for name, array in batch._arrays.items():
+            if array is None or name not in batch.array_names or name == "sizes":
+                continue
+            raw = array.cpu().numpy()
+            padded = np.zeros_like(raw)
+            if name in host:
+                value = np.asarray(host[name])
+                if name in ("static_offsets", "static_arg_offsets") and value.size:
+                    padded.fill(value[-1])
+                padded[tuple(slice(0, size) for size in value.shape)] = value
+            np.testing.assert_array_equal(raw, padded, err_msg=name)
 
 
 @pytest.mark.parametrize("domains", [1, 2])
@@ -207,3 +221,134 @@ def test_one_domain_exact_calls_download_only_the_flat_encoders_output_sizes(set
             patch.setattr(torch.Tensor, name, no_host)
         actual = encoder.encode(words, task_ids, actions=actions)
     compare(actual, expected, len(ids))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("live", [0, 3, 6])
+def test_simple_layers_and_history_fill_raw_capacity_tensors(sets, layout, index, live, monkeypatch):  # noqa: F811
+    from mymyr.encoding import _device
+
+    device = gpu()
+    suite = suite_of(sets, "gripper+blocks")
+    encoder = encoding.SuiteEncoder(suite, layout=layout, index_dtype=index, outputs=("relations", "simple"),
+                                   max_goal_level=1, history=True, target_sources=("goal", "subgoal", "history"))
+    states, ids = suite_batch(suite, per=1)
+    states, ids = states[:live], ids[:live]
+    n, w = states.shape
+    pos, neg = np.zeros((n, 1, w), np.uint64), np.zeros((n, 1, w), np.uint64)
+    pos[:, 0, 0] = 1
+    layers = (pos, neg)
+    history = (*layers, np.full((n, 1), -2, np.int32), np.ones(n, np.int32))
+    expected = encoder.encode(states, ids, subgoals=layers, history=history)
+    # Freed nonzero blocks make missing writes visible when output allocations reuse the cache.
+    poison = [torch.full((size,), -1, dtype=torch.int32, device=device) for size in (4, 8, 16, 64, 4096, 16384)]
+    torch.cuda.synchronize(device)
+    del poison
+    allocate = _device._outputs
+
+    def poisoned_outputs(*args, **kwargs):
+        arrays = allocate(*args, **kwargs)
+        for array in arrays.values():
+            array.fill_(1)
+        return arrays
+
+    monkeypatch.setattr(_device, "_outputs", poisoned_outputs)
+    caps = {k: {**v, "history": n} for k, v in capacities(encoder, n).items()}
+    actual = encoder.encode(tensor(states, device), tensor(ids, device), subgoals=tuple(tensor(x, device) for x in layers),
+                            history=tuple(tensor(x, device) for x in history), capacities=caps)
+    compare(actual, expected, n)
+
+
+@pytest.mark.parametrize("encoder_type", [encoding.FlatHorizonEncoder, encoding.FlatTransitionEncoder,
+                                         encoding.FlatTransitionEffectsEncoder])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_device_suites_refuse_horizon_encoders_up_front(sets, encoder_type, capacity):  # noqa: F811
+    device = gpu()
+    suite = suite_of(sets, "gripper+blocks")
+    options = {"horizon_mode": "full"} if encoder_type is encoding.FlatHorizonEncoder else {}
+    encoder = encoding.SuiteEncoder(suite, encoder_type, **options)
+    states, ids = np.asarray(suite.initial_states()), np.arange(len(suite), dtype=np.int32)
+    with pytest.raises(ValueError, match=encoder_type.__name__ + ".*host rows.*HorizonView"):
+        encoder.encode(tensor(states, device), tensor(ids, device),
+                       capacities=capacities(encoder, len(ids)) if capacity else None)
+
+
+def test_capacity_suites_refuse_given_per_domain_expansions(sets):  # noqa: F811
+    device = gpu()
+    suite = suite_of(sets, "gripper+blocks")
+    encoder = encoding.SuiteEncoder(suite)
+    states, ids = np.asarray(suite.initial_states()), np.arange(len(suite), dtype=np.int32)
+    given = encoder.encode(states, ids, actions=True).expansions
+    with pytest.raises(ValueError, match="capacity calls do not accept given per-domain expansions"):
+        encoder.encode(tensor(states, device), tensor(ids, device), actions=given, capacities=capacities(encoder, len(ids)))
+
+
+def test_bounded_labels_preserve_raw_overflow_and_allocate_no_successors(monkeypatch):
+    from mymyr.encoding._device_actions import bounded_actions
+
+    device = gpu()
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(task)
+    rows = tensor(np.asarray(task.encode([task.initial_state] * 2)), device)
+    ids = torch.zeros(2, dtype=torch.int32, device=device)
+    live = torch.ones(1, dtype=torch.int64, device=device)
+
+    def expand(table, states, task_ids, **outputs):
+        assert "succ" not in outputs
+        outputs["status"].fill_(1)
+        outputs["offsets"].copy_(torch.tensor([0, 1, 100], dtype=torch.int32, device=device))
+        return {}
+
+    monkeypatch.setattr(rl, "expand_into", expand)
+    result = bounded_actions(encoder, rows, ids, 4, live=live)
+    assert result.succ is None
+    assert result.status.item() == 1
+    assert result.offsets.tolist() == [0, 1, 1]
+
+
+
+def test_captured_expansions_have_distinct_owners_and_refuse_workspace_growth():
+    from mymyr.encoding._device_actions import bounded_actions
+
+    device = gpu()
+    table = rl.as_table(text_task("gripper__prob05"))
+    encoder = encoding.FlatRelationEncoder(table)
+    rows = tensor(np.asarray(table.initial_states()), device)
+    ids = torch.zeros(1, dtype=torch.int32, device=device)
+    streams = [torch.cuda.Stream(device=device) for _ in range(2)]
+    graphs, results = [], []
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            bounded_actions(encoder, rows, ids, 100)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = bounded_actions(encoder, rows, ids, 100)
+        assert result._keepalive is not None
+        graphs.append(graph)
+        results.append(result)
+    assert results[0]._keepalive is not results[1]._keepalive
+    for stream, graph in zip(streams, graphs, strict=True):
+        with torch.cuda.stream(stream):
+            graph.replay()
+    for stream in streams:
+        stream.synchronize()
+    for graph, result in zip(graphs, results, strict=True):
+        expected = rl.expand(table, np.asarray(table.initial_states()))
+        total = int(np.asarray(expected.offsets)[-1])
+        np.testing.assert_array_equal(result.schema[:total].cpu().numpy(), np.asarray(expected.schema))
+        np.testing.assert_array_equal(result.binding[:total].cpu().numpy(), np.asarray(expected.binding))
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        bounded_actions(encoder, rows, ids, 100)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        result = bounded_actions(encoder, rows, ids, 100)
+        with pytest.raises(ValueError, match="same stream, shapes and options"):
+            bounded_actions(encoder, rows, ids, 200)
+    graph.replay()
+    torch.cuda.synchronize(device)

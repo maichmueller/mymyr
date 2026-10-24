@@ -678,7 +678,9 @@ void bind_encoding_device(nb::module_& parent)
              "Encodes the rows (54 integers: the graphs, then the pointers and strides of the arrays) into the 29 output "
              "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric, "
              "static_instances, static_args), on `stream`. Optional graph_count is the pointer to an int64 device "
-             "scalar counting the live prefix, bounded by the row count; per-graph tails are zeroed. No host wait.")
+             "scalar counting the live prefix, bounded by the row count; the clamped count is written back to that "
+             "scalar. Negative int64 counts are read as unsigned and clamp to the row count. Per-graph tails are "
+             "zeroed. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, numeric, "
              "flags, static_instances, static_tuples, static_args) to check the flags and return the graph extent and "

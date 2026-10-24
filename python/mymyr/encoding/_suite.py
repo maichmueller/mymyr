@@ -32,13 +32,15 @@ class SuiteBatch(Mapping):
       ``index``): graph ``k`` of ``batches[d]`` encodes row ``rows[d][k]``.
     - ``task_ids``: int32 ``[N]``, the rows' global instance numbers.
     - ``expansions[d]``: the expansion of domain ``d``'s rows when the call expanded them (``actions=True``), else the
-      expansions that were given; empty without actions. CUDA capacity calls return device label/state arrays and a
-      status word. Graph ``k`` of ``batches[d]`` is state ``k`` of
+      expansions that were given; empty without actions. CUDA capacity calls return device labels, offsets, parents
+      and a status word, with ``succ=None``. Graph ``k`` of ``batches[d]`` is state ``k`` of
       ``expansions[d]``, so ``mymyr.encoding.action_rows(batches[d], expansions[d])`` maps its action entities back.
 
     CUDA results keep all arrays on the device. Capacity calls include every domain, including those without rows;
     each batch has graph capacity N and ``device_graphs`` counts its live prefix. ``rows[d]`` has N entries with -1
     past that prefix. ``graph`` and batch scalar accessors read device values and wait; tensor access does not.
+    Invalid global task ids are grouped with instance 0's domain and set that batch's ``invalid_input`` flag;
+    host calls raise instead.
     """
 
     def __init__(
@@ -155,6 +157,9 @@ class SuiteEncoder:
         tails and report overflow in ``device_sizes``. ``actions=True`` bounds expansions by each domain's entity
         capacity and returns its device label arrays in ``expansions``. Automatic device action expansion requires
         an asynchronous backend, including for exact calls, so the grouping never falls back to downloading rows.
+        Given per-domain expansions are accepted only by exact device calls; capacity calls require ``actions=True``
+        or no actions. Capacity expansions store labels only (``succ=None``), and preserve the backend's raw status,
+        including overflow caused by staged rows past the domain's live prefix.
         Warm a capacity call on the capture stream before CUDA graph capture; keep the encoder, inputs and results
         alive through the final replay. Relations and actions use each domain's local task ids.
         """

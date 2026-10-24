@@ -156,6 +156,12 @@ counts its live graphs in `device_graphs`, and `graphs.rows[d]` has -1 past that
 reading `num_graphs`, `sizes` or `graphs.graph(i)` on the host does. With `actions=True`, expansion buffers are bounded
 by the entity capacity and schema multiplicity. Automatic device action expansion, exact or capacity, requires an
 asynchronous backend for every domain, so encoding never falls back to downloading the stored rows.
+Capacity suite calls accept automatic actions (`actions=True`); given per-domain expansions require exact calls.
+Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not allocated.
+The raw expansion status is preserved, including overflow from staged rows past a domain's live prefix.
+Invalid global task ids are grouped into instance 0's domain and set that batch's `invalid_input` flag; host calls
+raise instead. Device suites accept relational schemas; horizon and transition encoders take host rows or an
+explicit `HorizonView` encoded separately per domain.
 The dataset files continue to store rows and labels only. Tables can mix instances whose rows are 1, 42 and 184 words wide.
 
 A resident suite dataset and its capacity encoding, including capture and replay:

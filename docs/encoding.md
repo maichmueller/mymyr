@@ -1572,6 +1572,9 @@ derived_goals)` with `append`, `flush(DeviceOutput)`, `clear`, and `status()`; a
 batch_views, stream)` with caller scratch sized by `scratch_bytes()`. The batch views come from
 `cuda::collation_batch(encoder, arrays, sizes, graphs)`, which refuses an encoder that the device does not encode.
 `DeviceOutput::graphs` optionally receives a live graph count.
+The native Python encoder handle's `graph_count` pointer is both input and output: it reads an int64 device scalar
+as an unsigned count and writes `min(count, N)` back into the same scalar. Counts above `N`, including negative
+int64 values interpreted as unsigned, become `N`.
 
 For CUDA capacity encoding with shared statics, `DeviceOutput::static_capacities` bounds the instance blocks and their
 arguments, and `static_sizes` points to a device `StaticSizes`. The overflow flag includes these capacities. The free

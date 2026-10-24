@@ -67,6 +67,12 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
     torch = d._torch()
     if pool is not None or framework not in (None, "torch", "pytorch"):
         raise d._error("device suites need torch output and no host thread pool")
+    for part_encoder in encoder.encoders:
+        if part_encoder.options["horizon_mode"] is not None:
+            raise d._error(f"device suites encode relational schemas; {type(part_encoder).__name__} takes host rows "
+                           "or a HorizonView per domain")
+    if capacities is not None and isinstance(actions, Mapping) and actions:
+        raise d._error("device suite capacity calls do not accept given per-domain expansions; use actions=True")
     if task_ids is None:
         raise d._error("a suite needs task_ids, one per row")
     keep: list = []
@@ -142,8 +148,10 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
             expansions[k] = exp
         inputs = [_input(v, idx, n, keep) for v in (derived, goals, subgoals, history)]
         if live is None:
-            batches[k] = part_encoder.encode(part, part_ids, derived=inputs[0], goals=inputs[1], actions=exp,
-                                             subgoals=inputs[2], history=inputs[3], framework=framework, threads=threads)
+            kwargs = dict(derived=inputs[0], goals=inputs[1], actions=exp, subgoals=inputs[2], history=inputs[3],
+                          framework=framework)
+            batches[k] = part_encoder.encode(part, part_ids, threads=threads,
+                                             **{name: value for name, value in kwargs.items() if value is not None})
         else:
             checked = d._Rows(torch, part, part_ids, inputs[0], inputs[1], inputs[2], inputs[3])
             if exp is not None:
