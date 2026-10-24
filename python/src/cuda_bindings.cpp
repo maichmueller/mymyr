@@ -1785,6 +1785,7 @@ void bind_cuda(nb::module_& parent)
               return export_device_array(std::move(spec), DeviceExport{imported.device.device_type,
                                           imported.device.device_id, {}}, Framework::Torch, default_words(Framework::Torch));
           }, "array"_a, "owner"_a, "stream"_a,
+          nb::sig("def _keep_expansion_array(array: mymyr._typing.SupportsDLPack, owner: types.CapsuleType, stream: int) -> torch.Tensor"),
           "A zero-copy output tensor whose storage keeps a captured expansion workspace alive.");
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
