@@ -1251,7 +1251,7 @@ are ordered. When another stream produced an input or consumes an output, establ
 stream that constructed them. JAX FFI kernels use XLA's stream.
 
 Warm a capacity call on the capture stream to upload the encoder's context before recording. Keep the encoder,
-input arrays and their owners, output tensors and graph alive through completion of the final replay. Replay reads
+input arrays and their owners, and output tensors alive through completion of the final replay. Replay reads
 the captured addresses: update inputs in place. Host exports, exact encoding and HGraph construction belong outside
 capture. The capacity encoder allocates scratch through torch; the graph's private pool retains captured scratch.
 Exact encodes reuse scratch per stream; `encoder.reserve_device(graphs, device=..., stream=...)` grows it in advance
@@ -1275,7 +1275,7 @@ assert captured_bytes == captured.nbytes
 assert not captured.sizes["overflow"]
 ```
 
-Captured action observations have additional [expansion requirements](rl.md#encoded-observations).
+Captured action expansion has its own [workspace ownership and fixed-shape requirements](rl.md#encoded-observations).
 
 ### The torch op
 
@@ -1303,7 +1303,7 @@ The result list is ordered by `DeviceFlatBatch.array_names`: output arrays, `sta
 Absent arrays are empty tensors. Wrap it with `DeviceFlatBatch.from_arrays`. The handle registry owns the encoder
 until `unregister(handle)`; keep the handle registered while compiled functions or CUDA graphs can call it.
 A compiled function specializes the handle: calling it with another registered encoder traces a graph for that
-encoder's schema. Graphs of different sizes can share a capture stream; each owns its scratch.
+encoder's schema.
 
 ```python needs-torch skip-if-no-cuda
 import mymyr.rl.torch as rt

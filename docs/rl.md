@@ -526,8 +526,7 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   status on the device; they wait for nothing and capture with the step. This requires a table whose expansion runs
   asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
-  zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
-  expansion reads each domain's live-row count on the device; staged padding contributes no successors or overflow.
+  zero unused output tails. These buffers store labels only; successor state rows are not allocated.
   A captured graph and its result tensors own an exclusive expansion workspace per table; eager calls and other
   captures use different workspaces. Native CUDA graph ownership retains scratch through the last pending replay,
   including manual `torch.cuda.CUDAGraph` captures, even if every result is dropped or the graph is destroyed during
@@ -535,8 +534,9 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   A host worker waits for uncaptured warm-up work and frees on a separate stream, so release never touches a capture
   stream that has been destroyed or reused.
   Warm on the capture stream with the same shapes and options. All expansions over the same table within one graph
-  must keep those shapes and options fixed. Inputs and caller-provided destinations must stay at their captured
-  addresses until the final replay completes; synchronize the replay stream before freeing or reusing them.
+  must keep those shapes and options fixed. The [encoding buffer requirements](encoding.md#streams-and-cuda-graphs)
+  also apply to caller-provided expansion destinations: keep them at their captured addresses through completion of
+  the final replay, and synchronize the replay stream before freeing or reusing them.
   External CUDA streams must remain valid while arrays produced on them are retained. The JAX environments do not
   encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
@@ -545,7 +545,8 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   and `index[i]` its graph in that batch. With capacities a domain's batch has an entry for every environment in its
   per-graph arrays and counts its rows on the device (`device_graphs`; `num_graphs` reads it).
   Multi-domain torch observations capture with `BatchedEnv.capture` or `torch.cuda.graph`; their domain dispatch
-  is not traced by `torch.compile`.
+  is not traced by `torch.compile`. Grouping, status and the live-row bound on action expansion follow the
+  [device-suite contract](encoding.md#several-domains-and-resident-datasets).
 
 A torch environment on the CPU, whose observations are the host encoder's batches:
 
