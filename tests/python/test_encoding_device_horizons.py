@@ -172,7 +172,7 @@ def test_deep_view_invalid_offsets_and_indices_are_flagged_before_fill(mixed, fi
 @pytest.fixture(scope="module")
 def space():
     gpu()
-    cuda = pytest.importorskip("mymyr.cuda")
+    cuda = pytest.importorskip("mymyr.cuda", exc_type=ImportError)
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
     base = ROOT / "tests/data/benchmarks/small/blocks_3"

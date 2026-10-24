@@ -18,7 +18,7 @@ def device_path(request):
     device, path = request.param
     if device == "cuda":
         torch = pytest.importorskip("torch")
-        if not torch.cuda.is_available() or not pytest.importorskip("mymyr.cuda").available():
+        if not torch.cuda.is_available() or not pytest.importorskip("mymyr.cuda", exc_type=ImportError).available():
             pytest.skip("no visible CUDA device")
     return device, path
 

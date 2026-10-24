@@ -17,7 +17,7 @@ torch = pytest.importorskip("torch")
 def gpu():
     if not torch.cuda.is_available():
         pytest.skip("no visible CUDA device")
-    pytest.importorskip("mymyr.cuda")
+    pytest.importorskip("mymyr.cuda", exc_type=ImportError)
     return torch.device("cuda", 0)
 
 
