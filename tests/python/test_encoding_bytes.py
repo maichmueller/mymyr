@@ -278,7 +278,8 @@ def test_jax_suite_observation_byte_reports(platform):
     suite = rl.TaskSuite.group([text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")])
     encoder = encoding.SuiteEncoder(suite)
     env = Env(suite, device=platform, observation=encoder, obs_capacities=dict(entities=128, args=1024))
-    _, observation = jax.jit(lambda key: env.reset(key, 2))(jax.random.key(0))
+    with jax.default_device(jax.devices(platform)[0]):
+        _, observation = jax.jit(lambda key: env.reset(key, 2))(jax.random.key(0))
     batch = observation.encoding
     expected = {f"batches.{d}.{name}": size for d, part in enumerate(batch.batches)
                 for name, size in part.nbytes_by_array.items()}

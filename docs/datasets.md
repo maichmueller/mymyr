@@ -162,6 +162,10 @@ The raw expansion status is preserved, including overflow from staged rows past 
 Invalid global task ids are grouped into instance 0's domain and set that batch's `invalid_input` flag; host calls
 raise instead. Device suites accept relational schemas; horizon and transition encoders take host rows or an
 explicit `HorizonView` encoded separately per domain.
+`loaded.nbytes` and `loaded.nbytes_by_array` report the output payload, including its encoded graphs, task ids and
+labels. `loaded.graphs.nbytes` reports the graphs and, for suites, the grouping mappings. Byte reports retain capacity
+shapes and read no device counters; input action expansions and scratch are excluded. See
+[observation bytes](encoding.md#observation-bytes) for the accounting contract and encoding choices.
 The dataset files continue to store rows and labels only. Tables can mix instances whose rows are 1, 42 and 184 words wide.
 
 A resident suite dataset and its capacity encoding, including capture and replay:
@@ -196,6 +200,8 @@ torch.cuda.synchronize()
 assert loaded_suite.graphs.domain.tolist() == [0, 1]
 assert loaded_suite.graphs.index.tolist() == [0, 0]
 assert all(not batch.sizes["overflow"] for batch in loaded_suite.graphs.values())
+assert loaded_suite.nbytes == sum(loaded_suite.nbytes_by_array.values())
+assert loaded_suite.graphs.nbytes_by_array["domain"] == len(suite) * 4
 ```
 
 `EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`
