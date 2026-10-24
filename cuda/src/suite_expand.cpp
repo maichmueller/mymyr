@@ -1,6 +1,8 @@
 // The device expand over a task suite (include/mymyr/cuda/suite_expand.hpp): one DeviceExpander per domain, each on the
 // rows of its domain (in place when every domain's rows are one run of the batch, else gathered and scattered back).
 
+#include "completed_release.hpp"
+
 #include "mymyr/cuda/suite_expand.hpp"
 
 #include "mymyr/cuda/generator.hpp"
@@ -255,6 +257,15 @@ SuiteExpander::SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_
 }
 
 SuiteExpander::~SuiteExpander() = default;
+
+void SuiteExpander::release_completed(std::unique_ptr<SuiteExpander>& expander, const Event& ready)
+{
+    if (!expander)
+        return;
+    detail::CompletedRelease release(expander->context());
+    ready.synchronize();
+    expander.reset();
+}
 
 const ContextPtr& SuiteExpander::context() const noexcept { return m->ctx; }
 const rl::TaskSuitePtr& SuiteExpander::suite() const noexcept { return m->suite; }

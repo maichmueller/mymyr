@@ -1,5 +1,7 @@
 // The CUDA backend's runtime layer: contexts, pools, buffers, events (include/mymyr/cuda/runtime.hpp).
 
+#include "completed_release.hpp"
+
 #include "mymyr/cuda/runtime.hpp"
 
 #include <algorithm>
@@ -420,6 +422,16 @@ void order_after(cudaStream_t waiter, cudaStream_t s) noexcept
 
 void DeviceBuffer::reset(cudaStream_t release) noexcept
 {
+    if (m_ptr && detail::completed_release_stream)
+    {
+        m_ctx->deallocate(m_ptr, detail::completed_release_stream);
+        m_ptr = nullptr;
+        m_bytes = 0;
+        m_free_live = false;
+        m_users.clear();
+        m_lasts.clear();
+        return;
+    }
     if (!m_ptr)
         return;
     cudaStream_t fs = m_stream;
@@ -449,6 +461,33 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
     m_bytes = 0;
     m_free_live = false;
 }
+
+namespace detail
+{
+thread_local cudaStream_t completed_release_stream = nullptr;
+
+CompletedRelease::CompletedRelease(ContextPtr ctx) : m_ctx(std::move(ctx)), m_guard(m_ctx->device())
+{
+    check(cudaThreadExchangeStreamCaptureMode(&m_mode), "cudaThreadExchangeStreamCaptureMode");
+    const cudaError_t result = cudaStreamCreateWithFlags(&m_stream, cudaStreamNonBlocking);
+    if (result != cudaSuccess)
+    {
+        (void)cudaThreadExchangeStreamCaptureMode(&m_mode);
+        check(result, "cudaStreamCreateWithFlags");
+    }
+    m_previous = std::exchange(completed_release_stream, m_stream);
+}
+
+CompletedRelease::~CompletedRelease()
+{
+    (void)cudaStreamSynchronize(m_stream);
+    completed_release_stream = m_previous;
+    // All frees finish before the last context reference can destroy its pool.
+    m_ctx.reset();
+    (void)cudaStreamDestroy(m_stream);
+    (void)cudaThreadExchangeStreamCaptureMode(&m_mode);
+}
+}  // namespace detail
 
 // ------------------------------------------------------------------------------------------------ LastUse
 

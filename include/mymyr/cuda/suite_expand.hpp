@@ -42,6 +42,10 @@ class SuiteExpander
 public:
     SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_t stream = nullptr);
     ~SuiteExpander();
+    /// Destroys an exclusive expander after its captured launches have completed, waiting for its uncaptured warm-up
+    /// event. Releases on a separate stream so original streams may be gone or capturing other work. On failure the
+    /// expander remains owned by the caller.
+    static void release_completed(std::unique_ptr<SuiteExpander>& expander, const Event& ready);
     SuiteExpander(const SuiteExpander&) = delete;
     SuiteExpander& operator=(const SuiteExpander&) = delete;
 

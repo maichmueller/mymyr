@@ -402,3 +402,171 @@ def test_action_expansion_ignores_padding(sets, capacity, captured):  # noqa: F8
     else:
         assert actual[0].sizes["capacity_overflow"]
         assert_same(actual[1], expected[1])
+
+
+def _wait_workspace_release(reference):
+    import gc
+    import time
+    from mymyr._core import _cuda
+
+    for _ in range(500):
+        gc.collect()
+        if _cuda._expansion_workspace_released(reference):
+            assert not _cuda._expansion_workspace_alive(reference)
+            return
+        time.sleep(0.01)
+    assert _cuda._expansion_workspace_released(reference)
+
+
+def test_graph_retains_expansion_after_all_results_are_dropped():
+    import gc
+    from mymyr._core import _cuda
+    from mymyr.encoding._device_actions import bounded_actions
+
+    device = gpu()
+    table = rl.as_table(text_task("gripper__prob05"))
+    encoder = encoding.FlatRelationEncoder(table)
+    rows = tensor(np.asarray(table.initial_states()), device)
+    ids = torch.zeros(1, dtype=torch.int32, device=device)
+    expected = rl.expand(table, np.asarray(table.initial_states()))
+    saved_schema = torch.empty(100, dtype=torch.int32, device=device)
+    saved_binding = torch.empty((100, table.label_width), dtype=torch.int32, device=device)
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        bounded_actions(encoder, rows, ids, 100)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        result = bounded_actions(encoder, rows, ids, 100)
+        saved_schema.copy_(result.schema)
+        saved_binding.copy_(result.binding)
+    reference = _cuda._expansion_workspace_weak(result._keepalive)
+    del result
+    gc.collect()
+    # Check ownership before launching anything that reads the captured workspace.
+    assert _cuda._expansion_workspace_alive(reference)
+    for _ in range(3):
+        graph.replay()
+        total = len(expected.schema)
+        np.testing.assert_array_equal(saved_schema[:total].cpu(), np.asarray(expected.schema))
+        np.testing.assert_array_equal(saved_binding[:total].cpu(), np.asarray(expected.binding))
+        assert not saved_schema[total:].any()
+        assert not saved_binding[total:].any()
+    graph.reset()
+    _wait_workspace_release(reference)
+
+
+@pytest.mark.parametrize("drop_results_first", [False, True])
+def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_results_first):
+    import gc
+    from mymyr import cuda
+    from mymyr._core import _cuda
+
+    device = gpu()
+    table = rl.as_table(text_task("gripper__prob05"))
+    ctx = cuda.Context(0, max_bytes=64 << 20)
+    states = tensor(np.asarray(table.initial_states()), device)
+    ids = torch.zeros(1, dtype=torch.int32, device=device)
+    expected = rl.expand(table, np.asarray(table.initial_states()))
+    arrays = dict(schema=torch.zeros(100, dtype=torch.int32, device=device),
+                  binding=torch.zeros((100, table.label_width), dtype=torch.int32, device=device),
+                  offsets=torch.zeros(2, dtype=torch.int32, device=device),
+                  status=torch.zeros(1, dtype=torch.int32, device=device))
+    capture_stream = torch.cuda.Stream(device=device)
+    replay_stream = torch.cuda.Stream(device=device)
+    capture_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(capture_stream):
+        rl.expand_into(table, states, ids, **arrays, stream=capture_stream, ctx=ctx)
+    capture_stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        result = rl.expand_into(table, states, ids, **arrays, stream=capture_stream, ctx=ctx)
+    reference = _cuda._expansion_workspace_weak(result["_keepalive"])
+    assert _cuda._expansion_workspace_owners(reference) == 2
+    # This independent guard makes a failed ownership assertion safe under asynchronous replay.
+    safety_owner = result["_keepalive"]
+    if drop_results_first:
+        del result
+        gc.collect()
+        assert _cuda._expansion_workspace_alive(reference)
+    replay_stream.wait_stream(torch.cuda.current_stream(device))
+    done = torch.cuda.Event()
+    with torch.cuda.stream(replay_stream):
+        torch.cuda._sleep(200_000_000)
+        graph.replay()
+        done.record()
+    try:
+        assert not done.query()
+        if not drop_results_first:
+            del result
+        graph.reset()
+        gc.collect()
+        if not done.query():
+            assert _cuda._expansion_workspace_owners(reference) == 2
+    finally:
+        done.synchronize()
+    del safety_owner
+    total = len(expected.schema)
+    np.testing.assert_array_equal(arrays["schema"][:total].cpu(), np.asarray(expected.schema))
+    np.testing.assert_array_equal(arrays["binding"][:total].cpu(), np.asarray(expected.binding))
+    np.testing.assert_array_equal(arrays["offsets"].cpu(), np.asarray(expected.offsets))
+    assert arrays["status"].item() == 0
+    _wait_workspace_release(reference)
+    ctx.synchronize()
+
+
+@pytest.mark.parametrize("release_during_capture", [False, True])
+def test_repeated_capture_destruction_releases_workspace_memory(release_during_capture):
+    import time
+    from mymyr import cuda
+    from mymyr._core import _cuda
+
+    device = gpu()
+    ctx = cuda.Context(0, max_bytes=64 << 20)
+    table = rl.as_table(text_task("gripper__prob05"))
+    states = tensor(np.asarray(table.initial_states()), device)
+    arrays = dict(schema=torch.zeros(100, dtype=torch.int32, device=device),
+                  offsets=torch.zeros(2, dtype=torch.int32, device=device),
+                  status=torch.zeros(1, dtype=torch.int32, device=device))
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    used, torch_used = [], []
+    marker = torch.zeros(1, dtype=torch.int32, device=device)
+    for cycle in range(12):
+        with torch.cuda.stream(stream):
+            rl.expand_into(table, states, **arrays, stream=stream, ctx=ctx)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = rl.expand_into(table, states, **arrays, stream=stream, ctx=ctx)
+        reference = _cuda._expansion_workspace_weak(result["_keepalive"])
+        graph.replay()
+        torch.cuda.synchronize(device)
+        graph.reset()
+        assert _cuda._expansion_workspace_alive(reference)
+        if release_during_capture:
+            following = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(following, stream=stream):
+                del result
+                _wait_workspace_release(reference)
+                marker.add_(1)
+            following.replay()
+            torch.cuda.synchronize(device)
+            assert marker.item() == cycle + 1
+            following.reset()
+            ctx.synchronize()
+            value = ctx.usage()["used"]
+        else:
+            del result
+            _wait_workspace_release(reference)
+            for _ in range(500):
+                ctx.synchronize()
+                value = ctx.usage()["used"]
+                if value == 0:
+                    break
+                time.sleep(0.01)
+        used.append(value)
+        torch_used.append(torch.cuda.memory_allocated(device))
+    assert used == [0] * len(used)
+    assert torch_used == [torch_used[0]] * len(torch_used)

@@ -525,10 +525,17 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
   zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
   expansion reads each domain's live-row count on the device; staged padding contributes no successors or overflow.
-  A captured graph owns an exclusive expansion workspace per table, retained by its result tensors; eager calls and
-  other graphs use different workspaces. Warm on the capture stream with the same shapes and options. All expansions
-  over the same table within one graph must keep those shapes and options fixed. Keep the results alive through the
-  final replay. The JAX environments do not encode actions.
+  A captured graph and its result tensors own an exclusive expansion workspace per table; eager calls and other
+  captures use different workspaces. Native CUDA graph ownership retains scratch through the last pending replay,
+  including manual `torch.cuda.CUDAGraph` captures, even if every result is dropped or the graph is destroyed during
+  replay on another stream. Scratch is released once the graph, results and pending launches are all gone.
+  A host worker waits for uncaptured warm-up work and frees on a separate stream, so release never touches a capture
+  stream that has been destroyed or reused.
+  Warm on the capture stream with the same shapes and options. All expansions over the same table within one graph
+  must keep those shapes and options fixed. Inputs and caller-provided destinations must stay at their captured
+  addresses until the final replay completes; synchronize the replay stream before freeing or reusing them.
+  External CUDA streams must remain valid while arrays produced on them are retained. The JAX environments do not
+  encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`

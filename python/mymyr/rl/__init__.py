@@ -78,10 +78,15 @@ device; their expansion uses per-instance kernels and gathers/scatters rows at t
 CUDA array [1], read as an unsigned count and clamped to N. Padding contributes no successors or validation
 errors; offsets past the prefix repeat its total. It requires ``status=`` and an asynchronous device table.
 Under CUDA graph capture, warm ``expand_into`` on the capture stream with identical shapes, destinations present
-and options. Every expansion over the same table within that graph must keep these fixed. The result dictionary's
-``_keepalive`` owns the graph's exclusive workspace: keep the dictionary alive through the final replay. Captured
-workspaces never return to the eager pool and are never shared between graphs. Encoded action observations retain
-this ownership in their output tensor storage automatically.
+and options. Every expansion over the same table within that graph must keep these fixed. The native CUDA graph
+and the result dictionary's ``_keepalive`` retain its exclusive workspace. The workspace is released only when the
+graph, results and last pending replay are gone, including manual ``torch.cuda.CUDAGraph`` captures and replays on
+other streams. CUDA's release callback delegates destruction to a host worker so CUDA cleanup runs outside the
+callback. Cleanup waits for the uncaptured warm-up event and frees on a separate stream, independently of the
+original capture stream's lifetime or reuse. Captured workspaces never return to the eager pool and are never
+shared between captures. Encoded action observations retain this ownership in each output tensor's storage. Inputs and caller-provided destinations must
+stay at their captured addresses through the final replay's completion: synchronize the replay stream before freeing
+or reusing them. External CUDA streams must remain valid while arrays produced on them are retained.
 
 Environments: :mod:`mymyr.rl.torch` (needs torch) has batched planning environments on the CPU or a CUDA device
 (``BatchedEnv``, the TorchRL ``PlanningEnv``), torch custom ops for the step and the expansion, and the counter-based
