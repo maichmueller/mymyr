@@ -12,6 +12,7 @@
 // streams must outlive the arrays produced on them.
 
 #include "arrays.hpp"
+#include "completed_release.hpp"
 #include "cuda_stream.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
@@ -41,7 +42,6 @@
 #include <array>
 #include <atomic>
 #include <bit>
-#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -519,15 +519,14 @@ private:
                         auto* workspace = items->completed;
                         try
                         {
-                            cuda::SuiteExpander::release_completed(workspace->expander, *workspace->ready);
+                            cuda::detail::release_completed(workspace->expander, *workspace->ready);
                         }
                         catch (...)
                         {
-                            release(items);
-                            // Retain resources on cleanup failure and avoid spinning between retries.
-                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                            items = next;
-                            continue;
+                            // Runtime teardown and sticky errors cannot be retried. Keep CUDA resources alive
+                            // without invoking their destructors or making any further CUDA calls.
+                            (void)workspace->expander.release();
+                            (void)workspace->ready.release();
                         }
                         auto released = workspace->released;
                         delete workspace;
@@ -703,10 +702,10 @@ std::shared_ptr<ExpansionWorkspace> captured_workspace(const SuiteRef& ref, cons
     return owner;
 }
 
-nb::capsule workspace_owner(std::shared_ptr<ExpansionWorkspace> workspace)
+nb::capsule workspace_reference(const std::shared_ptr<ExpansionWorkspace>& workspace)
 {
-    return nb::capsule(new std::shared_ptr<ExpansionWorkspace>(std::move(workspace)), "mymyr.expansion_workspace",
-                       [](void* p) noexcept { delete static_cast<std::shared_ptr<ExpansionWorkspace>*>(p); });
+    return nb::capsule(new WorkspaceReference{workspace, workspace->released}, "mymyr.expansion_workspace_weak",
+                       [](void* p) noexcept { delete static_cast<WorkspaceReference*>(p); });
 }
 
 /// The device task ids of a batch: an int32 CUDA array [rows] on the context's device, or None (null: a table of one).
@@ -1190,7 +1189,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             c->release_after(os.s, std::move(keep));
         nb::dict r;
         if (owner)
-            r["_keepalive"] = workspace_owner(std::move(owner));
+            r["_workspace"] = workspace_reference(owner);
         if (waited)
         {
             r["total"] = x.total;
@@ -1735,13 +1734,15 @@ void bind_cuda(nb::module_& parent)
           "table"_a, "rows"_a, "device"_a, "stream"_a,
           "Checks that the table can expand this many rows without waiting for the device.");
 
-    m.def("_expansion_workspace_weak", [](nb::capsule capsule) {
-        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace") != 0)
-            throw nb::type_error("mymyr: expected an expansion workspace owner");
-        auto& owner = *static_cast<std::shared_ptr<ExpansionWorkspace>*>(capsule.data());
-        return nb::capsule(new WorkspaceReference{owner, owner->released}, "mymyr.expansion_workspace_weak",
-                           [](void* p) noexcept { delete static_cast<WorkspaceReference*>(p); });
-    }, "owner"_a, "A non-owning workspace reference for checking graph and result lifetimes.");
+    m.def("_expansion_workspace_guard", [](nb::capsule capsule) {
+        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
+            throw nb::type_error("mymyr: expected a weak expansion workspace reference");
+        auto owner = static_cast<WorkspaceReference*>(capsule.data())->workspace.lock();
+        if (!owner)
+            throw nb::value_error("mymyr: expansion workspace has expired");
+        return nb::capsule(new std::shared_ptr<ExpansionWorkspace>(std::move(owner)), "mymyr.expansion_workspace_guard",
+                           [](void* p) noexcept { delete static_cast<std::shared_ptr<ExpansionWorkspace>*>(p); });
+    }, "reference"_a, "An independent safety owner for checking graph lifetimes during pending launches.");
     m.def("_expansion_workspace_alive", [](nb::capsule capsule) {
         if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
             throw nb::type_error("mymyr: expected a weak expansion workspace reference");
@@ -1758,35 +1759,7 @@ void bind_cuda(nb::module_& parent)
         if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
             throw nb::type_error("mymyr: expected a weak expansion workspace reference");
         return static_cast<WorkspaceReference*>(capsule.data())->released->load(std::memory_order_acquire);
-    }, "reference"_a, "Whether captured workspace destruction and its stream-ordered frees have completed.");
-
-    m.def("_keep_expansion_array",
-          [](nb::handle array, nb::capsule capsule, std::intptr_t stream) {
-              if (std::strcmp(capsule.name(), "mymyr.expansion_workspace") != 0)
-                  throw nb::type_error("mymyr: expected an expansion workspace owner");
-              auto workspace = *static_cast<std::shared_ptr<ExpansionWorkspace>*>(capsule.data());
-              auto imported = dl::import_dlpack(array, stream);
-              struct Keep
-              {
-                  std::shared_ptr<void> array;
-                  std::shared_ptr<ExpansionWorkspace> workspace;
-              };
-              ArraySpec spec;
-              spec.owner = std::make_shared<Keep>(Keep{imported.keep, std::move(workspace)});
-              spec.data = imported.data;
-              if (imported.dtype.code == dl::k_float && imported.dtype.bits == 32)
-                  spec.dtype = rl::DType::F32;
-              else if (imported.dtype.code == dl::k_float && imported.dtype.bits == 64)
-                  spec.dtype = rl::DType::F64;
-              else
-                  spec.dtype = dtype_of({imported.dtype.code, imported.dtype.bits, imported.dtype.lanes});
-              spec.shape = imported.shape;
-              spec.strides = imported.strides;
-              return export_device_array(std::move(spec), DeviceExport{imported.device.device_type,
-                                          imported.device.device_id, {}}, Framework::Torch, default_words(Framework::Torch));
-          }, "array"_a, "owner"_a, "stream"_a,
-          nb::sig("def _keep_expansion_array(array: mymyr._typing.SupportsDLPack, owner: types.CapsuleType, stream: int) -> torch.Tensor"),
-          "A zero-copy output tensor whose storage keeps a captured expansion workspace alive.");
+    }, "reference"_a, "Whether workspace cleanup has finished, including abandonment after a CUDA failure.");
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")

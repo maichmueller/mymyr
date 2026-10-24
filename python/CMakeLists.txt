@@ -32,6 +32,7 @@ if(TARGET mymyr_frontend)
 endif()
 # mymyr.cuda, when the CUDA backend is built (MYMYR_CUDA=ON; mymyr_cuda defines MYMYR_HAS_CUDA publicly).
 if(TARGET mymyr_cuda)
+    target_include_directories(_core PRIVATE ${PROJECT_SOURCE_DIR}/cuda/src)
     target_sources(_core PRIVATE src/cuda_bindings.cpp src/cuda_search_bindings.cpp src/cuda_heuristics_bindings.cpp)
     target_sources(_core PRIVATE src/cuda_datasets_bindings.cpp src/encoding_device_bindings.cpp)
     target_link_libraries(_core PRIVATE mymyr::cuda)

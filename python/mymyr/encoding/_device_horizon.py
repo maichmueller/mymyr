@@ -105,7 +105,6 @@ def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
     if not encoder.options["include_actions"]:
         raise d._error("actions are given, but the schema has no action relations")
     a = action_arrays(encoder, actions, rows.device, rows.graphs, rows.tensors)
-    rows.expansion_owner = getattr(actions, "_keepalive", None)
     status = a.status
     if status is not None:
         if status.device != rows.device or status.numel() != 1 or status.dtype not in (d._torch().int32, d._torch().int64):

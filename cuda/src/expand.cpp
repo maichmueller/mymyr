@@ -369,10 +369,10 @@ struct DeviceExpander::Impl
         const u64 n = c.rows, nseg = n * S + 1;
         if (nseg > 0x7FFFFFFFull)
             throw std::length_error("mymyr: device expand: more than 2^31 (state, schema) segments in one chunk");
-        auto* ord = scratch_of<u32>(order, ctx, in.rows, s) + c.first;
-        auto* ps = scratch_of<u32>(pos, ctx, in.rows, s) + c.first;
-        if (!views_only)
+        if (!views_only && !rows_dev)
         {
+            auto* ord = scratch_of<u32>(order, ctx, in.rows, s) + c.first;
+            auto* ps = scratch_of<u32>(pos, ctx, in.rows, s) + c.first;
             const u64 tb = lifted::order_temp_bytes(n);
             const auto* rid = reinterpret_cast<const u32*>(ids + c.first);
             check(lifted::launch_order(rid, plan.instances, plan.order_keys(), n, order_temp.ensure(ctx, tb, s), tb, ord, ps,
@@ -1153,7 +1153,7 @@ DeviceExpander::DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStrea
 
 DeviceExpander::~DeviceExpander()
 {
-    if (m && m->ctx && !detail::completed_release_stream)
+    if (m && m->ctx && !detail::completed_release_active())
     {
         try
         {

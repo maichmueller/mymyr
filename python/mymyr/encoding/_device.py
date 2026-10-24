@@ -339,7 +339,7 @@ def _layer_words(torch: Any, t: Any, name: str, graphs: int, may_share: bool) ->
 class _Rows:
     """The checked rows of a call: the device pointers and strides the native side takes."""
 
-    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors", "expansion_owner")
+    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors")
 
     def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any, subgoals: Any = None,
                  history: Any = None):
@@ -648,12 +648,6 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
     _retain(torch, [*rows.tensors, *(keep or [])], device)
-    owner = getattr(rows, "expansion_owner", None)
-    if owner is not None:
-        from mymyr._core import _cuda
-        for name, array in out.items():
-            if array is not None:
-                out[name] = _cuda._keep_expansion_array(array, owner, stream)
     return out
 
 

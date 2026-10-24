@@ -1,11 +1,16 @@
 """Resident suite batches: stable domain grouping, live counts, capacities and graph replay."""
 
+import gc
+import os
+import pathlib
+import time
+
 import numpy as np
 import pytest
 
 from mymyr import encoding, rl
 from conftest import text_task
-from test_encoding_device_actions import gpu, tensor
+from test_encoding_device_actions import gpu, tensor, toggle_tasks
 from test_rl_table import sets  # noqa: F401
 from test_rl_task_suite import suite_batch, suite_of
 from test_rl_torch_obs import assert_same
@@ -308,7 +313,7 @@ def test_bounded_labels_preserve_raw_overflow_and_allocate_no_successors(monkeyp
 
 
 
-def test_captured_expansions_have_distinct_owners_and_refuse_workspace_growth():
+def test_captured_expansions_have_distinct_workspaces_and_refuse_workspace_growth():
     from mymyr.encoding._device_actions import bounded_actions
 
     device = gpu()
@@ -326,10 +331,10 @@ def test_captured_expansions_have_distinct_owners_and_refuse_workspace_growth():
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             result = bounded_actions(encoder, rows, ids, 100)
-        assert result._keepalive is not None
+        assert result._workspace is not None
         graphs.append(graph)
         results.append(result)
-    assert results[0]._keepalive is not results[1]._keepalive
+    assert results[0]._workspace is not results[1]._workspace
     for stream, graph in zip(streams, graphs, strict=True):
         with torch.cuda.stream(stream):
             graph.replay()
@@ -441,7 +446,8 @@ def test_graph_retains_expansion_after_all_results_are_dropped():
         result = bounded_actions(encoder, rows, ids, 100)
         saved_schema.copy_(result.schema)
         saved_binding.copy_(result.binding)
-    reference = _cuda._expansion_workspace_weak(result._keepalive)
+    reference = result._workspace
+    assert _cuda._expansion_workspace_owners(reference) == 1
     del result
     gc.collect()
     # Check ownership before launching anything that reads the captured workspace.
@@ -482,10 +488,10 @@ def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_res
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
         result = rl.expand_into(table, states, ids, **arrays, stream=capture_stream, ctx=ctx)
-    reference = _cuda._expansion_workspace_weak(result["_keepalive"])
-    assert _cuda._expansion_workspace_owners(reference) == 2
+    reference = result["_workspace"]
+    assert _cuda._expansion_workspace_owners(reference) == 1
     # This independent guard makes a failed ownership assertion safe under asynchronous replay.
-    safety_owner = result["_keepalive"]
+    safety_owner = _cuda._expansion_workspace_guard(reference)
     if drop_results_first:
         del result
         gc.collect()
@@ -540,15 +546,18 @@ def test_repeated_capture_destruction_releases_workspace_memory(release_during_c
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             result = rl.expand_into(table, states, **arrays, stream=stream, ctx=ctx)
-        reference = _cuda._expansion_workspace_weak(result["_keepalive"])
+        reference = result["_workspace"]
+        safety_owner = _cuda._expansion_workspace_guard(reference)
+        assert _cuda._expansion_workspace_owners(reference) == 2
         graph.replay()
         torch.cuda.synchronize(device)
         graph.reset()
         assert _cuda._expansion_workspace_alive(reference)
+        del result
         if release_during_capture:
             following = torch.cuda.CUDAGraph()
             with torch.cuda.graph(following, stream=stream):
-                del result
+                del safety_owner
                 _wait_workspace_release(reference)
                 marker.add_(1)
             following.replay()
@@ -558,7 +567,7 @@ def test_repeated_capture_destruction_releases_workspace_memory(release_during_c
             ctx.synchronize()
             value = ctx.usage()["used"]
         else:
-            del result
+            del safety_owner
             _wait_workspace_release(reference)
             for _ in range(500):
                 ctx.synchronize()
@@ -570,3 +579,211 @@ def test_repeated_capture_destruction_releases_workspace_memory(release_during_c
         torch_used.append(torch.cuda.memory_allocated(device))
     assert used == [0] * len(used)
     assert torch_used == [torch_used[0]] * len(torch_used)
+
+
+@pytest.mark.parametrize("captured", [False, True])
+@pytest.mark.parametrize("entities", [30, 4000])
+def test_suite_multi_instance_toggle_padding(sets, captured, entities):  # noqa: F811
+    """A suite domain of several instances (multi-instance kernels) whose zero state has applicable actions."""
+    device = gpu()
+    toggle = rl.TaskTable(toggle_tasks([5, 3]))
+    suite = rl.TaskSuite([toggle, rl.TaskTable(sets["gripper"])])
+    ids = np.asarray([2, 0, 3, 1, 4, 2], np.int32)
+    states = np.asarray(suite.initial_states())[ids].copy()
+    encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+    expected = encoder.encode(states, ids, actions=True)
+    live_total = int(np.asarray(expected.expansions[0].offsets)[-1])
+    assert live_total == 21 + 7
+    words, task_ids = tensor(states, device), tensor(ids, device)
+    caps = capacities(encoder, len(ids))
+    caps[0]["entities"] = entities
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        actual = encoder.encode(words, task_ids, actions=True, capacities=caps)
+    stream.synchronize()
+    if captured:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = encoder.encode(words, task_ids, actions=True, capacities=caps)
+        graph.replay()
+    torch.cuda.synchronize(device)
+    x = actual.expansions[0]
+    assert x.status.item() == 0
+    if entities >= len(expected[0].entity_ref):
+        compare(actual, expected, len(ids))
+
+
+def _gripper_setup(device):
+    from mymyr import cuda
+    table = rl.as_table(text_task("gripper__prob05"))
+    ctx = cuda.Context(0, max_bytes=64 << 20)
+    states = tensor(np.asarray(table.initial_states()), device)
+    ids = torch.zeros(1, dtype=torch.int32, device=device)
+    arrays = dict(schema=torch.zeros(100, dtype=torch.int32, device=device),
+                  binding=torch.zeros((100, table.label_width), dtype=torch.int32, device=device),
+                  offsets=torch.zeros(2, dtype=torch.int32, device=device),
+                  status=torch.zeros(1, dtype=torch.int32, device=device))
+    return table, ctx, states, ids, arrays
+
+
+@pytest.mark.parametrize("how", ["reset", "del"])
+def test_queued_replays_keep_workspace_until_last_completes(how):
+    """Three replays queued behind a sleep on another stream; graph destroyed and results dropped at once."""
+    from mymyr._core import _cuda
+    device = gpu()
+    table, ctx, states, ids, arrays = _gripper_setup(device)
+    cap_stream, replay_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+    cap_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(cap_stream):
+        rl.expand_into(table, states, ids, **arrays, stream=cap_stream, ctx=ctx)
+    cap_stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=cap_stream):
+        result = rl.expand_into(table, states, ids, **arrays, stream=cap_stream, ctx=ctx)
+    ref = result["_workspace"]
+    # Keep scratch alive even if a graph-ownership assertion fails during replay.
+    safety = _cuda._expansion_workspace_guard(ref)
+    replay_stream.wait_stream(torch.cuda.current_stream(device))
+    events = []
+    with torch.cuda.stream(replay_stream):
+        torch.cuda._sleep(300_000_000)
+        for _ in range(3):
+            graph.replay()
+            e = torch.cuda.Event()
+            e.record()
+            events.append(e)
+    try:
+        assert not events[0].query()
+        del result
+        if how == "reset":
+            graph.reset()
+        else:
+            del graph
+        gc.collect()
+        pending = not events[-1].query()
+        owners = _cuda._expansion_workspace_owners(ref)
+        if pending:
+            assert owners == 2, owners
+    finally:
+        events[-1].synchronize()
+    # after completion, the graph's reference goes away (asynchronously)
+    for _ in range(300):
+        if _cuda._expansion_workspace_owners(ref) == 1:
+            break
+        time.sleep(0.01)
+    assert _cuda._expansion_workspace_owners(ref) == 1
+    del safety
+    _wait_workspace_release(ref)
+    ctx.synchronize()
+    assert ctx.usage()["used"] == 0 or _poll_used_zero(ctx)
+
+
+def _poll_used_zero(ctx):
+    for _ in range(300):
+        ctx.synchronize()
+        if ctx.usage()["used"] == 0:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _threads():
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("Threads:"):
+                return int(line.split()[1])
+    return -1
+
+
+def test_many_capture_destroy_cycles_no_growth():
+    """60 cycles: pool usage back to zero, one host worker, no thread or RSS growth."""
+    from mymyr._core import _cuda
+
+    device = gpu()
+    table, ctx, states, ids, arrays = _gripper_setup(device)
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    threads, rss = [], []
+    for cycle in range(60):
+        with torch.cuda.stream(stream):
+            rl.expand_into(table, states, ids, **arrays, stream=stream, ctx=ctx)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = rl.expand_into(table, states, ids, **arrays, stream=stream, ctx=ctx)
+        ref = result["_workspace"]
+        safety = _cuda._expansion_workspace_guard(ref)
+        assert _cuda._expansion_workspace_owners(ref) == 2
+        graph.replay()
+        done = torch.cuda.Event()
+        done.record()
+        del result
+        del graph
+        done.synchronize()
+        del safety
+        _wait_workspace_release(ref)
+        assert _poll_used_zero(ctx)
+        if cycle in (5, 59):
+            threads.append(_threads())
+            with open("/proc/self/statm") as f:
+                rss.append(int(f.read().split()[1]) * 4096)
+    assert threads[0] == threads[1], threads
+    assert rss[1] - rss[0] < 32 << 20, rss
+
+
+EXIT_SCRIPT = r"""
+import sys, numpy as np, torch
+sys.path.insert(0, {tests!r})
+from mymyr import rl
+from conftest import text_task
+mode = {mode!r}
+device = torch.device("cuda", 0)
+table = rl.as_table(text_task("gripper__prob05"))
+def t(a):
+    a = np.asarray(a)
+    return torch.from_numpy(a.view(np.int64).copy() if a.dtype == np.uint64 else a.copy()).to(device)
+states = t(table.initial_states()); ids = torch.zeros(1, dtype=torch.int32, device=device)
+arrays = dict(schema=torch.zeros(100, dtype=torch.int32, device=device),
+              offsets=torch.zeros(2, dtype=torch.int32, device=device),
+              status=torch.zeros(1, dtype=torch.int32, device=device))
+s = torch.cuda.Stream(device=device)
+s.wait_stream(torch.cuda.current_stream(device))
+with torch.cuda.stream(s):
+    rl.expand_into(table, states, ids, **arrays, stream=s)
+s.synchronize()
+graphs = []
+for _ in range(4):
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g, stream=s):
+        r = rl.expand_into(table, states, ids, **arrays, stream=s)
+    with torch.cuda.stream(s):
+        rl.expand_into(table, states, ids, **arrays, stream=s)
+    graphs.append((g, r))
+s.synchronize()
+for g, _ in graphs:
+    g.replay()
+if mode == "drop":
+    graphs.clear()
+elif mode == "pending":
+    torch.cuda._sleep(50_000_000)
+    for g, _ in graphs:
+        g.replay()
+    graphs.clear()
+print("ok", flush=True)
+"""
+
+
+@pytest.mark.parametrize("mode", ["keep", "drop", "pending"])
+def test_interpreter_exit_with_graph_owned_workspaces(mode):
+    gpu()
+    from python_children import run_code
+
+    script = EXIT_SCRIPT.format(tests=str(pathlib.Path(__file__).parent), mode=mode)
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
+    bad = []
+    for i in range(8):
+        p = run_code(script, env=env, timeout=None, capture_output=True, check=False)
+        if p.returncode != 0 or "ok" not in p.stdout or p.stderr.strip():
+            bad.append((i, p.returncode, p.stderr[-400:]))
+    assert not bad, bad

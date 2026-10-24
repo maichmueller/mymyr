@@ -9,6 +9,7 @@ import pytest
 import mymyr
 from mymyr import encoding, rl
 from conftest import text_task, walk
+from test_rl_table import sets  # noqa: F401
 
 torch = pytest.importorskip("torch")
 
@@ -534,3 +535,122 @@ def test_horizons_past_each_shared_memory_limit_equal_host(predicates, mode, ind
     uploaded = upload(view, device)
     same(expected, encoder.encode(uploaded))
     same(expected, encoder.encode(uploaded, capacities=caps(expected)))
+
+
+TOGGLE = """(define (domain toggle) (:requirements :strips)
+  (:predicates (link ?x ?y) (on ?x) (lit))
+  (:action flip :parameters (?x ?y) :precondition (link ?x ?y) :effect (on ?x))
+  (:action light :parameters () :precondition (and) :effect (lit)))"""
+
+
+def toggle_tasks(sizes):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("PDDL front end unavailable")
+    domain = mymyr.Domain.from_string(TOGGLE)
+    out = []
+    for n in sizes:
+        objs = " ".join(f"o{i}" for i in range(n))
+        links = " ".join(f"(link o{i} o{j})" for i in range(n) for j in range(n) if i != j)
+        out.append(mymyr.Task(domain.instantiate_string(
+            f"(define (problem p{n}) (:domain toggle) (:objects {objs}) (:init (on o0) {links}) (:goal (lit)))")))
+    return out
+
+
+def host_prefix(table, states, ids, live):
+    return rl.expand(table, np.ascontiguousarray(states[:live]), np.ascontiguousarray(ids[:live]))
+
+
+def run_bounded(table, words, ids_t, count, cap, device, stream):
+    L = max(1, table.label_width)
+    n = words.shape[0]
+    arrays = dict(schema=torch.full((cap,), -7, dtype=torch.int32, device=device),
+                  binding=torch.full((cap, L), -7, dtype=torch.int32, device=device),
+                  parent=torch.full((cap,), -7, dtype=torch.int32, device=device),
+                  offsets=torch.full((n + 1,), -7, dtype=torch.int32, device=device),
+                  status=torch.full((1,), -7, dtype=torch.int32, device=device))
+    with torch.cuda.stream(stream):
+        result = rl.expand_into(table, words, ids_t, **arrays, stream=stream, row_count=count)
+    return arrays, result
+
+
+def check_bounded(arrays, host, live, n, cap):
+    total = int(np.asarray(host.offsets)[-1]) if live else 0
+    offsets = arrays["offsets"].cpu().numpy()
+    want = np.full(n + 1, total, np.int32)
+    if live:
+        want[:live + 1] = np.asarray(host.offsets)
+    np.testing.assert_array_equal(offsets, want)
+    assert arrays["status"].item() == int(total > cap), (arrays["status"].item(), total, cap)
+    if total <= cap and total:
+        for name in ("schema", "binding", "parent"):
+            raw = arrays[name].cpu().numpy()
+            np.testing.assert_array_equal(raw[:total], np.asarray(getattr(host, name)).reshape(raw[:total].shape),
+                                          err_msg=name)
+
+
+@pytest.mark.parametrize("kind", ["single", "multi_toggle", "multi_gripper"])
+@pytest.mark.parametrize("count", [0, 1, "N", "N+7", -3])
+@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+def test_row_count_direct(sets, kind, count, dtype):  # noqa: F811
+    device = gpu()
+    if kind == "single":
+        table = rl.as_table(toggle_tasks([5])[0])
+    elif kind == "multi_toggle":
+        table = rl.TaskTable(toggle_tasks([5, 3, 4]))
+    else:
+        table = rl.TaskTable(sets["gripper"])
+    init = np.asarray(table.initial_states())
+    T = len(table)
+    # padding rows are real initial states (they have successors), ids valid
+    ids = np.asarray([i % T for i in range(6)], np.int32)
+    states = init[ids].copy()
+    n = len(ids)
+    live = {"N": n, "N+7": n + 7, -3: n}.get(count, count)
+    live = min(live, n)
+    host = host_prefix(table, states, ids, live) if live else None
+    needed = int(np.asarray(host.offsets)[-1]) if live else 0
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    words, ids_t = tensor(states, device), tensor(ids, device)
+    raw = {"N": n, "N+7": n + 7}.get(count, count)
+    cnt = torch.tensor([raw], dtype=torch.int32, device=device)
+    if dtype == "uint32":
+        cnt = cnt.view(torch.uint32) if hasattr(torch, "uint32") else cnt
+    for cap in sorted({max(needed, 1), max(needed - 1, 1), needed + 50}):
+        arrays, _ = run_bounded(table, words, ids_t, cnt, cap, device, stream)
+        stream.synchronize()
+        check_bounded(arrays, host, live, n, cap)
+
+
+@pytest.mark.parametrize("kind", ["single", "multi_toggle"])
+def test_row_count_read_at_replay(kind):
+    """The captured expansion reads the count when it runs: change it in place between replays."""
+    device = gpu()
+    table = rl.as_table(toggle_tasks([5])[0]) if kind == "single" else rl.TaskTable(toggle_tasks([5, 3, 4]))
+    init = np.asarray(table.initial_states())
+    T = len(table)
+    ids = np.asarray([i % T for i in range(6)], np.int32)
+    states = init[ids].copy()
+    n = len(ids)
+    cap = 200
+    words, ids_t = tensor(states, device), tensor(ids, device)
+    cnt = torch.tensor([n], dtype=torch.int32, device=device)
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    arrays, _ = run_bounded(table, words, ids_t, cnt, cap, device, stream)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        with torch.cuda.stream(stream):
+            result = rl.expand_into(table, words, ids_t, **arrays, stream=stream, row_count=cnt)
+    for live in (2, 0, n, 1, 5):
+        cnt.fill_(live)
+        for a in arrays.values():
+            a.fill_(-7)
+        graph.replay()
+        torch.cuda.synchronize(device)
+        host = host_prefix(table, states, ids, live) if live else None
+        check_bounded(arrays, host, live, n, cap)
+    del result
+    graph.reset()
+    torch.cuda.synchronize(device)

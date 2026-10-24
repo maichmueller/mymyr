@@ -3,6 +3,7 @@
 #include "completed_release.hpp"
 
 #include "mymyr/cuda/runtime.hpp"
+#include "mymyr/cuda/suite_expand.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -11,6 +12,11 @@
 
 namespace mymyr::cuda
 {
+namespace
+{
+thread_local cudaStream_t completed_release_stream = nullptr;
+}
+
 CudaError::CudaError(cudaError_t code, const std::string& what)
     : std::runtime_error("mymyr: CUDA: " + what + ": " + cudaGetErrorName(code) + " (" + cudaGetErrorString(code) + ")"),
       m_code(code)
@@ -422,9 +428,9 @@ void order_after(cudaStream_t waiter, cudaStream_t s) noexcept
 
 void DeviceBuffer::reset(cudaStream_t release) noexcept
 {
-    if (m_ptr && detail::completed_release_stream)
+    if (m_ptr && completed_release_stream)
     {
-        m_ctx->deallocate(m_ptr, detail::completed_release_stream);
+        m_ctx->deallocate(m_ptr, completed_release_stream);
         m_ptr = nullptr;
         m_bytes = 0;
         m_free_live = false;
@@ -462,9 +468,23 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
     m_free_live = false;
 }
 
-namespace detail
+namespace
 {
-thread_local cudaStream_t completed_release_stream = nullptr;
+class CompletedRelease
+{
+public:
+    explicit CompletedRelease(ContextPtr ctx);
+    ~CompletedRelease();
+    CompletedRelease(const CompletedRelease&) = delete;
+    CompletedRelease& operator=(const CompletedRelease&) = delete;
+
+private:
+    ContextPtr m_ctx;
+    DeviceGuard m_guard;
+    cudaStreamCaptureMode m_mode = cudaStreamCaptureModeRelaxed;
+    cudaStream_t m_stream = nullptr;
+    cudaStream_t m_previous = nullptr;
+};
 
 CompletedRelease::CompletedRelease(ContextPtr ctx) : m_ctx(std::move(ctx)), m_guard(m_ctx->device())
 {
@@ -486,6 +506,23 @@ CompletedRelease::~CompletedRelease()
     m_ctx.reset();
     (void)cudaStreamDestroy(m_stream);
     (void)cudaThreadExchangeStreamCaptureMode(&m_mode);
+}
+}  // namespace
+
+namespace detail
+{
+bool completed_release_active() noexcept { return completed_release_stream != nullptr; }
+
+void release_completed(std::unique_ptr<SuiteExpander>& expander, const Event& ready)
+{
+    if (!expander)
+        return;
+    // Only the workspace worker enters this scope. The expander exclusively owns every device object it destroys,
+    // all graph launches have completed, and ready covers eager work, so frees need no other stream ordering.
+    // Relaxed capture mode permits cleanup while unrelated resources are being captured on another thread.
+    CompletedRelease release(expander->context());
+    ready.synchronize();
+    expander.reset();
 }
 }  // namespace detail
 

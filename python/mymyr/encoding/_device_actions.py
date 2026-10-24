@@ -70,7 +70,7 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
         result = rl.expand_into(table, states, ids, schema=x.schema, binding=x.binding, parent=x.parent,
                                 offsets=x.offsets, status=x.status, stream=_stream(device),
                                 row_count=None if live is None else live.clamp(0, states.shape[0]).to(torch.int32))
-        x._keepalive = result.get("_keepalive")
+        x._workspace = result.get("_workspace")
         if live is not None:
             total = x.offsets.gather(0, live)
             x.offsets = torch.where(torch.arange(states.shape[0] + 1, device=device) <= live, x.offsets, total)
