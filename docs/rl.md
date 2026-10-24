@@ -285,9 +285,11 @@ assert arrays["relation_args"].unsafe_buffer_pointer() == batch.relation_args.__
 ### Several domains
 
 Relation ids are scoped to a domain, so the rows of a suite of several domains have no common catalog. A
-`encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch of host rows as a dictionary of batches,
-one per domain, together with each row's index in its batch. CUDA rows require a `FlatRelationEncoder` per domain with
-that domain's local task ids. This example uses host rows:
+`encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch as a dictionary of batches, one per
+domain, together with each row's index in its batch. CUDA rows and global task ids are grouped on the device and
+produce device batches. Exact calls over several domains download only their row counts; one domain uses the known
+input row count. Each domain then sizes its outputs as a flat encode does. Capacities for every domain (`graphs >= N`) avoid all count downloads and include domains with zero
+rows; `device_graphs` counts each batch's live prefix and `rows[d]` is padded with -1. This example uses host rows:
 
 ```python
 suite = rl.TaskSuite.group([task, mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt")])
@@ -513,13 +515,19 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   and it cannot be captured or jitted.
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
-  without `obs_capacities` (the device expansion waits for its total, as an exact encoding waits for its sizes; with
-  `obs_capacities` it is refused). The JAX environments do not encode actions.
+  with or without `obs_capacities`. Exact device expansion waits for its total, and the encoding waits for its
+  sizes. Capacity observations allocate bounded action buffers using the entity capacity and keep the total and
+  status on the device; they wait for nothing and capture with the step. This requires a table whose expansion runs
+  asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
+  encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
+  zero unused output tails. The JAX environments do not encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
   and `index[i]` its graph in that batch. With capacities a domain's batch has an entry for every environment in its
   per-graph arrays and counts its rows on the device (`device_graphs`; `num_graphs` reads it).
+  Multi-domain torch observations capture with `BatchedEnv.capture` or `torch.cuda.graph`; their domain dispatch
+  is not traced by `torch.compile`.
 
 A torch environment on the CPU, whose observations are the host encoder's batches:
 
@@ -551,6 +559,20 @@ rollout = env.capture(4)
 result = rollout.replay()
 batch = encoding.collate(result.obs)
 print(len(result.obs), batch.num_graphs, result.obs[0].device)
+```
+
+Action observations use the same capacity form, including the reached states before an autoreset:
+
+```python skip-if-no-cuda needs-torch
+encoder_actions = encoding.FlatRelationEncoder(table, target_sources=("action",))
+action_env = BatchedEnv(table, 8, device=torch.device("cuda", 0), seed=3, max_steps=4,
+                        observation=encoder_actions, obs_actions=True,
+                        obs_capacities=dict(entities=4096, args=16384, targets=4096))
+action_rollout = action_env.capture(3, final=True)
+action_result = action_rollout.replay()
+torch.cuda.synchronize()
+assert len(action_result.obs) == len(action_result.final_obs) == 3
+assert all(not batch.sizes["overflow"] for batch in action_result.obs)
 ```
 
 The JAX environment carries the encoding in its observations, under `jax.jit` and `lax.scan`:
