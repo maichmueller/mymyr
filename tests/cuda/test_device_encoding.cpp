@@ -1449,16 +1449,32 @@ TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
 {
     SKIP_WITHOUT_GPU();
     for (const bool index64 : {false, true})
-        for (const bool warp : {false, true})
+        for (const u32 lanes : cuda::detail::k_fill_classes)
         {
-            const u64 dynamic = cuda::detail::fill_shared_bytes(0, 32, warp, true);
-            const u64 total = cuda::detail::fill_shared_required(0, 32, warp, true, index64);
+            const u64 dynamic = cuda::detail::fill_shared_bytes(0, 32, lanes, true);
+            const u64 total = cuda::detail::fill_shared_required(0, 32, lanes, true, index64);
             ASSERT_GT(total, dynamic);
             const u64 extra = total - dynamic;
             const u32 relations = static_cast<u32>((cuda::detail::k_shared_limit - extra) / 8 + 1);
-            EXPECT_LE(cuda::detail::fill_shared_bytes(0, relations, warp, true), cuda::detail::k_shared_limit);
-            EXPECT_GT(cuda::detail::fill_shared_required(0, relations, warp, true, index64), cuda::detail::k_shared_limit);
+            EXPECT_LE(cuda::detail::fill_shared_bytes(0, relations, lanes, true), cuda::detail::k_shared_limit);
+            EXPECT_GT(cuda::detail::fill_shared_required(0, relations, lanes, true, index64), cuda::detail::k_shared_limit);
         }
+}
+
+TEST(DeviceEncoder, FillClassesFollowTheWidthTheLayersAndTheFloor)
+{
+    using encoding::detail::GraphWidth;
+    const GraphWidth narrow{4, 16, 100, 0}, sparse{40, 16, 2000, 100}, statics{4, 16, 2000, 1000};
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, false), 1u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(sparse, false), 8u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, false), 32u);
+    // the cells of levels and history steps are written by one lane of a group
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, true), 1u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, true), 8u);
+    // a class below the floor takes the floor's lanes, on the host and in the kernels alike
+    EXPECT_EQ(cuda::detail::fill_lanes_for(narrow, false, 8), 8u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(statics, false, 8), 32u);
+    EXPECT_EQ(cuda::detail::fill_lanes_for(sparse, true, 32), 32u);
 }
 
 }

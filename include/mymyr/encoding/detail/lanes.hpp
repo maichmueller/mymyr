@@ -389,10 +389,12 @@ MYMYR_HD RowValidity row_validity(const ContextView& context, i32 instance, u32 
                         derived_goals, goal_derived_words);
 }
 
-/// Conservative work of one instance without expansion rows, including either instance or row goals.
+/// Conservative work of one instance without expansion rows, including either instance or row goals: its words, its
+/// cells, a bound of the arguments of its cells other than goal cells (whose tuples one lane writes), and the arguments
+/// of its static cells that every graph writes.
 struct GraphWidth
 {
-    u64 words = 0, cells = 0, args = 0;
+    u64 words = 0, cells = 0, args = 0, static_args = 0;
 };
 MYMYR_HD GraphWidth graph_width(const InstanceView& v)
 {
@@ -407,7 +409,10 @@ MYMYR_HD GraphWidth graph_width(const InstanceView& v)
         for (u32 i = 0; i < count; ++i)
         {
             const Cell& c = cells[i];
-            args += (u64{c.b - c.a} + (is_goal_op(c.op) ? c.d - c.c : 0u)) * c.arity;
+            if (!is_goal_op(c.op))
+                args += u64{c.b - c.a} * c.arity;
+            if (own == 0 && c.op == static_cast<u32>(CellOp::Static) && !is_shared_static(c))
+                out.static_args += u64{c.b - c.a} * c.arity;
         }
         out.args = args > out.args ? args : out.args;
     }
@@ -1205,6 +1210,17 @@ MYMYR_HD void bind_levels(const Group& grp, const InstanceView& v, const RowInpu
     layers.levels = effective_layers_group(grp, v, goal_words(v, row), layers.subgoals, row.atoms, row.derived, storage);
 }
 
+/// bind_levels of levels that a bind_levels of the same row computed into `storage` before, from their
+/// LevelPlanes::present: the planes are not recomputed.
+MYMYR_HD void bind_stored_levels(const InstanceView& v, const RowInput& row, RowLayers& layers, const u64* storage,
+                                 u64 present)
+{
+    if (row.layers != &layers || layers.subgoals.layers == 0)
+        return;
+    layers.levels = LevelPlanes{storage, present, level_plane_offset(v, layers.subgoals, true, 0, 0), v.words,
+                                v.derived_words};
+}
+
 /// The mask a goal cell takes its literals from: the positive or negative literals over the fluent or derived slots of
 /// the goal, or, for a cell of a subgoal level (1 to 3), of that level of the row's subgoal layers (effective_layers);
 /// null if there is none (no tuples).
@@ -1453,20 +1469,22 @@ MYMYR_HD u32 entity_count(const GraphTotals& t, const InstanceView& v)
     return n;
 }
 
-/// Completes the totals once every cell of the graph is accumulated: the entities and the bad-row flags.
-template<bool Layered>
-MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInput& in)
+/// Completes the totals once every cell of the graph is accumulated: the entities and the bad-row flags. The lanes of a
+/// group share the words of the checks and all call this together with the same totals.
+template<bool Layered, class Group = SoloGroup>
+MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInput& in, const Group& grp = {})
 {
     t.entities = entity_count<Layered>(t, v);
-    if (has_foreign_atom_bits(v, in.atoms) || (in.derived && has_foreign_derived_bits(v, in.derived)))
+    if (any_bit_from_group(grp, in.atoms, v.words, v.fluent_slots) ||
+        (in.derived && any_bit_from_group(grp, in.derived, v.derived_words, v.derived_slots)))
         t.flags |= k_graph_bad_row;
-    if (has_foreign_goal_bits(v, in))
+    if (has_foreign_goal_bits_group(grp, v, in))
         t.flags |= k_graph_bad_goal;
     if (Layered && in.layers)
     {
-        if (has_foreign_layer_bits(v, in.layers->subgoals))
+        if (has_foreign_layer_bits_group(grp, v, in.layers->subgoals))
             t.flags |= k_graph_bad_layers;
-        if (has_foreign_layer_bits(v, in.layers->history.masks))
+        if (has_foreign_layer_bits_group(grp, v, in.layers->history.masks))
             t.flags |= k_graph_bad_history;
     }
 }
@@ -1586,19 +1604,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
         t.history_targets = grp.sum(t.history_targets);
     }
     t.flags = grp.bit_or(t.flags);
-    t.entities = entity_count<Layered>(t, v);
-    if (any_bit_from_group(grp, in.atoms, v.words, v.fluent_slots) ||
-        (in.derived && any_bit_from_group(grp, in.derived, v.derived_words, v.derived_slots)))
-        t.flags |= k_graph_bad_row;
-    if (has_foreign_goal_bits_group(grp, v, in))
-        t.flags |= k_graph_bad_goal;
-    if (Layered && in.layers)
-    {
-        if (has_foreign_layer_bits_group(grp, v, in.layers->subgoals))
-            t.flags |= k_graph_bad_layers;
-        if (has_foreign_layer_bits_group(grp, v, in.layers->history.masks))
-            t.flags |= k_graph_bad_history;
-    }
+    finish_totals<Layered>(t, v, in, grp);
     return t;
 }
 
@@ -2501,8 +2507,9 @@ MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g
 /// which start at `tuple_base` and `arg_base`, and the tuples' arguments. `totals` is count_graph's result for the same
 /// graph; `target_base` is where the graph's targets start in the target arrays; `virtual_scratch` is as in count_graph.
 /// The end entries of the offset arrays are the caller's. A loop over begin_graph and fill_cell_at: the cells of an
-/// instance are sorted by relation, and the relations between them are empty.
-template<class I, bool Layered>
+/// instance are sorted by relation, and the relations between them are empty. `CellArrays` false leaves the counts and
+/// offsets of the segments to the caller (they follow from the cell counts alone).
+template<class I, bool Layered, bool CellArrays = true>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
                          u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr, u64 history_base = 0,
@@ -2526,34 +2533,39 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
     for (u32 i = 0; i < num_cells; ++i)
     {
         const Cell& c = cells[i];
-        for (; r < c.relation; ++r)
+        if constexpr (CellArrays)
         {
+            for (; r < c.relation; ++r)
+            {
+                offsets[r] = static_cast<I>(tuples);
+                arg_offsets[r] = static_cast<I>(args);
+                if (counts)
+                    counts[r] = static_cast<I>(0);
+            }
             offsets[r] = static_cast<I>(tuples);
             arg_offsets[r] = static_cast<I>(args);
-            if (counts)
-                counts[r] = static_cast<I>(0);
         }
-        offsets[r] = static_cast<I>(tuples);
-        arg_offsets[r] = static_cast<I>(args);
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, args_out + args)
                       : Layered && cell_counts && cell_counts[i] == 0
                           ? 0u
                           : fill_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor,
                                                      out, args_out + args);
-        if (counts)
-            counts[r] = static_cast<I>(n);
+        if constexpr (CellArrays)
+            if (counts)
+                counts[r] = static_cast<I>(n);
         tuples += n;
         args += static_cast<u64>(n) * c.arity;
-        ++r;
+        r = c.relation + 1;
     }
-    for (; r < R; ++r)
-    {
-        offsets[r] = static_cast<I>(tuples);
-        arg_offsets[r] = static_cast<I>(args);
-        if (counts)
-            counts[r] = static_cast<I>(0);
-    }
+    if constexpr (CellArrays)
+        for (; r < R; ++r)
+        {
+            offsets[r] = static_cast<I>(tuples);
+            arg_offsets[r] = static_cast<I>(args);
+            if (counts)
+                counts[r] = static_cast<I>(0);
+        }
 }
 
 /// Where the arguments of a relation-major cell go, read from the batch's scanned segment arrays: the segment's entry of

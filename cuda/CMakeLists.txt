@@ -72,6 +72,9 @@ target_sources(mymyr_cuda PRIVATE src/cost_program.cpp)
 # Numeric programs use the CPU's operation order and rounding at every arithmetic instruction.
 target_sources(mymyr_cuda PRIVATE src/numeric.cu src/numeric_pad.cu src/goal_program.cpp)
 set_source_files_properties(src/numeric.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
+# Most of what the encode kernels write is read by later kernels, not by the encoder: their global stores are
+# cache-streaming (evict-first), which leaves the L2 to the rows and to the kernels around an encode.
+set_source_files_properties(src/encoding.cu PROPERTIES COMPILE_OPTIONS "-Xptxas=-dscm=cs")
 set_target_properties(mymyr_cuda PROPERTIES
     CUDA_STANDARD 23
     CUDA_STANDARD_REQUIRED ON

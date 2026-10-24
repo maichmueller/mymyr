@@ -678,8 +678,9 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
     out.cell_stride = bounds.cells;
     out.cell_entries = out.relation_major && !bounds.variable_inputs ? 0 : mul(G, bounds.cells);
     // the levels of the subgoal layers of a graph: the plain mask of each level, sign and slot kind, over the instance's
-    // words (and its derived words)
-    out.level_stride = mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words));
+    // words (and its derived words), and a last word for which of them have literals
+    out.level_stride =
+        bounds.levels ? add(mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words)), 1) : 0;
     out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
     out.action_storage = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
     // Independent cursors per graph: the action merge is serial within a graph.
@@ -980,15 +981,16 @@ namespace
 {
 [[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
 
-/// The count kernel's lanes per graph and the fill classes (bit 0: one thread per graph, bit 1: a warp per graph) that
-/// the first `instances` instances of `widths` launch with. Throws std::invalid_argument when the shared memory of a
-/// block does not hold what a kernel needs.
+/// The count kernel's lanes per graph, the fill classes (bit c: the lanes detail::k_fill_classes[c] per graph) that
+/// the first `instances` instances of `widths` launch with, and the fewest lanes of a class (EncodeParams::fill_floor).
+/// Throws std::invalid_argument when the shared memory of a block does not hold what a kernel needs.
 struct LaunchPlan
 {
     u32 lanes;
     u32 fill_mask;
+    u32 fill_floor;
 };
-LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bool index64,
+LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bool index64, bool layered,
                        const std::vector<encoding::detail::GraphWidth>& widths, u64 instances, const LaunchConfig& launch)
 {
     u32 lanes = launch.count_lanes ? launch.count_lanes : 4;
@@ -1001,23 +1003,27 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
             }
     if (detail::count_shared_required(virtual_nodes, lanes) > detail::k_shared_limit)
         invalid("the schema has too many predicate virtual nodes for the count kernel");
-    auto fits = [&](bool warp)
+    auto fits = [&](u32 fill_lanes)
     {
-        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(relations), warp, relation_major, index64) <=
-               detail::k_shared_limit;
+        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(relations), fill_lanes, relation_major,
+                                            index64) <= detail::k_shared_limit;
     };
+    // more lanes per graph keep fewer graphs' scratch in a block
+    u32 floor = 1;
+    while (launch.fill == FillMode::Auto && floor < 32 && !fits(floor))
+        floor = floor == 1 ? 8u : 32u;
     u32 fill_mask = 0;
     for (u64 instance = 0; instance < std::min<u64>(instances, widths.size()); ++instance)
     {
-        bool warp = launch.fill == FillMode::Warp ||
-                    (launch.fill == FillMode::Auto && detail::warp_fill_for(widths[instance], relation_major));
-        if (!fits(warp) && launch.fill == FillMode::Auto)
-            warp = true;
-        if (!fits(warp))
+        const u32 fill_lanes = launch.fill == FillMode::Thread ? 1u
+                               : launch.fill == FillMode::Group ? 8u
+                               : launch.fill == FillMode::Warp  ? 32u
+                                                                : detail::fill_lanes_for(widths[instance], layered, floor);
+        if (!fits(fill_lanes))
             invalid("the schema has too many predicate virtual nodes or relations for the fill kernel");
-        fill_mask |= warp ? 2u : 1u;
+        fill_mask |= 1u << detail::fill_class_of(fill_lanes);
     }
-    return {lanes, fill_mask ? fill_mask : 1u};
+    return {lanes, fill_mask ? fill_mask : 1u, floor};
 }
 
 }  // namespace
@@ -1030,8 +1036,8 @@ void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
     const auto facts = context_facts(encoder.context());
     const auto& options = encoder.schema().options();
     (void)plan_launch(encoder.context().view().num_virtual, encoder.schema().num_relations(),
-                      options.layout == encoding::Layout::Relation, options.index == encoding::IndexType::I64, facts->widths,
-                      facts->widths.size(), {});
+                      options.layout == encoding::Layout::Relation, options.index == encoding::IndexType::I64, false,
+                      facts->widths, facts->widths.size(), {});
 }
 
 void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
@@ -1244,9 +1250,10 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
 
     // how it is launched
     const u64 launched_instances = in.task_ids ? facts.widths.size() : std::min<usize>(1, facts.widths.size());
-    const auto [lanes, fill_mask] =
-        plan_launch(context.view.num_virtual, R, relation_major, opts.index == encoding::IndexType::I64, facts.widths,
-                    launched_instances, launch);
+    const encoding::detail::LayerSource layers{sub, hist, opts.history_max_steps.value_or(0)};
+    const auto [lanes, fill_mask, fill_floor] =
+        plan_launch(context.view.num_virtual, R, relation_major, opts.index == encoding::IndexType::I64,
+                    layers.layered(), facts.widths, launched_instances, launch);
 
     const detail::ScratchView scratch = detail::scratch_view(layout, block);
     const encoding::IndexType index = opts.index;
@@ -1294,8 +1301,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.horizon_cousins = opts.horizon.cousin_relation;
     p.horizon_exclude = opts.horizon.root == encoding::RootPolicy::Exclude;
     p.horizon_root_target = opts.horizon.root == encoding::RootPolicy::Include;
-    p.layers = {sub, hist, opts.history_max_steps.value_or(0)};
-    p.layered = p.layers.layered();
+    p.layers = layers;
+    p.layered = layers.layered();
+    p.fill_floor = fill_floor;
     p.level_storage = scratch.level_storage;
     p.level_stride = scratch.level_stride;
     p.order = launch.order;

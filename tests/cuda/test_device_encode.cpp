@@ -392,7 +392,8 @@ TEST(DeviceEncode, EveryLaunchConfigurationGivesTheSameBytes)
                                 "upload the order");
                 }
                 for (const u32 lanes : {0u, 4u, 8u, 32u})
-                    for (const auto fill : {cuda::FillMode::Auto, cuda::FillMode::Thread, cuda::FillMode::Warp})
+                    for (const auto fill : {cuda::FillMode::Auto, cuda::FillMode::Thread, cuda::FillMode::Group,
+                                            cuda::FillMode::Warp})
                     {
                         SCOPED_TRACE(std::string(order_name) + ", lanes " + std::to_string(lanes) + ", fill " +
                                      std::to_string(static_cast<int>(fill)));
@@ -1391,7 +1392,7 @@ TEST(DeviceEncode, WideTotalsEqualTheHost)
                 for (const u64 k : {u64{1}, u64{33}, n})
                 {
                     const Reference host = host_reference(*encoder, host_input(batch, k, config.inputs));
-                    for (const auto fill : {cuda::FillMode::Thread, cuda::FillMode::Warp})
+                    for (const auto fill : {cuda::FillMode::Thread, cuda::FillMode::Group, cuda::FillMode::Warp})
                     {
                         cuda::LaunchConfig launch;
                         launch.fill = fill;
@@ -1511,7 +1512,7 @@ TEST(DeviceEncode, InvalidLaunchIndicesSetTheInputFlagAndLeaveTheCanary)
         ASSERT_EQ(result.block[i], std::byte{0xa5}) << i;
 }
 
-TEST(DeviceEncode, MixedWidthsUseBothFillClassesAndKeepBatchOrder)
+TEST(DeviceEncode, MixedWidthsUseTheirFillClassesAndKeepBatchOrder)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = device_context();
@@ -1545,7 +1546,7 @@ TEST(DeviceEncode, MixedWidthsUseBothFillClassesAndKeepBatchOrder)
         cuda::check(cudaGraphGetNodes(graph, nullptr, &count), "nodes");
         std::vector<cudaGraphNode_t> nodes(count);
         cuda::check(cudaGraphGetNodes(graph, nodes.data(), &count), "nodes");
-        u32 kernels = 0, thread_fills = 0, warp_fills = 0;
+        u32 kernels = 0, thread_fills = 0, group_fills = 0, warp_fills = 0;
         for (const auto node : nodes)
         {
             cudaGraphNodeType type;
@@ -1556,11 +1557,16 @@ TEST(DeviceEncode, MixedWidthsUseBothFillClassesAndKeepBatchOrder)
             cudaKernelNodeParams params{};
             cuda::check(cudaGraphKernelNodeGetParams(node, &params), "kernel parameters");
             thread_fills += params.gridDim.x == (n + 127) / 128;
+            group_fills += params.gridDim.x == (n * 8 + 127) / 128;
             warp_fills += params.gridDim.x == (n * 32 + 127) / 128;
         }
-        EXPECT_LE(kernels, 8u);
+        // the narrow instance takes a thread per graph, the wide ones more lanes; at most four kernels per class
+        const u32 classes = thread_fills + group_fills + warp_fills;
         EXPECT_EQ(thread_fills, 1u);
-        EXPECT_EQ(warp_fills, 1u);
+        EXPECT_GE(classes, 2u);
+        EXPECT_LE(group_fills, 1u);
+        EXPECT_LE(warp_fills, 1u);
+        EXPECT_LE(kernels, 4 * classes);
         cuda::check(cudaGraphDestroy(graph), "destroy");
         const auto result = run_device(device, ctx, stream, input, shape, nullptr, launch);
         expect_same_arrays(*reference.bundle, result);
