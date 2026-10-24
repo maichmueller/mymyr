@@ -119,7 +119,8 @@ public:
     [[nodiscard]] std::string async_unsupported(u64 rows, const rl::ExpandOptions& options = {}) const;
     /// The expansion of a batch into destinations of a fixed capacity, without waiting for the device: count() and
     /// write() in stream order, with what they read back kept on the device. out.offsets is required and gets the true
-    /// counts (offsets[rows] is the total, even past the capacity); rows past the capacity are not written. *status
+    /// counts (offsets[rows] is the total, even past the capacity), saturated at UINT32_MAX when the total cannot fit
+    /// in u32; the offsets are usable only without overflow. Rows past the capacity are not written. *status
     /// (a device u32, required) gets bit 0 when the successors exceed the capacity, bit 1 when the batch is invalid (a
     /// task id outside the table, a row with bits its instance has no slot for, a successor wider than out.words);
     /// an invalid batch writes no successor or label. Successor rows past the total are zero, and goal flags and

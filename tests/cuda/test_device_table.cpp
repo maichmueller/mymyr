@@ -17,6 +17,7 @@
 
 #include "env_harness.hpp"
 #include "mymyr/cuda/expand.hpp"
+#include "mymyr/cuda/lifted.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
 
@@ -945,4 +946,54 @@ TEST(DeviceTableWide, EnvEqualsHost)
             if (::testing::Test::HasFatalFailure())
                 return;
         }
+}
+
+
+TEST(DeviceTableExpand, SaturatedScanKeepsCapacityStatusExactPastTheU32Boundary)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto stream = ctx->stream();
+    constexpr u32 max = 0xFFFFFFFFu, capacity = 0x7FFFFFFFu;
+    std::vector<std::vector<u32>> counts = {{capacity, 0}, {capacity, 1, 0}, {max, 0}, {max, 1, 0},
+                                                 {0x80000000u, 0x80000000u, 7, 0}};
+    std::vector<std::vector<u32>> prefixes = {{0, capacity}, {0, capacity, capacity + 1}, {0, max},
+                                                   {0, max, max}, {0, 0x80000000u, max, max}};
+    counts.emplace_back(2049, 0x200000u);
+    counts.back().back() = 0;
+    prefixes.emplace_back();
+    u64 total = 0;
+    for (const u32 count : counts.back())
+    {
+        prefixes.back().push_back(static_cast<u32>(std::min<u64>(total, max)));
+        total += count;
+    }
+    for (u32 c = 0; c < counts.size(); ++c)
+    {
+        SCOPED_TRACE(c);
+        const auto& input = counts[c];
+        cuda::DeviceBuffer in(ctx, input.size() * sizeof(u32)), out(ctx, input.size() * sizeof(u32)),
+            control(ctx, 4 * sizeof(u32)), scratch(ctx, cuda::lifted::scan_temp_bytes(input.size()));
+        cuda::check(cudaMemcpyAsync(in.data(), input.data(), in.size(), cudaMemcpyHostToDevice, stream), "counts");
+        auto* words = static_cast<u32*>(control.data());
+        for (const bool valid : {true, false})
+        {
+            const u32 flags[] = {valid ? max : 0u, max, max, max};
+            cuda::check(cudaMemcpyAsync(words, flags, sizeof(flags), cudaMemcpyHostToDevice, stream), "flags");
+            cuda::check(cuda::lifted::launch_scan(static_cast<const u32*>(in.data()), static_cast<u32*>(out.data()),
+                                                  input.size(), scratch.data(), scratch.size(), stream), "scan");
+            cuda::check(cuda::lifted::launch_expansion_status(static_cast<const u32*>(out.data()) + input.size() - 1,
+                                                              capacity, words, words + 1, words + 2, words + 3, stream),
+                        "status");
+            std::vector<u32> scanned(input.size());
+            u32 status[4];
+            cuda::check(cudaMemcpyAsync(scanned.data(), out.data(), out.size(), cudaMemcpyDeviceToHost, stream), "prefixes");
+            cuda::check(cudaMemcpyAsync(status, words, sizeof(status), cudaMemcpyDeviceToHost, stream), "status");
+            cuda::check(cudaStreamSynchronize(stream), "scan and status");
+            EXPECT_EQ(scanned, prefixes[c]);
+            const u32 overflow = c == 0 ? 0u : 1u;
+            EXPECT_EQ(status[2], valid ? 1u : 0u);
+            EXPECT_EQ(status[3], overflow | (valid ? 0u : 2u));
+        }
+    }
 }

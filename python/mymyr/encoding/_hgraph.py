@@ -30,9 +30,12 @@ class DeviceHGraphView:
     whose entity arrays are implicit are new tensors, made on request on the device.
 
     Making the view reads the graph count, sizes and offsets at the relations' boundaries on the host in one transfer,
-    so it waits for the device exactly once and must be done outside CUDA graph capture.
+    so it waits for the device exactly once and must be done outside CUDA graph capture. This transfer and its
+    metadata gathering run on torch's current stream for the batch's device; that stream must wait for the batch's
+    producer before the view is made.
     After that no method waits (except for ``framework='numpy'``): the new tensors are made by torch operations on the
-    current stream, in stream order. The view keeps the counts it read, so a batch whose arrays are rewritten in place
+    current stream for the batch's device, in stream order. The view keeps the counts it read, so a batch whose arrays
+    are rewritten in place
     (a CUDA graph replay) needs a new view. The view keeps the batch alive. ``mymyr.encoding.hgraph(batch)`` makes
     one; it refuses what the host view refuses."""
 
@@ -54,8 +57,9 @@ class DeviceHGraphView:
             raise _error("statics='shared' is not supported by the HGraph encoding: its graphs hold the static tuples "
                          "among their own tuples")
         torch = _torch()
-        if torch.cuda.is_current_stream_capturing():
-            raise _error("create a DeviceHGraphView outside capture")
+        with torch.cuda.device(batch.device):
+            if torch.cuda.is_current_stream_capturing():
+                raise _error("create a DeviceHGraphView outside capture")
         sizes = batch.device_sizes
         arrays, relations = batch._arrays.copy(), schema.num_relations
         graphs = batch.device_graphs
@@ -170,6 +174,7 @@ class DeviceHGraphView:
     def _entity_row(self, relation: int, slot: int) -> Any:
         """The entity at position ``slot`` of every tuple of ``relation``: a strided view of relation_args."""
         args, arity, count = self._arrays["relation_args"], self._arity[relation], self._tuples[relation]
+        # An explicit shape also describes an empty relation whose slot lies past the stored arguments.
         return args.as_strided((count,), (arity,), args.storage_offset() + self._first_arg[relation] + slot)
 
     def _arange(self, relation: int) -> Any:

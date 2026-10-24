@@ -294,7 +294,8 @@ cudaError_t launch_place_host(HostRows h, const u32* offsets, u32 num_schemas, L
 /// Scatters host counts: counts[segment[i]] = value[i].
 cudaError_t launch_scatter_counts(const u32* segment, const u32* value, u64 n, u32* counts, cudaStream_t s);
 
-/// Exclusive prefix sum of n u32 values (CUB): temp_bytes() is the scratch launch_scan needs for n values.
+/// Exclusive prefix sum of n u32 values, saturated at UINT32_MAX (CUB): scan_temp_bytes() is its scratch.
+/// Capacities are at most 2^31 - 1, so a saturated total still gives the exact capacity overflow status.
 [[nodiscard]] u64 scan_temp_bytes(u64 n);
 cudaError_t launch_scan(const u32* in, u32* out, u64 n, void* temp, u64 temp_bytes, cudaStream_t s);
 
