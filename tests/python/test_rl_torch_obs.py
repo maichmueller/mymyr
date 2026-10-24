@@ -178,10 +178,6 @@ def test_actions_opt_in_on_the_cpu(gripper):
     assert arrays(r.obs)["relation_counts"][:, lanes].sum() > 0
 
 
-def test_device_actions_are_refused_with_capacities(gripper):
-    encoder = encoding.FlatRelationEncoder(gripper)
-    with pytest.raises(ValueError, match="device observations with obs_capacities have no action relations"):
-        rt.BatchedEnv(gripper, 4, device=gpu_device(), observation=encoder, obs_actions=True, obs_capacities=CAPS)
 
 
 def test_refusals(gripper, sets):  # noqa: F811
@@ -612,13 +608,14 @@ def test_one_table_without_the_front_end():
 
 
 @pytest.mark.parametrize("over", ["table", "suite"])
-def test_device_actions_are_the_expansion_of_the_observed_states(gripper, suite, over):
+@pytest.mark.parametrize("capacity", [False, True])
+def test_device_actions_are_the_expansion_of_the_observed_states(gripper, suite, over, capacity):
     device = gpu_device()
     table = gripper if over == "table" else suite
     encoders = [encoding.FlatRelationEncoder(t) for t in ([gripper] if over == "table" else suite.tables)]
     ids = None if over == "table" else [0, len(suite) - 1] * 3
     env = rt.BatchedEnv(table, 6, device=device, seed=4, max_steps=4, task_ids=ids, observation=encoders,
-                        obs_actions=True)
+                        obs_actions=True, obs_capacities=CAPS if capacity else None)
     lanes = [np.asarray([lane == "action" for lane in e.relation_lanes]) for e in encoders]
     for _ in range(3):
         r = env.step()
@@ -636,3 +633,179 @@ def test_device_actions_are_the_expansion_of_the_observed_states(gripper, suite,
                                               np.ascontiguousarray(task_ids.cpu().numpy())))
             assert_same(batch, expected)
             assert arrays(batch)["relation_counts"][:, lanes[k]].sum() > 0
+
+
+@pytest.mark.parametrize("over", ["table", "suite"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_capacity_action_observations_capture_without_host_reads(gripper, suite, over, layout, monkeypatch):
+    device = gpu_device()
+    table = gripper if over == "table" else suite
+    tables = [gripper] if over == "table" else suite.tables
+    encoders = [encoding.FlatRelationEncoder(t, layout=layout, target_sources=("action", "goal")) for t in tables]
+    caps = dict(entities=4096, args=16384, targets=4096)
+    ids = [0, len(table) - 1] * 2
+    env = rt.BatchedEnv(table, 4, device=device, task_ids=ids, max_steps=3, seed=7, goals=True,
+                        observation=encoders, obs_actions=True, obs_capacities=caps)
+    # Capture's warm-up acquires both the encoder contexts and the asynchronous expanders.
+    env.step()
+
+    def no_host(*args, **kwargs):
+        raise AssertionError("capacity action observations must not read device values on the host")
+
+    with monkeypatch.context() as patch:
+        for name in ("cpu", "numpy", "item", "tolist"):
+            patch.setattr(torch.Tensor, name, no_host)
+        rollout = env.capture(3, final=True)
+        rollout.replay()
+    torch.cuda.synchronize(device)
+    out = rollout.replay()
+    for j in range(3):
+        for final in (False, True):
+            obs = out.final_obs[j] if final else out.obs[j]
+            states = out.final_states[j] if final else out.states[j]
+            ids_host = out.task_ids[j].cpu().numpy()
+            domains = np.asarray(suite.domain_of)[ids_host] if over == "suite" else np.zeros(4, np.int32)
+            local = np.asarray(suite.local_ids)[ids_host] if over == "suite" else ids_host
+            batches = obs.batches if over == "suite" else [obs]
+            for k, batch in enumerate(batches):
+                selected = np.flatnonzero(domains == k)
+                own = np.ascontiguousarray(states.cpu().numpy()[selected, :tables[k].words])
+                own_ids = np.asarray(local[selected], np.int32)
+                masks = tuple(np.ascontiguousarray(g.cpu().numpy()[selected]) for g in (env.goal_pos, env.goal_neg))
+                expected = encoders[k].encode(own, own_ids, goals=masks, actions=rl.expand(tables[k], own, own_ids))
+                assert_same(batch, expected)
+                sizes = batch.sizes
+                for name, size in VARIABLE.items():
+                    if name in batch.as_dict():
+                        assert not getattr(batch, name)[sizes.get(size, 0):].any()
+
+
+@pytest.mark.parametrize("over", ["table", "suite"])
+def test_action_observation_capacity_overflow_zeroes_all_outputs(gripper, suite, over):
+    device = gpu_device()
+    table = gripper if over == "table" else suite
+    encoders = [encoding.FlatRelationEncoder(t, target_sources=("action",))
+                for t in ([gripper] if over == "table" else suite.tables)]
+    ids = None if over == "table" else [0, len(suite) - 1] * 2
+    env = rt.BatchedEnv(table, 4, device=device, task_ids=ids, observation=encoders, obs_actions=True,
+                        obs_capacities=dict(entities=0, args=0, targets=0))
+    result = env.step()
+    for obs in (result.obs, result.final_obs):
+        for batch in (obs.batches if over == "suite" else [obs]):
+            assert batch.sizes["capacity_overflow"] and not batch.sizes["invalid_input"]
+            for value in batch.as_dict("numpy").values():
+                if isinstance(value, np.ndarray):
+                    assert not value.any()
+
+
+def test_capacity_action_observations_return_before_the_device(gripper):
+    from test_encoding_device_transitions import returns_before_the_device
+    device = gpu_device()
+    encoder = encoding.FlatRelationEncoder(gripper)
+    env = rt.BatchedEnv(gripper, 4, device=device, observation=encoder, obs_actions=True, obs_capacities=CAPS)
+    env.step()
+    early, result = returns_before_the_device(lambda: env.step(final=False))
+    assert early
+    own = np.ascontiguousarray(result.states.cpu().numpy())
+    ids = np.ascontiguousarray(result.task_ids.cpu().numpy())
+    assert_same(result.obs, encoder.encode(own, ids, actions=rl.expand(gripper, own, ids)))
+
+
+@pytest.mark.needs_gil
+def test_capacity_action_observations_under_torch_compile(gripper):
+    device = gpu_device()
+    encoder = encoding.FlatRelationEncoder(gripper)
+    env = rt.BatchedEnv(gripper, 4, device=device, observation=encoder, obs_actions=True, obs_capacities=CAPS)
+    torch._dynamo.reset()
+    try:
+        call = torch.compile(lambda: env.step(final=False).obs.relation_args, fullgraph=True, backend="aot_eager")
+        call()
+        call()
+        own = np.ascontiguousarray(env.states.cpu().numpy())
+        ids = np.ascontiguousarray(env.task_ids.cpu().numpy())
+        assert_same(env.encode_observation(), encoder.encode(own, ids, actions=rl.expand(gripper, own, ids)))
+    finally:
+        torch.cuda.synchronize(device)
+        env.close()
+        torch._dynamo.reset()
+
+
+def test_captured_action_observations_follow_changing_suite_domains(suite):
+    device = gpu_device()
+    encoders = [encoding.FlatRelationEncoder(t) for t in suite.tables]
+    env = rt.BatchedEnv(suite, 4, device=device, task_ids=[0] * 4, max_steps=1, observation=encoders,
+                        obs_actions=True, obs_capacities=CAPS)
+    next_ids = torch.zeros(4, dtype=torch.int32, device=device)
+    rollout = env.capture(2, next_task_ids=next_ids, final=True)
+    for instance in (len(suite) - 1, 0, len(suite) - 1):
+        next_ids.fill_(instance)
+        before = env.task_ids.clone()
+        out = rollout.replay()
+        for j in range(2):
+            for obs, states, ids in ((out.obs[j], out.states[j], out.task_ids[j]),
+                                     (out.final_obs[j], out.final_states[j], before if j == 0 else out.task_ids[j - 1])):
+                global_ids = ids.cpu().numpy()
+                domain = np.asarray(suite.domain_of)[global_ids]
+                local = np.asarray(suite.local_ids, np.int32)[global_ids]
+                for k, batch in enumerate(obs.batches):
+                    selected = np.flatnonzero(domain == k)
+                    own = np.ascontiguousarray(states.cpu().numpy()[selected, :suite.tables[k].words])
+                    own_ids = np.ascontiguousarray(local[selected])
+                    expected = encoders[k].encode(own, own_ids, actions=rl.expand(suite.tables[k], own, own_ids))
+                    assert_same(batch, expected)
+
+
+@pytest.mark.parametrize("single", [False, True])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_captured_actions_survive_other_stream_steps_expansions_and_captures(gripper, single, compiled):
+    device = gpu_device()
+    table = rl.as_table(gripper[0]) if single else gripper
+    encoder = encoding.FlatRelationEncoder(table)
+    first = rt.BatchedEnv(table, 4, device=device, seed=4, observation=encoder,
+                          obs_actions=True, obs_capacities=CAPS)
+    second = rt.BatchedEnv(table, 9, device=device, seed=7, observation=encoder,
+                           obs_actions=True, obs_capacities=CAPS)
+    torch._dynamo.reset()
+    try:
+        if compiled:
+            step = torch.compile(lambda env: env.step(final=False).obs.relation_args,
+                                 fullgraph=True, backend="aot_eager")
+            rollout = first.capture(2, policy=lambda env: env.random_actions())
+            # The custom op's returned storage also owns the workspace when traced.
+            stream = torch.cuda.Stream(device=device)
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                step(first)
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                compiled_output = step(first)
+        else:
+            rollout = first.capture(2, final=True)
+        other = torch.cuda.Stream(device=device)
+        other.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(other):
+            second.step()
+            expansion = rl.expand(table, second.states, second.task_ids, framework="torch", stream=other)
+        other.synchronize()
+        other_rollout = second.capture(2, final=True)
+        for captured in (rollout, other_rollout, rollout, other_rollout):
+            out = captured.replay()
+            for k, batch in enumerate(out.obs):
+                own = np.ascontiguousarray(out.states[k].cpu().numpy())
+                ids = np.ascontiguousarray(out.task_ids[k].cpu().numpy())
+                assert_same(batch, encoder.encode(own, ids, actions=rl.expand(table, own, ids)))
+        if compiled:
+            graph.replay()
+            torch.cuda.synchronize(device)
+            own = np.ascontiguousarray(first.states.cpu().numpy())
+            ids = np.ascontiguousarray(first.task_ids.cpu().numpy())
+            expected = encoder.encode(own, ids, actions=rl.expand(table, own, ids))
+            used = len(expected.relation_args)
+            np.testing.assert_array_equal(compiled_output[:used].cpu().numpy(), np.asarray(expected.relation_args))
+            assert not compiled_output[used:].any()
+    finally:
+        torch.cuda.synchronize(device)
+        first.close()
+        second.close()
+        torch._dynamo.reset()

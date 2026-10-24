@@ -265,7 +265,7 @@ class JaxFlatBatch:
             g, r = graphs, relations
             extents = {"task_ids": g, "num_objects": g, "entity_offsets": g + 1, "relation_counts": g * r,
                        "relation_offsets": g * r + 1, "relation_arg_offsets": g * r + 1, "goal_complete": g,
-                       "target_offsets": g + 1}
+                       "target_offsets": g + 1, "history_offsets": g + 1}
             arrays = {name: a.reshape(-1)[: extents[name]].reshape((-1, r) if name == "relation_counts" else (-1,))
                       if name in extents else a for name, a in arrays.items()}
         if framework in (None, "jax", "dlpack"):
@@ -642,8 +642,8 @@ def encode(
 
     live: an integer scalar array (traced or not), the live rows: only the first ``min(live, N)`` rows are encoded,
     as a batch of that many graphs whose per-graph and per-cell arrays keep the entries of N graphs and are zero past
-    them (``batch.device_graphs`` holds the count; ``as_dict`` and ``num_graphs`` read it). It needs capacities and
-    takes no subgoal layers or history steps."""
+    them (``batch.device_graphs`` holds the count; ``as_dict`` and ``num_graphs`` read it). It needs capacities;
+    subgoal layers and history steps use the same live prefix."""
     if actions is not None:
         raise _error("the JAX FFI does not encode action rows: its operands carry no expansion labels or offsets; use "
                      "the torch device encoder")
@@ -686,8 +686,6 @@ def encode(
     else:
         if capacities is None:
             raise _error("live rows need capacities (the arrays keep the entries of every row)")
-        if reg.layout.history or layers[0].ndim == 3 and layers[0].shape[1] != 0:
-            raise _error("a live row count carries no subgoal layers or history steps")
         live_count = jnp.clip(jnp.asarray(live).reshape(()), 0, graphs).astype(jnp.int32)
         live_words = jnp.stack([live_count.astype(jnp.uint32), jnp.uint32(0)])
     operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps,

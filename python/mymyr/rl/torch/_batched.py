@@ -135,8 +135,9 @@ class BatchedEnv:
     the true sizes are in the batch's ``device_sizes`` (``sizes``), and a batch that does not fit is all zero with its
     overflow flag set. Without capacities each encoding is exact, which on a device waits for the batch's sizes once
     (and cannot be captured). ``obs_actions=True`` adds the action relations of the observed states (their expansion;
-    on a device only without ``obs_capacities``, since the expansion waits for its total); by default observations
-    hold no action tuples. Over a
+    with capacities the device expansion is bounded by the entity capacity, keeps its status on the device and
+    captures with the step; tables requiring host expansion are rejected); by default observations hold no action
+    tuples. Over a
     suite an observation is a :class:`SuiteObservation`: one batch per domain and each row's index in its batch.
 
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing

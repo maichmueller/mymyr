@@ -147,10 +147,56 @@ per item as well.
 
 `StateRows` also accepts CUDA DLPack arrays and keeps its rows, task ids, labels and goal masks on the device.
 `StateRows.from_state_space` accepts a device state space. `EncodingCollate(encoder, capacities=...)` with a
-`FlatRelationEncoder` dispatches those stored rows directly to CUDA; selecting a batch with `take` and encoding it
-needs no host copy of the rows or task ids. `SuiteEncoder` accepts host rows only. For CUDA datasets, use one flat
-encoder per domain with that domain's local task ids.
+`FlatRelationEncoder` or `SuiteEncoder` dispatches those stored rows directly to CUDA; selecting a batch with `take`
+and encoding it needs no host copy of the rows or task ids. A suite uses global task ids and returns one device batch
+per domain, together with each input row's domain and index in that batch. Exact suite calls over several domains download only the
+per-domain row counts; a single domain uses the known input row count. They then wait for each domain's exact output sizes. To avoid these waits, supply capacities for
+every domain, with `graphs` at least the input batch size. Capacity results include empty domains: each batch
+counts its live graphs in `device_graphs`, and `graphs.rows[d]` has -1 past that count. Accessing tensors does not wait;
+reading `num_graphs`, `sizes` or `graphs.graph(i)` on the host does. With `actions=True`, expansion buffers are bounded
+by the entity capacity and schema multiplicity. Automatic device action expansion, exact or capacity, requires an
+asynchronous backend for every domain, so encoding never falls back to downloading the stored rows.
+Capacity suite calls accept automatic actions (`actions=True`); given per-domain expansions require exact calls.
+Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not allocated.
+The raw expansion status is preserved, including overflow from staged rows past a domain's live prefix.
+Invalid global task ids are grouped into instance 0's domain and set that batch's `invalid_input` flag; host calls
+raise instead. Device suites accept relational schemas; horizon and transition encoders take host rows or an
+explicit `HorizonView` encoded separately per domain.
 The dataset files continue to store rows and labels only. Tables can mix instances whose rows are 1, 42 and 184 words wide.
+
+A resident suite dataset and its capacity encoding, including capture and replay:
+
+```python skip-if-no-cuda needs-torch
+import torch
+import mymyr
+from mymyr import datasets, encoding, rl
+
+suite = rl.TaskSuite.group([
+    mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt"),
+    mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt"),
+])
+suite_encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+resident = datasets.StateRows(
+    torch.as_tensor(np.asarray(suite.initial_states()).view(np.int64).copy(), device="cuda:0"),
+    torch.arange(len(suite), dtype=torch.int32, device="cuda:0"),
+)
+capacities = {d: dict(graphs=len(suite), entities=2048, args=8192, targets=2048)
+              for d in range(suite.num_domains)}
+collate_suite = datasets.EncodingCollate(suite_encoder, actions=True, capacities=capacities)
+stream = torch.cuda.Stream()
+stream.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(stream):
+    collate_suite(resident)  # upload catalogs and acquire device contexts on the capture stream
+stream.synchronize()
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph, stream=stream):
+    loaded_suite = collate_suite(resident)
+graph.replay()
+torch.cuda.synchronize()
+assert loaded_suite.graphs.domain.tolist() == [0, 1]
+assert loaded_suite.graphs.index.tolist() == [0, 0]
+assert all(not batch.sizes["overflow"] for batch in loaded_suite.graphs.values())
+```
 
 `EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`
 (the `FlatBatch`, or the `SuiteBatch` of one batch per domain when `encoder` is a `SuiteEncoder`), the rows'

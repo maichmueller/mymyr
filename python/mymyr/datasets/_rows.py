@@ -90,8 +90,9 @@ class StateRows:
     items of a batch into an ``EncodedRows``, so an encoder (and its options) can change without touching the data.
 
     CUDA DLPack rows are retained as torch int64 word views. Task ids, labels and goals stay on the same device;
-    a device ``StateRow.task_id`` is a scalar tensor. ``EncodingCollate`` with a ``FlatRelationEncoder`` encodes the
-    stored rows without downloading them.
+    a device ``StateRow.task_id`` is a scalar tensor. ``EncodingCollate`` with a ``FlatRelationEncoder`` or
+    ``SuiteEncoder`` encodes the stored rows without downloading them. Suite capacity calls need capacities for every
+    domain and graph capacity covering the entire input batch.
 
     ``StateRows(rows, task_ids=None, *, labels=None, goals=None)``: ``rows`` a ``uint64`` array ``[N, W]`` of state
     words of one table's instances (rows of instances with fewer words are padded with zeros), ``task_ids`` the
@@ -285,8 +286,8 @@ class EncodingCollate:
     ``SuiteEncoder`` when the rows are of the instances of a suite (global ids; the graphs are then one batch per domain).
     ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
-    encoded with it. CUDA rows require a ``FlatRelationEncoder`` and stay on the device; ``SuiteEncoder`` accepts
-    host rows only. ``capacities`` optionally supplies its output capacities, avoiding the wait for exact allocation.
+    encoded with it. CUDA rows stay on the device with either encoder. ``capacities`` optionally supplies output capacities, avoiding
+    the wait for exact allocation; for a suite it maps every domain to capacities with ``graphs >= N``.
     The collate function is a plain callable object: it pickles with its encoder, so it works with data loader worker
     processes.
     """
@@ -299,7 +300,7 @@ class EncodingCollate:
         framework: str | None = None,
         threads: int = 1,
         pool: ThreadPool | None = None,
-        capacities: Mapping[str, int] | None = None,
+        capacities: Mapping[str, int] | Mapping[int, Mapping[str, int]] | None = None,
     ) -> None:
         self.encoder = encoder
         self.actions = actions

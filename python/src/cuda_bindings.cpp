@@ -38,6 +38,7 @@
 #include <nanobind/stl/tuple.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <deque>
@@ -444,12 +445,21 @@ rl::DType dtype_of(const nb::dlpack::dtype& d)
 
 // ------------------------------------------------------------------------------------------------ device expand
 
+using ExpansionShape = std::array<u64, 12>;
+
+struct ExpansionWorkspace
+{
+    std::unique_ptr<cuda::SuiteExpander> expander;
+    std::optional<ExpansionShape> shape;
+};
+
 /// Per-table CUDA state (a Task's on its core, a TaskTable's on the table, a TaskSuite's on the suite): a default
 /// context per device and idle device expanders per context (they keep their context alive until the table goes).
 struct TaskCuda
 {
     std::map<int, PyContextPtr> contexts;
-    std::map<const cuda::DeviceContext*, std::vector<std::unique_ptr<cuda::SuiteExpander>>> idle;
+    std::map<const cuda::DeviceContext*, std::vector<std::shared_ptr<ExpansionWorkspace>>> idle;
+    std::map<std::pair<const cuda::DeviceContext*, unsigned long long>, std::weak_ptr<ExpansionWorkspace>> captures;
 };
 
 TaskCuda& slot_cuda(std::shared_ptr<void>& slot)  // with the slot's mutex held
@@ -487,7 +497,7 @@ PyContextPtr table_context(const SuiteRef& ref, nb::handle ctx, int device)
 class ExpanderLease
 {
 public:
-    ExpanderLease(const SuiteRef& ref, const PyContextPtr& c, cudaStream_t s) : m_ref(ref), m_ctx(c->ctx)
+    ExpanderLease(const SuiteRef& ref, const PyContextPtr& c, cudaStream_t s, bool inspect = false) : m_ref(ref), m_ctx(c->ctx)
     {
         {
             std::lock_guard lock(ref.cuda_mutex());
@@ -495,14 +505,19 @@ public:
             if (!v.empty())
             {
                 const cudaStream_t want = s ? s : m_ctx->stream();
-                auto it = std::find_if(v.rbegin(), v.rend(), [&](const auto& x) { return x->stream() == want; });
+                auto it = std::find_if(v.rbegin(), v.rend(), [&](const auto& x) { return x->expander->stream() == want; });
                 auto at = it == v.rend() ? v.end() - 1 : std::prev(it.base());
                 m_x = std::move(*at);
                 v.erase(at);
             }
         }
         if (!m_x)
-            m_x = std::make_unique<cuda::SuiteExpander>(m_ctx, ref.suite);
+        {
+            m_x = std::make_shared<ExpansionWorkspace>();
+            m_x->expander = std::make_unique<cuda::SuiteExpander>(m_ctx, ref.suite);
+        }
+        if (!inspect)
+            m_x->shape.reset();
     }
     ~ExpanderLease()
     {
@@ -513,13 +528,51 @@ public:
     }
     ExpanderLease(const ExpanderLease&) = delete;
     ExpanderLease& operator=(const ExpanderLease&) = delete;
-    cuda::SuiteExpander* operator->() const { return m_x.get(); }
+    cuda::SuiteExpander* operator->() const { return m_x->expander.get(); }
+    void warmed(const ExpansionShape& shape) { m_x->shape = shape; }
 
 private:
     const SuiteRef& m_ref;
     cuda::ContextPtr m_ctx;
-    std::unique_ptr<cuda::SuiteExpander> m_x;
+    std::shared_ptr<ExpansionWorkspace> m_x;
 };
+
+/// A graph exclusively owns one warmed workspace per table and context. Every use has the same shape, so none
+/// of its captured pointers can move when a later node is recorded. Only the graph's stream accesses this workspace.
+std::shared_ptr<ExpansionWorkspace> captured_workspace(const SuiteRef& ref, const PyContextPtr& c, cudaStream_t s,
+                                                        unsigned long long id, const ExpansionShape* shape = nullptr)
+{
+    std::lock_guard lock(ref.cuda_mutex());
+    auto& state = slot_cuda(ref.cuda());
+    std::erase_if(state.captures, [](const auto& entry) { return entry.second.expired(); });
+    const auto key = std::make_pair(c->ctx.get(), id);
+    if (auto owner = state.captures[key].lock())
+    {
+        if (owner->expander->stream() != s || (shape && owner->shape != *shape))
+            throw nb::value_error("mymyr: captured expansions over one table need the same stream, shapes and options");
+        return owner;
+    }
+    auto& idle = state.idle[c->ctx.get()];
+    auto it = std::find_if(idle.begin(), idle.end(), [&](const auto& owner) {
+        return owner->expander->stream() == s && owner->shape && (!shape || owner->shape == *shape);
+    });
+    if (it == idle.end())
+        throw nb::value_error("mymyr: warm expand_into with the same shapes and options on the capture stream before "
+                              "CUDA graph capture");
+    auto owner = *it;
+    if (shape)
+    {
+        idle.erase(it);
+        state.captures[key] = owner;
+    }
+    return owner;
+}
+
+nb::capsule workspace_owner(std::shared_ptr<ExpansionWorkspace> workspace)
+{
+    return nb::capsule(new std::shared_ptr<ExpansionWorkspace>(std::move(workspace)), "mymyr.expansion_workspace",
+                       [](void* p) noexcept { delete static_cast<std::shared_ptr<ExpansionWorkspace>*>(p); });
+}
 
 /// The device task ids of a batch: an int32 CUDA array [rows] on the context's device, or None (null: a table of one).
 const i32* device_task_ids(nb::handle obj, const PyContext& c, const OpStream& os, u64 rows,
@@ -823,8 +876,16 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                              "device); host states take host destinations");
     const dl::Device dev = dl::dlpack_device(a.states);
     PyContextPtr c = table_context(ref, a.ctx, dev.device_id);
-    c->drain();
     const OpStream os = c->stream_of(a.stream);
+    cudaStreamCaptureStatus capture;
+    {
+        cuda::DeviceGuard guard(dev.device_id);
+        cuda::check(cudaStreamIsCapturing(os.s, &capture), "cudaStreamIsCapturing");
+    }
+    if (capture == cudaStreamCaptureStatusNone)
+        c->drain();
+    else if (a.status.is_none())
+        throw nb::value_error("mymyr: expand_into under CUDA graph capture needs status= and stream=");
     DeviceInput in = import_device(a.states, *c, os, "states");
     const WordsLayout w = device_words(in);
     std::vector<std::shared_ptr<void>> keep{in.im.keep};
@@ -834,6 +895,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     if (w.words < NN)
         throw nb::value_error("mymyr: numeric states have no numeric block");
     x.numeric_words = NN;
+    x.words = w.words - NN;
     std::optional<u64> cap;
     auto take_cap = [&](i64 n) { cap = cap ? std::min<u64>(*cap, static_cast<u64>(n)) : static_cast<u64>(n); };
     auto dest = [&](nb::handle obj, const char* name) {
@@ -944,13 +1006,30 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (a.stream.is_none())
             throw nb::value_error("mymyr: expand_into: an expansion with 'status' does not wait for the device: pass "
                                   "stream=, the stream that reads its outputs (for instance torch.cuda.current_stream())");
+        const u64 outputs = (x.succ ? 1u : 0u) | (x.parent ? 2u : 0u) | (x.schema ? 4u : 0u) |
+                            (x.binding ? 8u : 0u) | (x.goal ? 16u : 0u) | (x.derived ? 32u : 0u);
+        const ExpansionShape shape{w.rows, w.words, w.stride, x.capacity, x.words, x.label_width, x.derived_words,
+                                   outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate};
         bool waited = false;
+        std::shared_ptr<ExpansionWorkspace> owner;
+        if (capture != cudaStreamCaptureStatusNone)
+        {
+            unsigned long long id = 0;
+            cuda::check(cudaStreamGetCaptureInfo(os.s, &capture, &id), "cudaStreamGetCaptureInfo");
+            owner = captured_workspace(ref, c, os.s, id, &shape);
+            nb::gil_scoped_release release;
+            owner->expander->expand_async(view, ids, x, status, opt);
+        }
+        else
         {
             ExpanderLease ex(ref, c, os.s);
             nb::gil_scoped_release release;
             ex->set_stream(os.s);
             if (ex->async_unsupported(w.rows, opt).empty())
+            {
                 ex->expand_async(view, ids, x, status, opt);
+                ex.warmed(shape);
+            }
             else
             {
                 ex->expand(view, ids, x, opt);
@@ -960,8 +1039,11 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                 waited = true;
             }
         }
-        c->release_after(os.s, std::move(keep));
+        if (capture == cudaStreamCaptureStatusNone)
+            c->release_after(os.s, std::move(keep));
         nb::dict r;
+        if (owner)
+            r["_keepalive"] = workspace_owner(std::move(owner));
         if (waited)
         {
             r["total"] = x.total;
@@ -1480,6 +1562,58 @@ void bind_cuda(nb::module_& parent)
 
     device_hooks().expand = &device_expand;
     device_hooks().expand_into = &device_expand_into;
+    m.def("_check_async_expansion",
+          [](TableArg table, u64 rows, int device, std::intptr_t stream)
+          {
+              const SuiteRef ref = suite_of(table);
+              PyContextPtr c = table_context(ref, nb::none(), device);
+              const auto s = cuda_stream(stream);
+              cudaStreamCaptureStatus capture;
+              unsigned long long id = 0;
+              cuda::DeviceGuard guard(device);
+              cuda::check(cudaStreamGetCaptureInfo(s, &capture, &id), "cudaStreamGetCaptureInfo");
+              auto check = [&](const cuda::SuiteExpander& ex) {
+                  if (const std::string why = ex.async_unsupported(rows, rl::ExpandOptions{}); !why.empty())
+                      throw std::invalid_argument("mymyr: device action expansion needs an asynchronous backend: " + why);
+              };
+              if (capture != cudaStreamCaptureStatusNone)
+                  check(*captured_workspace(ref, c, s, id)->expander);
+              else
+              {
+                  ExpanderLease ex(ref, c, s, true);
+                  nb::gil_scoped_release release;
+                  check(*ex.operator->());
+              }
+          },
+          "table"_a, "rows"_a, "device"_a, "stream"_a,
+          "Checks that the table can expand this many rows without waiting for the device.");
+
+    m.def("_keep_expansion_array",
+          [](nb::handle array, nb::capsule capsule, std::intptr_t stream) {
+              if (std::strcmp(capsule.name(), "mymyr.expansion_workspace") != 0)
+                  throw nb::type_error("mymyr: expected an expansion workspace owner");
+              auto workspace = *static_cast<std::shared_ptr<ExpansionWorkspace>*>(capsule.data());
+              auto imported = dl::import_dlpack(array, stream);
+              struct Keep
+              {
+                  std::shared_ptr<void> array;
+                  std::shared_ptr<ExpansionWorkspace> workspace;
+              };
+              ArraySpec spec;
+              spec.owner = std::make_shared<Keep>(Keep{imported.keep, std::move(workspace)});
+              spec.data = imported.data;
+              if (imported.dtype.code == dl::k_float && imported.dtype.bits == 32)
+                  spec.dtype = rl::DType::F32;
+              else if (imported.dtype.code == dl::k_float && imported.dtype.bits == 64)
+                  spec.dtype = rl::DType::F64;
+              else
+                  spec.dtype = dtype_of({imported.dtype.code, imported.dtype.bits, imported.dtype.lanes});
+              spec.shape = imported.shape;
+              spec.strides = imported.strides;
+              return export_device_array(std::move(spec), DeviceExport{imported.device.device_type,
+                                          imported.device.device_id, {}}, Framework::Torch, default_words(Framework::Torch));
+          }, "array"_a, "owner"_a, "stream"_a,
+          "A zero-copy output tensor whose storage keeps a captured expansion workspace alive.");
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")

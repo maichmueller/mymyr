@@ -1366,6 +1366,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   dt, count)` or all six, masks `[N, H, ...]`, `dt` `int32` `[N, H]` and `count` `int32` `[N]`) are the subgoal layers
   and history steps of `encoder.encode`, on both platforms. A wider integer `dt` or `count` is taken where int32 holds
   its values: a concrete value outside int32 raises `ValueError`, a traced one marks its row invalid.
+  With `live=`, subgoal layers and history steps are read only for the live prefix on both platforms; their unused
+  per-graph entries and variable output tails are zero.
 - **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
   args=, targets=, history=)` (`targets` only with target sources, `history` only with history steps; `graphs` at
   least `N`): the per-graph arrays have `N` entries, the variable-size arrays (`history_entity` and `history_dt` among
@@ -1572,6 +1574,9 @@ derived_goals)` with `append`, `flush(DeviceOutput)`, `clear`, and `status()`; a
 batch_views, stream)` with caller scratch sized by `scratch_bytes()`. The batch views come from
 `cuda::collation_batch(encoder, arrays, sizes, graphs)`, which refuses an encoder that the device does not encode.
 `DeviceOutput::graphs` optionally receives a live graph count.
+The native Python encoder handle's `graph_count` pointer is both input and output: it reads an int64 device scalar
+as an unsigned count and writes `min(count, N)` back into the same scalar. Counts above `N`, including negative
+int64 values interpreted as unsigned, become `N`.
 
 For CUDA capacity encoding with shared statics, `DeviceOutput::static_capacities` bounds the instance blocks and their
 arguments, and `static_sizes` points to a device `StaticSizes`. The overflow flag includes these capacities. The free

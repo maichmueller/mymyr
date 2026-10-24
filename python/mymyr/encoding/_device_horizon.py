@@ -105,8 +105,16 @@ def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
     if not encoder.options["include_actions"]:
         raise d._error("actions are given, but the schema has no action relations")
     a = action_arrays(encoder, actions, rows.device, rows.graphs, rows.tensors)
+    rows.expansion_owner = getattr(actions, "_keepalive", None)
+    status = a.status
+    if status is not None:
+        if status.device != rows.device or status.numel() != 1 or status.dtype not in (d._torch().int32, d._torch().int64):
+            raise d._error("actions.status must be one int32 or int64 word on the rows' device")
+        status = status.to(d._torch().int64).contiguous()
+        rows.tensors.append(status)
     rows.fields[d._ROW_ACTIONS:d._ROW_HORIZON] = [a.offsets.data_ptr(), a.schema.data_ptr(), a.binding.data_ptr(),
-                          0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1], 0]
+                          0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1],
+                          0 if status is None else status.data_ptr()]
 
 
 def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any, status: Any = None) -> Any:

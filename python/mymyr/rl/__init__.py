@@ -74,6 +74,11 @@ not wait for the device, so it needs ``stream=``, the stream that reads its outp
 written then), and the result holds only ``capacity`` (tables whose expansion needs the host wait and return the usual
 keys; rows past the total then keep their contents, and an invalid row raises). Numeric tables and suites preserve each instance's CPU encoding on the
 device; their expansion uses per-instance kernels and gathers/scatters rows at the shared atom/numeric boundary.
+Under CUDA graph capture, warm ``expand_into`` on the capture stream with identical shapes, destinations present
+and options. Every expansion over the same table within that graph must keep these fixed. The result dictionary's
+``_keepalive`` owns the graph's exclusive workspace: keep the dictionary alive through the final replay. Captured
+workspaces never return to the eager pool and are never shared between graphs. Encoded action observations retain
+this ownership in their output tensor storage automatically.
 
 Environments: :mod:`mymyr.rl.torch` (needs torch) has batched planning environments on the CPU or a CUDA device
 (``BatchedEnv``, the TorchRL ``PlanningEnv``), torch custom ops for the step and the expansion, and the counter-based

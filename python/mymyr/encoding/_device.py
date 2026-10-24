@@ -339,7 +339,7 @@ def _layer_words(torch: Any, t: Any, name: str, graphs: int, may_share: bool) ->
 class _Rows:
     """The checked rows of a call: the device pointers and strides the native side takes."""
 
-    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors")
+    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors", "expansion_owner")
 
     def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any, subgoals: Any = None,
                  history: Any = None):
@@ -598,7 +598,7 @@ def encode_arrays(
     return _encode_rows(encoder, rows, capacities, keep)
 
 
-def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> dict[str, Any]:
+def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, graph_count: Any = None) -> dict[str, Any]:
     torch = _torch()
     _drain(torch)
     layout = layout_of(encoder)
@@ -621,7 +621,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> 
         scratch = _scratch(torch, native, stream, scratch_rows, device, rows.fields[_ROW_DERIVED] != 0)
         native.encode(stream, rows.fields, _pointers(out),
                       [out["task_ids"].shape[0], entities, args, targets, steps, numeric, static_instances, static_args],
-                      scratch.data_ptr(), scratch.numel())
+                      scratch.data_ptr(), scratch.numel(), 0 if graph_count is None else graph_count.data_ptr())
     else:
 
         def allocate(
@@ -648,6 +648,12 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
     _retain(torch, [*rows.tensors, *(keep or [])], device)
+    owner = getattr(rows, "expansion_owner", None)
+    if owner is not None:
+        from mymyr._core import _cuda
+        for name, array in out.items():
+            if array is not None:
+                out[name] = _cuda._keep_expansion_array(array, owner, stream)
     return out
 
 
@@ -925,6 +931,8 @@ class DeviceFlatBatch:
                        "relation_arg_offsets": g * self.num_relations + 1, "entity_role": sizes["entities"],
                        "entity_ref": sizes["entities"], "relation_args": sizes["args"],
                        "target_entity": sizes["targets"], "target_group": sizes["targets"],
+                       "history_offsets": g + 1, "history_entity": sizes.get("history", 0),
+                       "history_dt": sizes.get("history", 0),
                        "numeric_values": sizes.get("numeric", 0),
                        "node_offsets": g + 1, "node_label": sizes["entities"] + sizes["tuples"],
                        "edge_offsets": g + 1, "edge_label": 2 * sizes["args"]}

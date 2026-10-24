@@ -1276,3 +1276,25 @@ def test_derived_subgoal_masks_need_derived_words_only_where_the_device_cannot_e
                     jax_encode(encoder, plain, platform, capacities=caps, **kwargs)
             else:  # the target evaluates the derived atoms that the layers read
                 same_batch(want, jax_encode(encoder, plain, platform, capacities=caps, **kwargs))
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("count", [0, 2, 4])
+def test_live_rows_with_subgoals_and_history_equal_host_capacity(platform, layout, count):
+    task = text_task("gripper__prob05")
+    words = np.asarray(task.encode([task.initial_state] * 4))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, max_goal_level=1, history=True,
+                                           target_sources=("goal", "subgoal", "history"))
+    layers = (words[:, None, :].copy(), np.zeros((4, 1, words.shape[1]), np.uint64))
+    history = (*layers, np.full((4, 1), -1, np.int32), np.ones(4, np.int32))
+    full = encoder.encode(words, subgoals=layers, history=history)
+    caps = exact_capacities(full, 2)
+    inputs = layered_inputs(platform, layers, history)
+    batch = jax.jit(lambda rows, steps, live: ej.encode(encoder, rows, capacities=caps, live=live, **steps))(
+        put(halves(words), platform), inputs, put(np.asarray(count, np.int32), platform))
+    expected = encoder.encode(words[:count], subgoals=tuple(x[:count] for x in layers),
+                              history=tuple(x[:count] for x in history), capacities=caps)
+    same_batch(expected, batch)
+    for name in ("entity_offsets", "history_offsets", "target_offsets"):
+        assert not np.asarray(batch._arrays[name])[count + 1:].any(), name

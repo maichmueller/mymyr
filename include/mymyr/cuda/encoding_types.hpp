@@ -49,7 +49,8 @@ struct DeviceOutput
     encoding::StaticSizes* static_sizes = nullptr;
 };
 /// Device expansion labels. The offsets delimit one canonical (schema, binding) run per parent row; capacity bounds
-/// every label array, including unused capacity tails. Overflow is a device scalar (nonzero: expansion overflowed).
+/// every label array, including unused capacity tails. Overflow is a device uint64 status word: bit 0 reports
+/// expansion capacity overflow, bit 1 reports invalid input.
 struct DeviceActionInput
 {
     const i32* offsets = nullptr;  // [graphs + 1]
@@ -154,7 +155,8 @@ struct DeviceEncodeInput
     /// Optional device count, bounded by `graphs`. A circular row view starts at *row_start modulo row_capacity.
     /// Counts and starts are read on the encoder's stream; derived inputs and goal masks use the same row order.
     /// An encode with any of them (or with DeviceOutput::graphs) is sized for `graphs` rows but costs what the live rows
-    /// cost; it takes no launch order, and its rows carry no subgoal layers and its schema no history steps.
+    /// cost; it takes no launch order. Circular views carry no subgoal layers and their schema has no history steps;
+    /// linear live views support both.
     const u64* graphs_device = nullptr;
     const u64* row_start = nullptr;
     u64 row_capacity = 0;

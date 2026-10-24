@@ -143,28 +143,38 @@ def test_shared_collation_requires_the_ordered_blocks_of_each_sources_graphs(cas
 @pytest.mark.parametrize("domains", [1, 2])
 @pytest.mark.parametrize("form", ["direct", "dataset", "items"])
 @pytest.mark.parametrize("actions", [False, True])
-def test_device_suite_encoding_is_refused_before_downloading_ids(cases, domains, form, actions, monkeypatch):
+def test_device_suite_encoding_stays_resident(cases, domains, form, actions, monkeypatch):
     device = gpu()
     tables = [rl.as_table(cases["gripper"].source)]
     if domains == 2:
         tables.append(cases["blocks_table"].source)
     suite = rl.TaskSuite(tables)
     encoder = encoding.SuiteEncoder(suite, statics="shared")
-    rows = to_device(np.asarray(suite.initial_states()), device)
-    dataset = StateRows(rows, torch.arange(len(suite), dtype=torch.int32, device=device))
+    host_rows = np.asarray(suite.initial_states())
+    host_ids = np.arange(len(suite), dtype=np.int32)
+    expected = encoder.encode(host_rows, host_ids, actions=actions)
+    caps = {k: {**capacities(batch), "graphs": len(suite)} for k, batch in expected.items()}
+    dataset = StateRows(to_device(host_rows, device), to_device(host_ids, device))
+    items = dataset if form != "items" else [dataset[i] for i in range(len(dataset))]
+
+    def call():
+        if form == "direct":
+            return encoder.encode(dataset.rows, dataset.task_ids, actions=actions, capacities=caps)
+        return EncodingCollate(encoder, actions=actions, capacities=caps)(items).graphs
+
+    call()
 
     def no_host(*args, **kwargs):
-        raise AssertionError("device suite ids must not be downloaded")
+        raise AssertionError("device suite arrays must not be downloaded")
 
     with monkeypatch.context() as patch:
-        patch.setattr(torch.Tensor, "cpu", no_host)
-        patch.setattr(torch.Tensor, "numpy", no_host)
-        with pytest.raises(ValueError, match="SuiteEncoder.*CUDA.*FlatRelationEncoder"):
-            if form == "direct":
-                encoder.encode(dataset.rows, dataset.task_ids, actions=actions)
-            else:
-                items = dataset if form == "dataset" else [dataset[i] for i in range(len(dataset))]
-                EncodingCollate(encoder, actions=actions)(items)
+        for name in ("cpu", "numpy", "item", "tolist"):
+            patch.setattr(torch.Tensor, name, no_host)
+        actual = call()
+    for k in expected:
+        same_batch(expected[k], actual[k])
+    np.testing.assert_array_equal(actual.domain.cpu(), expected.domain)
+    np.testing.assert_array_equal(actual.index.cpu(), expected.index)
 
 
 @pytest.mark.parametrize("operation", ["take", "from_state_space"])
@@ -433,3 +443,37 @@ def test_shared_statics_with_device_action_rows_equal_cpu(cases, layout, index):
     same_batch(encoder.encode(case.rows, case.ids, actions=rl.expand(case.source, case.rows, case.ids),
                               capacities=caps),
                encoder.encode(rows, ids, actions=actions, capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("actions", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_resident_suite_groups_one_42_and_184_word_instances(wide_table, cases, layout, actions, capacity, monkeypatch):
+    device = gpu()
+    suite = rl.TaskSuite([wide_table, rl.as_table(cases["gripper"].source)])
+    ids = np.array([2, 3, 0, 1, 2, 3], np.int32)
+    rows = np.asarray(suite.initial_states())[ids].copy()
+    for row, instance in enumerate(ids):
+        width = (1, 42, 184, suite[3].words)[instance]
+        rows[row, width:] = np.uint64(0xFFFFFFFFFFFFFFFF)
+    encoder = encoding.SuiteEncoder(suite, layout=layout, statics="shared", target_sources=("action", "goal"))
+    expected = encoder.encode(rows, ids, actions=actions)
+    caps = {k: {**capacities(batch), "graphs": len(ids)} for k, batch in expected.items()} if capacity else None
+    dataset = StateRows(to_device(rows, device), to_device(ids, device))
+    collate = EncodingCollate(encoder, actions=actions, capacities=caps)
+    collate(dataset)
+
+    def no_host(*args, **kwargs):
+        raise AssertionError("resident suite rows and task ids must not be downloaded")
+
+    if capacity:
+        with monkeypatch.context() as patch:
+            for name in ("cpu", "numpy", "item", "tolist"):
+                patch.setattr(torch.Tensor, name, no_host)
+            actual = collate(dataset).graphs
+    else:
+        actual = collate(dataset).graphs
+    for k in expected:
+        same_batch(expected[k], actual[k])
+    np.testing.assert_array_equal(actual.domain.cpu(), expected.domain)
+    np.testing.assert_array_equal(actual.index.cpu(), expected.index)

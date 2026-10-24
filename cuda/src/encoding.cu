@@ -112,8 +112,11 @@ __device__ EncodeParams live_params(const EncodeParams& params)
         p.graphs = live < p.graphs ? live : p.graphs;
     }
     p.segments = 2 * (p.graphs + 1);
+    const u64 extra = p.relation_major ? p.segments + p.graphs * p.context.num_relations + 1 : 4 * (p.graphs + 1);
+    if (p.history_at)
+        p.history_at = extra;
     if (p.numeric_at)
-        p.numeric_at = p.relation_major ? p.segments + p.graphs * p.context.num_relations + 1 : 4 * (p.graphs + 1);
+        p.numeric_at = extra + (p.history_at ? p.graphs + 1 : 0);
     return p;
 }
 
@@ -565,6 +568,14 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     if (p.horizon_mode && p.horizon.expansion_status)
     {
         const u32 status = *p.horizon.expansion_status;
+        if (status & 1u)
+            sizes.overflow = (sizes.overflow & ~enc::k_overflow_input) | enc::k_overflow_capacity;
+        if (status & 2u)
+            sizes.overflow |= enc::k_overflow_input;
+    }
+    if (p.actions.overflow)
+    {
+        const u64 status = *p.actions.overflow;
         if (status & 1u)
             sizes.overflow = (sizes.overflow & ~enc::k_overflow_input) | enc::k_overflow_capacity;
         if (status & 2u)
@@ -1271,9 +1282,16 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
     cudaError_t error = shape.cleared ? cudaSuccess : launch_clear(shape, stream);
     if (error != cudaSuccess)
         return error;
-    const bool structured = p.actions.offsets || p.horizon_mode;
+    const bool structured = p.actions.offsets || p.horizon_mode || (Live && (p.layered || p.history_at));
     if (structured)
     {
+        if constexpr (Live)
+        {
+            // Structured rows use an inclusive scan with zeros outside the live totals.
+            error = cudaMemsetAsync(p.totals, 0, shape.scan_length * (p.wide ? 8 : 4), stream);
+            if (error != cudaSuccess)
+                return error;
+        }
         EncodeParams q = p;
         q.structured_lanes = structured_lanes_for(p, 0);
         structured_count_kernel<<<std::max<u32>(1, blocks_for(p.graphs * q.structured_lanes)), k_block,
@@ -1302,7 +1320,7 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
         if (error != cudaSuccess)
             return error;
     }
-    if constexpr (Live)
+    if (Live && !structured)
     {
         const live_scan::State st = live_scan::state_at(static_cast<u64*>(p.scan_state), p.scan_tiles, 1, 0);
         if (p.wide)
@@ -1326,7 +1344,7 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
 template<bool Live>
 cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
-    if (p.actions.offsets || p.horizon_mode)
+    if (p.actions.offsets || p.horizon_mode || (Live && (p.layered || p.history_at)))
     {
         EncodeParams q = p;
         const u64 table = p.relation_major ? align8(u64{p.context.num_relations} * 8) : 0;
