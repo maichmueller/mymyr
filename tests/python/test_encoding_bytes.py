@@ -17,7 +17,7 @@ CONFIGS = [(form, layout) for form in FORMS for layout in ("graph", "relation")
 
 def cuda():
     torch = pytest.importorskip("torch")
-    pytest.importorskip("mymyr.cuda")
+    pytest.importorskip("mymyr.cuda", exc_type=ImportError)
     if not torch.cuda.is_available():
         pytest.skip("a visible CUDA device is required")
     return torch

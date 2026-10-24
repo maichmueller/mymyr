@@ -549,7 +549,7 @@ def test_the_device_encodes_the_same_simple_graph():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
-    cuda = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend")
+    cuda = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
     if not cuda.available():
         pytest.skip("mymyr sees no CUDA device")
     task = text_task("gripper__prob05")

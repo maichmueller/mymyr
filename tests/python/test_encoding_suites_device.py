@@ -424,11 +424,11 @@ def _wait_workspace_release(reference):
 
 
 def test_graph_retains_expansion_after_all_results_are_dropped():
+    device = gpu()
     import gc
     from mymyr._core import _cuda
     from mymyr.encoding._device_actions import bounded_actions
 
-    device = gpu()
     table = rl.as_table(text_task("gripper__prob05"))
     encoder = encoding.FlatRelationEncoder(table)
     rows = tensor(np.asarray(table.initial_states()), device)
@@ -465,11 +465,11 @@ def test_graph_retains_expansion_after_all_results_are_dropped():
 
 @pytest.mark.parametrize("drop_results_first", [False, True])
 def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_results_first):
+    device = gpu()
     import gc
     from mymyr import cuda
     from mymyr._core import _cuda
 
-    device = gpu()
     table = rl.as_table(text_task("gripper__prob05"))
     ctx = cuda.Context(0, max_bytes=64 << 20)
     states = tensor(np.asarray(table.initial_states()), device)
@@ -524,11 +524,11 @@ def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_res
 
 @pytest.mark.parametrize("release_during_capture", [False, True])
 def test_repeated_capture_destruction_releases_workspace_memory(release_during_capture):
+    device = gpu()
     import time
     from mymyr import cuda
     from mymyr._core import _cuda
 
-    device = gpu()
     ctx = cuda.Context(0, max_bytes=64 << 20)
     table = rl.as_table(text_task("gripper__prob05"))
     states = tensor(np.asarray(table.initial_states()), device)
@@ -630,8 +630,8 @@ def _gripper_setup(device):
 @pytest.mark.parametrize("how", ["reset", "del"])
 def test_queued_replays_keep_workspace_until_last_completes(how):
     """Three replays queued behind a sleep on another stream; graph destroyed and results dropped at once."""
-    from mymyr._core import _cuda
     device = gpu()
+    from mymyr._core import _cuda
     table, ctx, states, ids, arrays = _gripper_setup(device)
     cap_stream, replay_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
     cap_stream.wait_stream(torch.cuda.current_stream(device))
@@ -698,9 +698,9 @@ def _threads():
 
 def test_many_capture_destroy_cycles_no_growth():
     """60 cycles: pool usage back to zero, one host worker, no thread or RSS growth."""
+    device = gpu()
     from mymyr._core import _cuda
 
-    device = gpu()
     table, ctx, states, ids, arrays = _gripper_setup(device)
     stream = torch.cuda.Stream(device=device)
     stream.wait_stream(torch.cuda.current_stream(device))
