@@ -56,6 +56,9 @@ expansion needs the host (instances expanded apart, CPU-fallback schemas or axio
 domains, batches beyond one chunk of views), which waits as without `status` and returns the usual keys (`total`
 among them): then rows past the total keep what the destination held, and an invalid row raises `ValueError` instead
 of setting bit 1.
+The optional `row_count=` is a contiguous int32 or uint32 CUDA array `[1]`, read as an unsigned count clamped to
+`N`. Only that prefix is expanded or validated; offsets past it repeat the live total. This needs `status=` and an
+asynchronous device table: host expansion is rejected when a device live count is supplied.
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
 output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
 `k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
@@ -512,7 +515,10 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   captured with the step (`CapturedRollout`, `torch.cuda.graph`, `torch.compile`, `jax.jit`, `lax.scan`). The true
   sizes are in the batch's `device_sizes` (`sizes` reads them on the host); a batch that does not fit is all zero with
   its overflow flag set. Without capacities every encoding is exact: on a device it waits for the batch's sizes once,
-  and it cannot be captured or jitted.
+  and it cannot be captured or jitted. `obs.nbytes` and `obs.nbytes_by_array` report the allocated output payload,
+  including unused capacity and device counters, without waiting. The same API covers `SuiteObservation`, including
+  its domain/index mappings. See
+  [observation bytes](encoding.md#observation-bytes) and [device status](encoding.md#capacities-status-and-synchronization).
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
   with or without `obs_capacities`. Exact device expansion waits for its total, and the encoding waits for its
@@ -520,19 +526,26 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   status on the device; they wait for nothing and capture with the step. This requires a table whose expansion runs
   asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
-  zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
-  raw expansion overflow is preserved even when staged rows past a domain's live prefix cause it.
-  A captured graph owns an exclusive expansion workspace per table, retained by its result tensors; eager calls and
-  other graphs use different workspaces. Warm on the capture stream with the same shapes and options. All expansions
-  over the same table within one graph must keep those shapes and options fixed. Keep the results alive through the
-  final replay. The JAX environments do not encode actions.
+  zero unused output tails. These buffers store labels only; successor state rows are not allocated.
+  A captured graph owns an exclusive expansion workspace per table; eager calls and other captures use their own.
+  The workspace stays alive until the graph is destroyed and its last replay has completed, also for a manual
+  `torch.cuda.CUDAGraph`. Callers may drop every result without releasing the workspace. Two instantiations of one
+  capture share its workspace, so do not launch them concurrently.
+  Warm on the capture stream with the same shapes and options. All expansions over one table within a graph must
+  keep them fixed; unwarmed calls and changes to these shapes or options are refused during capture.
+  The [encoding buffer requirements](encoding.md#streams-and-cuda-graphs) also apply to expansion inputs and
+  caller-provided destinations: keep them alive at their captured addresses until the final replay completes, and
+  synchronize the replay stream before freeing or reusing them.
+  External CUDA streams must remain valid while arrays produced on them are retained. The JAX environments do not
+  encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
   and `index[i]` its graph in that batch. With capacities a domain's batch has an entry for every environment in its
   per-graph arrays and counts its rows on the device (`device_graphs`; `num_graphs` reads it).
   Multi-domain torch observations capture with `BatchedEnv.capture` or `torch.cuda.graph`; their domain dispatch
-  is not traced by `torch.compile`.
+  is not traced by `torch.compile`. Grouping, status and the live-row bound on action expansion follow the
+  [device-suite contract](encoding.md#several-domains-and-resident-datasets).
 
 A torch environment on the CPU, whose observations are the host encoder's batches:
 
@@ -564,6 +577,7 @@ rollout = env.capture(4)
 result = rollout.replay()
 batch = encoding.collate(result.obs)
 print(len(result.obs), batch.num_graphs, result.obs[0].device)
+assert result.obs[0].nbytes == sum(result.obs[0].nbytes_by_array.values())
 ```
 
 Action observations use the same capacity form, including the reached states before an autoreset:
@@ -577,7 +591,8 @@ action_rollout = action_env.capture(3, final=True)
 action_result = action_rollout.replay()
 torch.cuda.synchronize()
 assert len(action_result.obs) == len(action_result.final_obs) == 3
-assert all(not batch.sizes["overflow"] for batch in action_result.obs)
+assert all(not batch.sizes["overflow"] for batch in (*action_result.obs, *action_result.final_obs))
+assert all(batch.nbytes == sum(batch.nbytes_by_array.values()) for batch in action_result.obs)
 ```
 
 The JAX environment carries the encoding in its observations, under `jax.jit` and `lax.scan`:
@@ -598,6 +613,7 @@ env = Env(table, device="cpu", max_steps=6, observation=encoder, obs_capacities=
 state, observation = env.reset(jax.random.key(0), 8)
 state, observation, reward, terminated, truncated, info = jax.jit(env.step)(jax.random.key(1), state)
 print(observation.encoding.num_graphs, int(observation.encoding.overflow))
+assert observation.encoding.nbytes == sum(observation.encoding.nbytes_by_array.values())
 ```
 
 ## A learning smoke example

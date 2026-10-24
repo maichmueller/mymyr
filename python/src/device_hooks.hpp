@@ -24,7 +24,7 @@ struct ExpandIntoArgs
 {
     nb::handle table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets;
     bool canonical = true, witness = false, validate = true;
-    nb::handle stream, ctx, status;
+    nb::handle stream, ctx, status, row_count;
 };
 
 struct DeviceHooks

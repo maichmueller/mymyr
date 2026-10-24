@@ -74,11 +74,18 @@ not wait for the device, so it needs ``stream=``, the stream that reads its outp
 written then), and the result holds only ``capacity`` (tables whose expansion needs the host wait and return the usual
 keys; rows past the total then keep their contents, and an invalid row raises). Numeric tables and suites preserve each instance's CPU encoding on the
 device; their expansion uses per-instance kernels and gathers/scatters rows at the shared atom/numeric boundary.
-Under CUDA graph capture, warm ``expand_into`` on the capture stream with identical shapes, destinations present
-and options. Every expansion over the same table within that graph must keep these fixed. The result dictionary's
-``_keepalive`` owns the graph's exclusive workspace: keep the dictionary alive through the final replay. Captured
-workspaces never return to the eager pool and are never shared between graphs. Encoded action observations retain
-this ownership in their output tensor storage automatically.
+``row_count=`` optionally bounds this asynchronous expansion to a live prefix: a contiguous int32 or uint32
+CUDA array [1], read as an unsigned count and clamped to N. Padding contributes no successors or validation
+errors; offsets past the prefix repeat its total. It requires ``status=`` and an asynchronous device table.
+A captured graph owns an exclusive expansion workspace per table; eager calls and other captures use their own.
+The workspace stays alive until the graph is destroyed and its last replay has completed, also for a manual
+``torch.cuda.CUDAGraph``. Callers may drop every result without releasing the workspace. Two instantiations of one
+capture share its workspace, so do not launch them concurrently. Warm ``expand_into`` on the capture stream with
+identical shapes, destinations present and options; all expansions over one table within a graph must keep them
+fixed. Unwarmed calls and changes to these shapes or options are refused during capture. Inputs and caller-provided
+destinations must stay alive at their captured addresses until the final replay completes: synchronize the replay
+stream before freeing or reusing them. External CUDA streams must remain valid while arrays produced on them are
+retained.
 
 Environments: :mod:`mymyr.rl.torch` (needs torch) has batched planning environments on the CPU or a CUDA device
 (``BatchedEnv``, the TorchRL ``PlanningEnv``), torch custom ops for the step and the expansion, and the counter-based

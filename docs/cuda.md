@@ -136,6 +136,29 @@ assert task.is_goal(state)
 ctx.synchronize()
 ```
 
-Relational encoding supports `statics="shared"` on CUDA, including device row streams, capacity outputs and collation.
-Shared blocks retain instance-local entity ids and follow ascending task ids; a model adds each graph's entity base.
-Device datasets pass their resident rows and task ids directly to the encoder through `datasets.EncodingCollate`.
+## Encoded observations and resident rows
+
+[Device encoding](encoding.md#encoding-on-the-device) reads CUDA state rows directly and returns torch arrays:
+relations, Simple graphs, numeric values, actions, horizons and shared static blocks, subject to the
+[support table](encoding.md#what-the-device-encodes). Exact calls download output counts. Capacity calls retain
+counts and status on the device and support CUDA graph capture after warm-up. `batch.nbytes` and
+`batch.nbytes_by_array` report capacity payload bytes from host metadata without synchronizing.
+
+Choose the path by where rows arrive:
+
+- Already batched CUDA rows: `encoder.encode(rows, task_ids, capacities=...)` or the
+  [torch custom op](encoding.md#the-torch-op) inside `torch.compile`.
+- Rows accumulated over time: a [device row ring](encoding.md#device-row-streams-and-collation); prepare a
+  `DeviceCollator` for repeated or captured collation.
+- Several domains or resident training data: [`SuiteEncoder` and `EncodingCollate`](datasets.md#training-data-encoded-on-load)
+  group global task ids on the device, returning a batch and local ids per domain. Capacity calls keep the grouping
+  resident, including empty domains.
+- Policy observations: [`BatchedEnv`](rl.md#encoded-observations) encodes states after autoreset and, on request,
+  final states before reset. Capacity action observations can be captured with the step when expansion is asynchronous.
+- Jitted JAX code: the [XLA FFI encoder](encoding.md#encoding-inside-jax) uses XLA's stream and fixed capacity shapes;
+  its supported forms are narrower than the torch path.
+
+Torch operations use the current stream. Order cross-stream producers and consumers with events or `wait_stream`.
+Create rings, collators and encoder contexts before capture; keep the required owners through completion of the last
+replay. See the [capture contract](encoding.md#streams-and-cuda-graphs) for lifetimes and operations allowed during
+capture, and [encoded observations](rl.md#encoded-observations) for action expansion requirements.

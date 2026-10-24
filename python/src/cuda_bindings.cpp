@@ -12,6 +12,7 @@
 // streams must outlive the arrays produced on them.
 
 #include "arrays.hpp"
+#include "completed_release.hpp"
 #include "cuda_stream.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
@@ -39,13 +40,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace mymyr::python::ann
@@ -445,13 +450,129 @@ rl::DType dtype_of(const nb::dlpack::dtype& d)
 
 // ------------------------------------------------------------------------------------------------ device expand
 
-using ExpansionShape = std::array<u64, 12>;
+using ExpansionShape = std::array<u64, 13>;
+
+struct ExpansionWorkspace;
+
+struct WorkspaceRelease
+{
+    std::shared_ptr<ExpansionWorkspace> workspace;
+    ExpansionWorkspace* completed = nullptr;
+    WorkspaceRelease* next = nullptr;
+};
 
 struct ExpansionWorkspace
 {
     std::unique_ptr<cuda::SuiteExpander> expander;
     std::optional<ExpansionShape> shape;
+    std::unique_ptr<cuda::Event> ready;
+    std::unique_ptr<WorkspaceRelease> release;
+    std::shared_ptr<std::atomic<bool>> released = std::make_shared<std::atomic<bool>>(false);
 };
+
+struct WorkspaceReference
+{
+    std::weak_ptr<ExpansionWorkspace> workspace;
+    std::shared_ptr<std::atomic<bool>> released;
+};
+
+/// CUDA user-object callbacks may only signal host work: workspace destruction calls CUDA.
+class WorkspaceReclaimer
+{
+public:
+    using Item = WorkspaceRelease;
+
+    static WorkspaceReclaimer& get()
+    {
+        // CUDA can release graph references during runtime teardown, after C++ static destructors.
+        static auto* instance = new WorkspaceReclaimer;
+        return *instance;
+    }
+
+    void release(Item* item) noexcept
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            item->next = m_head;
+            m_head = item;
+        }
+        m_ready.notify_one();
+    }
+
+private:
+    WorkspaceReclaimer()
+    {
+        std::thread([this] {
+            for (;;)
+            {
+                Item* items;
+                {
+                    std::unique_lock lock(m_mutex);
+                    m_ready.wait(lock, [this] { return m_head != nullptr; });
+                    items = std::exchange(m_head, nullptr);
+                }
+                while (items)
+                {
+                    Item* next = items->next;
+                    if (items->completed)
+                    {
+                        auto* workspace = items->completed;
+                        try
+                        {
+                            cuda::detail::release_completed(workspace->expander, *workspace->ready);
+                        }
+                        catch (...)
+                        {
+                            // Runtime teardown and sticky errors cannot be retried. Keep CUDA resources alive
+                            // without invoking their destructors or making any further CUDA calls.
+                            (void)workspace->expander.release();
+                            (void)workspace->ready.release();
+                        }
+                        auto released = workspace->released;
+                        delete workspace;
+                        released->store(true, std::memory_order_release);
+                    }
+                    delete items;
+                    items = next;
+                }
+            }
+        }).detach();
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_ready;
+    Item* m_head = nullptr;
+};
+
+std::shared_ptr<ExpansionWorkspace> make_expansion_workspace()
+{
+    return std::shared_ptr<ExpansionWorkspace>(new ExpansionWorkspace, [](ExpansionWorkspace* workspace) noexcept {
+        if (auto* item = workspace->release.release())
+        {
+            item->completed = workspace;
+            WorkspaceReclaimer::get().release(item);
+        }
+        else
+            delete workspace;
+    });
+}
+
+/// The graph and every executable clone retain the workspace until their final launch completes.
+void retain_workspace(cudaGraph_t graph, const std::shared_ptr<ExpansionWorkspace>& workspace)
+{
+    (void)WorkspaceReclaimer::get();
+    auto item = std::make_unique<WorkspaceReclaimer::Item>();
+    item->workspace = workspace;
+    cudaUserObject_t object;
+    cuda::check(cudaUserObjectCreate(&object, item.get(), [](void* p) {
+        WorkspaceReclaimer::get().release(static_cast<WorkspaceReclaimer::Item*>(p));
+    }, 1, cudaUserObjectNoDestructorSync), "cudaUserObjectCreate");
+    (void)item.release();  // the user object owns the callback argument
+    const cudaError_t result = cudaGraphRetainUserObject(graph, object, 1, cudaGraphUserObjectMove);
+    if (result != cudaSuccess)
+        (void)cudaUserObjectRelease(object);
+    cuda::check(result, "cudaGraphRetainUserObject");
+}
 
 /// Per-table CUDA state (a Task's on its core, a TaskTable's on the table, a TaskSuite's on the suite): a default
 /// context per device and idle device expanders per context (they keep their context alive until the table goes).
@@ -513,7 +634,9 @@ public:
         }
         if (!m_x)
         {
-            m_x = std::make_shared<ExpansionWorkspace>();
+            cuda::DeviceGuard guard(m_ctx->device());
+            m_x = make_expansion_workspace();
+            m_x->ready = std::make_unique<cuda::Event>();
             m_x->expander = std::make_unique<cuda::SuiteExpander>(m_ctx, ref.suite);
         }
         if (!inspect)
@@ -529,7 +652,12 @@ public:
     ExpanderLease(const ExpanderLease&) = delete;
     ExpanderLease& operator=(const ExpanderLease&) = delete;
     cuda::SuiteExpander* operator->() const { return m_x->expander.get(); }
-    void warmed(const ExpansionShape& shape) { m_x->shape = shape; }
+    void warmed(const ExpansionShape& shape)
+    {
+        cuda::DeviceGuard guard(m_ctx->device());
+        m_x->ready->record(m_x->expander->stream());
+        m_x->shape = shape;
+    }
 
 private:
     const SuiteRef& m_ref;
@@ -537,8 +665,8 @@ private:
     std::shared_ptr<ExpansionWorkspace> m_x;
 };
 
-/// A graph exclusively owns one warmed workspace per table and context. Every use has the same shape, so none
-/// of its captured pointers can move when a later node is recorded. Only the graph's stream accesses this workspace.
+/// Each capture uses an exclusive warmed workspace per table and context. Shapes stay fixed so captured pointers
+/// cannot move. Successive launches of one executable graph serialize workspace accesses.
 std::shared_ptr<ExpansionWorkspace> captured_workspace(const SuiteRef& ref, const PyContextPtr& c, cudaStream_t s,
                                                         unsigned long long id, const ExpansionShape* shape = nullptr)
 {
@@ -562,16 +690,22 @@ std::shared_ptr<ExpansionWorkspace> captured_workspace(const SuiteRef& ref, cons
     auto owner = *it;
     if (shape)
     {
+        cudaStreamCaptureStatus capture;
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamGetCaptureInfo(s, &capture, nullptr, &graph), "cudaStreamGetCaptureInfo");
+        auto release = std::make_unique<WorkspaceRelease>();
+        retain_workspace(graph, owner);
+        owner->release = std::move(release);
         idle.erase(it);
         state.captures[key] = owner;
     }
     return owner;
 }
 
-nb::capsule workspace_owner(std::shared_ptr<ExpansionWorkspace> workspace)
+nb::capsule workspace_reference(const std::shared_ptr<ExpansionWorkspace>& workspace)
 {
-    return nb::capsule(new std::shared_ptr<ExpansionWorkspace>(std::move(workspace)), "mymyr.expansion_workspace",
-                       [](void* p) noexcept { delete static_cast<std::shared_ptr<ExpansionWorkspace>*>(p); });
+    return nb::capsule(new WorkspaceReference{workspace, workspace->released}, "mymyr.expansion_workspace_weak",
+                       [](void* p) noexcept { delete static_cast<WorkspaceReference*>(p); });
 }
 
 /// The device task ids of a batch: an int32 CUDA array [rows] on the context's device, or None (null: a table of one).
@@ -991,6 +1125,16 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (static_cast<u64>(d.im.shape[0]) < w.rows + 1)
             throw nb::value_error("mymyr: 'offsets' needs N + 1 entries");
     }
+    const u32* rows_dev = nullptr;
+    if (!a.row_count.is_none())
+    {
+        if (a.status.is_none())
+            throw nb::value_error("mymyr: expand_into: row_count requires status=");
+        DeviceInput d = dest(a.row_count, "row_count");
+        rows_dev = device_dest<u32>(d, "row_count", {i32t, u32t}, 1);
+        if (d.im.shape[0] != 1)
+            throw nb::value_error("mymyr: expand_into: row_count needs one entry");
+    }
     x.capacity = cap.value_or(0);
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
     const rl::StateBatchView view{w.data, w.rows, w.words - NN, w.stride, NN};
@@ -1009,7 +1153,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         const u64 outputs = (x.succ ? 1u : 0u) | (x.parent ? 2u : 0u) | (x.schema ? 4u : 0u) |
                             (x.binding ? 8u : 0u) | (x.goal ? 16u : 0u) | (x.derived ? 32u : 0u);
         const ExpansionShape shape{w.rows, w.words, w.stride, x.capacity, x.words, x.label_width, x.derived_words,
-                                   outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate};
+                                   outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate, rows_dev ? 1u : 0u};
         bool waited = false;
         std::shared_ptr<ExpansionWorkspace> owner;
         if (capture != cudaStreamCaptureStatusNone)
@@ -1018,7 +1162,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             cuda::check(cudaStreamGetCaptureInfo(os.s, &capture, &id), "cudaStreamGetCaptureInfo");
             owner = captured_workspace(ref, c, os.s, id, &shape);
             nb::gil_scoped_release release;
-            owner->expander->expand_async(view, ids, x, status, opt);
+            owner->expander->expand_async(view, ids, x, status, opt, rows_dev);
         }
         else
         {
@@ -1027,11 +1171,13 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             ex->set_stream(os.s);
             if (ex->async_unsupported(w.rows, opt).empty())
             {
-                ex->expand_async(view, ids, x, status, opt);
+                ex->expand_async(view, ids, x, status, opt, rows_dev);
                 ex.warmed(shape);
             }
             else
             {
+                if (rows_dev)
+                    throw nb::value_error("mymyr: expand_into: row_count requires an asynchronous device expansion");
                 ex->expand(view, ids, x, opt);
                 const u32 flags = (x.overflow() ? 1u : 0u) | (x.words_needed > x.words ? 2u : 0u);
                 cuda::check(cudaMemcpyAsync(status, &flags, sizeof(u32), cudaMemcpyHostToDevice, os.s), "cudaMemcpyAsync");
@@ -1043,7 +1189,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             c->release_after(os.s, std::move(keep));
         nb::dict r;
         if (owner)
-            r["_keepalive"] = workspace_owner(std::move(owner));
+            r["_workspace"] = workspace_reference(owner);
         if (waited)
         {
             r["total"] = x.total;
@@ -1588,32 +1734,32 @@ void bind_cuda(nb::module_& parent)
           "table"_a, "rows"_a, "device"_a, "stream"_a,
           "Checks that the table can expand this many rows without waiting for the device.");
 
-    m.def("_keep_expansion_array",
-          [](nb::handle array, nb::capsule capsule, std::intptr_t stream) {
-              if (std::strcmp(capsule.name(), "mymyr.expansion_workspace") != 0)
-                  throw nb::type_error("mymyr: expected an expansion workspace owner");
-              auto workspace = *static_cast<std::shared_ptr<ExpansionWorkspace>*>(capsule.data());
-              auto imported = dl::import_dlpack(array, stream);
-              struct Keep
-              {
-                  std::shared_ptr<void> array;
-                  std::shared_ptr<ExpansionWorkspace> workspace;
-              };
-              ArraySpec spec;
-              spec.owner = std::make_shared<Keep>(Keep{imported.keep, std::move(workspace)});
-              spec.data = imported.data;
-              if (imported.dtype.code == dl::k_float && imported.dtype.bits == 32)
-                  spec.dtype = rl::DType::F32;
-              else if (imported.dtype.code == dl::k_float && imported.dtype.bits == 64)
-                  spec.dtype = rl::DType::F64;
-              else
-                  spec.dtype = dtype_of({imported.dtype.code, imported.dtype.bits, imported.dtype.lanes});
-              spec.shape = imported.shape;
-              spec.strides = imported.strides;
-              return export_device_array(std::move(spec), DeviceExport{imported.device.device_type,
-                                          imported.device.device_id, {}}, Framework::Torch, default_words(Framework::Torch));
-          }, "array"_a, "owner"_a, "stream"_a,
-          "A zero-copy output tensor whose storage keeps a captured expansion workspace alive.");
+    m.def("_expansion_workspace_guard", [](nb::capsule capsule) {
+        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
+            throw nb::type_error("mymyr: expected a weak expansion workspace reference");
+        auto owner = static_cast<WorkspaceReference*>(capsule.data())->workspace.lock();
+        if (!owner)
+            throw nb::value_error("mymyr: expansion workspace has expired");
+        return nb::capsule(new std::shared_ptr<ExpansionWorkspace>(std::move(owner)), "mymyr.expansion_workspace_guard",
+                           [](void* p) noexcept { delete static_cast<std::shared_ptr<ExpansionWorkspace>*>(p); });
+    }, "reference"_a, "An independent safety owner for checking graph lifetimes during pending launches.");
+    m.def("_expansion_workspace_alive", [](nb::capsule capsule) {
+        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
+            throw nb::type_error("mymyr: expected a weak expansion workspace reference");
+        return !static_cast<WorkspaceReference*>(capsule.data())->workspace.expired();
+    }, "reference"_a, "Whether a captured expansion workspace still has an owner.");
+
+    m.def("_expansion_workspace_owners", [](nb::capsule capsule) {
+        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
+            throw nb::type_error("mymyr: expected a weak expansion workspace reference");
+        return static_cast<WorkspaceReference*>(capsule.data())->workspace.use_count();
+    }, "reference"_a, "The number of independent owners of a captured expansion workspace.");
+
+    m.def("_expansion_workspace_released", [](nb::capsule capsule) {
+        if (std::strcmp(capsule.name(), "mymyr.expansion_workspace_weak") != 0)
+            throw nb::type_error("mymyr: expected a weak expansion workspace reference");
+        return static_cast<WorkspaceReference*>(capsule.data())->released->load(std::memory_order_acquire);
+    }, "reference"_a, "Whether workspace cleanup has finished, including abandonment after a CUDA failure.");
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")

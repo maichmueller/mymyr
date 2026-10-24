@@ -339,7 +339,7 @@ def _layer_words(torch: Any, t: Any, name: str, graphs: int, may_share: bool) ->
 class _Rows:
     """The checked rows of a call: the device pointers and strides the native side takes."""
 
-    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors", "expansion_owner")
+    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors")
 
     def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any, subgoals: Any = None,
                  history: Any = None):
@@ -648,12 +648,6 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
     _retain(torch, [*rows.tensors, *(keep or [])], device)
-    owner = getattr(rows, "expansion_owner", None)
-    if owner is not None:
-        from mymyr._core import _cuda
-        for name, array in out.items():
-            if array is not None:
-                out[name] = _cuda._keep_expansion_array(array, owner, stream)
     return out
 
 
@@ -832,6 +826,22 @@ class DeviceFlatBatch:
         self._sizes = None if exact else arrays["sizes"]
         self._static_sizes = arrays["static_sizes"]
         self._graphs = self._arrays["task_ids"].shape[0]
+
+    @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Output array names and payload bytes, including unused capacity and device counters. Reads only host
+        metadata: no device wait, tensor export or device allocation. Excludes inputs, schema and scratch."""
+        arrays = dict(self._arrays)
+        for name, value in (("device_sizes", self._sizes), ("device_static_sizes", self.device_static_sizes),
+                            ("device_graphs", self._device_graphs)):
+            if value is not None:
+                arrays[name] = value
+        return {name: int(value.nbytes) for name, value in arrays.items()}
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``; includes unused capacity, excludes allocator overhead. Does not wait."""
+        return sum(self.nbytes_by_array.values())
 
     @property
     def device_static_sizes(self) -> Optional[Any]:

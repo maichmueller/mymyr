@@ -161,7 +161,7 @@ cudaError_t launch_goal_count(const rl::dev::TaskView& t, Parents p, u32* out, c
 cudaError_t launch_goal_rows(const rl::dev::TaskView& t, const u64* states, u32 words, u64 n, const u32* n_dev, u8* out,
                              cudaStream_t s);
 /// bad_row = min(bad_row, i) for every row i that sets a bit at or past `limit` (atom slots the task has not assigned).
-cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad_row, cudaStream_t s);
+cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u32 limit, u32* bad_row, cudaStream_t s, const u32* rows_dev = nullptr);
 
 /// Views of `p` into v.data (one warp per state). derived bitsets are applied with the derived view ops.
 cudaError_t launch_view(const rl::dev::TaskView& t, Parents p, Views v, cudaStream_t s);
@@ -528,9 +528,9 @@ cudaError_t launch_goal_rows_multi(const rl::dev::TaskView* views, u32 instances
 /// and (data not null) bad_row = min(bad_row, i) for every row i that sets a bit at or past its instance's assigned
 /// fluent slots (limits [instances]).
 cudaError_t launch_check_multi(const u32* limits, u32 instances, const i32* inst, const u64* data, u64 stride, u32 words,
-                               u64 rows, u32* bad_id, u32* bad_row, cudaStream_t s);
+                               u64 rows, u32* bad_id, u32* bad_row, cudaStream_t s, const u32* rows_dev = nullptr);
 /// bad_id = min(bad_id, i) for every row i whose task id is outside [0, instances) (tables whose rows run apart).
-cudaError_t launch_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id, cudaStream_t s);
+cudaError_t launch_check_ids(const i32* inst, u32 instances, u64 rows, u32* bad_id, cudaStream_t s, const u32* rows_dev = nullptr);
 
 /// The per-instance expansion of a batch over a table (cuda::DeviceExpander, PerInstance): each instance's rows are
 /// gathered into a part (rows[j]: the batch row at part position j) and expanded apart; these put the parts' results

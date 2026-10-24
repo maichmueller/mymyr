@@ -69,6 +69,22 @@ class SuiteBatch(Mapping):
         return len(self.batches)
 
     @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Payload bytes of the encoded batches and row mappings, including capacity and device counters.
+        Names are ``batches.<domain>.<array>``, ``rows.<domain>``, ``domain``, ``index`` and ``task_ids``.
+        Counts each named array once, without deduplicating aliases; excludes input expansions. Never waits."""
+        out = {f"batches.{d}.{name}": size for d, batch in self.batches.items()
+               for name, size in batch.nbytes_by_array.items()}
+        out.update({f"rows.{d}": int(array.nbytes) for d, array in self.rows.items()})
+        out.update({name: int(getattr(self, name).nbytes) for name in ("domain", "index", "task_ids")})
+        return out
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``; excludes allocator overhead, inputs, schema and scratch."""
+        return sum(self.nbytes_by_array.values())
+
+    @property
     def num_rows(self) -> int:
         """The rows of the call."""
         return len(self.domain)

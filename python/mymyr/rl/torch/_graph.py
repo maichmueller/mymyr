@@ -55,7 +55,9 @@ class CapturedRollout:
 
     Needs a device environment whose calls can be captured (``env.capturable``: the fast path). The graph keeps
     pointers into the environments' tensors and its scratch: it holds the BatchedEnv, whose tensors must not be
-    replaced (assign into them in place). ``pool`` shares a memory pool with other graphs (``torch.cuda.graph``).
+    replaced (assign into them in place). The graph owns its expansion workspaces until its last replay completes.
+    Two instantiations of one capture share its workspace, so do not launch them concurrently.
+    ``pool`` shares a memory pool with other graphs (``torch.cuda.graph``).
     """
 
     def __init__(

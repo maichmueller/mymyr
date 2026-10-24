@@ -127,9 +127,11 @@ public:
     /// successor widths past it are not counted: bit 1's width check is exact only while the batch fits; bit 0 is
     /// always exact. Successor rows past the total are zero, and goal flags and derived words cover every row below
     /// the capacity (past the total: those of zero rows). out.total and out.words_needed are not set, and a later write()
-    /// needs a count() first. Needs async_unsupported() empty (std::invalid_argument otherwise).
+    /// needs a count() first. With rows_dev (device u32), only min(*rows_dev, in.rows) rows are present;
+    /// padding contributes neither successors nor validation errors, and its offsets equal the live total.
+    /// Needs async_unsupported() empty (std::invalid_argument otherwise).
     void expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
-                      const rl::ExpandOptions& options = {});
+                      const rl::ExpandOptions& options = {}, const u32* rows_dev = nullptr);
 
     /// rl::pad on the device: the padded [rows, K] view of a flat device expansion (it must carry offsets).
     void pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out);

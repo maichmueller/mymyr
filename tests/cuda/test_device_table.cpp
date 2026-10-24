@@ -546,7 +546,7 @@ TEST(DeviceTableExpand, TaskIdsAreChecked)
 
 /// expand_async into buffers poisoned like host_expand's: the expansion and its status word.
 Flat device_async(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, const cuda::DeviceBuffer& d_rows,
-                  const std::vector<i32>& ids, u64 W, u64 cap, u32 L, u32& status)
+                  const std::vector<i32>& ids, u64 W, u64 cap, u32 L, u32& status, const u32* live = nullptr)
 {
     const cudaStream_t s = ex.stream();
     const u64 c = std::max<u64>(cap, 1), N = ids.size();
@@ -567,8 +567,10 @@ Flat device_async(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, const c
     x.binding = static_cast<i32*>(binding.data());
     x.goal = static_cast<u8*>(goal.data());
     x.offsets = static_cast<i32*>(offsets.data());
+    const cuda::DeviceBuffer d_live = to_device(ctx, std::vector<u32>{live ? *live : 0}, s);
     ex.expand_async(rl::StateBatchView{static_cast<const u64*>(d_rows.data()), N, static_cast<u32>(W), 0},
-                    static_cast<const i32*>(d_ids.data()), x, static_cast<u32*>(word.data()));
+                    static_cast<const i32*>(d_ids.data()), x, static_cast<u32*>(word.data()), {},
+                    live ? static_cast<const u32*>(d_live.data()) : nullptr);
     Flat f;
     f.succ = to_host<u64>(succ.data(), c * W, s);
     f.parent = to_host<i32>(parent.data(), c, s);
@@ -626,6 +628,25 @@ TEST(DeviceTableExpand, AsyncExpansionEqualsHostAndKeepsItsStatusOnTheDevice)
                 EXPECT_EQ(status, cap < total ? 1u : 0u);
                 expect_async_equal(d, h, std::min(cap, total), cap, W, L);
             }
+            for (const u32 count : {0u, static_cast<u32>(ids.size() / 2), static_cast<u32>(ids.size()),
+                                    static_cast<u32>(ids.size() + 3)})
+            {
+                const u32 live = std::min(count, static_cast<u32>(ids.size()));
+                const std::vector<u64> prefix(rows.begin(), rows.begin() + live * W);
+                const std::vector<i32> prefix_ids(ids.begin(), ids.begin() + live);
+                const u64 needed = host_expand(T, prefix, prefix_ids, 1, L).total;
+                for (const u64 cap : {needed, needed ? needed - 1 : 0})
+                {
+                    Flat h = host_expand(T, prefix, prefix_ids, cap, L);
+                    h.offsets.resize(ids.size() + 1, static_cast<i32>(needed));
+                    std::vector<i32> padded_ids = ids;
+                    std::fill(padded_ids.begin() + live, padded_ids.end(), static_cast<i32>(T.size()));
+                    u32 status = 0xFFFF;
+                    const Flat d = device_async(ctx, ex, d_rows, padded_ids, W, cap, L, status, &count);
+                    EXPECT_EQ(status, cap < needed ? 1u : 0u);
+                    expect_async_equal(d, h, std::min(cap, needed), cap, W, L);
+                }
+            }
             // an invalid task id: flagged, nothing written
             std::vector<i32> bad = ids;
             bad[1] = static_cast<i32>(T.size());
@@ -643,6 +664,49 @@ TEST(DeviceTableExpand, AsyncExpansionEqualsHostAndKeepsItsStatusOnTheDevice)
                 return;
         }
     EXPECT_GT(ran, 0u);
+}
+
+TEST(DeviceTableExpand, LivePrefixExcludesValidPaddingWithApplicableActions)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain toggle) (:requirements :strips) (:predicates (on ?x) (lit)) "
+        "(:action flip :parameters (?x) :precondition (and) :effect (on ?x)) "
+        "(:action light :parameters () :precondition (and) :effect (lit)))", "toggle.pddl");
+    TaskOptions options;
+    options.atoms = TaskOptions::Atoms::Dense;
+    std::vector<TaskPtr> tasks;
+    for (const std::string objects : {"o0 o1", "o0 o1 o2"})
+        tasks.push_back(Task::create(*domain->instantiate_string(
+            "(define (problem p) (:domain toggle) (:objects " + objects + ") (:init) (:goal (lit)))", "p.pddl"), options));
+    const auto table = rl::TaskTable::create(std::move(tasks));
+    const u32 W = table->words(), L = std::max<u32>(1, table->label_width());
+    const std::vector<i32> ids{1, 0, 1, 0, 1, 0};
+    const u32 N = static_cast<u32>(ids.size());
+    const std::vector<u64> rows(N * W, 0);
+    cuda::DeviceExpander ex(ctx, table);
+    ASSERT_EQ(ex.mode(), cuda::DeviceExpander::Mode::Multi);
+    ASSERT_TRUE(ex.async_unsupported(N).empty());
+    const cuda::DeviceBuffer d_rows = to_device(ctx, rows, ex.stream());
+    ASSERT_GT(host_expand(*table, rows, ids, 1, L).total, N);
+    for (const u32 count : {0u, 1u, 2u, N, N + 3})
+    {
+        SCOPED_TRACE(count);
+        const u32 live = std::min(count, N);
+        const std::vector<u64> prefix(rows.begin(), rows.begin() + live * W);
+        const std::vector<i32> prefix_ids(ids.begin(), ids.begin() + live);
+        const u64 needed = host_expand(*table, prefix, prefix_ids, 1, L).total;
+        for (const u64 cap : {needed, needed ? needed - 1 : 0})
+        {
+            Flat expected = host_expand(*table, prefix, prefix_ids, cap, L);
+            expected.offsets.resize(N + 1, static_cast<i32>(needed));
+            u32 status = 0xFFFF;
+            const Flat actual = device_async(ctx, ex, d_rows, ids, W, cap, L, status, &count);
+            EXPECT_EQ(status, cap < needed ? 1u : 0u);
+            expect_async_equal(actual, expected, std::min(cap, needed), cap, W, L);
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ envs

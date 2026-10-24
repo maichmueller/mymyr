@@ -48,6 +48,21 @@ class EncodedRows:
     labels: dict[str, SupportsDLPack]
     actions: Expansion | None = None
 
+    @property
+    def nbytes_by_array(self) -> dict[str, int]:
+        """Payload bytes of the graphs, task ids and labels, including capacity and device counters; never waits.
+        Names are ``graphs.<array>``, ``task_ids`` and ``labels.<name>``. Aliases are counted by name;
+        input action expansions, allocator overhead, schema and scratch are excluded."""
+        out = {f"graphs.{name}": size for name, size in self.graphs.nbytes_by_array.items()}
+        out["task_ids"] = int(self.task_ids.nbytes)
+        out.update({f"labels.{name}": int(array.nbytes) for name, array in self.labels.items()})
+        return out
+
+    @property
+    def nbytes(self) -> int:
+        """The sum of ``nbytes_by_array``."""
+        return sum(self.nbytes_by_array.values())
+
 
 def _on_device(value: Any) -> bool:
     """Whether a DLPack array resides on a CUDA device."""
