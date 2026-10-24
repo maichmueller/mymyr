@@ -47,7 +47,6 @@ class SuiteObservation(NamedTuple):
         return sum(self.nbytes_by_array.values())
 
 
-
 def _encoders(observation: Any) -> list:
     """The encoders of ``observation``: one encoder, a sequence of encoders (one per domain) or an object with an
     ``encoders`` sequence (a suite encoder)."""

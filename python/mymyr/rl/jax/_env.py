@@ -99,7 +99,6 @@ class SuiteObservation(NamedTuple):
         return sum(self.nbytes_by_array.values())
 
 
-
 class PaddedExpansion(NamedTuple):
     """The padded [N, K] expansion in canonical order (rl.expand's padded view): succ [N, K, 2 row_words], schema
     [N, K] (-1 padding), binding [N, K, L] (-1 padding), goal [N, K], mask [N, K], count [N] (true counts; count > K

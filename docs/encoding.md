@@ -234,7 +234,7 @@ shared statics and capacity outputs. Capacity reports include unused entries; JA
 axes. Device counts are included under `device_sizes`, `device_static_sizes` and `device_graphs` when exposed.
 Scalars, alignment, allocator overhead, inputs, schemas and scratch are excluded.
 
-A HGraph view reports its backing batch, including capacity; arrays produced on request by `ptr` or `edge_index`
+An HGraph view reports its backing batch, including capacity; arrays produced on request by `ptr` or `edge_index`
 are separate allocations. Suite batches and observations include their domain batches and row mappings, with names
 such as `batches.0.relation_args`. `datasets.EncodedRows` includes `graphs.*`, task ids and labels. Named aliases are
 counted separately; retained input action expansions are excluded. These are payload sizes, not allocator or process
@@ -246,39 +246,6 @@ assert sizes == {name: array.nbytes for name, array in batch.as_dict().items() i
 assert batch.nbytes == sum(sizes.values())
 print(batch.nbytes, batch.nbytes / batch.num_graphs, sizes)  # total, bytes per state, breakdown
 ```
-
-### Choosing an encoding
-
-Choose the arrays your model consumes. Compact relations omit counts and implicit entity tags; shared statics avoid
-repeating static tuples per state. HGraph exposes typed relations, while Simple stores a homogeneous graph with
-explicit node/edge labels. Action targets add selectable actions; horizons include successor context.
-
-The following measurements use an **NVIDIA L4**, **1,024 states**, int32 indices, no goal derivations and eight
-cyclically repeated states from seeded walks (`seed=0`). Capacity outputs reserve 25% extra variable entries.
-Bytes are output payload per state; the device capacity column includes its counters. Times are median CUDA-event
-nanoseconds per state over 3 rounds of 10 captured encodes, with prepared inputs. They exclude expansion, HGraph
-metadata construction, allocation and host dispatch. The GPU was shared; these are workload measurements.
-
-| Form | CPU exact B/state | Device exact B/state | Device capacity B/state | Encode ns/state |
-|---|---:|---:|---:|---:|
-| Relations | 1520.5 | 1520.5 | 1690.7 | 41.5 |
-| Compact relations | 1011.5 | 1011.5 | 1135.4 | 39.6 |
-| Shared statics | 1117.1 | 1117.1 | 1186.4 | 91.5 |
-| HGraph backing | 1520.5 | 1520.5 | 1690.7 | 47.6 |
-| Simple | 3785.5 | 3785.5 | 4771.9 | 56.8 |
-| Relations + Simple | 5109.0 | 5109.0 | 6219.3 | 57.1 |
-| Action targets | 6542.3 | 6542.3 | 7966.9 | 454.3 |
-| Full horizon | 41624.3 | 41624.3 | 51945.4 | 11460.9 |
-| Delta horizon | 12958.3 | 12958.3 | 16064.9 | 14702.8 |
-| Numeric relations (four counters) | 240.0 | 240.0 | 261.1 | 37.3 |
-
-Rows use `childsnack-p16e` except the numeric row, which uses `cs-counters.txt`. Horizons have depth one.
-Compact relations also omit unused action lanes; HGraph times encode relation-major backing arrays. Other rows use
-graph-major layout. Numeric values are float32. The [byte benchmark](../bench/python/encoding_bytes.py) reports
-every encoding GPU benchmark task, CPU capacity bytes, per-array JSON breakdowns and unsupported forms.
-Run it with `--tasks blocks-p01e --rows 1024` for a vendored task, or `--data` pointing to the IPC directory for
-the full task set; `--numeric` adds the counter fixture. Size grows with facts, objects, action fanout and horizon
-nodes, so use `nbytes` on representative batches before choosing capacities.
 
 ### Entities
 
@@ -759,8 +726,8 @@ and transitions because it has no node-offset or edge operands.
 
 `encoding.hgraph(batch)` views a **relation-major** batch (`layout='relation'`) as one heterogeneous graph, the form
 that relational graph networks take: a node type for every relation of the schema, whose nodes are the relation's
-tuples (the atoms), and the node type `_symbol_`, whose nodes are the entities of the graphs. It copies no tuple and
-keeps the batch alive (the view and every array it hands out hold it), so creating a host view does not copy the encoded tuples (creating a device view waits once for device metadata).
+tuples (the atoms), and the node type `_symbol_`, whose nodes are the entities of the graphs. The view and every
+array it hands out keep the batch alive and copy no tuple; creating a device view waits once for its metadata.
 
 - **Node types**: `view.node_types` lists the names of the schema's relations in relation order, then `_symbol_`.
   `view.num_nodes(node_type)` counts the nodes in the whole batch (the relation's tuples, or the entities) and
@@ -1205,7 +1172,7 @@ tensors. This needs a CUDA build of mymyr and torch. The arrays have the host ba
 values, for both layouts and index widths. Inputs must share one device. State words may be `uint64`/`int64`
 `[N, W]` or `uint32`/`int32` halves `[N, 2 W]`; task ids are contiguous `int32` `[N]`.
 DLPack and CUDA array interface inputs are imported in place. `framework` is `None` or `"torch"`; `pool` and `into`
-are host-only, and `threads` has no effect.
+are refused for device rows, and `threads` has no effect.
 
 ```python needs-torch skip-if-no-cuda
 import torch
@@ -1232,7 +1199,7 @@ assert not fixed.sizes["overflow"]                       # explicitly reads devi
 | Relations, goals, derived atoms, subgoal layers, history, targets | Yes | Yes |
 | Graph/relation layouts, int32/int64 indices, omitted counts/entities | Yes | Yes; int64 needs `jax_enable_x64` |
 | Numeric relations and values | Yes | Numeric tables refused |
-| Simple alone or beside relations | Yes, without numeric values | Refused |
+| Simple alone or beside relations | Yes; refused with numeric relations (`include_numeric=False` encodes it) | Refused |
 | Shared static blocks | Yes, including streams and collation | Refused |
 | Supplied action labels and action targets | Yes, relational output on classical tables | Refused |
 | Horizons, rooted horizons, transitions | Yes, classical relational output | Refused |
@@ -1313,9 +1280,21 @@ Captured action observations have additional [expansion requirements](rl.md#enco
 ### The torch op
 
 `torch.ops.mymyr.encode_flat` is the capacity encoder as a custom op. Import `mymyr.rl.torch` to register it and
-`register(encoder)` to obtain its encoder handle. It accepts the state, task id, derived, goal, subgoal and history
-tensors, then the capacities `graphs, entities, args, targets, history`, with optional `numeric`, `static_instances`
-and `static_args`. Absent inputs are `None`, unused capacities are zero. Optional keyword tensors supply
+`register(encoder)` to obtain its encoder handle. Its signature lists all 16 optional input tensors in order:
+
+```text
+torch.ops.mymyr.encode_flat(
+    encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
+    subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg,
+    history_pos, history_neg, history_dt, history_count, history_derived_pos, history_derived_neg,
+    graphs, entities, args, targets, history, numeric=0, static_instances=0, static_args=0, *,
+    action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
+    node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None,
+    edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False)
+```
+
+Absent input tensors are `None`. The capacities are `graphs, entities, args, targets, history`, with optional
+`numeric`, `static_instances` and `static_args`; unused capacities are zero. Optional keyword tensors supply
 `action_schema`, `action_binding`, `action_offsets`, `action_parent`, horizon node/edge columns or `action_succ`
 for transitions. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
 arrays. Its fake implementation derives shapes from metadata, so `torch.compile(fullgraph=True)` can trace it.
@@ -1323,13 +1302,19 @@ arrays. Its fake implementation derives shapes from metadata, so `torch.compile(
 The result list is ordered by `DeviceFlatBatch.array_names`: output arrays, `static_sizes`, then `sizes`.
 Absent arrays are empty tensors. Wrap it with `DeviceFlatBatch.from_arrays`. The handle registry owns the encoder
 until `unregister(handle)`; keep the handle registered while compiled functions or CUDA graphs can call it.
+A compiled function specializes the handle: calling it with another registered encoder traces a graph for that
+encoder's schema. Graphs of different sizes can share a capture stream; each owns its scratch.
 
 ```python needs-torch skip-if-no-cuda
 import mymyr.rl.torch as rt
 
 handle = rt.register(encoder)
-outputs = torch.ops.mymyr.encode_flat(handle, device_rows, *([None] * 16),
-                                     graphs=2, entities=256, args=2048, targets=0, history=0)
+outputs = torch.ops.mymyr.encode_flat(
+    handle, device_rows, task_ids=None, derived=None, goal_pos=None, goal_neg=None,
+    goal_derived_pos=None, goal_derived_neg=None, subgoal_pos=None, subgoal_neg=None,
+    subgoal_derived_pos=None, subgoal_derived_neg=None, history_pos=None, history_neg=None,
+    history_dt=None, history_count=None, history_derived_pos=None, history_derived_neg=None,
+    graphs=2, entities=256, args=2048, targets=0, history=0)
 op_batch = encoding.DeviceFlatBatch.from_arrays(encoder, outputs)
 assert op_batch.nbytes == fixed.nbytes
 assert not op_batch.sizes["overflow"]
@@ -1370,16 +1355,19 @@ instance contents. See [Collation](#collation) for schema/table checks.
 
 `SuiteEncoder.encode(cuda_rows, global_task_ids)` groups rows stably on the device and returns a `SuiteBatch`: one
 batch per domain, plus device `domain`, `index`, `rows` and global `task_ids` mappings. Each domain batch uses its
-local instance ids. Exact multi-domain calls read one count per domain, omit empty domains and then wait for each
-domain's exact encoding sizes. A single-domain call knows its row count without a grouping transfer.
+local instance ids. Exact multi-domain calls download the per-domain row counts once, omit empty domains and then
+wait for each domain's exact encoding sizes. A single-domain call knows its row count without a grouping transfer.
 
 For asynchronous encoding, pass a capacity dict per domain, with **each** `graphs >= N`, the whole input batch size.
 Every domain is returned, including empty ones. Each batch has `N` graph slots, a live `device_graphs` count and zero
 unused tails; `rows[d]` is -1 past the live prefix. Invalid global ids are grouped with instance 0's domain and flag
 that batch's `invalid_input`; host calls raise instead. Capacity calls and their mappings remain resident and can be
 captured after warm-up. `actions=True` uses bounded device expansion; supplied per-domain expansions require exact
-calls. Automatic actions require an asynchronous expansion backend for every domain. Device suites take relational
-schemas; encode horizons/transitions with a separate view per domain.
+calls. Automatic actions require an asynchronous expansion backend for every domain, on both exact and capacity
+calls. Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not
+allocated. Raw expansion status is preserved, including overflow from staged rows past a domain's live prefix.
+Device suites accept Simple output as well as relations, but refuse horizon and transition schemas; encode those
+with a separate view per domain.
 
 [`StateRows` and `EncodingCollate`](datasets.md#training-data-encoded-on-load) use this path for resident datasets.
 [`BatchedEnv`](rl.md#encoded-observations) returns the corresponding domain batches with `domain`/`index` mappings;
@@ -1455,7 +1443,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   `device_graphs` retains the live scalar. Array properties and byte reports keep capacity shapes without a host
   read; `num_graphs` and compact `as_dict()` read the count.
 - **`JaxFlatBatch`** is a pytree with the arrays of `FlatBatch` under the same names, dtypes and shapes (an array the
-  schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities`, `nbytes`, `nbytes_by_array` and
+  schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities`,
+  `nbytes`, `nbytes_by_array` and
   `as_dict(framework=None)` (`'jax'`, `'dlpack'` or `'numpy'`, with the scalars of `FlatBatch.as_dict`, the table's
   fingerprint included). It is returned from jitted functions and stacked by
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
@@ -1491,6 +1480,62 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   `mymyr.rl.jax`, so XLA may trace it into its CUDA graphs (`--xla_gpu_enable_command_buffer` with `CUSTOM_CALL`).
 - **On the CPU** `threads` sets the host encoder's worker threads (0: one per hardware thread); the arrays do not
   depend on it. A call holds the encoder's host scratch, so the CPU calls of one encoder run one at a time.
+
+## Choosing an encoding
+
+Choose the arrays your model consumes. [Omitting counts and implicit entity arrays](#layouts-and-omitted-arrays)
+reduces the relational payload; [shared statics](#shared-statics) avoid repeating static tuples per state.
+[HGraph](#the-hgraph-view) exposes typed relations, while the [Simple graph](#the-simple-graph) stores a homogeneous
+graph with explicit node/edge labels. [Action targets](#actions) add selectable actions;
+[horizons](#horizons-and-transitions) include successor context.
+
+The following measurements use an **NVIDIA L4 (GPU 0)** and batches of **1,024 and 8,192 states**, with int32 indices.
+Rows use the **Childsnack domain, problem p16-easy**, except the numeric row, which uses
+`tests/data/numeric_tasks/cs-counters.txt`. Each batch cyclically repeats eight distinct states from seeded walks
+(`seed=0`); this repetition favors cache reuse compared with equally sized batches of distinct states.
+Every row sets `goal_derivations=()` rather than using the default. Capacity outputs reserve 25% extra variable
+entries. Byte columns are output payload per state at 1,024 rows; device capacity bytes include device counters.
+
+Times are median CUDA-event nanoseconds per state over 3 rounds of 10 captured encodes, with prepared inputs.
+They exclude expansion, HGraph metadata construction, allocation and host dispatch. At 1,024 states, a fixed cost
+of roughly 40 µs per call dominates the light forms; dividing it by the row count makes per-state time fall sharply
+with larger batches. These are batch latency divided by the number of states, not a per-state throughput slope.
+The GPU is shared, so times are indicative.
+
+| Form | CPU exact B/state | Device exact B/state | Device capacity B/state | Encode ns/state, 1,024 | Encode ns/state, 8,192 |
+|---|---:|---:|---:|---:|---:|
+| Relations | 1520.5 | 1520.5 | 1690.7 | 42.3 | 15.3 |
+| Relations with omitted arrays | 1011.5 | 1011.5 | 1135.4 | 41.2 | 12.9 |
+| Shared statics | 1117.1 | 1117.1 | 1186.4 | 91.7 | 16.8 |
+| HGraph backing | 1520.5 | 1520.5 | 1690.7 | 48.0 | 16.4 |
+| Simple graph | 3785.5 | 3785.5 | 4771.9 | 57.3 | 34.5 |
+| Relations and Simple graph | 5109.0 | 5109.0 | 6219.3 | 58.5 | 36.9 |
+| Action targets | 6542.3 | 6542.3 | 7966.9 | 451.9 | 200.7 |
+| Full horizon | 41624.3 | 41624.3 | 51945.4 | 11533.4 | 3328.1 |
+| Delta horizon | 12958.3 | 12958.3 | 16064.9 | 14753.5 | 3484.7 |
+| Numeric relations (four counters) | 240.0 | 240.0 | 261.1 | 36.9 | 5.6 |
+
+The options for each row follow; all other encoder options use their defaults, including graph-major layout except
+for HGraph. Numeric values are float32. Horizons have depth one.
+
+| Form | Encoder and options, in addition to `goal_derivations=()` |
+|---|---|
+| Relations | `FlatRelationEncoder` |
+| Relations with omitted arrays | `FlatRelationEncoder(emit_counts=False, entity_arrays='auto', include_actions=False)` |
+| Shared statics | `FlatRelationEncoder(statics='shared')` |
+| HGraph backing | `FlatRelationEncoder(layout='relation')`; time covers encoding its backing arrays |
+| Simple graph | `SimpleEncoder` |
+| Relations and Simple graph | `FlatRelationEncoder(outputs=('relations', 'simple'))` |
+| Action targets | `FlatRelationEncoder(target_sources=('action',))`, with a prepared expansion as `actions=` |
+| Full horizon | `FlatHorizonEncoder(horizon_mode='full')`, with a prepared `horizon(..., depth=1)` |
+| Delta horizon | `FlatHorizonEncoder(horizon_mode='delta')`, with a prepared `horizon(..., depth=1)` |
+| Numeric relations (four counters) | `FlatRelationEncoder` over the counter fixture |
+
+The [byte benchmark](../bench/python/bench_encoding_bytes.py) reports every encoding GPU benchmark task, CPU
+capacity bytes, per-array JSON breakdowns and unsupported forms. Run it with
+`--tasks blocks-p01e --rows 1024 8192` for a vendored task, or `--data` pointing to the IPC directory for the full task
+set; `--numeric` adds the counter fixture. Size grows with facts, objects, action fanout and horizon nodes, so use
+`nbytes` on representative batches before choosing capacities.
 
 ## Names, pickling and persistence
 

@@ -1,7 +1,7 @@
 """Observation payload bytes and captured device encode time per state.
 
 Run from the repository root with a CUDA build and torch, for example:
-  CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python bench/python/encoding_bytes.py --tasks blocks-p01e --rows 1024
+  CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python bench/python/bench_encoding_bytes.py --tasks blocks-p01e --rows 1024 8192
 The default tasks are the encoding GPU benchmark tasks; --data names their IPC directory. Missing tasks are reported.
 The numeric fixture is included with --numeric. CPU-only builds report host bytes. Capacity outputs reserve 25% extra
 variable entries, with graph slots fixed by the input row count. HGraph reports its backing batch; requested ptr and
@@ -105,11 +105,12 @@ def device_time(torch, call, rows, rounds):
 
 
 def measure(task, rows, form, args, torch):
+    row_count = len(rows)
     encoder, inputs, kwargs = prepare(task, rows, form)
     exact = encoder.encode(inputs, **kwargs)
     capacities = capacity_of(exact, args.headroom)
     bounded = encoder.encode(inputs, capacities=capacities, **kwargs)
-    record = dict(cpu_exact=exact.nbytes / args.rows, cpu_capacity=bounded.nbytes / args.rows,
+    record = dict(cpu_exact=exact.nbytes / row_count, cpu_capacity=bounded.nbytes / row_count,
                   capacities=capacities, options=encoder.options,
                   cpu_exact_arrays=exact.nbytes_by_array, cpu_capacity_arrays=bounded.nbytes_by_array)
     if form == "hgraph":
@@ -126,7 +127,7 @@ def measure(task, rows, form, args, torch):
                 raise
             record["device_unavailable"] = str(error)
             return record
-        record.update(device_exact=device_exact.nbytes / args.rows, device_capacity=device_capacity.nbytes / args.rows,
+        record.update(device_exact=device_exact.nbytes / row_count, device_capacity=device_capacity.nbytes / row_count,
                       device_exact_arrays=device_exact.nbytes_by_array, device_capacity_arrays=device_capacity.nbytes_by_array)
         if form == "hgraph":
             assert encoding.hgraph(device_exact).nbytes == device_exact.nbytes
@@ -134,7 +135,7 @@ def measure(task, rows, form, args, torch):
         del device_exact, device_capacity
         torch.cuda.empty_cache()
         record["device_ns"] = device_time(torch, lambda: encoder.encode(device_rows, capacities=capacities,
-                                                                       **device_kwargs), args.rows, args.rounds)
+                                                                       **device_kwargs), row_count, args.rounds)
         torch.cuda.synchronize()
     return record
 
@@ -144,14 +145,14 @@ def main():
     parser.add_argument("--tasks", nargs="+", choices=[*TASKS, "blocks-8"], default=list(TASKS))
     parser.add_argument("--forms", nargs="+", choices=FORMS, default=FORMS)
     parser.add_argument("--data", type=Path)
-    parser.add_argument("--rows", type=int, default=1024)
+    parser.add_argument("--rows", type=int, nargs="+", default=[1024])
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--headroom", type=float, default=1.25)
     parser.add_argument("--numeric", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
-    if args.rows < 1 or args.rounds < 1 or args.headroom < 1:
+    if any(rows < 1 for rows in args.rows) or args.rounds < 1 or args.headroom < 1:
         parser.error("rows and rounds must be positive, headroom at least 1")
     torch = None
     if not args.cpu:
@@ -166,7 +167,7 @@ def main():
                     rounds=args.rounds, headroom=args.headroom, goal_derivations=[], index_dtype="int32",
                     horizon_depth=1, seed=0, walk_rows=8, mymyr_version=mymyr.__version__)
     print(json.dumps(metadata))
-    print("task form CPU-exact-B/state CPU-cap-B/state device-exact-B/state device-cap-B/state device-ns/state")
+    print("task rows form CPU-exact-B/state CPU-cap-B/state device-exact-B/state device-cap-B/state device-ns/state")
     records = []
     for key in [*args.tasks, *(["numeric-counters"] if args.numeric else [])]:
         if key == "numeric-counters":
@@ -177,17 +178,19 @@ def main():
             print(f"{key}: unavailable: {reason}")
             records.append(dict(task=key, unavailable=reason))
             continue
-        rows = tile(walk_rows(task, 8, seed=0, depth=16, patience=2), args.rows)
-        for form in args.forms:
-            if key == "numeric-counters" and form in ("actions", "horizon", "delta"):
-                continue
-            record = dict(task=key, form=form, **measure(task, rows, form, args, torch))
-            records.append(record)
-            values = [record.get(name) for name in ("cpu_exact", "cpu_capacity", "device_exact", "device_capacity", "device_ns")]
-            print(f"{key} {form} " + " ".join("-" if value is None else f"{value:.2f}" for value in values), flush=True)
-            gc.collect()
-            if torch is not None:
-                torch.cuda.empty_cache()
+        states = walk_rows(task, 8, seed=0, depth=16, patience=2)
+        for row_count in args.rows:
+            rows = tile(states, row_count)
+            for form in args.forms:
+                if key == "numeric-counters" and form in ("actions", "horizon", "delta"):
+                    continue
+                record = dict(task=key, rows=row_count, form=form, **measure(task, rows, form, args, torch))
+                records.append(record)
+                values = [record.get(name) for name in ("cpu_exact", "cpu_capacity", "device_exact", "device_capacity", "device_ns")]
+                print(f"{key} {row_count} {form} " + " ".join("-" if value is None else f"{value:.2f}" for value in values), flush=True)
+                gc.collect()
+                if torch is not None:
+                    torch.cuda.empty_cache()
     if args.json:
         args.json.write_text(json.dumps(dict(environment=metadata, records=records), indent=2) + "\n")
 

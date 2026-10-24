@@ -34,7 +34,7 @@ PAGES = [path for path in sorted(DOCS.glob("*.md")) if python_blocks(path)]
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda path: path.stem)
-def test_documentation_python_blocks(page, tmp_path, request):
+def test_documentation_python_blocks(page, tmp_path):
     blocks = python_blocks(page)
     if not hasattr(mymyr, "Domain") and any(requires_frontend(source) for _, source in blocks):
         pytest.skip("built without the PDDL front end")
@@ -47,8 +47,6 @@ def test_documentation_python_blocks(page, tmp_path, request):
             skipped += 1
         else:
             runnable.append((number, source))
-
-    request.node.user_properties.extend((("blocks_run", len(runnable)), ("blocks_skipped", skipped)))
 
     if runnable:
         statements = [

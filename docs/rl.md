@@ -514,7 +514,7 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   its overflow flag set. Without capacities every encoding is exact: on a device it waits for the batch's sizes once,
   and it cannot be captured or jitted. `obs.nbytes` and `obs.nbytes_by_array` report the allocated output payload,
   including unused capacity and device counters, without waiting. The same API covers `SuiteObservation`, including
-  its domain/index mappings; raw row observation specs describe a different payload. See
+  its domain/index mappings. See
   [observation bytes](encoding.md#observation-bytes) and [device status](encoding.md#capacities-status-and-synchronization).
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
@@ -525,10 +525,10 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
   zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
   raw expansion overflow is preserved even when staged rows past a domain's live prefix cause it.
-  The JAX environments do not encode actions.
-
-<!-- capture-workspace-lifetime -->
-
+  A captured graph owns an exclusive expansion workspace per table, retained by its result tensors; eager calls and
+  other graphs use different workspaces. Warm on the capture stream with the same shapes and options. All expansions
+  over the same table within one graph must keep those shapes and options fixed. Keep the results alive through the
+  final replay. The JAX environments do not encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
