@@ -520,7 +520,12 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   status on the device; they wait for nothing and capture with the step. This requires a table whose expansion runs
   asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
   encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
-  zero unused output tails. The JAX environments do not encode actions.
+  zero unused output tails. These buffers store labels only; successor state rows are not allocated. Over a suite,
+  raw expansion overflow is preserved even when staged rows past a domain's live prefix cause it.
+  A captured graph owns an exclusive expansion workspace per table, retained by its result tensors; eager calls and
+  other graphs use different workspaces. Warm on the capture stream with the same shapes and options. All expansions
+  over the same table within one graph must keep those shapes and options fixed. Keep the results alive through the
+  final replay. The JAX environments do not encode actions.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`

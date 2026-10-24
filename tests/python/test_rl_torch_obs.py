@@ -753,3 +753,59 @@ def test_captured_action_observations_follow_changing_suite_domains(suite):
                     own_ids = np.ascontiguousarray(local[selected])
                     expected = encoders[k].encode(own, own_ids, actions=rl.expand(suite.tables[k], own, own_ids))
                     assert_same(batch, expected)
+
+
+@pytest.mark.parametrize("single", [False, True])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_captured_actions_survive_other_stream_steps_expansions_and_captures(gripper, single, compiled):
+    device = gpu_device()
+    table = rl.as_table(gripper[0]) if single else gripper
+    encoder = encoding.FlatRelationEncoder(table)
+    first = rt.BatchedEnv(table, 4, device=device, seed=4, observation=encoder,
+                          obs_actions=True, obs_capacities=CAPS)
+    second = rt.BatchedEnv(table, 9, device=device, seed=7, observation=encoder,
+                           obs_actions=True, obs_capacities=CAPS)
+    torch._dynamo.reset()
+    try:
+        if compiled:
+            step = torch.compile(lambda env: env.step(final=False).obs.relation_args,
+                                 fullgraph=True, backend="aot_eager")
+            rollout = first.capture(2, policy=lambda env: env.random_actions())
+            # The custom op's returned storage also owns the workspace when traced.
+            stream = torch.cuda.Stream(device=device)
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                step(first)
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                compiled_output = step(first)
+        else:
+            rollout = first.capture(2, final=True)
+        other = torch.cuda.Stream(device=device)
+        other.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(other):
+            second.step()
+            expansion = rl.expand(table, second.states, second.task_ids, framework="torch", stream=other)
+        other.synchronize()
+        other_rollout = second.capture(2, final=True)
+        for captured in (rollout, other_rollout, rollout, other_rollout):
+            out = captured.replay()
+            for k, batch in enumerate(out.obs):
+                own = np.ascontiguousarray(out.states[k].cpu().numpy())
+                ids = np.ascontiguousarray(out.task_ids[k].cpu().numpy())
+                assert_same(batch, encoder.encode(own, ids, actions=rl.expand(table, own, ids)))
+        if compiled:
+            graph.replay()
+            torch.cuda.synchronize(device)
+            own = np.ascontiguousarray(first.states.cpu().numpy())
+            ids = np.ascontiguousarray(first.task_ids.cpu().numpy())
+            expected = encoder.encode(own, ids, actions=rl.expand(table, own, ids))
+            used = len(expected.relation_args)
+            np.testing.assert_array_equal(compiled_output[:used].cpu().numpy(), np.asarray(expected.relation_args))
+            assert not compiled_output[used:].any()
+    finally:
+        torch.cuda.synchronize(device)
+        first.close()
+        second.close()
+        torch._dynamo.reset()

@@ -46,7 +46,7 @@ def action_states(encoder: Any, states: Any, ids: Any) -> Any:
 
 
 def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live: Any = None) -> Any:
-    """Expand into caller-sized device arrays. Only the live prefix contributes to capacity overflow."""
+    """Expand labels into caller-sized device arrays, retaining the backend's overflow and invalid-input flags."""
     from collections import Counter
     from types import SimpleNamespace
     from mymyr import rl
@@ -59,7 +59,7 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
     multiplicity = max(Counter(encoder.schema_relations).values(), default=1)
     capacity = min(0x7fffffff, capacity * multiplicity)
     opts = dict(dtype=torch.int32, device=device)
-    x = SimpleNamespace(succ=torch.zeros((capacity, states.shape[1]), dtype=torch.int64, device=device),
+    x = SimpleNamespace(succ=None,
                         schema=torch.zeros(capacity, **opts), binding=torch.zeros((capacity, table.label_width), **opts),
                         parent=torch.zeros(capacity, **opts), offsets=torch.zeros(states.shape[0] + 1, **opts),
                         status=torch.zeros(1, **opts))
@@ -67,14 +67,14 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
         from mymyr._core import _cuda
 
         _cuda._check_async_expansion(table, states.shape[0], device.index, _stream(device))
-        rl.expand_into(table, states, ids, succ=x.succ, schema=x.schema, binding=x.binding, parent=x.parent,
-                       offsets=x.offsets, status=x.status, stream=_stream(device))
+        result = rl.expand_into(table, states, ids, schema=x.schema, binding=x.binding, parent=x.parent,
+                                offsets=x.offsets, status=x.status, stream=_stream(device))
+        x._keepalive = result.get("_keepalive")
         if live is not None:
             total = x.offsets.gather(0, live)
-            x.status = (x.status & 2) | (total > capacity).to(torch.int32)
             x.offsets = torch.where(torch.arange(states.shape[0] + 1, device=device) <= live, x.offsets, total)
             used = torch.arange(capacity, device=device) < total
-            for name in ("schema", "binding", "parent", "succ"):
+            for name in ("schema", "binding", "parent"):
                 array = getattr(x, name)
                 mask = used if array.ndim == 1 else used[:, None]
                 setattr(x, name, torch.where(mask, array, 0))
