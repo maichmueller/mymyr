@@ -1364,6 +1364,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   dt, count)` or all six, masks `[N, H, ...]`, `dt` `int32` `[N, H]` and `count` `int32` `[N]`) are the subgoal layers
   and history steps of `encoder.encode`, on both platforms. A wider integer `dt` or `count` is taken where int32 holds
   its values: a concrete value outside int32 raises `ValueError`, a traced one marks its row invalid.
+  With `live=`, subgoal layers and history steps are read only for the live prefix on both platforms; their unused
+  per-graph entries and variable output tails are zero.
 - **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
   args=, targets=, history=)` (`targets` only with target sources, `history` only with history steps; `graphs` at
   least `N`): the per-graph arrays have `N` entries, the variable-size arrays (`history_entity` and `history_dt` among

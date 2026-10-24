@@ -18,8 +18,7 @@
 //               uint32 [N, H, 2 HD] (or [0]: none), the H history steps of each row, oldest first (the layouts and
 //               rules of encoding::LayerInput and encoding::HistoryInput); live uint32 [2] (a u64 as halves, low first;
 //               or [0]: every row), the live rows: only the first min(live, N) rows are graphs, the per-graph and
-//               per-cell arrays keep the entries of N graphs and are zero past the live ones (no subgoal layers or
-//               history steps with it)
+//               per-cell arrays keep the entries of N graphs and are zero past the live ones
 //   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
 //               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
 //               worker threads (0: one per hardware thread; the CUDA target ignores it)
@@ -543,8 +542,6 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 history, i64 tar
     {
         if (reinterpret_cast<std::uintptr_t>(live.untyped_data()) % 8 != 0)
             fail("'live' is not 8-byte aligned");
-        if (sub.layers != 0 || steps.layers != 0 || schema.has_history())
-            fail("a live row count carries no subgoal layers or history steps");
         c.live = static_cast<const u64*>(live.untyped_data());
     }
     c.capacities = {c.graphs, static_cast<u64>(entities), static_cast<u64>(args), static_cast<u64>(targets),
@@ -747,6 +744,7 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
                 zero_from(7, graphs * R + 1, I);
                 zero_from(9, graphs, 1);
                 zero_from(10, graphs + 1, I);
+                zero_from(13, graphs + 1, I);
             }
         }
         std::memcpy(c.sizes, &sizes, sizeof sizes);

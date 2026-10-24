@@ -2511,19 +2511,63 @@ TEST(DeviceEncode, TheCallRefusesLayersAndHistoryThatDoNotMatchTheSchema)
     // a schema with levels does not need layers in every call, and one with history not history
     DeviceRows no_layers(ctx, stream, batch);
     EXPECT_NO_THROW(device.encode(no_layers.input(batch, n, Inputs{true, true, true}), good, stream));
-    // a live row view and a ring carry no subgoal layers and no history steps
+    // a circular row view carries no subgoal layers and no history steps
     cuda::DeviceBuffer live(ctx, 3 * sizeof(u64), stream);
     cuda::check(cudaMemsetAsync(live.data(), 0, live.size(), stream), "clear the live count");
     {
         auto in = input;
         in.graphs_device = static_cast<const u64*>(live.data());
+        in.row_start = static_cast<const u64*>(live.data()) + 1;
+        in.row_capacity = n;
         expect_invalid(in, good);
         in = no_layers.input(batch, n, Inputs{true, true, true});
         in.graphs_device = static_cast<const u64*>(live.data());
+        in.row_start = static_cast<const u64*>(live.data()) + 1;
+        in.row_capacity = n;
         expect_invalid(in, good);  // the schema has history steps
     }
     EXPECT_THROW(cuda::append_rows(input, input, static_cast<u64*>(live.data()), stream), std::invalid_argument);
     cuda::check(cudaStreamSynchronize(stream), "wait");
+}
+
+TEST(DeviceEncode, LinearLiveRowsWithLayersAndHistoryEqualTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];
+    const u64 n = 8;
+    const Batch batch = layered_batch(c.table, n, true, 131);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = rich_layered_config();
+    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+    const auto shape = device.worst_case(n, batch.steps);
+    cuda::DeviceBuffer live(ctx, sizeof(u64), stream);
+    const auto layout = device.output_layout(shape);
+    cuda::DeviceBuffer block(ctx, layout.bytes, stream);
+    for (const u64 count : {u64{0}, n / 2, n})
+    {
+        SCOPED_TRACE(count);
+        cuda::check(cudaMemcpyAsync(live.data(), &count, sizeof count, cudaMemcpyHostToDevice, stream), "set live count");
+        auto in = rows.input(batch, n, config.inputs);
+        in.graphs_device = static_cast<const u64*>(live.data());
+        const auto host = host_reference(*encoder, host_input(batch, count, config.inputs));
+        cuda::check(cudaMemsetAsync(block.data(), 0xa5, block.size(), stream), "poison output");
+        auto out = cuda::output_of(layout, shape, block.data());
+        out.zero_unused = true;
+        device.encode(in, out, stream);
+        const auto result = download_encoding(ctx, stream, layout, block);
+        expect_sizes(host.sizes, result.sizes);
+        expect_same_arrays(*host.bundle, result);
+        expect_tails(result, shape, count, encoder->schema().num_relations(), config.options.index, host.sizes,
+                     std::byte{0});
+        const u64 at = result.layout.history_offsets + (count + 1) * sizeof(i32);
+        const u64 end = result.layout.history_offsets + (n + 1) * sizeof(i32);
+        for (u64 b = at; b < end; ++b)
+            EXPECT_EQ(result.block[b], std::byte{0});
+    }
 }
 
 TEST(DeviceEncode, TheCountsOfAnEmptyHistoryAreCheckedAsTheHostChecksThem)

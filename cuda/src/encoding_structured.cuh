@@ -205,6 +205,11 @@ __global__ void structured_fill_kernel(const EncodeParams params)
             out.history_offsets[G] = I(sizes.history);
         out.relation_offsets[G * R] = I(sizes.tuples);
         out.relation_arg_offsets[G * R] = I(sizes.args);
+        if (p.simple)
+        {
+            static_cast<I*>(p.out.node_offsets)[G] = I(sizes.entities + sizes.tuples);
+            static_cast<I*>(p.out.edge_offsets)[G] = I(2 * sizes.args);
+        }
     }
     if (p.relation_major)
         for (u64 s = u64(blockIdx.x) * k_block + threadIdx.x; s < G * R; s += u64(gridDim.x) * k_block)
