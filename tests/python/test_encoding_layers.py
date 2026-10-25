@@ -421,3 +421,23 @@ def test_repeated_literal_options_are_reported_and_valid_without_layers(policy):
     masks = encoding.subgoal_masks(encoder, [[[literal(task.encoding_goal[0])]]])
     same(encoder.encode([task.initial_state], subgoals=masks),
          restored.encode([task.initial_state], subgoals=masks))
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_layer_placement_keeps_constant_goal_literals(policy):
+    from test_encoding_goals import goals_task
+
+    task = goals_task("static_true")
+    encoder = make(task, history=False, repeated_literals=policy, target_sources=("goal", "subgoal"))
+    state = task.initial_state
+    baseline = encoder.encode([state])
+    fluent = [literal(a, a.positive) for a in task.encoding_goal if a.predicate.kind == "fluent"]
+    batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, [[fluent]]))
+    before = encoder.describe(baseline, 0).relations
+    after = encoder.describe(batch, 0).relations
+    static = {a.predicate.name for a in task.encoding_goal if a.predicate.kind == "static"}
+    assert static and fluent
+    for relation in before:
+        if any(f"]{p}[g]" in relation for p in static):
+            assert after[relation] == before[relation]
+    assert batch.goal_complete.tolist() == baseline.goal_complete.tolist()
