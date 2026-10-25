@@ -23,7 +23,7 @@ the states again; required on a device).
 - ``mymyr::refresh(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)``: recomputes the cache,
   counts and at_goal flags of states (task ids, goal masks) the caller wrote.
 - ``mymyr::step(env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action,
-  next_task_ids, first_env, final)``: one step of every environment in place (autoresetting rows restart in
+  next_task_ids, first_env, final, action_schema=None, action_binding=None)``: one step of every environment in place (autoresetting rows restart in
   next_task_ids[i] where given); returns (reward, terminated, truncated, goal, invalid, schema, binding, final_states).
 - ``mymyr::refresh_sync`` / ``mymyr::step_sync``: ``refresh`` / ``step`` of environments whose calls synchronize (the
   device's general path), tagged ``cudagraph_unsafe``.
@@ -276,6 +276,8 @@ def step_impl(
     next_task_ids: Optional[Tensor],
     first_env: int,
     final: bool,
+    action_schema: Optional[Tensor] = None,
+    action_binding: Optional[Tensor] = None,
     out: Optional[tuple[Tensor, ...]] = None,
 ) -> tuple[Tensor, ...]:
     """The body of ``mymyr::step``; ``out``: the 8 outputs' destinations (contiguous, of _step_outputs' shapes and
@@ -283,6 +285,13 @@ def step_impl(
     e, info = _env_info(env)
     dev, L = info[0], info[5]
     n = states.shape[0]
+    if (action_schema is None) != (action_binding is None):
+        raise ValueError("mymyr: label actions require both action_schema and action_binding")
+    stride = 0
+    if action_binding is not None:
+        if action_binding.ndim != 2:
+            raise ValueError("mymyr: action_binding must have shape [N, L]")
+        stride = action_binding.shape[1]
     if out is None:
         out = _step_outputs(L, states, final)
     else:
@@ -306,8 +315,10 @@ def step_impl(
         invalid.data_ptr(),
         goal.data_ptr(),
         _ptr(at_goal, "at_goal", torch.bool, (n,), dev),
+        _ptr(action_schema, "action_schema", torch.int32, (n,), dev),
+        _ptr(action_binding, "action_binding", torch.int32, (n, stride), dev),
     ]
-    e._step_ptrs(n, p, L, first_env, _stream(states))
+    e._step_ptrs(n, p, L, first_env, _stream(states), stride)
     return out
 
 
@@ -416,21 +427,24 @@ def step(
     next_task_ids: Optional[Tensor],
     first_env: int,
     final: bool,
+    action_schema: Optional[Tensor] = None,
+    action_binding: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step``: one step of every environment in place, ``action`` [N] int64 (None: the random policy);
-    autoresetting rows restart in ``next_task_ids[i]`` where given. Returns (reward, terminated, truncated, goal,
+    label mode instead takes ``action_schema`` int32 [N] and ``action_binding`` int32 [N, L] with action=None.
+    Autoresetting rows restart in ``next_task_ids[i]`` where given. Returns (reward, terminated, truncated, goal,
     invalid, schema, binding, final_states); ``final_states`` is [N, row_words], the reached states before the
     autoreset, with ``final`` and [0, row_words] without."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final,
+        first_env, final, action_schema, action_binding,
     )  # fmt: skip
 
 
 @step.register_fake
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-    first_env, final,
+    first_env, final, action_schema=None, action_binding=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 
@@ -458,19 +472,21 @@ def step_sync(
     next_task_ids: Optional[Tensor],
     first_env: int,
     final: bool,
+    action_schema: Optional[Tensor] = None,
+    action_binding: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step_sync``: :func:`step` for environments whose calls synchronize (the device's general path);
     tagged ``cudagraph_unsafe``."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final,
+        first_env, final, action_schema, action_binding,
     )  # fmt: skip
 
 
 @step_sync.register_fake
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-    first_env, final,
+    first_env, final, action_schema=None, action_binding=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 

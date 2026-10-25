@@ -19,6 +19,14 @@ struct HerStrategy
 struct DeadEnd
 {
 };
+/// The action representation of a batched environment.
+struct ActionSpace
+{
+};
+/// An index array, a (schema, binding) pair, or the random policy.
+struct EnvAction
+{
+};
 /// An instance sampler argument: "auto" or "uniform" (uniform sampling) or a mymyr.rl.InstanceSampler.
 struct SamplerArg
 {
@@ -40,6 +48,17 @@ template<>
 struct type_caster<mymyr::python::ann::DeadEnd>
 {
     static constexpr auto Name = const_name("typing.Literal['no_successors', 'none']");
+};
+template<>
+struct type_caster<mymyr::python::ann::ActionSpace>
+{
+    static constexpr auto Name = const_name("typing.Literal['index', 'label']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EnvAction>
+{
+    static constexpr auto Name = const_name("mymyr._typing.SupportsDLPack | tuple[mymyr._typing.SupportsDLPack, "
+                                          "mymyr._typing.SupportsDLPack]");
 };
 template<>
 struct type_caster<mymyr::python::ann::SamplerArg>
