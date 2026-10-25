@@ -198,7 +198,7 @@ Pick the mode that matches how you use the states:
 
 - Keep `'auto'` for learning, datasets and anything else that stores or exchanges rows.
 - Use `'lazy'` for searches on large tasks. Its states hold only the atoms the search met, which on large tasks can
-  be a few dozen words instead of thousands.
+  be a few dozen words instead of thousands. Flat and Simple encoders accept these States through a frozen twin.
 
 The budget counts the analysis' join steps, not seconds, so whether it suffices depends only on the task. The default
 takes a few seconds and about a gigabyte of memory at most. `task.info` reports the mode, the typed-dense and
@@ -224,6 +224,12 @@ it:
 
 States, searches, datasets and pickles still work. A task pickle carries the slots assigned so far, and the loaded task
 numbers its atoms as the pickled one did.
+
+`task.frozen(atoms='auto')` returns a cached task over the same parse and options with fixed slots. It accepts
+`'auto'`, `'reachable'` or `'dense'`; `'auto'` uses the source's `reachability_budget`. Calling it on a task already
+constructed with that mode returns the task itself. The cache is thread-safe, and a frozen twin pickles as its source
+plus the selected mode. `FlatRelationEncoder(task)` and `SimpleEncoder(task)` create the auto twin when the source
+is lazy and accept its States, including while another thread searches that source. Other row APIs require fixed rows.
 
 **Numeric storage.** `'auto'` stores values as `'i32'` (two per word) when the task is statically integral and no
 quantum is set. A task is statically integral when its initial values, constants and static values in fluent effects

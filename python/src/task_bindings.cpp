@@ -1888,7 +1888,11 @@ nb::tuple encoding_state(const Task& T)
 
 nb::object task_reduce(nb::handle self)
 {
-    const PyTaskCore& core = *nb::inst_ptr<PyTask>(self)->core;
+    const PyTask& task = *nb::inst_ptr<PyTask>(self);
+    const PyTaskCore& core = *task.core;
+    if (task.frozen_source.is_valid())
+        return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_frozen_task"),
+                              nb::make_tuple(task.frozen_source, atoms_option_name(core.task->options().atoms)));
     nb::object restore = nb::module_::import_("mymyr._pickle").attr("_restore_task");
     const nb::tuple opts = options_tuple(core.task->options());
     const u64 fp = core.task->fingerprint();
@@ -2062,6 +2066,34 @@ i64 py_hash(u64 h)
     return v == -1 ? -2 : v;
 }
 }  // namespace
+
+nb::object frozen_task(nb::handle source, std::string_view atoms)
+{
+    const TaskOptions::Atoms mode = atoms == "auto" ? TaskOptions::Atoms::Auto :
+                                    atoms == "reachable" ? TaskOptions::Atoms::Reachable :
+                                    atoms == "dense" ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
+    if (mode == TaskOptions::Atoms::Lazy)
+        throw nb::value_error("mymyr: frozen atoms must be 'auto', 'reachable' or 'dense'");
+    const Owner owner = owner_of(source);
+    TaskPtr twin;
+    CorePtr core;
+    {
+        nb::gil_scoped_release release;
+        twin = owner.core->task->frozen(mode);
+        if (twin.get() != owner.core->task.get())
+        {
+            std::lock_guard lock(owner.core->frozen_mutex);
+            auto& cached = owner.core->frozen_cores[twin->uid()];
+            if (!cached)
+                cached = std::make_shared<PyTaskCore>(twin, owner.core->data, owner.core->source);
+            core = cached;
+        }
+    }
+    if (twin.get() == owner.core->task.get())
+        return nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
+    nb::object original = nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
+    return nb::cast(PyTask{std::move(core), std::move(original)});
+}
 
 std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
                                                        nb::handle partial)
@@ -2393,6 +2425,11 @@ void bind_task(nb::module_& m)
             },
             "framework"_a = nb::none(),
             "(gpos, gneg): the goal's positive and negative fluent atoms as state words (zero-copy, read-only).")
+        .def("frozen", [](nb::handle self, std::string_view atoms) {
+                 return Arg<PyTask>(frozen_task(self, atoms));
+             }, "atoms"_a = "auto",
+             "The cached task of this parse and options with fixed slots ('auto', 'reachable' or 'dense'). "
+             "Returns this task for its own mode. Auto uses this task's reachability_budget.")
         .def("__reduce__", &task_reduce)
         .def("__repr__", [](const PyTask& t) {
             return "Task(" + t.core->data->domain_name + "/" + t.core->data->problem_name + ", " +

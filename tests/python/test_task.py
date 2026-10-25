@@ -210,3 +210,37 @@ def test_pickles_keep_the_encoding():
 
 def test_gil_stays_disabled():
     assert gil_stays_off()
+
+
+@pytest.mark.parametrize("mode", ["auto", "reachable", "dense"])
+def test_frozen_task_cache_and_pickle(mode):
+    lazy = text_task("gripper__prob05", atoms="lazy", matching="fc", reachability_budget=1 << 24)
+    frozen = lazy.frozen(mode)
+    assert frozen.atom_mode != "lazy"
+    assert frozen.uid == lazy.frozen(mode).uid
+    assert frozen.frozen(mode) is frozen
+    assert frozen.fingerprint == lazy.fingerprint
+    assert frozen.options == {**lazy.options, "atoms": mode}
+    source, twin = pickle.loads(pickle.dumps((lazy, frozen)))
+    assert source.frozen(mode).uid == twin.uid
+    assert twin.encoding_fingerprint == frozen.encoding_fingerprint
+    with pytest.raises(ValueError, match="frozen atoms"):
+        lazy.frozen("lazy")
+    with pytest.raises(ValueError, match="frozen atoms"):
+        lazy.frozen("other")
+
+
+def test_frozen_cache_is_shared_across_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    lazy = text_task("gripper__prob05", atoms="lazy")
+    with ThreadPoolExecutor(4) as pool:
+        tasks = list(pool.map(lambda _: lazy.frozen(), range(16)))
+    assert len({t.uid for t in tasks}) == 1
+
+
+def test_frozen_uses_the_source_reachability_budget():
+    lazy = text_task("gripper__prob05", atoms="lazy", reachability_budget=1)
+    assert lazy.frozen().atom_mode == "dense"
+    with pytest.raises((ValueError, RuntimeError), match="reachability_budget"):
+        lazy.frozen("reachable")

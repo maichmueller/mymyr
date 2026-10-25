@@ -29,6 +29,10 @@ def _restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding):
     return _core._restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding)
 
 
+def _restore_frozen_task(source, atoms):
+    return source.frozen(atoms)
+
+
 def _restore_state(task, fingerprint, kind, payload):
     return _core._restore_state(task, fingerprint, kind, payload)
 

@@ -33,6 +33,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -230,6 +231,7 @@ struct PyEncodingSchema
 struct PyFlatEncoder
 {
     TableRef reference;
+    nb::object pickle_source;
     std::shared_ptr<const encoding::FlatEncoder> encoder;
     std::mutex pool_mutex;  // guards the cached pool
     struct CachedPool
@@ -536,7 +538,12 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                             bool parent_relation, bool sibling_relation, bool cousin_relation, bool history,
                             nb::handle history_max_steps)
     {
-        const TableRef reference = table_of(table);
+        nb::object source = nb::borrow(table);
+        if constexpr (H == HorizonArgs::Absent || H == HorizonArgs::Simple)
+            if ((nb::isinstance<PyTask>(source) || nb::isinstance<PyHandle>(source)) &&
+                !owner_of(source).core->task->atoms().frozen())
+                source = frozen_task(source);
+        const TableRef reference = table_of(source);
         if ((H == HorizonArgs::Required || H == HorizonArgs::Rooted) && horizon_mode.is_none())
             throw nb::value_error(
                 "mymyr: encoding: a horizon encoder needs a horizon_mode ('full', 'delta' or 'action'); "
@@ -548,6 +555,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             sibling_relation, cousin_relation, history, history_max_steps,
             H == HorizonArgs::Optional);
         make(self, reference, options);
+        if constexpr (H == HorizonArgs::Absent || H == HorizonArgs::Simple)
+            self->pickle_source = nb::borrow(table);
     };
     if constexpr (H == HorizonArgs::Optional)
     {
@@ -1060,6 +1069,9 @@ void import_history(rlimp::Imports& imports, std::vector<i32>& dt_copy, std::vec
 struct ImportedRows
 {
     StateBatch states;
+    std::unordered_map<const SlotMap*, std::shared_ptr<const std::vector<u32>>> map_snapshots;
+    std::vector<SlotMapView> slot_maps;
+    std::unordered_map<const std::vector<u32>*, std::vector<u32>> missing_slots;
     std::vector<i32> ids_copy, dt_copy, count_copy, edge_binding_copy;
     std::vector<std::vector<i32>> horizon_copies;  // the converted offset and edge arrays of a horizon
     std::shared_ptr<void> ids_keep;
@@ -1070,7 +1082,8 @@ struct ImportedRows
 
 /// The state rows and instance ids of a call: `state_arg` goes to rows.states; the result is the validated instance of each
 /// row (null: instance 0).
-const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, StatesLike state_arg, TaskIdsArg task_ids)
+const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, StatesLike state_arg, TaskIdsArg task_ids,
+                             bool allow_maps = false)
 {
     rows.states = import_rows(state_arg, packed_words(state_arg), table.numeric_words());
     const StateBatch& states = rows.states;
@@ -1083,6 +1096,30 @@ const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, Sta
         const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
         const Task& expected = *table.task(instance);
         const Task& given = *states.owner_tasks[row];
+        if (allow_maps && !given.atoms().frozen())
+            if (const auto map = given.slot_map_to(expected))
+            {
+                auto [cached, fresh] = rows.map_snapshots.try_emplace(map.get());
+                if (fresh)
+                    cached->second = map->snapshot();
+                const auto& snapshot = cached->second;
+                if (rows.slot_maps.empty())
+                    rows.slot_maps.resize(states.view.rows);
+                static const u32 empty_map = 0;
+                rows.slot_maps[row] = {snapshot->empty() ? &empty_map : snapshot->data(),
+                                       static_cast<u32>(snapshot->size())};
+                auto [missing, inserted] = rows.missing_slots.try_emplace(snapshot.get());
+                if (inserted)
+                    for (u32 slot = 0; slot < snapshot->size(); ++slot)
+                        if ((*snapshot)[slot] == AtomIndex::k_empty)
+                            missing->second.push_back(slot);
+                for (u32 slot : missing->second)
+                    if (slot / 64 < states.view.words &&
+                        (states.view.row(row)[slot / 64] & (u64{1} << (slot % 64))))
+                        throw nb::value_error(("mymyr: encoding: atom " + given.format(SlotId{slot}) +
+                                               " has no slot in the frozen task").c_str());
+                continue;
+            }
         if (given.uid() == expected.uid() ||
             (given.fingerprint() == expected.fingerprint() && given.encoding_fingerprint() == expected.encoding_fingerprint()))
             continue;
@@ -1099,11 +1136,12 @@ void import_rows(ImportedRows& rows, const encoding::FlatEncoder& encoder, State
                  HistoryArg history_arg)
 {
     const rl::TaskTable& table = encoder.table();
-    const i32* ids = import_state_rows(rows, table, state_arg, task_ids);
+    const i32* ids = import_state_rows(rows, table, state_arg, task_ids, !encoder.schema().has_horizon());
     const StateBatch& states = rows.states;
 
     encoding::EncodeInput& input = rows.input;
     input.states = states.view;
+    input.slot_maps = rows.slot_maps.empty() ? nullptr : rows.slot_maps.data();
     input.task_ids = ids;
     std::vector<i64> extents;
     u32 derived_words = 0;
@@ -1902,7 +1940,8 @@ void define_reduce(nb::class_<Py, Extra...>& cls, const char* class_name)
         [class_name](Py& self)
         {
             return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_flat_encoder"),
-                                  nb::make_tuple(class_name, self.reference.obj,
+                                  nb::make_tuple(class_name,
+                                                 self.pickle_source.is_valid() ? self.pickle_source : self.reference.obj,
                                                  options_dict(self.encoder->schema().options()),
                                                  self.encoder->schema().fingerprint()));
         },

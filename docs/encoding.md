@@ -149,8 +149,15 @@ serves any number of concurrent calls.
   The rows of a numeric table are `[N, W + NN]`: the atom words, then the table's `numeric_words` numeric words
   ([Numeric functions](#numeric-functions)); `State`s of a numeric task are packed that way. A row may be wider than
   its instance needs: the words past the instance's own are padding and are not read. A row narrower than its
-  instance, or one that sets an atom bit its instance does not have, raises `ValueError`. Tasks with lazy atom slots
-  are refused, since their rows have no fixed layout ([State encodings](parsing-and-tasks.md#state-encodings)).
+  instance, or one that sets an atom bit its instance does not have, raises `ValueError`.
+  `FlatRelationEncoder(lazy_task)` and `SimpleEncoder(lazy_task)` use `lazy_task.frozen()` as their table source.
+  They accept the lazy task's `State`s and translate their set atom bits into one scratch row per worker. A flat
+  encoder over a table of frozen twins also accepts those lazy States with the corresponding `task_ids`. Raw arrays,
+  `derived`, `goals`, `subgoals`, `history` and `actions` use the twin's slots and table. Literal mask helpers called
+  with the encoder use these slots too. The batches have the twin table's fingerprint, equal to an independent parse
+  with the same frozen options. `encoder.table` exposes the twin; pickling the encoder preserves the lazy source and
+  rebuilds its twin. An atom absent from a reachable twin raises `ValueError` naming the atom. Lazy States retain
+  their compact storage; only the scratch row has the twin's width. Horizon and transition encoders require fixed rows.
 - **`task_ids`:** the instance of each row, an int32 array or a sequence of ints. It is required for a table of several
   instances. A `State` must be a state of the task of its row (the table's instance named by its task id): a `State`
   of another `Task` object is accepted when that task has the same `fingerprint()` and `encoding_fingerprint()` (for
