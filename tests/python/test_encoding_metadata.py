@@ -11,9 +11,53 @@ HELPERS = (encoding.entity_counts, encoding.tuple_counts, encoding.entity_graph,
 FIXED = HELPERS[:-1]
 
 
+def test_mixed_instance_sizes():
+    import mymyr
+    from conftest import ROOT
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/pddl/blocks"
+    tasks = [mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{name}.pddl")
+             for name in ("smedium", "probBLOCKS-8-0")]
+    table = rl.TaskTable(tasks)
+    ids = np.array([1, 0, 1], np.int32)
+    rows = np.zeros((3, table.words), np.uint64)
+    for graph, instance in enumerate(ids):
+        words = np.asarray(tasks[instance].encode([tasks[instance].initial_state]))
+        rows[graph, :words.shape[1]] = words[0]
+    for layout in ("graph", "relation"):
+        explicit = encoding.FlatRelationEncoder(table, layout=layout, include_actions=False, goal_derivations=())
+        reference = explicit.encode(rows, ids)
+        assert reference.num_objects[0] != reference.num_objects[1]
+        for implicit in (False, True):
+            encoder = encoder_of(table, layout, counts=False, implicit=implicit)
+            if not implicit:
+                reference = encoder_of(table, layout).encode(rows, ids)
+            else:
+                reference = explicit.encode(rows, ids)
+            batch = encoder.encode(rows, ids)
+            assert_metadata([helper(batch) for helper in HELPERS], expected(reference))
+
+
+def test_graphs_without_entities_or_relations():
+    import mymyr
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string("(define (domain empty) (:requirements :strips) (:predicates))")
+    task = mymyr.Task(domain.instantiate_string("(define (problem p) (:domain empty) (:init) (:goal (and)))"))
+    for layout in ("graph", "relation"):
+        for counts in (False, True):
+            encoder = encoder_of(task, layout, counts=counts, implicit=True)
+            batch = encoder.encode([task.initial_state] * 2)
+            assert batch.num_relations == 0
+            wanted = (np.zeros(2, np.int32), np.zeros(2, np.int32), np.empty(0, np.int32),
+                      np.empty(0, np.uint8), np.empty(0, bool), np.empty(0, np.int32))
+            assert_metadata([helper(batch) for helper in HELPERS], wanted)
+
+
 @pytest.fixture(scope="module")
 def case():
-    task = text_task("gripper__prob05")
+    task = text_task("blocks__probBLOCKS-8-0")
     rows = np.ascontiguousarray(task.encode(walk(task, steps=2, walks=1)))
     return task, rows
 
@@ -121,7 +165,7 @@ def test_host_streams_and_suites(case, layout):
     direct = encoder.encode(rows)
     for helper in HELPERS:
         np.testing.assert_array_equal(helper(flushed), helper(direct))
-    other = text_task("blocks__probBLOCKS-8-0")
+    other = text_task("gripper__prob05")
     suite = rl.TaskSuite([rl.TaskTable([task]), rl.TaskTable([other])])
     padded = np.zeros((2, suite.words), np.uint64)
     for i, item in enumerate((task, other)):
@@ -178,7 +222,7 @@ def gpu():
 def test_device_suite_metadata(case, layout):
     torch = gpu()
     task, _ = case
-    other = text_task("blocks__probBLOCKS-8-0")
+    other = text_task("gripper__prob05")
     suite = rl.TaskSuite([rl.TaskTable([task]), rl.TaskTable([other])])
     encoder = encoding.SuiteEncoder(suite, layout=layout, include_actions=False, emit_counts=False,
                                    entity_arrays="auto", goal_derivations=())
@@ -227,6 +271,33 @@ def test_torch_device_metadata(case, layout, counts, implicit, index):
             assert set(batch.as_dict()) == keys and batch.nbytes_by_array == sizes
 
 
+def test_implicit_device_wrapping_and_collation(case):
+    torch = gpu()
+    from mymyr.encoding import _device
+    task, rows = case
+    encoder = encoder_of(task, "relation", counts=False, implicit=True)
+    reference_encoder = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False,
+                                                    goal_derivations=())
+    reference = reference_encoder.encode(rows)
+    caps = capacities(reference)
+    device_rows = torch.from_numpy(rows.view(np.int64)).to("cuda:0")
+    arrays = _device.encode_arrays(encoder, device_rows, None, None, None,
+                                   _device._capacities(caps, _device.layout_of(encoder)))
+    outputs = tuple(arrays[name] for name in encoding.DeviceFlatBatch.array_names)
+    batch = encoding.DeviceFlatBatch.from_arrays(encoder, outputs, entity_capacity=caps["entities"])
+    traced = encoding.DeviceFlatBatch._of(encoding.DeviceFlatBatch._template(encoder), outputs, caps["entities"])
+    for wrapped in (batch, traced):
+        assert_metadata([helper(wrapped) for helper in HELPERS], expected(reference, entities=caps["entities"]))
+    unspecified = encoding.DeviceFlatBatch.from_arrays(encoder, outputs)
+    with pytest.raises(ValueError, match="implicit per-entity metadata needs entity_capacity"):
+        encoding.entity_graph(unspecified)
+    joined_reference = reference_encoder.encode(np.concatenate([rows, rows]))
+    for joined_caps in (None, capacities(joined_reference)):
+        joined = encoding.collate([batch, batch], capacities=joined_caps)
+        extent = int(joined_reference.entity_offsets[-1]) if joined_caps is None else joined_caps["entities"]
+        assert_metadata([helper(joined) for helper in HELPERS], expected(joined_reference, entities=extent))
+
+
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("implicit", [False, True])
 def test_device_stream_metadata_capture(case, layout, implicit):
@@ -264,7 +335,8 @@ def test_device_stream_metadata_capture(case, layout, implicit):
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("counts", [False, True])
 @pytest.mark.parametrize("implicit", [False, True])
-def test_jax_metadata_under_jit(case, layout, counts, implicit):
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_jax_metadata_under_jit(case, layout, counts, implicit, index):
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
     from mymyr._core import _rl_jax
@@ -272,9 +344,9 @@ def test_jax_metadata_under_jit(case, layout, counts, implicit):
         pytest.skip("mymyr was built without the XLA FFI headers")
     from mymyr.encoding import jax as ej
     task, rows = case
-    encoder = encoder_of(task, layout, counts, implicit)
-    reference_encoder = encoder_of(task, layout) if not implicit else encoding.FlatRelationEncoder(
-        task, layout=layout, include_actions=False, goal_derivations=())
+    encoder = encoder_of(task, layout, counts, implicit, index)
+    reference_encoder = encoder_of(task, layout, index=index) if not implicit else encoding.FlatRelationEncoder(
+        task, layout=layout, include_actions=False, goal_derivations=(), index_dtype=index)
     caps = capacities(reference_encoder.encode(rows))
     words = jnp.asarray(rows.view(np.uint32))
 
@@ -284,6 +356,8 @@ def test_jax_metadata_under_jit(case, layout, counts, implicit):
         return batch, tuple(helper(batch) for helper in FIXED)
 
     inspect = jax.jit(lambda b: tuple(helper(b) for helper in FIXED))
+    old_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", index == "int64")
     try:
         for live in (0, 1, len(rows)):
             batch, values = encode(words, jnp.int32(live))
@@ -303,3 +377,4 @@ def test_jax_metadata_under_jit(case, layout, counts, implicit):
     finally:
         ej.unregister(encoder)
         jax.clear_caches()
+        jax.config.update("jax_enable_x64", old_x64)
