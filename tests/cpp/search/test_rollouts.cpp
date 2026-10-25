@@ -7,6 +7,7 @@
 //   - the portfolio: serial reproducibility, the certifier alone equals IW(1), certification rules, hooks and budgets.
 
 #include "../support/suite.hpp"
+#include "../support/search_tree.hpp"
 #include "mymyr/core/random.hpp"
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/search/aiw.hpp"
@@ -369,7 +370,7 @@ class Counter : public SearchObserver
 public:
     explicit Counter(bool parallel_safe = false) : m_safe(parallel_safe) {}
     std::atomic<u64> starts{0}, expands{0}, generates{0}, prunes{0}, passes{0}, solutions{0}, ends{0};
-    std::atomic<u64> outcome[6] = {};
+    std::atomic<u64> outcome[static_cast<u32>(TransitionOutcome::SelfLoop) + 1] = {};
     std::vector<std::shared_ptr<Counter>> workers;
     std::vector<u32> worker_ids;
 
@@ -616,7 +617,8 @@ TEST(IwVariantEvents, EveryTransitionHasOneOutcome)
     }
     EXPECT_EQ(c.transitions(), generated);
     EXPECT_EQ(c.generates, generated);
-    EXPECT_EQ(c.of(TransitionOutcome::Opened) + c.of(TransitionOutcome::Duplicate) + c.of(TransitionOutcome::Pruned), generated);
+    EXPECT_EQ(c.of(TransitionOutcome::Opened) + c.of(TransitionOutcome::Duplicate) + c.of(TransitionOutcome::Pruned) +
+              c.of(TransitionOutcome::Blocked) + c.of(TransitionOutcome::SelfLoop), generated);
     EXPECT_LE(c.of(TransitionOutcome::Opened), in_tree);
     EXPECT_EQ(c.passes, r.passes.size());
     EXPECT_EQ(c.ends, 1u);
@@ -1142,4 +1144,36 @@ TEST(Random, XoshiroPinnedValues)
     d.reseed(99);
     EXPECT_EQ(d.next(), e.next());
     EXPECT_EQ(d.bounded(17), e.bounded(17));
+}
+
+TEST(ParallelRolloutSearchTree, IdenticalForEverySeedAcrossThreadCounts)
+{
+    const auto task = Task::from_text_file(task_path("rovers__p02"));
+    for (TreeRecord level : {TreeRecord::Nodes, TreeRecord::Transitions})
+    {
+        auto o = rollout_batch(8, 1);
+        o.iw.tree = level;
+        o.iw.max_width = 2;
+        o.iw.control.budget.max_states = 100;
+        const auto serial = find_rollouts_parallel(*task, o);
+        for (u32 threads : {2u, 8u})
+        {
+            o.threads = threads;
+            const auto parallel = find_rollouts_parallel(*task, o);
+            ASSERT_EQ(parallel.threads_used, threads);
+            ASSERT_EQ(serial.rollouts.size(), parallel.rollouts.size());
+            for (usize i = 0; i < serial.rollouts.size(); ++i)
+            {
+                const auto& a = serial.rollouts[i].search.passes;
+                const auto& b = parallel.rollouts[i].search.passes;
+                ASSERT_EQ(a.size(), b.size());
+                for (usize p = 0; p < a.size(); ++p)
+                {
+                    ASSERT_TRUE(a[p].tree);
+                    ASSERT_TRUE(b[p].tree);
+                    expect_same_tree(*a[p].tree, *b[p].tree);
+                }
+            }
+        }
+    }
 }

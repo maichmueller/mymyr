@@ -328,6 +328,8 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         }
         root->on_end(solved ? SearchStatus::Solved : status, total);
     }
+    for (auto& rollout : out.rollouts)
+        detail::normalize_trees(rollout.search.passes, task.words());
     return out;
 }
 

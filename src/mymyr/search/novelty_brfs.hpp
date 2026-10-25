@@ -673,6 +673,8 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             }
             is_goal = env.goal.test(succ, cv, prepared);
         }
+        if (sink)
+            sink->goal(e, is_goal);
         if (is_goal)
         {
             finish(SearchStatus::Solved);
@@ -690,8 +692,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         if (!x.expanded)
         {
             ++st.skipped;
+            if (sink)
+                sink->flag(e, TreeNodeFlag::Skipped);
             return true;
         }
+        if (sink)
+            sink->flag(e, TreeNodeFlag::Expanded);
         pruner.begin(words.data(), n);
         expanded = true;
         return true;
@@ -1063,10 +1069,10 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                 ++st.blocked;  // checked first: a blocked state marks nothing
                 return reject(s, b, w, nn, TransitionOutcome::Blocked);
             }
-            if (rule == RootRule::ArityZero && !at_root)
-                return reject(s, b, w, nn);
             if (add.empty() && bits::equal(w, nn, cw, n))
                 return reject(s, b, w, nn, TransitionOutcome::SelfLoop);
+            if (rule == RootRule::ArityZero && !at_root)
+                return reject(s, b, w, nn);
             if (rule == RootRule::ArityZero)
             {
                 const u32 dup = seen.find(tree, w, nn);
@@ -1137,7 +1143,6 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     }
     if (beam)
         st.generated_in_tree -= next.size();  // candidates of a next layer that was never selected
-    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
     out.table_bytes = pruner.bytes();
     out.node_bytes = tree.bytes();
     if (sink)
@@ -1146,13 +1151,15 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             sink->selected(next, {});
         tree.release(*sink);
         st.tree = sink->finish(succ, env.goal);
+        out.node_bytes = std::max(out.node_bytes, tree_bytes(*st.tree));
     }
+    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
 }
 
 /// An IW-style ladder over passes: run_pass(k, PassOut&) for k = first..top (after an optional placeholder entry
 /// for arity 0). Fills status, plan, goal_state, passes, total, effective_width, message and peaks (as run_ladder).
 template<class RunPass>
-IwResult novelty_ladder(Env& env, u32 first, u32 top, bool placeholder, RunPass&& run_pass)
+IwResult novelty_ladder(Env& env, StateView root, u32 first, u32 top, bool placeholder, RunPass&& run_pass)
 {
     IwResult r;
     auto push = [&](const IwPassStatistics& p)
@@ -1174,6 +1181,7 @@ IwResult novelty_ladder(Env& env, u32 first, u32 top, bool placeholder, RunPass&
         IwPassStatistics p;
         p.width = first;
         p.status = SearchStatus::Unsolvable;
+        p.tree = record_root(env.tree, env.task, root, first, env.succ, env.goal);
         push(p);
         r.status = SearchStatus::Unsolvable;
         return r;
@@ -1229,6 +1237,7 @@ inline void finish_result(Env& env, const State& root, IwResult& r)
         const PlanCost pc(env.task);
         r.cost = pc.apply(env.succ, root, r.plan);
     }
+    normalize_trees(r.passes, env.task.words());
     r.fluent_slots = env.task.atoms().fluent_slots();
     if (env.root)
     {
@@ -1311,7 +1320,7 @@ inline IwResult classic_ladder(Env& env, StateView root, u32 max_width, bool opt
         return r;
     }
     const bool optimize = optimize_iw1 && max_width == 1;
-    return novelty_ladder(env, optimize ? 1 : 0, max_width, optimize,
+    return novelty_ladder(env, root, optimize ? 1 : 0, max_width, optimize,
                           [&](u32 k, PassOut& po)
                           {
                               if (k == 0)

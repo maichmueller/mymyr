@@ -91,7 +91,7 @@ struct Candidate
     u32 wlen;
     u64 aoff;     // add slots false in the parent, into adds
     u32 alen;
-    usize transition = 0;
+    bool reported = false;
 };
 }  // namespace
 
@@ -141,6 +141,27 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
     std::vector<u8> taken;
     u32 layer_begin = 0, layer_end = 1;
     bool stop = false;
+
+    auto discard_pending = [&]()
+    {
+        if (!sink && !obs)
+            return;
+        for (const Candidate& x : cands)
+            if (!x.reported)
+            {
+                const StateView child{words.data() + x.woff, x.wlen, nullptr, 0};
+                const ObjectId* b = binding.data() + x.boff;
+                if (sink)
+                    sink->transition(x.parent, x.schema, b, succ.arity(x.schema), child, k_none, TransitionOutcome::Pruned);
+                if (obs)
+                {
+                    const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b, b + succ.arity(x.schema)));
+                    obs->on_generate(x.parent, a, ~u64{0}, child, false);
+                    obs->on_prune(x.parent, a, child);
+                    obs->on_transition(x.parent, a, ~u64{0}, child, TransitionOutcome::Pruned);
+                }
+            }
+    };
 
     while (!stop && layer_begin < layer_end)
     {
@@ -238,9 +259,6 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                             std::find(adds_buf.begin() + static_cast<std::ptrdiff_t>(x.aoff), adds_buf.end(), a.v) == adds_buf.end())
                             adds_buf.push_back(a.v);
                     x.alen = static_cast<u32>(adds_buf.size() - x.aoff);
-                    if (sink)
-                        x.transition = sink->transition(id, s, b, succ.arity(s), {next.data(), nn, nullptr, 0}, k_none,
-                                                        TransitionOutcome::Pruned);
                     cands.push_back(x);
                     return true;
                 },
@@ -249,7 +267,10 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 break;
         }
         if (stop)
+        {
+            discard_pending();
             break;
+        }
 
         // 2. order the layer
         const u32 m = static_cast<u32>(cands.size());
@@ -277,14 +298,15 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
         const u32 next_begin = nodes.size();
         for (u32 i : perm)
         {
-            const Candidate& x = cands[i];
+            Candidate& x = cands[i];
             const StateView pv = nodes.view(x.parent);
             const StateView child{words.data() + x.woff, x.wlen, nullptr, 0};
             const std::span<const ObjectId> b(binding.data() + x.boff, succ.arity(x.schema));
             auto reject = [&](TransitionOutcome outcome = TransitionOutcome::Pruned)
             {
+                x.reported = true;
                 if (sink)
-                    sink->resolve(x.transition, k_none, outcome);
+                    sink->transition(x.parent, x.schema, b.data(), static_cast<u32>(b.size()), child, k_none, outcome);
                 if (obs)
                 {
                     const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end()));
@@ -299,6 +321,11 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 reject(TransitionOutcome::Blocked);
                 continue;
             }
+            if (bits::equal(child.w, child.nw, pv.w, pv.nw))
+            {
+                reject(TransitionOutcome::SelfLoop);
+                continue;
+            }
             adds.assign(adds_buf.begin() + static_cast<std::ptrdiff_t>(x.aoff), adds_buf.begin() + static_cast<std::ptrdiff_t>(x.aoff + x.alen));
             u32 mx = 0;
             for (u32 a : adds)
@@ -310,11 +337,6 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             {
                 // the optimized IW(1) root: every new successor other than the root enters, the non-novel ones
                 // are not expanded
-                if (bits::equal(child.w, child.nw, pv.w, pv.nw))
-                {
-                    reject(TransitionOutcome::SelfLoop);
-                    continue;
-                }
                 const u64 h = hash::state_words(child.w, child.nw);
                 bool dup = false;
                 for (auto [it, end] = root_seen.equal_range(h); it != end && !dup; ++it)
@@ -341,8 +363,9 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 stop = true;
                 break;
             }
+            x.reported = true;
             if (sink)
-                sink->resolve(x.transition, nodes.size(), TransitionOutcome::Opened);
+                sink->transition(x.parent, x.schema, b.data(), static_cast<u32>(b.size()), child, nodes.size(), TransitionOutcome::Opened);
             if (obs)
             {
                 const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end()));
@@ -358,18 +381,21 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 break;
             }
         }
+        if (stop)
+            discard_pending();
         layer_begin = next_begin;
         layer_end = nodes.size();
     }
     if (!status_set)
         st.status = SearchStatus::Exhausted;
-    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
     out.table_bytes = table.bytes();
     out.node_bytes = nodes.bytes();
     if (sink)
     {
         nodes.release(*sink, std::max<u32>(task.words(), 1));
         st.tree = sink->finish(succ, goal);
+        out.node_bytes = std::max(out.node_bytes, tree_bytes(*st.tree));
     }
+    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
 }
 }  // namespace mymyr::search::detail

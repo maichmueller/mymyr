@@ -84,7 +84,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const State root = o.start ? *o.start : task.initial_state();
     if (env.root)
         env.root->on_start(root);
-    IwResult r = detail::novelty_ladder(env, 0, o.max_width, false,
+    IwResult r = detail::novelty_ladder(env, root, 0, o.max_width, false,
                                         [&](u32 k, detail::PassOut& po)
                                         {
                                             if (k == 0)

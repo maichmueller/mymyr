@@ -154,7 +154,7 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
             layers = std::make_unique<LayerOrderer>(t, o.layers);
     }
     const u32 T = resolve_threads(o.threads);
-    const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree != TreeRecord::None;
+    const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
     if (!error.empty())
         return;
     if (T > 1 && !o.layers.beam())
@@ -162,8 +162,9 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
     else if (layers && layers->relaxed() && slow)
         error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a "
                 "successor order";
-    else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()))
-        team = std::make_unique<BeamTeam>(t, T);
+    else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
+             (o.tree == TreeRecord::None || layers->relaxed()))
+        team = std::make_unique<BeamTeam>(t, o.tree == TreeRecord::None ? T : 1);
 }
 
 Context::~Context() = default;
@@ -176,6 +177,29 @@ void add_pass(SearchStatistics& total, const IwPassStatistics& p)
     total.states += s.states;
     total.pruned += s.pruned;
     total.seconds += s.seconds;
+}
+
+void normalize_trees(std::span<IwPassStatistics> passes, u32 words)
+{
+    for (auto& p : passes)
+        if (p.tree && p.tree->words < words)
+        {
+            auto t = std::make_shared<SearchTree>(*p.tree);
+            const usize R = usize{words} + t->numeric_words;
+            std::vector<u64> rows(t->row_goal.size() * R, 0);
+            for (usize i = 0; i < t->row_goal.size(); ++i)
+            {
+                const u64* src = t->rows.empty() ? nullptr : t->rows.data() + i * (t->words + t->numeric_words);
+                u64* dst = rows.data() + i * R;
+                if (t->words)
+                    std::copy_n(src, t->words, dst);
+                if (t->numeric_words)
+                    std::copy_n(src + t->words, t->numeric_words, dst + words);
+            }
+            t->rows = std::move(rows);
+            t->words = words;
+            p.tree = std::move(t);
+        }
 }
 
 namespace
@@ -692,6 +716,8 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             }
             is_goal = goal.test(succ, cv, prepared);
         }
+        if (sink)
+            sink->goal(e, is_goal);
         if (is_goal)
         {
             finish(SearchStatus::Solved);
@@ -708,8 +734,12 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         if (!x.expanded)
         {
             ++st.skipped;
+            if (sink)
+                sink->flag(e, TreeNodeFlag::Skipped);
             return true;
         }
+        if (sink)
+            sink->flag(e, TreeNodeFlag::Expanded);
         expanded = true;
         return true;
     };
@@ -1139,7 +1169,6 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         st.status = SearchStatus::Exhausted;
     if (beam)
         st.generated_in_tree -= next_layer.size();  // candidates of a next layer that was never selected
-    st.seconds = seconds_since(t0);
     out.table_bytes = table ? table->bytes() : 0;
     out.node_bytes = tree.bytes();
     if (sink)
@@ -1148,7 +1177,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             sink->selected(next_layer, {});
         tree.release(*sink);
         st.tree = sink->finish(succ, goal);
+        out.node_bytes = std::max(out.node_bytes, tree_bytes(*st.tree));
     }
+    st.seconds = seconds_since(t0);
 }
 }  // namespace
 
@@ -1191,6 +1222,7 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
         IwPassStatistics p;
         p.width = first;
         p.status = SearchStatus::Unsolvable;
+        p.tree = record_root(o.tree, c.task, root, first, c.succ, goal);
         push(p);
         r.status = SearchStatus::Unsolvable;
         return r;
@@ -1267,6 +1299,7 @@ IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
         const detail::PlanCost pc(task);
         r.cost = pc.apply(succ, root, r.plan);
     }
+    detail::normalize_trees(r.passes, task.words());
     r.fluent_slots = task.atoms().fluent_slots();
     if (c.observer)
     {
