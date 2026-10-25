@@ -6,6 +6,7 @@
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/reachability/relaxed_reachability.hpp"
 #include "mymyr/task/workspace.hpp"
+#include "mymyr/task/slot_map.hpp"
 
 #include <bit>
 #include <chrono>
@@ -39,6 +40,35 @@ Task::Task(Private, formalism::TaskData data, const TaskOptions& options) : m_da
 }
 
 Task::~Task() = default;
+
+std::shared_ptr<const Task> Task::frozen(TaskOptions::Atoms atoms) const
+{
+    if (atoms != TaskOptions::Atoms::Auto && atoms != TaskOptions::Atoms::Reachable && atoms != TaskOptions::Atoms::Dense)
+        throw std::invalid_argument("mymyr: frozen atoms must be auto, reachable or dense");
+    if (m_options.atoms == atoms)
+        return shared_from_this();
+    const usize mode = static_cast<usize>(atoms);
+    std::lock_guard lock(m_frozen_mutex);
+    if (!m_frozen[mode])
+    {
+        TaskOptions options = m_options;
+        options.atoms = atoms;
+        auto twin = create(m_data, options);
+        auto map = std::make_shared<SlotMap>(*this, *twin);
+        m_slot_maps[mode] = std::move(map);
+        m_frozen[mode] = std::move(twin);
+    }
+    return m_frozen[mode];
+}
+
+std::shared_ptr<SlotMap> Task::slot_map_to(const Task& target) const
+{
+    std::lock_guard lock(m_frozen_mutex);
+    for (usize mode = 0; mode < m_frozen.size(); ++mode)
+        if (m_frozen[mode].get() == &target)
+            return m_slot_maps[mode];
+    return {};
+}
 
 u64 Task::fingerprint() const
 {

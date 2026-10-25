@@ -90,6 +90,7 @@ add_library(mymyr_core STATIC
     src/mymyr/formalism/pddl_writer.cpp
     src/mymyr/formalism/text_format.cpp
     src/mymyr/task/atom_index.cpp
+    src/mymyr/task/slot_map.cpp
     src/mymyr/task/compile.cpp
     src/mymyr/task/task.cpp
     src/mymyr/task/workspace.cpp

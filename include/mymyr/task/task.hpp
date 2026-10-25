@@ -33,6 +33,7 @@
 #include "mymyr/task/plan.hpp"
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -43,6 +44,7 @@ namespace mymyr
 {
 class Task;
 class Workspace;
+class SlotMap;
 namespace detail
 {
 struct WorkspacePool;
@@ -152,7 +154,7 @@ struct AtomArgs
     std::span<const ObjectId> objects;
 };
 
-class Task
+class Task : public std::enable_shared_from_this<Task>
 {
     struct Private
     {
@@ -177,6 +179,10 @@ public:
     [[nodiscard]] const TaskInfo& info() const noexcept { return m_info; }
     [[nodiscard]] const plan::Compiled& compiled() const noexcept { return m_compiled; }
     [[nodiscard]] const AtomIndex& atoms() const noexcept { return m_atoms; }
+    /// Cached task over the same normalized problem and options with fixed atom slots. Lazy is not a frozen mode.
+    [[nodiscard]] std::shared_ptr<const Task> frozen(TaskOptions::Atoms atoms = TaskOptions::Atoms::Auto) const;
+    /// The cached same-parse map to a frozen twin, or null when target is not one of this task's twins.
+    [[nodiscard]] std::shared_ptr<SlotMap> slot_map_to(const Task& target) const;
 
     [[nodiscard]] u32 num_objects() const noexcept { return m_compiled.num_objects; }
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_compiled.schemas.size()); }
@@ -259,6 +265,9 @@ private:
     plan::Compiled m_compiled;
     AtomIndex m_atoms;
     State m_initial;
+    mutable std::mutex m_frozen_mutex;
+    mutable std::array<std::shared_ptr<const Task>, 3> m_frozen;
+    mutable std::array<std::shared_ptr<SlotMap>, 3> m_slot_maps;
     friend class WorkspaceLease;
     void give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept;
 

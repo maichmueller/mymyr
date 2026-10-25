@@ -126,7 +126,24 @@ void AtomIndex::write_slot(AtomKind k, u32 slot, CanonicalAtom c) const
     const u32 p = L.decode(c, rec + 1);
     rec[0] = p;
     *m_ops[idx(k)].ensure(slot) = view_op_of(*m_view, p, L.arity[p], rec + 1);
-    *m_cid[idx(k)].ensure(slot) = c;
+    auto* cid = m_cid[idx(k)].ensure(slot);
+    if (m_mode == AtomMode::Lazy)
+        std::atomic_ref(*cid).store(c + 1, std::memory_order_release);
+    else
+        *cid = c;
+}
+
+CanonicalAtom AtomIndex::canonical(AtomKind k, u32 slot) const
+{
+    if (m_mode != AtomMode::Lazy)
+        return *m_cid[idx(k)].get(slot);
+    // Slot reservation precedes record publication; a snapshot may encounter a reserved slot.
+    std::atomic_ref cid(*m_cid[idx(k)].ensure(slot));
+    CanonicalAtom c;
+    do
+        c = cid.load(std::memory_order_acquire);
+    while (c == 0);
+    return c - 1;
 }
 
 u32 AtomIndex::intern_slow(CanonicalAtom c) const
