@@ -346,6 +346,33 @@ with these masks gives the same batch as a call without `goals` only for an inst
 literal over a static predicate, over a derived predicate or over an atom without a slot (the constant part, the
 derived part), so that the masks are the whole goal.
 
+**Goals from literals.** `mymyr.encoding.goal_masks(source, goals, task_ids=None, fixed="decide")` builds the goals of
+rows from lists of literals (anything `Task.literal` takes, read in the task of the row's instance) as a `GoalMasks`:
+`pos`, `neg` `[N, W]`, `derived_pos`, `derived_neg` `[N, D]` (`None` for a table without derived predicates) and
+`unsatisfiable` bool `[N]`; it is the sequence `(pos, neg[, derived_pos, derived_neg])` that `goals=` takes. The source
+is an encoder, a `TaskTable` or a `Task`. A literal over a static predicate, or over a fluent or derived atom without a
+slot, has a fixed truth and no bit in the masks: `fixed="decide"` leaves it out when it holds and marks its row
+unsatisfiable when it fails, `fixed="raise"` raises `ValueError`. Such a row goal differs from the instance's goal in
+its constant part: the instance's goal lists its static literals as constant tuples, a row goal has none (its relations
+list the slotted literals only), and both have `goal_complete` 1. `literal_masks(source, predicates, objects, positive,
+rows, num_rows, task_ids=None)` builds the same from arrays: table predicate ids `[K]` (indices into
+`table.predicate_names`), instance-local object ids `[K, k]` padded with -1, the sign and the row of each literal, and
+the instance of each row. `literal_slots(source, predicates, objects, task_ids=None)` is the lookup itself: the
+`LiteralKind` of each literal (`FLUENT`, `DERIVED`, `STATIC_TRUE`, `STATIC_FALSE`, `UNREACHABLE` for an atom without a
+slot, `INVALID` for ids out of range) and its slot (-1 for the kinds without one).
+
+```python
+from mymyr import rl
+
+goal_task = mymyr.Task.from_pddl("tests/data/pddl/goals/domain.pddl", "tests/data/pddl/goals/static_true.pddl")
+row_goals = encoding.goal_masks(goal_task, [["(lit a)", "(heavy t1)"], ["(lit b)", "(heavy t2)"]])
+assert row_goals.unsatisfiable.tolist() == [False, True]  # (heavy t1) holds, (heavy t2) fails: both are static
+lit = rl.as_table(goal_task).predicate_names.index("lit")  # a table predicate id
+a = goal_task.atom("(lit a)")
+kind, slot = encoding.literal_slots(goal_task, [lit], [list(a.object_indices)])
+assert kind.tolist() == [encoding.LiteralKind.FLUENT] and slot.tolist() == [a.slot]
+```
+
 ### Actions
 
 **`actions=`** is the `rl.Expansion` of the same states over the same table (`rl.expand(table, states, task_ids)`), on
@@ -412,8 +439,12 @@ the fluent (derived) atom slots, `[N, L', W]` (`[N, L', D]` for the derived pair
 `[1, L', W]` for layers that every row shares; u64 words or u32 halves. It needs `max_goal_level >= 1` and goal
 relations. Layer `l` of a row (`l = 0, 1, ...`) fills the relations of level `l + 1`; a row may have fewer layers than
 the schema has levels (the missing ones are empty). Masks narrower than the instance, or with a bit the instance does
-not have, raise `ValueError`, as for `goals`. `mymyr.encoding.subgoal_masks(encoder, layers, task_ids=None)` builds the
-arrays from lists of literals (per row, per layer).
+not have, raise `ValueError`, as for `goals`. `mymyr.encoding.subgoal_masks(source, layers, task_ids=None,
+fixed="raise")` builds them from lists of literals (per row, per layer) as a `LayerMasks`: `pos`, `neg` `[N, L', W]`,
+the derived pair and `unsatisfiable` bool `[N, L']`, the sequence `subgoals=` takes. A subgoal of fixed truth (static,
+or an atom without a slot) raises `ValueError` by default; `fixed="decide"` leaves it out or marks its layer
+unsatisfiable, as `goal_masks` does for a row. `literal_masks(..., layers=, num_layers=)` builds the layers from
+arrays.
 
 A level holds the literals of its layer **minus every literal of the goal and of the lower layers**: a literal is
 encoded once, at the lowest level that has it. A literal that the goal has is only in the goal relations, one that
@@ -434,8 +465,8 @@ of a row's history. **`history=`** gives it: `(pos, neg, dt)`, `(pos, neg, dt, c
 derived_pos, derived_neg)`: masks `[N, H, W]` (`[N, H, D]`) of the steps of a row, oldest first, `dt` an integer array
 `[N, H]` (the time of each step relative to the state, as the caller defines it; the encoder only stores it) and
 `count` an integer array `[N]` with the valid steps of each row, a prefix of its `H` (`None`: all `H`). Steps past a
-row's count are padding and never read. `mymyr.encoding.history_masks(encoder, steps, task_ids=None)` builds the
-arrays from lists of `(dt, literals)`.
+row's count are padding and never read. `mymyr.encoding.history_masks(source, steps, task_ids=None)` builds the
+arrays from lists of `(dt, literals)`; a literal of fixed truth says nothing about a step and raises `ValueError`.
 
 Of a row's valid steps only the **newest** `history_max_steps` are encoded (`None`, the default: all of them). Each
 encoded step is one **history step entity** (after the action entities), in step order, oldest first; the batch lists
