@@ -48,8 +48,9 @@ inline constexpr u32 k_max_depth = rl::dev::k_max_matcher_depth;
 /// bitsets up to (12, 16, 24 and 32 words: up to 2048 objects). Tasks with more objects run on the CPU.
 inline constexpr u32 k_max_ow = 32;
 /// The successor kernels' widest row held whole (words; a local array beyond 4 words). Wider rows take WB = k_wide:
-/// the successor is built k_max_words words at a time. The other device searches (BrFS, IW, A*, state spaces) and the
-/// numeric kernels hold whole rows and take rows of at most k_max_words words.
+/// the successor is built k_max_words words at a time. Classical search arenas round wider rows to whole chunks;
+/// hashing, equality, goals and gathers read their runtime width without a whole-row local array. Numeric kernels
+/// hold whole rows and take rows of at most k_max_words words.
 inline constexpr u32 k_max_words = 64;
 inline constexpr u32 k_wide = 0xFFFFFFFFu;
 /// The successor kernels' row width WB for rows of `words` words over object bitsets of `ow` words: 2, 4, 16,

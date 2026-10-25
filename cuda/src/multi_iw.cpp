@@ -7,6 +7,8 @@
 // does nothing and the driver redoes the chunk at the reported sizes. The host reads the chunk's control block (a few
 // u32) once, after the last kernel; the last chunk of a layer also ends the layer (segments, shuffles, exhaustion).
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/multi_iw.hpp"
 
 #include "goal_program.hpp"
@@ -39,15 +41,25 @@ double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std
 
 constexpr u32 k_none = miw::k_none;
 
-/// Row width of the device state rows: fixed buckets of 1, 2, 4, 8, 16, then 32 and 64 words (as the device BrFS).
-u32 bucket(u32 words)
+/// A lazy task can intern enough atoms to require smaller novelty-table groups. The driver retries the group
+/// from its original starts and seeds; no partial result is exposed.
+struct Regroup
 {
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device IW: the states grew wider than " + std::to_string(lifted::k_max_words) +
-                                    " words (the device kernels' limit); use search::iw");
-    return w;
+    u32 searches;
+};
+
+u32 table_group(u32 arity, u32 words, u64 budget)
+{
+    const u64 per = arity ? 8 * miw::table_words(arity, std::max(words, 1u)) : 8;
+    if (arity && per > budget)
+        throw std::invalid_argument("mymyr: device IW(" + std::to_string(arity) + "): novelty table requires " +
+                                    std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * words) +
+                                    " atom slots; table_bytes is " + std::to_string(budget));
+    return static_cast<u32>(std::clamp<u64>(budget / per, 1, u64{1} << 24));
 }
+
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(u32 words) { return search_row_words(words); }
 
 /// A grow-only typed device array; ensure(n, keep) preserves the first `keep` elements (growing by half at least:
 /// `exact` allocates n).
@@ -300,6 +312,9 @@ struct DeviceMultiIw::Impl
     DevArray<u32> e_count, e_offset, e_slot;
     DevArray<u64> map_keys;
     DevArray<u32> map_vals;
+    DevArray<miw::TupleKey> wide_keys, sorted_keys;
+    DevArray<u32> wide_candidates, sorted_candidates, wide_owners;
+    DevArray<u8> wide_scratch;
     DevArray<u64> root_slots;
     DevArray<u32> root_owner;
     DevArray<u64> scan_pair, kept_pair;  // (admitted, entries) scans, packed
@@ -473,7 +488,8 @@ struct DeviceMultiIw::Impl
     [[nodiscard]] u64 budget_rows(bool emits) const
     {
         const double cand = static_cast<double>(W) * 8 + 4.0 * L + 40, ucand = static_cast<double>(W) * 8 + 4.0 * L + 8;
-        const double per = est_cand * cand + (o.dedup_parents ? est_ucand * ucand : 0) + (emits ? est_emit * (4 + 4 * 12) : 0);
+        const double per = (W > 64 ? static_cast<double>(W) * 8 : 0) + est_cand * cand +
+                           (o.dedup_parents ? est_ucand * ucand : 0) + (emits ? est_emit * (RW > 64 ? 96 : 4 + 4 * 12) : 0);
         return std::max<u64>(1, static_cast<u64>(static_cast<double>(o.chunk_bytes) / std::max(per, 1.0)));
     }
     /// After a chunk (aborted or not): the estimates from its counts (those of the stages before an abort are exact).
@@ -535,7 +551,7 @@ void DeviceMultiIw::Impl::setup()
     check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
     const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
     const u64 per = std::max<u64>(8, (gen->view_words() + dw) * 8);
-    chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per) : std::max<u64>(8192, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
+    chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per) : std::max<u64>(task->words() > 64 ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
     row_cap = chunk_cap;
     est_cand = est_ucand = est_emit = std::max(o.capacity_per_row, 0.0);
     blk_dev.ensure(ctx, k_blk_device / sizeof(u64) + 1, s);
@@ -655,7 +671,10 @@ void DeviceMultiIw::Impl::grow_table(u32 arity)
     const u32 tw = task->words();
     if (arity == 0 || tw <= RW)
         return;
-    const u64 per = arity == 1 ? tw : u64{64} * tw * tw;
+    const u64 per = miw::table_words(arity, tw);
+    const u32 group = table_group(arity, tw, o.table_bytes);
+    if (B > group)
+        throw Regroup{group};
     DevArray<u64> t;
     t.ensure(ctx, u64{B} * per, s);
     check(miw::launch_table_relayout(table.data(), t.data(), arity, B, RW, tw, s), "launch_table_relayout");
@@ -738,6 +757,8 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     const u32 input_atoms = starts.words - (starts.numeric_words ? starts.numeric_words : slots);
     W = bucket(std::max({task->words(), input_atoms, 1u}) + slots);
     DevArray<u64> numeric_starts;
+    if (slots && W > lifted::k_max_words)
+        throw std::invalid_argument("mymyr: device IW: numeric rows exceed 64 words");
     if (slots)
     {
         auto view = gen->view();
@@ -751,18 +772,33 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         starts = DeviceStarts{converted, W, W, n};
     }
     // group size: the novelty tables of a group fit table_bytes
-    const u64 tw = std::max<u32>(1, task->words());
-    const u64 per = o.max_width >= 2 ? u64{512} * tw * tw : o.max_width == 1 ? 8 * tw : 8;
-    u32 group = static_cast<u32>(std::clamp<u64>(o.table_bytes / std::max<u64>(per, 1), 1, u64{1} << 24));
+    u32 group = table_group(o.max_width, task->words(), o.table_bytes);
     if (o.max_searches)
         group = std::min(group, o.max_searches);
-    for (u32 g0 = 0; g0 < n; g0 += group)
+    for (u32 g0 = 0; g0 < n;)
     {
+        group = std::min(group, table_group(o.max_width, task->words(), o.table_bytes));
         const u32 count = std::min(group, n - g0);
         const DeviceStarts gs{starts.data + static_cast<u64>(g0) * starts.stride, starts.stride, starts.words, count};
-        run_group(gs, g0, count, goals.empty() ? goals : goals.subspan(g0, count), seeds.empty() ? seeds : seeds.subspan(g0, count),
-                  out, host);
-        ++st.groups;
+        try
+        {
+            run_group(gs, g0, count, goals.empty() ? goals : goals.subspan(g0, count), seeds.empty() ? seeds : seeds.subspan(g0, count),
+                      out, host);
+            ++st.groups;
+            g0 += count;
+        }
+        catch (const Regroup& retry)
+        {
+            group = std::min(group, retry.searches);
+            for (u32 i = g0; i < g0 + count; ++i)
+            {
+                out.num_passes[i] = 0;
+                out.status[i] = search::SearchStatus::Exhausted;
+                out.effective_width[i] = 0;
+                out.plan_length[i] = -1;
+                host.plan_at[i] = ~u64{0};
+            }
+        }
     }
     // flatten: goal rows at the final width, plans in search order
     out.words = std::max<u32>(1, task->words());
@@ -1299,8 +1335,13 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
     if (arity >= 1)
     {
         RW = std::max<u32>(1, task->words());
-        const u64 per = arity == 1 ? RW : u64{64} * RW * RW;
+        const u64 per = miw::table_words(arity, RW);
+        const u32 group = table_group(arity, RW, o.table_bytes);
+        if (B > group)
+            throw Regroup{group};
         table.ensure(ctx, u64{B} * per, s);
+        if (arity == 2 && RW > 64)
+            check(cudaMemsetAsync(table.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
         check(miw::launch_table_init(table_view(arity), nodes(), R, s), "launch_table_init");
     }
     if (cpu_goal)
@@ -1429,15 +1470,28 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
             r.x.b.emit_count = r.e.count;
         }
         const u64 slots = std::bit_ceil(std::max<u64>(2 * ecap, 1024));
-        if (map_keys.capacity() < slots)
+        if (RW > 64)
         {
-            // the whole map is empty between chunks: fresh memory is cleared, commit clears what it used
-            map_keys.ensure(ctx, slots, s);
-            map_vals.ensure(ctx, slots, s);
-            check(cudaMemsetAsync(map_keys.data(), 0xFF, map_keys.bytes(), s), "cudaMemsetAsync");
-            check(cudaMemsetAsync(map_vals.data(), 0xFF, map_vals.bytes(), s), "cudaMemsetAsync");
+            r.map.wide = wide_keys.ensure(ctx, ecap, s);
+            r.map.sorted = sorted_keys.ensure(ctx, ecap, s);
+            r.map.candidates = wide_candidates.ensure(ctx, ecap, s);
+            r.map.sorted_candidates = sorted_candidates.ensure(ctx, ecap, s);
+            r.map.vals = wide_owners.ensure(ctx, ecap, s);
+            check(miw::wide_sort_bytes(ecap, r.map.scratch_bytes), "wide_sort_bytes");
+            r.map.scratch = wide_scratch.ensure(ctx, r.map.scratch_bytes, s);
         }
-        r.map = miw::OwnerMap{map_keys.data(), map_vals.data(), slots - 1};
+        else
+        {
+            if (map_keys.capacity() < slots)
+            {
+                // the whole map is empty between chunks: fresh memory is cleared, commit clears what it used
+                map_keys.ensure(ctx, slots, s);
+                map_vals.ensure(ctx, slots, s);
+                check(cudaMemsetAsync(map_keys.data(), 0xFF, map_keys.bytes(), s), "cudaMemsetAsync");
+                check(cudaMemsetAsync(map_vals.data(), 0xFF, map_vals.bytes(), s), "cudaMemsetAsync");
+            }
+            r.map = miw::OwnerMap{map_keys.data(), map_vals.data(), slots - 1};
+        }
     }
     r.root = miw::RootSet{};
     r.root_cap = 0;
@@ -1493,7 +1547,8 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
     k.all(r.e.count, r.e.offset, r.e.slot, r.e.capacity, r.map.keys, r.map.vals, r.map.mask, r.root.slots, r.root.owner,
           r.root_cap, r.cut_scan, r.kept, scan_ws.data(), scan_tiles);
     k.all(sa_u32.data(), sa_u64.data(), sv.rng, sv.goal_pos, sv.goal_neg, sv.goal_words, sv.reached, sv.reached_words,
-          r.t.bits, r.t.arity, r.t.row_words, gen->capture_key());
+          r.t.bits, r.t.arity, r.t.row_words, r.map.wide, r.map.sorted, r.map.candidates,
+          r.map.sorted_candidates, r.map.scratch, r.map.scratch_bytes, gen->capture_key());
     r.key.swap(k.v);
 }
 

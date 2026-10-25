@@ -65,8 +65,27 @@ namespace mymyr::cuda::miw
 inline constexpr u32 k_none = 0xFFFFFFFFu;
 inline constexpr u32 k_dead = 0xFFFFFFFEu;  // an entry of a layer that is never popped (a width-0 duplicate)
 inline constexpr u64 k_empty_key = ~0ull;
-/// Largest atom slot a tuple key holds (states are at most lifted::k_max_words = 64 words).
+/// Compact keys for rows through 64 words: search id followed by two 12-bit atom slots.
 inline constexpr u32 k_key_atom_bits = 12;
+
+/// Wide exact-novelty keys, ordered by (search, atoms): two full 32-bit slots packed as (min, max), and the search
+/// id in the low 32 bits of search. Stable radix sorting makes the first equal key's candidate its exact owner.
+/// Search ids are local to a group; atom slots use the task's row layout, including slots beyond the first chunk.
+struct TupleKey
+{
+    u64 atoms = 0;
+    u64 search = 0;
+};
+
+/// Words per search's novelty table. Wide pair tables pack the lower triangle, including its singleton diagonal;
+/// narrow pair tables retain directly indexed symmetric rows. Padding atoms are always zero in state rows.
+[[nodiscard]] constexpr u64 table_words(u32 arity, u32 words)
+{
+    if (arity < 2)
+        return words;
+    const u64 slots = u64{64} * words;
+    return words <= 64 ? slots * words : ((slots / 2) * (slots + 1) + 63) / 64;
+}
 
 /// Search statuses on the device (the host maps them to search::SearchStatus).
 enum : u32
@@ -282,7 +301,7 @@ struct Candidates
 };
 
 /// The novelty table of the pass: arity 1: [searches, row_words] bits; arity 2: [searches, 64 * row_words, row_words]
-/// (a symmetric bit matrix; the diagonal is the singletons).
+/// for narrow rows, or a packed lower triangle for wide rows (table_words). The diagonal is the singletons.
 struct Table
 {
     u64* bits = nullptr;
@@ -296,7 +315,18 @@ struct OwnerMap
     u64* keys = nullptr;
     u32* vals = nullptr;
     u64 mask = 0;
+    // Wide rows sort full keys. vals[emission index] is the smallest candidate with that key, so the admission and
+    // commit kernels share the compact map's owner contract. All scratch belongs to the captured chunk.
+    TupleKey* wide = nullptr;
+    TupleKey* sorted = nullptr;
+    u32* candidates = nullptr;
+    u32* sorted_candidates = nullptr;
+    void* scratch = nullptr;
+    usize scratch_bytes = 0;
 };
+
+/// Scratch bytes for stable radix sorting of wide keys (no device work).
+cudaError_t wide_sort_bytes(u64 capacity, usize& bytes);
 
 /// Emission bookkeeping: per candidate the offset of its tuples (an exclusive scan of the counts) and the slot of
 /// each emitted tuple.

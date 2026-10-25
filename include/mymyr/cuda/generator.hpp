@@ -122,8 +122,8 @@ public:
     /// bitsets wider than lifted::k_max_ow words, numeric conditions or effects without numeric state values, or
     /// numeric states wider than lifted::k_max_words words.
     [[nodiscard]] static std::string unsupported(const Task& task);
-    /// unsupported(task), or the device searches' limit (BrFS, IW, A*, state spaces: they hold whole state rows):
-    /// states wider than lifted::k_max_words words.
+    /// The device searches' support check: classical rows have runtime width; numeric rows retain unsupported()'s
+    /// whole-row limit.
     [[nodiscard]] static std::string search_unsupported(const Task& task);
 
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }

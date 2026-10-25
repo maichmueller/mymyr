@@ -1,5 +1,7 @@
 // The device layer BrFS (include/mymyr/cuda/brfs.hpp).
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/brfs.hpp"
 
 #include "mymyr/core/bitset.hpp"
@@ -27,15 +29,8 @@ namespace
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 
-/// Row width of the device arena: fixed buckets of 1, 2, 4, 8, 16, then 32 and 64 words.
-u32 bucket(u32 words)
-{
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device BrFS: the states grew wider than " + std::to_string(lifted::k_max_words) +
-                                    " words (the device kernels' limit); use the CPU BrFS");
-    return w;
-}
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(u32 words) { return search_row_words(words); }
 
 constexpr u32 k_no_parent = 0xFFFFFFFFu;
 
@@ -248,7 +243,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     W = bucket(task->words() + task->numeric_slots());
     const u64 budget = std::clamp<u64>(o.max_states, 1, state_set::k_max_states);
     const u64 expected = o.expected_states ? o.expected_states : (o.max_states != ~u64{0} ? budget : 0);
-    const u64 cap0 = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
+    const u64 initial = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
+    const u64 cap0 = W <= 64 ? initial : std::min(initial, std::max<u64>(1, (u64{16} << 20) / (u64{W} * 8)));
     states = std::make_unique<DeviceArena>(ctx, W * 8, cap0, host);  // the mirror only when the CPU reads parents
     nodes = std::make_unique<DeviceArena>(ctx, 8, cap0, false);
     alloc_table(expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * expected + 2)) : u64{1} << 20);
@@ -273,10 +269,10 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
         const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
-        const u64 per = std::max<u64>(8, (gen->view_words() + dw) * 8);
+        const u64 per = std::max<u64>(8, (gen->view_words() + dw + (W > 64 ? W : 0)) * 8);
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per)
-                                 : std::max<u64>({8192, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
+                                 : std::max<u64>({W > 64 ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
     }
     u64 count = 1, lb = 0, le = 1;
     bool stop = false, budget_hit = false;

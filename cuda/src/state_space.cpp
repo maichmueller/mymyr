@@ -1,5 +1,7 @@
 // The device state spaces (include/mymyr/cuda/state_space.hpp).
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/state_space.hpp"
 #include "mymyr/cuda/numeric.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
@@ -124,15 +126,8 @@ u32 bits_for(u64 n)
     return b;
 }
 
-/// Row width of a lazy task's rows (fixed buckets; lazy slots widen by relayout).
-u32 bucket(u32 words)
-{
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device state space: the states grew wider than " +
-                                    std::to_string(lifted::k_max_words) + " words (the device kernels' limit)");
-    return w;
-}
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(u32 words) { return search_row_words(words); }
 
 u32 max_arity(const Task& task)
 {
@@ -932,7 +927,7 @@ private:
         admit_more();
         const auto tg = Clock::now();
         u64 b = 0;
-        u32 chunk_cap = chunk_capacity();
+        u32 chunk_cap = chunk_capacity(w.W);
         for (;;)
         {
             if (b == w.count)
@@ -1017,7 +1012,7 @@ private:
     }
 
     /// Parents per chunk at most: their views fit the budget (as cuda::DeviceBrfs).
-    [[nodiscard]] u32 chunk_capacity() const
+    [[nodiscard]] u32 chunk_capacity(u32 words) const
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, m_ctx->device()), "cudaDeviceGetAttribute");
@@ -1030,10 +1025,10 @@ private:
             const u64 dw = m_gen->device_axioms() ? std::max<u32>(1, bits::words_for(t.atoms().max_derived_slots())) : 0;
             vw = m_gen->view_words() + dw;
         }
-        const u64 per = std::max<u64>(8, vw * 8);
+        const u64 per = std::max<u64>(8, (vw + (words > 64 ? words : 0)) * 8);
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         const u64 cap = m_o.view_bytes ? std::max<u64>(1, m_o.view_bytes / per)
-                                       : std::max<u64>({8192, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
+                                       : std::max<u64>({words > 64 ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
         return static_cast<u32>(std::min<u64>(cap, 0x7FFFFFFFull));
     }
 

@@ -7,6 +7,8 @@
 // goals, a heuristic that may meet states outside its grounding, lazy slots that met new atoms, a chunk past the
 // capacities, a pop window too small) it launches the same kernels with reads between them.
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/astar.hpp"
 
 #include "cost_program_build.hpp"
@@ -52,15 +54,8 @@ DeviceBestFirstResult failed(bool greedy, std::string message)
     return out;
 }
 
-/// Row width of the device state rows: the fixed row-width buckets (as the device BrFS).
-u32 bucket(u32 words)
-{
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device best-first search: the states grew wider than " +
-                                    std::to_string(lifted::k_max_words) + " words (the device kernels' limit); use the CPU search");
-    return w;
-}
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(u32 words) { return search_row_words(words); }
 
 /// A grow-only typed device array; ensure(n, keep) preserves the first `keep` elements.
 template<class T>
@@ -1050,8 +1045,8 @@ DeviceBestFirstResult Driver::run()
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
-        const u64 per = std::max<u64>(8, gen->view_words() * 8);
-        const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(8192, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
+        const u64 per = std::max<u64>(8, (gen->view_words() + (task->words() > 64 ? task->words() : 0)) * 8);
+        const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(task->words() > 64 ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
         B = o.batch;
         C = static_cast<u32>(std::min<u64>(chunk_cap, B));
         K = (B + C - 1) / C;

@@ -60,8 +60,13 @@ The bindings reject goals simplified as impossible because of static literals or
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks.
 Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
-up to 32 words). Successor rows wider than 64 words are built 64 words at a time; BrFS, IW, A*, state spaces and the
-numeric kernels hold whole rows and take states of at most 64 words. A `DeviceExpander` expands an instance the
+up to 32 words). Classical BrFS, IW, rollouts, A*/GBFS and state spaces accept rows of any width that fits memory.
+Arenas keep power-of-two widths through 64 words and round wider rows to 64-word chunks; successors are built
+one chunk at a time. Numeric kernels hold whole rows and take states of at most 64 words.
+IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
+into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes`; a table that cannot
+fit even one search raises `ValueError` with its required byte size and the budget. Wide exact novelty uses
+full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
 host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only
 those instances take the host and the others stay on the device, so the environments' general path serves every

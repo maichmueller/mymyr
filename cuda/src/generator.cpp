@@ -192,9 +192,6 @@ std::string ChunkGenerator::search_unsupported(const Task& task)
 {
     if (std::string why = unsupported(task); !why.empty())
         return why;
-    if (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words)
-        return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device searches take at most " +
-               std::to_string(lifted::k_max_words) + ")";
     return {};
 }
 
