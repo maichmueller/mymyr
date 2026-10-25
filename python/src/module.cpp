@@ -21,6 +21,9 @@
 #include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/hash.hpp"
 #include "mymyr/version.hpp"
+#if defined(MYMYR_HAS_CUDA)
+#include "mymyr/cuda/runtime.hpp"
+#endif
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -110,8 +113,18 @@ NB_MODULE(_core, m)
 {
     m.doc() = "mymyr native core";
     m.attr("__version__") = std::string(mymyr::version());
-    m.def("build_info", [] { return std::string(mymyr::build_info()); },
-          "How the extension was built: 'mymyr <version> (<build type>, <compiler>)'.");
+    m.def(
+        "build_info",
+        [] {
+            std::string info(mymyr::build_info());
+#if defined(MYMYR_HAS_CUDA)
+            info.insert(info.size() - 1, std::string(", ") + std::string(mymyr::cuda::build_info()));
+#endif
+            return info;
+        },
+        "How the extension was built: 'mymyr <version> (<build type>, <compiler>)'; a CUDA build adds its toolkit "
+        "and GPU code inside the parentheses: ', CUDA <nvcc version>, sm_89 sm_90' (SASS as sm_<n>, PTX as "
+        "compute_<n>).");
     m.def("free_threaded_build", [] {
 #ifdef Py_GIL_DISABLED
         return true;
