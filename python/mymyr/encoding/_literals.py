@@ -25,26 +25,43 @@ import numpy as np
 from mymyr._core._encoding import LiteralKind, _literal_masks, _literal_slots, _named_literal_masks
 
 
-class _Masks(Sequence):
-    __slots__ = ("pos", "neg", "derived_pos", "derived_neg", "unsatisfiable")
+class _Masks(tuple):
+    def __new__(cls, pos, neg, derived_pos, derived_neg, unsatisfiable):
+        masks = (pos, neg) if derived_pos is None else (pos, neg, derived_pos, derived_neg)
+        result = super().__new__(cls, masks)
+        result._unsatisfiable = unsatisfiable.view(np.bool_) if isinstance(unsatisfiable, np.ndarray) else unsatisfiable
+        return result
 
-    def __init__(self, pos, neg, derived_pos, derived_neg, unsatisfiable):
-        self.pos = pos
-        self.neg = neg
-        self.derived_pos = derived_pos
-        self.derived_neg = derived_neg
-        self.unsatisfiable = unsatisfiable.view(np.bool_)
+    @property
+    def pos(self):
+        return self[0]
 
-    def _masks(self):
-        if self.derived_pos is None:
-            return (self.pos, self.neg)
-        return (self.pos, self.neg, self.derived_pos, self.derived_neg)
+    @property
+    def neg(self):
+        return self[1]
 
-    def __len__(self):
-        return len(self._masks())
+    @property
+    def derived_pos(self):
+        return self[2] if len(self) == 4 else None
 
-    def __getitem__(self, index):
-        return self._masks()[index]
+    @property
+    def derived_neg(self):
+        return self[3] if len(self) == 4 else None
+
+    @property
+    def unsatisfiable(self):
+        return self._unsatisfiable
+
+    def __getnewargs__(self):
+        return self.pos, self.neg, self.derived_pos, self.derived_neg, self.unsatisfiable
+
+    def tree_flatten(self):
+        return (*self, self.unsatisfiable), None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        pos, neg, *derived, unsatisfiable = children
+        return cls(pos, neg, *(derived or (None, None)), unsatisfiable)
 
     def __repr__(self):
         derived = "" if self.derived_pos is None else f", derived {self.derived_pos.shape}"
@@ -56,7 +73,8 @@ class GoalMasks(_Masks):
     """The goals of N rows as masks, what ``encode(goals=...)`` takes: ``pos`` and ``neg`` uint64 ``[N, W]`` over the
     fluent slots, ``derived_pos`` and ``derived_neg`` uint64 ``[N, D]`` over the derived slots (None for a table
     without derived words), and ``unsatisfiable`` bool ``[N]``: the rows whose goal has a literal of fixed truth that
-    fails (``fixed='decide'``). It is the sequence ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)``.
+    fails (``fixed='decide'``). It is a tuple ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)`` with read-only
+    attributes. Importing ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``.
 
     A row goal has no constant part: a literal of fixed truth is in none of the masks, and ``goal_complete`` of a row
     goal is 1, as for the instance's goal, whose static literals are fixed too. The goal relations of such a row list
@@ -67,7 +85,8 @@ class LayerMasks(_Masks):
     """The subgoal layers of N rows as masks, what ``encode(subgoals=...)`` takes: ``pos`` and ``neg`` uint64
     ``[N, L, W]``, ``derived_pos`` and ``derived_neg`` ``[N, L, D]`` (None for a table without derived words), and
     ``unsatisfiable`` bool ``[N, L]``: the layers with a literal of fixed truth that fails (``fixed='decide'``). It is
-    the sequence ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)``."""
+    a tuple ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)`` with read-only attributes. Importing
+    ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``."""
 
 
 def _check_sequence(value, what):

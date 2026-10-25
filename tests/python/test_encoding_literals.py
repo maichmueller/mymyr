@@ -2,6 +2,8 @@
 history_masks from lists of literals and literal_masks from arrays, with the literals of fixed truth decided or
 refused, on single tasks and on tables of several instances, and the masks accepted by encode."""
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -178,6 +180,38 @@ def test_derived_literals_set_the_derived_masks():
     for got, want in zip(masks, expected):
         assert np.array_equal(got, want)
     assert masks.derived_pos[0].any() and masks.derived_neg[1].any() and not masks.unsatisfiable.any()
+
+
+@pytest.mark.parametrize("helper", [encoding.goal_masks, encoding.subgoal_masks, encoding.history_masks])
+def test_problem_local_derived_literals_have_slots_but_no_encoding_relation(helper):
+    task = goals_task("duplicate")
+    atom = task.literal("(axiom_0)").atom
+    assert atom.kind == "derived" and atom.derived_slot is not None
+    rows = [["(axiom_0)"]] if helper is encoding.goal_masks else (
+        [[["(axiom_0)"]]] if helper is encoding.subgoal_masks else [[(0, ["(axiom_0)"])]])
+    with pytest.raises(ValueError, match="derived predicate of its problem alone.*no relation"):
+        helper(task, rows)
+
+
+@pytest.mark.parametrize("name", ["gripper__prob05", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("layered", [False, True])
+@pytest.mark.parametrize("protocol", [0, pickle.HIGHEST_PROTOCOL])
+def test_mask_tuples_preserve_their_arrays_and_flags_when_pickled(name, layered, protocol):
+    task = text_task(name)
+    literal = str(next(iter(task.initial_state.atoms())))
+    masks = (encoding.subgoal_masks(task, [[[literal]], []]) if layered else
+             encoding.goal_masks(task, [[literal], []]))
+    masks.unsatisfiable[0] = True
+    assert isinstance(masks, tuple)
+    assert masks.pos is masks[0] and masks.neg is masks[1] and masks[:] == tuple(masks)
+    restored = pickle.loads(pickle.dumps(masks, protocol=protocol))
+    assert type(restored) is type(masks)
+    for got, want in zip((*restored, restored.unsatisfiable), (*masks, masks.unsatisfiable), strict=True):
+        np.testing.assert_array_equal(got, want)
+    assert restored.unsatisfiable.dtype == np.bool_
+    for name in ("pos", "neg", "derived_pos", "derived_neg", "unsatisfiable"):
+        with pytest.raises(AttributeError):
+            setattr(masks, name, None)
 
 
 def test_goal_masks_equal_the_first_subgoal_layer_and_the_slots_of_task_literal():

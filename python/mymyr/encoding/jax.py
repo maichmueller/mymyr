@@ -41,9 +41,13 @@ import numpy as np
 
 from mymyr._core import _encoding_jax
 from mymyr.encoding import _device
+from mymyr.encoding._literals import GoalMasks, LayerMasks
 from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
+
+jax.tree_util.register_pytree_node_class(GoalMasks)
+jax.tree_util.register_pytree_node_class(LayerMasks)
 
 _ARRAYS = tuple(name for name in _device._ARRAYS
                 if name not in (*_device._SIMPLE_ARRAYS, "numeric_values", *_device._STATIC_ARRAYS))

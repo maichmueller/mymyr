@@ -11,6 +11,7 @@ import pytest
 from mymyr import encoding, rl
 from conftest import text_task
 from test_encoding_device_actions import gpu, tensor, toggle_tasks
+from test_encoding_suites import literal_mask_inputs
 from test_rl_table import sets  # noqa: F401
 from test_rl_task_suite import suite_batch, suite_of
 from test_rl_torch_obs import assert_same
@@ -167,6 +168,24 @@ def test_suite_splits_shared_and_per_row_masks_and_layers(sets, layout, actions)
     actual = encoder.encode(tensor(states, device), tensor(ids, device), actions=actions, capacities=caps,
                             **{k: upload(v) for k, v in extra.items()})
     compare(actual, expected, n)
+
+
+@pytest.mark.parametrize("name", ["gripper__prob05", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_device_suite_accepts_literal_mask_objects(name, layout, shared, capacity):
+    device = gpu()
+    encoder, states, ids, goals, layers = literal_mask_inputs(name, layout, shared)
+    expected = encoder.encode(states, ids, goals=tuple(goals), subgoals=tuple(layers))
+
+    def upload(masks):
+        arrays = (masks.pos, masks.neg, masks.derived_pos, masks.derived_neg)
+        return type(masks)(*(None if x is None else tensor(x, device) for x in arrays), masks.unsatisfiable)
+
+    actual = encoder.encode(tensor(states, device), tensor(ids, device), goals=upload(goals), subgoals=upload(layers),
+                            capacities=capacities(encoder, len(ids)) if capacity else None)
+    compare(actual, expected, len(ids))
 
 
 def test_split_schema_action_expansion_fits_exact_entity_capacities():

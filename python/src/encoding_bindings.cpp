@@ -2684,7 +2684,8 @@ MasksTuple named_literal_masks(LiteralSourceArg source, nb::typed<nb::list, ann:
         const u32 table_predicate = table.instance(instance).pred_map.at(literal.atom.predicate.v);
         if (table_predicate >= table.num_domain_predicates())
             throw nb::value_error(("mymyr: encoding: the literal " + nb::cast<std::string>(nb::repr(item)) +
-                                   " is over a predicate of its problem alone: it has no slot")
+                                   " is over a derived predicate of its problem alone, which the encoding has no "
+                                   "relation for")
                                       .c_str());
         predicates.push_back(static_cast<i32>(table_predicate));
         for (u32 k = 0; k < width; ++k)
