@@ -446,6 +446,13 @@ def test_repeated_literal_schema_records_keep_the_policy(policy, levels):
     record["options"].pop("repeated_literals")
     if policy == "every":
         assert encoding.schema_from_dict(record, task).schema_fingerprint == schema.schema_fingerprint
+        without_placement_fingerprints = {0: "ceee4f842eb5101f", 3: "603a9506fe4b6245"}
+        record["fingerprint"] = without_placement_fingerprints[levels]
+        if levels == 0:
+            assert encoding.schema_from_dict(record, task).schema_fingerprint == schema.schema_fingerprint
+        else:
+            with pytest.raises(ValueError, match="fingerprint"):
+                encoding.schema_from_dict(record, task)
     else:
         with pytest.raises(ValueError, match="fingerprint"):
             encoding.schema_from_dict(record, task)
