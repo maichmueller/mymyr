@@ -57,7 +57,7 @@ def names_of(encoder, batch, role):
     return out
 
 
-@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
 def test_repeated_layer_literals_follow_the_placement_policy(policy):
     task = text_task(BLOCKS)
     state = task.initial_state
@@ -65,12 +65,13 @@ def test_repeated_layer_literals_follow_the_placement_policy(policy):
     goal = {(x.positive, x.predicate.name, tuple(task.objects[o.index] for o in x.objects)) for x in task.encoding_goal}
     free = [a for a in atoms if (True, a.predicate.name, tuple(o.name for o in a.objects)) not in goal]
     a, b, c = free[:3]
-    encoder = make(task, history=False, target_sources=("goal", "subgoal"), repeated_literals=policy)
+    encoder = make(task, history=False, target_sources=("goal", "subgoal"),
+                   **({"repeated_literals": policy} if policy is not None else {}))
     layers = [[[literal(a), literal(b)], [literal(b), literal(c), literal(a, False)]]]
     batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, layers))
     first = {f"{signed(x)}[sg]" for x in (a, b)}
     second = {f"{signed(c)}[ssg]", f"[-]{literal(a)}[ssg]"}
-    if policy == "every":
+    if policy in (None, "every"):
         second.add(f"{signed(b)}[ssg]")
     elif policy == "highest":
         first.remove(f"{signed(b)}[sg]")
@@ -78,13 +79,14 @@ def test_repeated_layer_literals_follow_the_placement_policy(policy):
     assert sorted(names_of(encoder, batch, SUBGOAL_ROLE)[0]) == sorted(first | second)
 
 
-@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
 def test_a_goal_literal_in_a_layer_follows_the_placement_policy(policy):
     task = text_task(BLOCKS)
     state = task.initial_state
     goal_atom = next(x for x in task.encoding_goal if x.positive)
     name = literal(goal_atom)
-    encoder = make(task, history=False, target_sources=("goal", "subgoal"), repeated_literals=policy)
+    encoder = make(task, history=False, target_sources=("goal", "subgoal"),
+                   **({"repeated_literals": policy} if policy is not None else {}))
     other = next(a for a in state.atoms() if literal(a) != name)
     layers = [[[name, literal(other)]]]
     batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, layers))
@@ -273,10 +275,8 @@ def test_a_table_of_several_instances_needs_task_ids_for_its_masks():
     layers = [[[literal(a) for a in s.atoms()]] for s in states]
     batch = encoder.encode(states, task_ids=ids, subgoals=encoding.subgoal_masks(encoder, layers, task_ids=ids))
     for graph, state in enumerate(states):
-        goal = {(x.positive, x.predicate.name, tuple(tasks[graph].objects[o.index] for o in x.objects))
-                for x in tasks[graph].encoding_goal}
         held = {(True, a.predicate.name, tuple(o.name for o in a.objects)) for a in state.atoms()}
-        assert len(names_of(encoder, batch, SUBGOAL_ROLE)[graph]) == len(held - goal) > 0
+        assert len(names_of(encoder, batch, SUBGOAL_ROLE)[graph]) == len(held) > 0
 
 
 def test_inputs_that_do_not_fit_the_encoder_are_refused():
@@ -410,6 +410,7 @@ def test_repeated_literal_options_are_reported_and_valid_without_layers(policy):
                 encoding.FlatHorizonEncoder, encoding.FlatRootedHorizonEncoder,
                 encoding.FlatTransitionEncoder, encoding.FlatTransitionEffectsEncoder):
         kwargs = {"horizon_mode": "full"} if cls is encoding.FlatHorizonEncoder else {}
+        assert cls(task, **kwargs).options["repeated_literals"] == "every"
         assert cls(task, repeated_literals=policy, **kwargs).options["repeated_literals"] == policy
     with pytest.raises(ValueError, match="repeated_literals"):
         encoding.FlatRelationEncoder(task, repeated_literals="invalid")

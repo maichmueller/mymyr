@@ -58,7 +58,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 |---|---|---|---|
 | `goal_derivations` | a collection of `'plain'`, `'satisfied'`, `'unsatisfied'`, `'added_satisfied'`, `'added_unsatisfied'` | `('plain', 'satisfied')` | which [goal relations](#goals) a predicate has |
 | `max_goal_level` | 0 to 3 | 0 | the [subgoal](#subgoals) levels beyond the goal |
-| `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"lowest"` | placement of literals listed at several goal levels |
+| `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"every"` | placement of literals listed at several goal levels |
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
 | `include_derived` | bool | `True` | the state relations of the derived predicates |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
@@ -130,7 +130,8 @@ instances of a table, so tables over one domain give the same relation ids to th
   catalog lists only relations a graph can have tuples in.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, `numeric_dtype` where values are stored,
-  history and `history_max_steps`, horizon mode and root policy), `statics='shared'` (the repeated form adds nothing to
+  history and `history_max_steps`, horizon mode and root policy), `repeated_literals` (always with subgoal relations,
+  otherwise only for a nondefault value), `statics='shared'` (the repeated form adds nothing to
   the hash), the outputs and, with `constant_labels`, the names of the constants, and which arrays are omitted:
   `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit entity arrays); an encoding that
   stores every array has one fingerprint however it was asked for. It does not depend on declaration order, on
@@ -421,8 +422,8 @@ subgoal layers; the sign is part of the literal, so positive and negative litera
 
 | Value | Placement | Literal in the goal and layers 0 and 2 |
 |---|---|---|
-| `"every"` | each level holds exactly its input; the goal holds its whole goal | levels 0, 1 and 3 |
-| `"lowest"` (default) | once, at the lowest level that lists it | level 0 |
+| `"every"` (default) | each level holds exactly its input; the goal holds its whole goal | levels 0, 1 and 3 |
+| `"lowest"` | once, at the lowest level that lists it | level 0 |
 | `"highest"` | once, at the highest level that lists it; lower levels lose it | level 3 |
 
 For a literal in layers 0 and 2 only, `"every"` puts it at levels 1 and 3, `"lowest"` at level 1, and `"highest"`

@@ -427,7 +427,7 @@ Literal on(const char* p, bool positive, Tuple objects) { return {p, positive, s
 
 // blocks smedium: the objects are b a c = 0 1 2; the state is (clear a) (on a b) (on b c) (ontable c) (handempty); the
 // goal is (on c b) (on b a)
-TEST(EncoderLayers, SubgoalLevelsAreTheLayersMinusTheGoalAndTheLowerLevels)
+TEST(EncoderLayers, SubgoalLevelsKeepEachLayer)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
     const test::Rows rows = test::random_walk(*table, 0, 1, 1);  // the initial state
@@ -451,30 +451,29 @@ TEST(EncoderLayers, SubgoalLevelsAreTheLayersMinusTheGoalAndTheLowerLevels)
             t.erase(t.begin());
         return tuples;
     };
-    // the goal: (on c b) and (on b a), as in the layers (on c b) is the goal's: it is dropped from level 1
     EXPECT_EQ(bare(relation("[+]on[g]")), (std::vector<Tuple>{{0, 1}, {2, 0}}));
-    EXPECT_EQ(bare(relation("[+]on[sg]")), (std::vector<Tuple>{{1, 0}}));
+    EXPECT_EQ(bare(relation("[+]on[sg]")), (std::vector<Tuple>{{1, 0}, {2, 0}}));
     EXPECT_EQ(bare(relation("[+]clear[sg]")), (std::vector<Tuple>{{1}}));
     EXPECT_EQ(bare(relation("[-]clear[sg]")), (std::vector<Tuple>{{0}}));
     EXPECT_EQ(bare(relation("[-]on[sg]")), (std::vector<Tuple>{{0, 1}}));
-    // level 2: (on a b), (clear a) and (not (clear b)) are in level 1 already; (on b a) is the goal's
-    EXPECT_EQ(bare(relation("[+]on[ssg]")), (std::vector<Tuple>{{0, 2}}));
+    EXPECT_EQ(bare(relation("[+]on[ssg]")), (std::vector<Tuple>{{0, 1}, {0, 2}, {1, 0}}));
     EXPECT_EQ(bare(relation("[+]ontable[ssg]")), (std::vector<Tuple>{{2}}));
-    EXPECT_TRUE(relation("[+]clear[ssg]").empty());
-    EXPECT_TRUE(relation("[-]clear[ssg]").empty());
+    EXPECT_EQ(bare(relation("[+]clear[ssg]")), (std::vector<Tuple>{{1}}));
+    EXPECT_EQ(bare(relation("[-]clear[ssg]")), (std::vector<Tuple>{{0}}));
     // (on a b), (clear a), (on b c), (ontable c) hold in the state; (not (clear b)) and (not (on b a)) hold; (on c b)
     // and (on b a) do not
-    EXPECT_EQ(relation("[+]on[sg][sat]"), bare(relation("[+]on[sg]")));
-    EXPECT_TRUE(relation("[+]on[sg][unsat]").empty());
+    EXPECT_EQ(relation("[+]on[sg][sat]"), (std::vector<Tuple>{{1, 0}}));
+    EXPECT_EQ(relation("[+]on[sg][unsat]"), (std::vector<Tuple>{{2, 0}}));
     EXPECT_EQ(relation("[-]on[sg][sat]"), bare(relation("[-]on[sg]")));
     EXPECT_EQ(relation("[-]clear[sg][sat]"), bare(relation("[-]clear[sg]")));
-    EXPECT_EQ(relation("[+]on[ssg][sat]"), bare(relation("[+]on[ssg]")));
+    EXPECT_EQ(relation("[+]on[ssg][sat]"), (std::vector<Tuple>{{0, 2}, {1, 0}}));
+    EXPECT_EQ(relation("[+]on[ssg][unsat]"), (std::vector<Tuple>{{0, 1}}));
     // 3 objects, the auxiliary entity ((handempty) holds in the state), the goal entities 2, the subgoal entities:
-    // level 1 has 4 tuples, level 2 has 2
-    EXPECT_EQ(g.role.size(), 3u + 1u + 2u + 6u);
-    EXPECT_EQ(std::count(g.role.begin(), g.role.end(), 3), 6);
+    // level 1 has 5 tuples, level 2 has 6
+    EXPECT_EQ(g.role.size(), 3u + 1u + 2u + 11u);
+    EXPECT_EQ(std::count(g.role.begin(), g.role.end(), 3), 11);
     // the subgoal entities follow the goal entities, in the order of their relations (sorted by name)
-    EXPECT_EQ(g.target_group, (std::vector<i64>{0, 0, 1, 1, 1, 1, 1, 1}));
+    EXPECT_EQ(g.target_group, (std::vector<i64>{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
     for (u64 k = 0; k < g.target_entity.size(); ++k)
         EXPECT_EQ(g.target_entity[k], 4 + static_cast<i64>(k));
 }

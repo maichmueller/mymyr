@@ -286,7 +286,7 @@ def test_deep_torch_op_compiles_and_replays_with_cousins(layout, index):
         rt.unregister(handle)
 
 
-@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
 @pytest.mark.parametrize("mode", ["full", "delta", "action"])
 @pytest.mark.parametrize("root", ["include", "exclude", "encode_only"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -301,8 +301,9 @@ def test_subgoal_placement_matches_host(policy, mode, root, layout):
     layers[:, 0] |= rows
     layers[:, 2] |= rows
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode=mode, root_policy=root, layout=layout,
-        max_goal_level=3, repeated_literals=policy, goal_derivations=("plain", "satisfied", "unsatisfied", *ADDED)
-        if mode == "delta" else ("plain", "satisfied", "unsatisfied"))
+        max_goal_level=3, goal_derivations=("plain", "satisfied", "unsatisfied", *ADDED)
+        if mode == "delta" else ("plain", "satisfied", "unsatisfied"),
+        **({"repeated_literals": policy} if policy is not None else {}))
     host = encoder.encode(view, subgoals=(layers, negative))
     inputs = upload(view, device)
     kwargs = dict(subgoals=(tensor(layers, device), tensor(negative, device)))

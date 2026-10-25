@@ -394,7 +394,7 @@ def test_the_history_of_a_record_keeps_only_its_newest_steps():
     assert {m.kind for m in compare(expected, older, context)} >= {"entity"}
 
 
-def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
+def test_a_goal_literal_that_a_layer_lists_is_expected_once_at_each_level():
     expected, actual, context = goal_case("C4_L1", "s2", "f01")
     assert "repeated_literal" in needed_differences(expected, actual, context)
     assert compare(expected, actual, context) == []
@@ -410,12 +410,14 @@ def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
     twice = copy(actual)
     twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
     assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+    subgoal = ("subgoal", entity.replace("[g]", "[sg]"))
+    assert subgoal in actual.entities
     level = copy(actual)
-    level.entities.append(("subgoal", entity.replace("[g]", "[sg]")))
+    level.entities.remove(subgoal)
     assert {m.kind for m in compare(expected, level, context)} == {"entity"}
 
 
-def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
+def test_a_literal_in_two_layers_is_expected_once_in_each_layer():
     expected, actual, context = goal_case("C4_L2", "s3", "f09")
     assert "repeated_literal" in needed_differences(expected, actual, context)
     assert compare(expected, actual, context) == []
@@ -423,7 +425,7 @@ def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
                     key=repr)
     assert shared and not set(shared) & goal_literals(context)
     name = literal_text(*shared[0])
-    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") not in actual.entities
+    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") in actual.entities
     higher = copy(actual)
     higher.entities[higher.entities.index(("subgoal", f"{name}[sg]"))] = ("subgoal", f"{name}[ssg]")
     assert {m.kind for m in compare(expected, higher, context)} == {"entity"}
@@ -903,17 +905,17 @@ def test_the_relations_no_graph_fills_are_excused_only_while_empty_and_missing()
     assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
 
 
-def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horizon():
+def test_a_literal_in_two_levels_is_expected_once_at_each_level_of_a_horizon():
     expected, actual, context = horizon_case("C7T", "f01", "s2")
     assert ("target:0", "c", "b") in actual.tuples["[+]on[g]"]
-    assert "[+]on[sg]" not in actual.tuples
+    assert ("target:0", "c", "b") in actual.tuples["[+]on[sg]"]
     assert "repeated_literal_horizon" in needed_differences(expected, actual, context)
     lost = copy(actual)
     lost.tuples["[+]on[g]"] = [t for t in actual.tuples["[+]on[g]"] if t != ("target:0", "c", "b")]
     assert any(m.where == "[+]on[g]" for m in compare(expected, lost, context))
-    moved = copy(actual)
-    moved.tuples["[+]on[sg]"] = [("target:0", "c", "b")]
-    assert any(m.kind == "tuple" for m in compare(expected, moved, context))
+    twice = copy(actual)
+    twice.tuples["[+]on[sg]"] = actual.tuples["[+]on[sg]"] + [("target:0", "c", "b")]
+    assert any(m.kind == "tuple" for m in compare(expected, twice, context))
 
 
 def test_the_edge_arrays_give_the_action_and_parent_tuples_whatever_the_order_and_multiplicity_of_the_edges():

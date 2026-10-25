@@ -13,5 +13,5 @@ enum class RepeatedLiterals : u8
     Highest,
 };
 
-inline constexpr RepeatedLiterals k_default_repeated_literals = RepeatedLiterals::Lowest;
+inline constexpr RepeatedLiterals k_default_repeated_literals = RepeatedLiterals::Every;
 }
