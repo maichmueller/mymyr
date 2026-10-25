@@ -141,15 +141,17 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingGoals>
 {
     static constexpr auto Name = const_name(
-        "mymyr.encoding.GoalMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
-        "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+        "mymyr._typing.GoalMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | "
+        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, "
+        "mymyr._typing.SupportsDLPack]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingSubgoals>
 {
     static constexpr auto Name = const_name(
-        "mymyr.encoding.LayerMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
-        "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+        "mymyr._typing.LayerMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | "
+        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, "
+        "mymyr._typing.SupportsDLPack]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingHistory>
@@ -2549,9 +2551,10 @@ LiteralSource literal_source(nb::handle source)
     if (encoder)
         return {encoder->reference, encoder->encoder->context_ptr()};
     if (!nb::isinstance<PyTable>(source) && !nb::isinstance<PyTask>(source) && !nb::isinstance<PyHandle>(source))
-        throw nb::type_error(("mymyr: encoding: expected an encoder, a mymyr.rl.TaskTable, a Task or a TaskHandle, not " +
-                              nb::cast<std::string>(nb::type_name(source.type())))
-                                 .c_str());
+        throw nb::type_error(
+            ("mymyr: encoding: expected an encoder, a mymyr.rl.TaskTable, a Task or a TaskHandle, not " +
+             nb::cast<std::string>(nb::type_name(source.type())))
+                .c_str());
     TableRef reference = table_of(source);
     std::shared_ptr<const void> context;
     {

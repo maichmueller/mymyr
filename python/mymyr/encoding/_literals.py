@@ -11,8 +11,8 @@ the positive or negative mask of its row (and layer or step); an atom of a stati
 or in none (``STATIC_TRUE``, ``STATIC_FALSE``); or an atom of a fluent or derived predicate without a slot, which holds
 in no state (``UNREACHABLE``). The last three are literals of fixed truth: no state changes them, and the masks have no
 bit for them. ``fixed`` says what to do with them: ``'decide'`` leaves out one that holds and marks its row (or layer)
-unsatisfiable when it fails, ``'raise'`` raises ValueError. A literal with variables, an unknown name or an id out of
-range raises ValueError.
+unsatisfiable when it fails, ``'raise'`` raises ValueError. A literal with variables or an id out of range raises
+ValueError, an unknown name KeyError (as ``Task.literal``).
 
 The source of every helper is an encoder (its table), a ``mymyr.rl.TaskTable`` or a Task: a table or task uses an
 encoding context of the default options, made once per table or task (the slots do not depend on the options).

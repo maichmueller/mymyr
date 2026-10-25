@@ -173,7 +173,7 @@ struct Owner
 /// A ground literal given as anything Task.literal takes ('(on a b)', '(not (on a b))', ('on', 'a', 'b'), a GroundAtom
 /// or GroundLiteral of this task, ...), in the ids of `core`'s task. Names are looked up in this task, so a literal
 /// written by name for another parse of the same problem resolves here too. Raises ValueError for a literal with
-/// variables, an unknown name or a wrong arity.
+/// variables or a wrong arity, KeyError for an unknown name.
 [[nodiscard]] GroundLiteral ground_literal_of(PyTaskCore& core, nb::handle literal);
 
 [[nodiscard]] Arg<PyState> make_state(const Owner& o, State&& s);

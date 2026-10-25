@@ -359,7 +359,8 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
             if (kind[ip] == rl::k_pred_static)
             {
                 r[detail::k_literal_predicate_kind] = detail::k_literal_static_predicate;
-                std::tie(r[detail::k_literal_static_begin], r[detail::k_literal_static_end]) = static_rows_of(ip, logical);
+                std::tie(r[detail::k_literal_static_begin], r[detail::k_literal_static_end]) =
+                    static_rows_of(ip, logical);
             }
             else if (kind[ip] == rl::k_pred_derived)
             {

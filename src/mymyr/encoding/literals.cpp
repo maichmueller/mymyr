@@ -111,7 +111,8 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
                                         : "mymyr: encoding: task_ids must have one entry per row");
     for (const i32 instance : placement.instances)
         if (instance < 0 || static_cast<u32>(instance) >= table.size())
-            throw std::invalid_argument("mymyr: encoding: task_ids must be in [0, " + std::to_string(table.size()) + ")");
+            throw std::invalid_argument("mymyr: encoding: task_ids must be in [0, " + std::to_string(table.size()) +
+                                        ")");
     if (placement.num_layers == 0 && n > 0)
         throw std::invalid_argument("mymyr: encoding: literals need at least one layer");
 
@@ -150,7 +151,8 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
         case LiteralKind::Derived:
         {
             const bool derived = s.kind == LiteralKind::Derived;
-            std::vector<u64>& mask = derived ? (positive ? out.derived_pos : out.derived_neg) : (positive ? out.pos : out.neg);
+            std::vector<u64>& mask =
+                derived ? (positive ? out.derived_pos : out.derived_neg) : (positive ? out.pos : out.neg);
             mask[cell * (derived ? out.derived_words : out.words) + (s.slot >> 6)] |= u64{1} << (s.slot & 63u);
             break;
         }

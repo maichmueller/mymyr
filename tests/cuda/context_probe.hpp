@@ -4,18 +4,20 @@
 // equal. A test kernel for the views of cuda/encoding.hpp, not an encoder.
 
 #include "mymyr/encoding/detail/lanes.hpp"
+#include "mymyr/encoding/detail/literals.hpp"
 
 #include <cuda_runtime_api.h>
 
 namespace mymyr::test
 {
-inline constexpr u32 k_probe_width = 12;
+inline constexpr u32 k_probe_width = 13;
 
 MYMYR_HD u64 probe_mix(u64 h, u64 v) { return (h ^ v) * 0x100000001b3ull; }
 
 /// out[0..6]: objects, words, fluent slots, derived words, derived slots, cells, encoding fingerprint; out[7..10]:
 /// hashes of the instance's cells, fluent slot rows, derived slot rows and static rows; out[11]: relations and the
-/// widest arity.
+/// widest arity; out[12]: a hash of the instance's literal section and of the resolution (resolve_literal) of the atom
+/// of every slot and static row it lists.
 MYMYR_HD void probe_instance(const encoding::detail::ContextView& c, u32 instance, u64* out)
 {
     using namespace encoding::detail;
@@ -49,6 +51,21 @@ MYMYR_HD void probe_instance(const encoding::detail::ContextView& c, u32 instanc
     out[9] = rows(v.derived_args, v.derived_slots);
     out[10] = rows(v.static_args, static_rows);
     out[11] = u64{v.num_relations} << 32 | v.max_arity;
+    u64 literals = 0xcbf29ce484222325ull;
+    for (u32 p = 0; p < c.num_predicates; ++p)
+    {
+        const u32* r = c.literal_ranges + (u64{instance} * c.num_predicates + p) * k_literal_columns;
+        for (u32 k = 0; k < k_literal_columns; ++k)
+            literals = probe_mix(literals, r[k]);
+        const i32* sets[3] = {v.slot_args, v.derived_args, v.static_args};
+        for (u32 set = 0; set < 3; ++set)
+            for (u32 at = r[2 * set]; at < r[2 * set + 1]; ++at)
+            {
+                const LiteralSlot s = resolve_literal(c, instance, p, sets[set] + u64{at} * v.max_arity, v.max_arity);
+                literals = probe_mix(literals, u64{static_cast<u32>(s.kind)} << 32 | s.slot);
+            }
+    }
+    out[12] = literals;
 }
 
 /// One thread per instance: probe_instance(context, i, out + i * k_probe_width). Enqueued on `stream`.

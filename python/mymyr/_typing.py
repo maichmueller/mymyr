@@ -10,7 +10,9 @@ if TYPE_CHECKING:
     from mymyr import State
     from mymyr.encoding import DeviceFlatBatch as DeviceFlatBatch
     from mymyr.encoding import DeviceFlatStream as DeviceFlatStream
+    from mymyr.encoding import GoalMasks as GoalMasks
     from mymyr.encoding import GraphDescription as GraphDescription
+    from mymyr.encoding import LayerMasks as LayerMasks
     from mymyr.rl import InstanceSampler as InstanceSampler
 
 __all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows"]
