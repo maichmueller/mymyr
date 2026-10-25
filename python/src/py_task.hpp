@@ -19,6 +19,7 @@
 #include "mymyr/rl/task_table.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
+#include "mymyr/successor/conditions.hpp"
 #include "mymyr/task/task.hpp"
 
 #include <nanobind/nanobind.h>
@@ -96,6 +97,10 @@ public:
     /// first use under cuda_mutex; released with the task.
     std::mutex cuda_mutex;
     std::shared_ptr<void> cuda;
+    /// The encoding context of the task's table with the default options (the literal helpers of mymyr.encoding that
+    /// take a task), created on first use under encoding_mutex; released with the task.
+    std::mutex encoding_mutex;
+    std::shared_ptr<const void> encoding_context;
 
 private:
     // lazy initializations that may throw (Once: not std::call_once, see mymyr/core/once.hpp)
@@ -165,6 +170,11 @@ struct Owner
 [[nodiscard]] Owner owner_of(nb::handle obj);
 /// The mymyr.Task object behind an owner (a Task or TaskHandle object).
 [[nodiscard]] Arg<PyTask> task_object(nb::handle owner);
+/// A ground literal given as anything Task.literal takes ('(on a b)', '(not (on a b))', ('on', 'a', 'b'), a GroundAtom
+/// or GroundLiteral of this task, ...), in the ids of `core`'s task. Names are looked up in this task, so a literal
+/// written by name for another parse of the same problem resolves here too. Raises ValueError for a literal with
+/// variables, an unknown name or a wrong arity.
+[[nodiscard]] GroundLiteral ground_literal_of(PyTaskCore& core, nb::handle literal);
 
 [[nodiscard]] Arg<PyState> make_state(const Owner& o, State&& s);
 /// An Action (label) owned by `o`; `binding` holds `arity` object ids.
