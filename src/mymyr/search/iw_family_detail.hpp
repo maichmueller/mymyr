@@ -58,7 +58,7 @@ inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer&
     env.layers = &orderer;
     if (orderer.relaxed() && env.slow())
         return "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a successor order";
-    if (orderer.beam() && !env.slow() && (T > 1 || orderer.relaxed()))
+    if (orderer.beam() && !env.slow() && env.tree == TreeRecord::None && (T > 1 || orderer.relaxed()))
     {
         team = std::make_unique<BeamTeam>(env.task, T);
         env.team = team.get();

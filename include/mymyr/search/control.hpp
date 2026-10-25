@@ -142,6 +142,8 @@ enum class TransitionOutcome : u8
     Pruned,     // not entered: not novel, blocked, a self loop, beyond a depth bound, or cut by a budget
     DeadEnd,    // not entered: recognized as a dead end (infinite heuristic value, no applicable action)
     Goal,       // a goal state, found by a search that tests the goal on generation (Rollout IW)
+    Blocked,    // not entered: belongs to the blocked-state set
+    SelfLoop,   // not entered: successor equals its parent
 };
 
 /// Event hooks: the public extension point (`hierarchical` implements a native tree capture on

@@ -62,6 +62,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);
     env.witness = o.witness_pruning;
+    env.tree = o.tree;
     env.canonical = o.canonical_order;
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;

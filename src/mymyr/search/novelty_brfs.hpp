@@ -42,6 +42,7 @@
 #include "beam_detail.hpp"
 #include "iw_detail.hpp"
 #include "layer_order_detail.hpp"
+#include "tree_sink.hpp"
 
 #include "mymyr/core/random.hpp"
 #include "mymyr/search/control.hpp"
@@ -219,6 +220,7 @@ struct Env
     const GoalTest& goal;
     const BlockedSet& blocked;
     const SearchControl& control;
+    TreeRecord tree = TreeRecord::None;
     bool witness = false;
     bool canonical = true;
     const SuccessorOrder* successor_order = nullptr;  // null or empty: generation order
@@ -242,7 +244,7 @@ struct Env
     [[nodiscard]] bool out_of_time() const { return timed && Clock::now() >= deadline; }
     [[nodiscard]] bool cancelled() const { return control.cancel.requested() || (coord && coord->is_cancelled()); }
     /// The slow path materializes and reports every transition.
-    [[nodiscard]] bool slow() const { return obs || !blocked.empty() || tracker || (successor_order && *successor_order); }
+    [[nodiscard]] bool slow() const { return obs || tree == TreeRecord::Transitions || !blocked.empty() || tracker || (successor_order && *successor_order); }
 };
 
 enum class RootRule : u8
@@ -310,9 +312,9 @@ public:
         MYMYR_NOVECTOR
         for (u32 i = n; i < m_W; ++i)
             dst[i] = 0;
-        m_parent.push_back(parent);
-        m_schema.push_back(schema);
-        m_depth.push_back(depth);
+        m_parent.push_back(static_cast<i32>(parent));
+        m_schema.push_back(static_cast<i32>(schema));
+        m_depth.push_back(static_cast<i32>(depth));
         m_flags.push_back(skip ? 1 : 0);
         m_boff.push_back(m_binding.size());
         if (arity)
@@ -328,7 +330,7 @@ public:
     [[nodiscard]] std::vector<Action> plan(u32 id, Successors& succ) const
     {
         std::vector<Action> out;
-        for (u32 v = id; m_parent[v] != k_no_node; v = m_parent[v])
+        for (u32 v = id; m_parent[v] != -1; v = m_parent[v])
             out.push_back(action(v, succ));
         std::reverse(out.begin(), out.end());
         return out;
@@ -338,6 +340,11 @@ public:
     {
         return m_words.capacity() * 8 + (m_parent.capacity() + m_schema.capacity() + m_depth.capacity()) * 4 + m_flags.capacity() +
                m_boff.capacity() * 8 + m_binding.capacity() * sizeof(ObjectId);
+    }
+
+    void release(TreeSink& sink)
+    {
+        sink.nodes(std::move(m_words), m_W, std::move(m_parent), std::move(m_depth), std::move(m_schema), m_boff, m_binding);
     }
 
 private:
@@ -354,7 +361,7 @@ private:
 
     u32 m_W;
     std::vector<u64> m_words;
-    std::vector<u32> m_parent, m_schema, m_depth;
+    std::vector<i32> m_parent, m_schema, m_depth;
     std::vector<u8> m_flags;  // 1: skip expansion, 2: closed
     std::vector<u64> m_boff;
     std::vector<ObjectId> m_binding;
@@ -466,6 +473,9 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     if (survivors && !Peeking<Pruner>)
         throw std::invalid_argument("mymyr: BeamNovelty::SurvivorsOnly needs a novelty pruner with a read-only test");
 
+    std::optional<TreeSink> sink;
+    if (env.tree != TreeRecord::None)
+        sink.emplace(env.tree, task, pc.arity);
     NodeTree tree(std::max(task.words(), root.nw));
     const u32 rn = bits::trimmed_size(root.w, root.nw);
     tree.push(root.w, rn, k_no_node, k_no_node, nullptr, 0, 0, false);
@@ -842,6 +852,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         {
             if (!ordered || next.empty())
                 break;
+            const std::vector<u32> candidates = sink ? next : std::vector<u32>{};
             if (preselected)
                 preselected = false;
             else if (team && env.layers->scored())
@@ -857,9 +868,11 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             if (survivors && pc.root != RootRule::ArityZero)
             {
                 replay();
-                if (next.empty())
-                    break;
             }
+            if (sink)
+                sink->selected(candidates, next);
+            if (next.empty())
+                break;
             cur.swap(next);
             next.clear();
             pos = 0;
@@ -918,7 +931,10 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             succ.prepare(cv);
             prepared = true;
         }
-        if (env.goal.test(succ, cv, prepared))
+        const bool is_goal = env.goal.test(succ, cv, prepared);
+        if (sink)
+            sink->goal(id, is_goal);
+        if (is_goal)
         {
             finish(SearchStatus::Solved);
             out.plan = tree.plan(id, succ);
@@ -950,10 +966,14 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         if (tree.skip(id) || depth >= budget.max_depth)
         {
             ++st.skipped;
+            if (sink)
+                sink->flag(id, TreeNodeFlag::Skipped);
             continue;
         }
         if (!prepared)
             succ.prepare(cv);
+        if (sink)
+            sink->flag(id, TreeNodeFlag::Expanded);
         pruner.begin(cw, n);
         const u32 cdepth = depth + 1;
         const bool at_root = id == 0;
@@ -987,6 +1007,8 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         };
         auto reject = [&](u32 s, const ObjectId* b, const u64* w, u32 nn, TransitionOutcome outcome = TransitionOutcome::Pruned) -> bool
         {
+            if (sink)
+                sink->transition(id, s, b, succ.arity(s), {w, nn, nullptr, 0}, k_no_node, outcome);
             if (obs)
             {
                 const Action a = action_of(s, b);
@@ -1000,6 +1022,18 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         // on_generate + on_transition of a successor that enters the tree (Opened) or is a width-0 duplicate entry
         auto report = [&](u32 s, const ObjectId* b, const u64* w, u32 nn, u32 child_id, TransitionOutcome outcome)
         {
+            const bool admitted = child_id < tree.size() || tree.size() < budget.max_states;
+            if (!admitted)
+            {
+                reject(s, b, w, nn);
+                return;
+            }
+            if (sink)
+            {
+                if (outcome == TransitionOutcome::Duplicate)
+                    sink->flag(child_id, TreeNodeFlag::DuplicateEntry);
+                sink->transition(id, s, b, succ.arity(s), {w, nn, nullptr, 0}, child_id, outcome);
+            }
             if (obs)
             {
                 const Action a = action_of(s, b);
@@ -1027,12 +1061,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             if (!env.blocked.empty() && env.blocked.contains(StateView{w, nn, nullptr, 0}))
             {
                 ++st.blocked;  // checked first: a blocked state marks nothing
-                return reject(s, b, w, nn);
+                return reject(s, b, w, nn, TransitionOutcome::Blocked);
             }
             if (rule == RootRule::ArityZero && !at_root)
                 return reject(s, b, w, nn);
             if (add.empty() && bits::equal(w, nn, cw, n))
-                return reject(s, b, w, nn);  // self loop: Pruned, as control.hpp documents
+                return reject(s, b, w, nn, TransitionOutcome::SelfLoop);
             if (rule == RootRule::ArityZero)
             {
                 const u32 dup = seen.find(tree, w, nn);
@@ -1106,6 +1140,13 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
     out.table_bytes = pruner.bytes();
     out.node_bytes = tree.bytes();
+    if (sink)
+    {
+        if (beam)
+            sink->selected(next, {});
+        tree.release(*sink);
+        st.tree = sink->finish(succ, env.goal);
+    }
 }
 
 /// An IW-style ladder over passes: run_pass(k, PassOut&) for k = first..top (after an optional placeholder entry

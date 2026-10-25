@@ -45,6 +45,7 @@
 
 #include "mymyr/novelty/novelty_table.hpp"
 #include "mymyr/search/control.hpp"
+#include "mymyr/search/search_tree.hpp"
 #include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
@@ -96,6 +97,7 @@ struct IwOptions
     LayerOrdering layers{};
     /// Threads of a beam's layer step (search/layer_ordering.hpp, "Threads"; 0: std::thread::hardware_concurrency()).
     /// More than one needs a beam (layers.beam_width).
+    TreeRecord tree = TreeRecord::None;  // retain each pass as flat node or transition arrays
     u32 threads = 1;
 };
 
@@ -110,6 +112,8 @@ struct IwPassStatistics
     u64 blocked = 0;            // successors rejected because they are blocked
     double seconds = 0;
     bool placeholder = false;   // the empty width-0 entry of an optimized IW(1) ladder
+
+    std::shared_ptr<const SearchTree> tree;  // null unless this pass was recorded
 
     [[nodiscard]] SearchStatistics stats() const
     {
