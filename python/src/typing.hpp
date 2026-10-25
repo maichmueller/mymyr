@@ -50,6 +50,9 @@ struct Framework
 struct CudaStream
 {
 };
+struct TreeRecord
+{
+};
 }  // namespace ann
 
 /// A CUDA stream: an int cudaStream_t (1 / 2: the legacy / per-thread default stream) or a stream object. With a None
@@ -246,5 +249,10 @@ template<>
 struct type_caster<mymyr::python::ann::CudaStream>
 {
     static constexpr auto Name = const_name("mymyr._typing.SupportsCudaStream");
+};
+template<>
+struct type_caster<mymyr::python::ann::TreeRecord>
+{
+    static constexpr auto Name = const_name("typing.Literal['nodes', 'transitions']");
 };
 }  // namespace nanobind::detail

@@ -43,6 +43,9 @@ def test_stubs_parse_and_are_typed():
     assert "def perfect(space: mymyr._core._datasets.StateSpace, *, costs: str = 'auto') -> Heuristic:" in search
     assert "def plan(self) -> list[mymyr._core.Action]" in search
     assert "def goal_state(self) -> mymyr._core.State | None" in search
+    assert "class SearchTree:" in search
+    assert "def tree(self) -> SearchTree | None" in search
+    assert search.count("tree: Literal['nodes', 'transitions'] | None = None") == 7
     # the IW family variants, landmarks and relaxed reachability (search_bindings.cpp, landmarks_bindings.cpp)
     task = "task: mymyr._core.Task | mymyr._core.TaskHandle"
     landmarks = "landmarks: FactLandmarkGraph | Literal['approximate', 'lifted'] | None = None"
