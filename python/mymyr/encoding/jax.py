@@ -393,7 +393,7 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     empty = jnp.zeros((0,), jnp.uint32)
     if goals is None:
         return empty, empty, empty, empty
-    if not isinstance(goals, (tuple, list)) or len(goals) not in (2, 4):
+    if isinstance(goals, str) or not hasattr(goals, "__len__") or len(goals) not in (2, 4):
         raise _error("goals are (goal_pos, goal_neg) or (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)")
     names = ("goal_pos", "goal_neg", "goal_derived_pos", "goal_derived_neg")
     masks = [_halves(g, names[k], True) for k, g in enumerate(goals)]
