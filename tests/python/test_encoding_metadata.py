@@ -39,7 +39,7 @@ def test_mixed_instance_sizes():
             assert_metadata([helper(batch) for helper in HELPERS], expected(reference))
 
 
-def test_graphs_without_entities_or_relations():
+def test_graphs_without_entities():
     import mymyr
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
@@ -49,7 +49,7 @@ def test_graphs_without_entities_or_relations():
         for counts in (False, True):
             encoder = encoder_of(task, layout, counts=counts, implicit=True)
             batch = encoder.encode([task.initial_state] * 2)
-            assert batch.num_relations == 0
+            assert not batch.relation_offsets.any()
             wanted = (np.zeros(2, np.int32), np.zeros(2, np.int32), np.empty(0, np.int32),
                       np.empty(0, np.uint8), np.empty(0, bool), np.empty(0, np.int32))
             assert_metadata([helper(batch) for helper in HELPERS], wanted)
