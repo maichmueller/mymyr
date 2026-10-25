@@ -29,6 +29,7 @@
 //   4. Achiever index: per atom every ground action with an operator adding it (whether or not the operator ever fires),
 //      the first achievers' ground actions (PossiblyBefore: for the atoms step 2 and 3 expanded only), and per ground
 //      action the landmarks it achieves, first-achieves and uniquely achieves (as the only achiever at all).
+//      build_achiever_index computes it for given landmarks.
 //
 // Derived atoms (include_derived_atoms): the landmarks are fluent atoms. With the option, positive derived goal
 // atoms and positive derived preconditions are landmarks too, back-chained through the axioms deriving them (their
@@ -69,4 +70,24 @@ struct ApproximateFactLandmarkOptions
 /// Generates over an existing grounding of `relaxed.task()`.
 [[nodiscard]] FactLandmarkGraph approximate_fact_landmarks(const heuristics::RelaxedTask& relaxed,
                                                            const ApproximateFactLandmarkOptions& options = {});
+
+/// The achiever index of step 4 for given fact landmarks and disjunctive landmarks (canonical ids of
+/// `relaxed.task()`), for a graph that has none (one made from given atoms): the achievers of every atom of the
+/// grounding (independent of the landmarks), the first achievers by `first_achievers` (HMax: of every atom;
+/// PossiblyBefore: of every fact landmark and disjunctive member), and per ground action the fact landmarks it
+/// achieves, first-achieves and uniquely achieves. On the generator's own landmarks the achievers and the per-action
+/// lists equal the generator's, and so do the first achievers of the fact landmarks; for HMax all first achievers do.
+/// With PossiblyBefore the generator lists first achievers for the atoms it expanded (the fact landmarks and the
+/// disjunctive members of every layer it expanded, including those of sets it then dropped), this function for the
+/// fact landmarks and the members of `disjunctive`, so first_achievers_of() of another atom can differ.
+[[nodiscard]] AchieverIndex build_achiever_index(const heuristics::RelaxedTask& relaxed, std::span<const CanonicalAtom> landmarks,
+                                                 const std::vector<std::vector<CanonicalAtom>>& disjunctive = {},
+                                                 FirstAchievers first_achievers = FirstAchievers::HMax);
+
+/// Grounds `task` as approximate_fact_landmarks does (keeping operators that can never fire) and builds the index.
+/// Throws std::runtime_error when the grounding exceeds `budget`.
+[[nodiscard]] AchieverIndex build_achiever_index(const Task& task, std::span<const CanonicalAtom> landmarks,
+                                                 const std::vector<std::vector<CanonicalAtom>>& disjunctive = {},
+                                                 FirstAchievers first_achievers = FirstAchievers::HMax,
+                                                 const heuristics::GroundingBudget& budget = {});
 }  // namespace mymyr::landmarks
