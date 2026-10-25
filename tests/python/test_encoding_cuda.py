@@ -234,7 +234,7 @@ def fluent_goals(case, seed=3):
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
-def test_device_equals_host_bit_for_bit(cases, layout, index, options, n, policy):
+def test_device_equals_host_bit_for_bit(cases, layout, index, options, n):
     dev = gpu()
     for case in cases.values():
         if n is not None:
@@ -403,7 +403,7 @@ def layered_kwargs(case, options, **kwargs):
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
 @pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
-def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index, options, n):
+def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index, options, n, policy):
     dev = gpu()
     for case in cases.values():
         if n is not None:
