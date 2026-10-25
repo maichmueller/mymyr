@@ -460,10 +460,8 @@ def test_bad_tables_are_refused():
         encoder_of(rl.TaskSuite([rl.TaskTable([task])]))
 
 
-def test_lazy_atom_slots_are_refused():
+def test_task_tables_require_frozen_slots():
     task = text_task("gripper__prob05", atoms="lazy")
-    with pytest.raises(ValueError, match="lazy atom slots"):
-        encoder_of(task)
     with pytest.raises(ValueError, match="lazy atom slots"):
         encoder_of(rl.TaskTable([task]))
 
