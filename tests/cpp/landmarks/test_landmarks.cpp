@@ -342,6 +342,107 @@ TEST(ApproximateLandmarks, GraphInvariants)
     }
 }
 
+TEST(ApproximateLandmarks, AchieverIndexRebuildEqualsTheGenerators)
+{
+    using landmarks::FirstAchievers;
+    for (const char* name : k_tasks)
+        for (const FirstAchievers rule : {FirstAchievers::HMax, FirstAchievers::PossiblyBefore})
+        {
+            SCOPED_TRACE(std::string(name) + (rule == FirstAchievers::HMax ? " hmax" : " possibly_before"));
+            const auto task = load(name);
+            landmarks::ApproximateFactLandmarkOptions o;
+            o.max_disjunctive_landmark_size = 4;
+            o.first_achievers = rule;
+            const auto g = landmarks::approximate_fact_landmarks(*task, o);
+            EXPECT_NO_THROW(landmarks::check(*task, g));
+            const landmarks::AchieverIndex& want = g.achievers();
+            const landmarks::AchieverIndex got = landmarks::build_achiever_index(*task, g.landmarks(), g.disjunctive(), rule);
+            ASSERT_EQ(got.actions.size(), want.actions.size());
+            for (usize i = 0; i < got.actions.size(); ++i)
+            {
+                EXPECT_EQ(got.actions[i].schema, want.actions[i].schema);
+                EXPECT_EQ(got.actions[i].binding, want.actions[i].binding);
+            }
+            EXPECT_EQ(got.atoms, want.atoms);
+            EXPECT_EQ(got.achievers_begin, want.achievers_begin);
+            EXPECT_EQ(got.achievers, want.achievers);
+            EXPECT_EQ(got.achieved_begin, want.achieved_begin);
+            EXPECT_EQ(got.achieved, want.achieved);
+            EXPECT_EQ(got.uniquely_achieved_begin, want.uniquely_achieved_begin);
+            EXPECT_EQ(got.uniquely_achieved, want.uniquely_achieved);
+            EXPECT_EQ(got.first_achieved_begin, want.first_achieved_begin);
+            EXPECT_EQ(got.first_achieved, want.first_achieved);
+            for (CanonicalAtom c : g.landmarks())
+            {
+                const auto a = got.first_achievers_of(c), b = want.first_achievers_of(c);
+                EXPECT_TRUE(std::equal(a.begin(), a.end(), b.begin(), b.end())) << format_atom(*task, c);
+            }
+            if (rule == FirstAchievers::HMax)
+            {
+                EXPECT_EQ(got.first_achievers_begin, want.first_achievers_begin);
+                EXPECT_EQ(got.first_achievers, want.first_achievers);
+            }
+            const auto rebuilt = landmarks::FactLandmarkGraph::create({g.landmarks().begin(), g.landmarks().end()}, g.disjunctive(),
+                                                                      {g.orderings().begin(), g.orderings().end()}, {}, got);
+            EXPECT_NO_THROW(landmarks::check(*task, rebuilt));
+        }
+}
+
+TEST(ApproximateLandmarks, CheckRejectsGraphsOfAnotherShape)
+{
+    const auto task = load("gripper__prob05");
+    const auto g = landmarks::approximate_fact_landmarks(*task);
+    const auto lms = std::vector<CanonicalAtom>(g.landmarks().begin(), g.landmarks().end());
+    const auto orderings = std::vector<std::pair<CanonicalAtom, CanonicalAtom>>(g.orderings().begin(), g.orderings().end());
+    auto with = [&](std::vector<CanonicalAtom> l, landmarks::AchieverIndex ix)
+    { return landmarks::FactLandmarkGraph::create(std::move(l), {}, orderings, {}, std::move(ix)); };
+    EXPECT_NO_THROW(landmarks::check(*task, with(lms, g.achievers())));
+    const CanonicalAtom outside = task->atoms().layout().total;
+    auto more = lms;
+    more.push_back(outside);
+    EXPECT_THROW(landmarks::check(*task, with(more, g.achievers())), std::invalid_argument);
+    // a fact landmark more or less changes the per-action lists the achievers determine
+    auto fewer = lms;
+    fewer.erase(fewer.begin());  // a goal atom, which some action adds
+    EXPECT_THROW(landmarks::check(*task, with(fewer, g.achievers())), std::invalid_argument);
+    auto ix = g.achievers();
+    ASSERT_GE(ix.actions.size(), 2u);
+    std::swap(ix.actions[0], ix.actions[1]);
+    EXPECT_THROW(landmarks::check(*task, with(lms, ix)), std::invalid_argument);
+    ix = g.achievers();
+    ix.achievers_begin.back() += 1;
+    EXPECT_THROW(landmarks::check(*task, with(lms, ix)), std::invalid_argument);
+    ix = g.achievers();
+    ix.actions[0].binding.push_back(ObjectId{0});
+    EXPECT_THROW(landmarks::check(*task, with(lms, ix)), std::invalid_argument);
+    // a lifted landmark whose member is an atom of another predicate
+    landmarks::LiftedLandmark l;
+    const CanonicalLayout& L = task->atoms().layout();
+    std::vector<u32> args(std::max<u32>(1, L.max_arity));
+    l.predicate = PredicateId{L.decode(lms[0], args.data())};
+    l.binding.assign(L.arity[l.predicate.v], landmarks::k_free);
+    l.members = {lms[0]};
+    EXPECT_NO_THROW(landmarks::check(*task, landmarks::FactLandmarkGraph::create(lms, {}, {}, {l})));
+    for (CanonicalAtom c = 0; c < L.fluent_count; ++c)
+        if (L.decode(c, args.data()) != l.predicate.v)
+        {
+            l.members = {c};
+            break;
+        }
+    EXPECT_THROW(landmarks::check(*task, landmarks::FactLandmarkGraph::create(lms, {}, {}, {l})), std::invalid_argument);
+}
+
+TEST(ApproximateLandmarks, GroundActionBudget)
+{
+    const auto task = load("gripper__prob05");
+    landmarks::ApproximateFactLandmarkOptions o;
+    o.budget.max_ground_actions = 3;
+    EXPECT_THROW((void)landmarks::approximate_fact_landmarks(*task, o), std::runtime_error);
+    EXPECT_THROW((void)landmarks::build_achiever_index(*task, {}, {}, landmarks::FirstAchievers::HMax, o.budget), std::runtime_error);
+    o.budget.max_ground_actions = landmarks::approximate_fact_landmarks(*task).achievers().actions.size();
+    EXPECT_NO_THROW((void)landmarks::approximate_fact_landmarks(*task, o));
+}
+
 TEST(LiftedLandmarks, FactLandmarksBlockTheRelaxedGoal)
 {
     for (const char* name : k_tasks)
