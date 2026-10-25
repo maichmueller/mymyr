@@ -120,7 +120,7 @@ def test_label_array_validation_and_native_step():
     for action in [(schema.to(torch.int64), binding), (schema, binding.to(torch.int64)),
                    (schema[:1], binding), (schema, binding[:1]), (schema, binding.flatten()),
                    (schema, binding[:, :0])]:
-        with pytest.raises(ValueError, match="int32|shape|stride"):
+        with pytest.raises(ValueError, match="int32|shape|stride|binding arrays"):
             env.step(action)
     result = expected.step((schema, binding))
     out_schema = torch.empty_like(schema)
@@ -146,6 +146,25 @@ def test_inapplicable_label_with_valid_objects_does_not_move():
     before = env.states.clone()
     result = env.step((schema, binding))
     assert result.invalid.all() and (result.reward == -2.0).all()
+    assert torch.equal(env.states, before)
+
+
+def test_label_numeric_effect_applicability():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string("""(define (domain numeric) (:requirements :strips :numeric-fluents :negative-preconditions)
+      (:predicates (ready)) (:functions (level))
+      (:action divide :parameters () :precondition (ready) :effect (scale-down (level) 0))
+      (:action increase :parameters () :precondition (ready) :effect (increase (level) 1)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem numeric) (:domain numeric)
+      (:init (ready) (= (level) 1)) (:goal (not (ready))))"""))
+    env = rt.BatchedEnv(task, 2, actions="label", autoreset=False, step_reward=-1.0)
+    before = env.states.clone()
+    schema = torch.zeros(2, dtype=torch.int32)
+    binding = torch.empty((2, 0), dtype=torch.int32)
+    assert not rl.is_applicable(task, env.states, schema, binding).any()
+    result = env.step((schema, binding))
+    assert result.invalid.all() and (result.reward == -1.0).all() and (result.count == 1).all()
     assert torch.equal(env.states, before)
 
 
