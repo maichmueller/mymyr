@@ -26,6 +26,9 @@ x86_64 with glibc 2.34 or newer and macOS arm64 with macOS 15 or newer. Change `
 Wheels include the PDDL parser and C++ SDK. For Gymnasium environments, install `mymyr[gym]`; install JAX or PyTorch
 separately when using those integrations. CUDA requires a source build.
 
+Pushing a `v*` tag that matches the package version publishes to TestPyPI and PyPI; a manual release workflow run is
+a TestPyPI rehearsal with a unique `.devN` version.
+
 ## Try it
 
 Run this with `.venv/bin/python`; it needs no task files:
