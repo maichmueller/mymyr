@@ -4,6 +4,7 @@
 // encoded arrays are laid out; every option that changes the encoded output is part of the schema fingerprint.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/encoding/repeated_literals.hpp"
 
 #include <initializer_list>
 #include <optional>
@@ -167,6 +168,8 @@ struct FlatOptions
     /// Subgoal layers beyond the goal: relations of level 1 .. max_goal_level, named `[sg]`, `[ssg]`, `[sssg]`.
     /// At most 3.
     u32 max_goal_level = 0;
+    /// Placement of literals listed at several goal levels (the goal is level 0).
+    RepeatedLiterals repeated_literals = k_default_repeated_literals;
     /// Relations of the static predicates (the types included) in the state lane.
     bool include_static = true;
     /// Relations of the derived predicates in the state lane.
@@ -240,13 +243,14 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
 /// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "repeat", "shared"; "int32", "int64";
-/// "float32", "float64"; "none", "full", "delta", "action"; "include", "exclude", "encode_only"; "relations", "simple"),
+/// "every", "lowest", "highest"; "float32", "float64"; "none", "full", "delta", "action"; "include", "exclude", "encode_only"; "relations", "simple"),
 /// and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;
 [[nodiscard]] std::string_view to_string(EntityArrays value) noexcept;
 [[nodiscard]] std::string_view to_string(Statics value) noexcept;
+[[nodiscard]] std::string_view to_string(RepeatedLiterals value) noexcept;
 [[nodiscard]] std::string_view to_string(IndexType value) noexcept;
 [[nodiscard]] std::string_view to_string(NumericDtype value) noexcept;
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
@@ -257,6 +261,7 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
 [[nodiscard]] std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Statics> parse_statics(std::string_view text) noexcept;
+[[nodiscard]] std::optional<RepeatedLiterals> parse_repeated_literals(std::string_view text) noexcept;
 [[nodiscard]] std::optional<IndexType> parse_index_type(std::string_view text) noexcept;
 [[nodiscard]] std::optional<NumericDtype> parse_numeric_dtype(std::string_view text) noexcept;
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;

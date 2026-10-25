@@ -428,3 +428,20 @@ def test_the_scalars_of_a_batch_are_those_of_its_schema():
     values = dict(numeric.encode([drone.initial_state]).as_dict())
     with pytest.raises(ValueError, match="numeric_relations"):
         encoding.FlatBatch.from_arrays(numeric.schema, dict(values, numeric_relations=values["numeric_relations"] + 1))
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_repeated_literal_schema_records_keep_the_policy(policy):
+    task = text_task("gripper__prob05")
+    schema = encoding.EncodingSchema(task, max_goal_level=3, repeated_literals=policy)
+    record = json.loads(json.dumps(encoding.schema_to_dict(schema)))
+    assert record["options"]["repeated_literals"] == policy
+    restored = encoding.schema_from_dict(record, task)
+    assert restored.options == schema.options
+    assert restored.schema_fingerprint == schema.schema_fingerprint
+    fingerprints = {encoding.EncodingSchema(task, max_goal_level=3, repeated_literals=p).schema_fingerprint
+                    for p in ("every", "lowest", "highest")}
+    assert len(fingerprints) == 3
+    if policy == "lowest":
+        record["options"].pop("repeated_literals")
+        assert encoding.schema_from_dict(record, task).schema_fingerprint == schema.schema_fingerprint

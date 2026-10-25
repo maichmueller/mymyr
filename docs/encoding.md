@@ -58,6 +58,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 |---|---|---|---|
 | `goal_derivations` | a collection of `'plain'`, `'satisfied'`, `'unsatisfied'`, `'added_satisfied'`, `'added_unsatisfied'` | `('plain', 'satisfied')` | which [goal relations](#goals) a predicate has |
 | `max_goal_level` | 0 to 3 | 0 | the [subgoal](#subgoals) levels beyond the goal |
+| `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"lowest"` | placement of literals listed at several goal levels |
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
 | `include_derived` | bool | `True` | the state relations of the derived predicates |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
@@ -415,12 +416,24 @@ the schema has levels (the missing ones are empty). Masks narrower than the inst
 not have, raise `ValueError`, as for `goals`. `mymyr.encoding.subgoal_masks(encoder, layers, task_ids=None)` builds the
 arrays from lists of literals (per row, per layer).
 
-A level holds the literals of its layer **minus every literal of the goal and of the lower layers**: a literal is
-encoded once, at the lowest level that has it. A literal that the goal has is only in the goal relations, one that
-layers 0 and 2 both have is only in level 1, and so is one that layers 0 and 1 both have. The layers of a row are
-masks, so a literal listed twice in one layer is one tuple. The `[sat]` and `[unsat]` variants are the literals of the
-level that hold, or do not hold, in the row's state. A row's own `goals`, when given, are the goal that is subtracted
-instead of the instance's.
+`repeated_literals` decides where a literal listed at several levels is encoded. The goal is level 0, below all
+subgoal layers; the sign is part of the literal, so positive and negative literals are placed independently.
+
+| Value | Placement | Literal in the goal and layers 0 and 2 |
+|---|---|---|
+| `"every"` | each level holds exactly its input; the goal holds its whole goal | levels 0, 1 and 3 |
+| `"lowest"` (default) | once, at the lowest level that lists it | level 0 |
+| `"highest"` | once, at the highest level that lists it; lower levels lose it | level 3 |
+
+For a literal in layers 0 and 2 only, `"every"` puts it at levels 1 and 3, `"lowest"` at level 1, and `"highest"`
+at level 3. The policy applies to fluent and derived literals, using a row's own `goals` when given. The instance's
+constant goal literals have no slots in a layer and are unaffected. `goal_complete` is unchanged by placement:
+a goal literal moved to a subgoal level is still represented in the graph. With no subgoal layers the option has
+no effect. History steps are independent of goal levels.
+
+Every cell is a set of strictly ascending tuples: a literal listed twice in one layer is one tuple. The `[sat]` and
+`[unsat]` variants follow the plain placement and contain the level's literals that hold, or do not hold, in the row's
+state. Goal and subgoal target entity counts follow the number of plain tuples at their levels.
 
 With `target_sources` including `"subgoal"` every tuple of a plain subgoal relation gets a **subgoal entity** (after the
 goal entities), numbered in the order of the plain subgoal relations (relation id, then tuple), the first argument of
@@ -465,6 +478,8 @@ assert layered_batch.history_dt.tolist() == [-1, 0] and layered_batch.target_gro
 ```
 
 ## Horizons and transitions
+
+Goal and subgoal levels use `repeated_literals` as above, with satisfaction evaluated at each horizon node.
 
 `FlatHorizonEncoder(table_or_task, *, horizon_mode, <options>)` encodes **horizons**: one graph per root state, holding
 the root and the nodes below it (states reached from the root by actions) as state entities, so that a model sees a

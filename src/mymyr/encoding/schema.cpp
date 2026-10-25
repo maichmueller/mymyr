@@ -558,6 +558,11 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         hasher.text("omit entity_role, entity_ref");
     if (o.statics == Statics::Shared)
         hasher.text("shared statics");
+    if (o.repeated_literals != k_default_repeated_literals)
+    {
+        hasher.text("repeated literals");
+        hasher.integer(static_cast<u64>(o.repeated_literals));
+    }
     hasher.integer(o.targets.bits());
     if (o.history)
     {

@@ -954,8 +954,10 @@ REGISTRY = (
     ),
     Difference(
         "repeated_literal_horizon",
-        "A literal that the goal and a layer, or two layers, list is encoded once, at the lowest of its levels; "
-        "mifrost's horizon graph has it once for each level it is listed in, all at the highest of them.",
+        "With repeated_literals='lowest' (the default), a literal that several goal levels list is encoded once, "
+        "at its lowest level; "
+        "mifrost's horizon graph has it once for each listing level, all at the highest. Under 'highest', "
+        "placement agrees but native cells keep one tuple instead of duplicate tuples.",
         "the tuples of the highest level of a literal that is listed in several levels, in every relation of that "
         "level, when there are as many equal tuples as levels",
         (("f01", "C7T"), ("f01", "C7S")),
@@ -1044,9 +1046,11 @@ REGISTRY = (
     ),
     Difference(
         "repeated_literal",
-        "A literal that the goal and a layer, or two layers, list is encoded once, at the lowest of its levels; "
+        "With repeated_literals='lowest' (the default), a literal that several goal levels list is encoded once, "
+        "at its lowest level; "
         "mifrost encodes it once for each level it is listed in, all at the highest of them, and leaves it out of "
-        "the other levels.",
+        "the other levels. Under repeated_literals='highest', placement agrees but native cells keep one tuple "
+        "instead of duplicate tuples.",
         "the subgoal entity and the equal tuples of the highest level of a literal that is listed in several levels, "
         "and its satisfaction tuples",
         (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1"), ("f08", "C4_L1N"), ("f08", "C4_L2"), ("f08", "C4_L2N"),

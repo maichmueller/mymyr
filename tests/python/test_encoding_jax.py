@@ -497,10 +497,11 @@ def test_the_cpu_result_does_not_depend_on_threads(cases):
 @pytest.mark.parametrize("options", LAYERED_OPTION_SETS.values(), ids=LAYERED_OPTION_SETS.keys())
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_subgoal_layers_and_history_equal_the_host_bit_for_bit(cases, layout, index, options):
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_subgoal_layers_and_history_equal_the_host_bit_for_bit(cases, layout, index, options, policy):
     with x64(index == "int64"):
         for case in cases.values():
-            encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **options)
+            encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, repeated_literals=policy, **options)
             kwargs = layered_kwargs(case, options)
             exact = host_encode(encoder, case, **kwargs)
             caps = exact_capacities(exact)
@@ -546,13 +547,14 @@ def test_empty_and_single_batches_with_layers_and_history_equal_the_host(cases, 
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_layers_and_history_with_row_goals_and_shared_layers_equal_the_host(cases, layout):
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_subgoal_layers_and_history_with_row_goals_and_shared_layers_equal_the_host(cases, layout, policy):
     options = LAYERED_OPTION_SETS["levels_history_virtual"]
     for name in ("gripper", "blocks_table", "philosophers_table"):
         if name not in cases:
             continue
         case = cases[name]
-        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, repeated_literals=policy, **options)
         goals = fluent_goals(case)
         kwargs = layered_kwargs(case, options)
         variants = [kwargs]

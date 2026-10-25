@@ -207,8 +207,8 @@ struct EncodeInput
     // labels: the successor states, goal flags and derived words of the expansion are not used.
     const rl::Expansion* actions = nullptr;
     // The subgoal layers of each row: layer l fills the subgoal relations of level l + 1 (at most max_goal_level
-    // layers). Each level holds the literals of its layer that no lower level has, the goal's included: a literal is
-    // encoded once, at its lowest level. Needs subgoal relations in the schema.
+    // layers). repeated_literals places literals listed at several levels; each cell contains unique tuples.
+    // Needs subgoal relations in the schema.
     LayerInput subgoals{};
     // The history steps of each row. Needs the history lane in the options.
     HistoryInput history{};

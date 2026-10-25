@@ -27,6 +27,7 @@ constexpr std::array<std::string_view, 5> k_derivations = {"plain", "satisfied",
 constexpr std::array<std::string_view, 4> k_sources = {"goal", "subgoal", "action", "history"};
 constexpr std::array<std::string_view, 2> k_layouts = {"graph", "relation"};
 constexpr std::array<std::string_view, 2> k_entity_arrays = {"auto", "always"};
+constexpr std::array<std::string_view, 3> k_repeated_literals = {"every", "lowest", "highest"};
 constexpr std::array<std::string_view, 2> k_statics = {"repeat", "shared"};
 constexpr std::array<std::string_view, 2> k_index_types = {"int32", "int64"};
 constexpr std::array<std::string_view, 2> k_numeric_dtypes = {"float32", "float64"};
@@ -39,6 +40,7 @@ std::string_view to_string(GoalDerivation value) noexcept { return k_derivations
 std::string_view to_string(TargetSource value) noexcept { return k_sources[static_cast<usize>(value)]; }
 std::string_view to_string(Layout value) noexcept { return k_layouts[static_cast<usize>(value)]; }
 std::string_view to_string(EntityArrays value) noexcept { return k_entity_arrays[static_cast<usize>(value)]; }
+std::string_view to_string(RepeatedLiterals value) noexcept { return k_repeated_literals[static_cast<usize>(value)]; }
 std::string_view to_string(Statics value) noexcept { return k_statics[static_cast<usize>(value)]; }
 std::string_view to_string(IndexType value) noexcept { return k_index_types[static_cast<usize>(value)]; }
 std::string_view to_string(NumericDtype value) noexcept { return k_numeric_dtypes[static_cast<usize>(value)]; }
@@ -60,6 +62,10 @@ std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept
     return parse<EntityArrays>(k_entity_arrays, text);
 }
 std::optional<Statics> parse_statics(std::string_view text) noexcept { return parse<Statics>(k_statics, text); }
+std::optional<RepeatedLiterals> parse_repeated_literals(std::string_view text) noexcept
+{
+    return parse<RepeatedLiterals>(k_repeated_literals, text);
+}
 std::optional<IndexType> parse_index_type(std::string_view text) noexcept
 {
     return parse<IndexType>(k_index_types, text);

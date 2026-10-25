@@ -383,6 +383,16 @@ TEST(EncodingOptions, NormalizationAndText)
     EXPECT_EQ(to_string(*parse_index_type("int64")), "int64");
     EXPECT_FALSE(parse_layout("row"));
     EXPECT_FALSE(parse_goal_derivation(""));
+    for (const auto text : {"every", "lowest", "highest"})
+    {
+        const auto policy = parse_repeated_literals(text);
+        ASSERT_TRUE(policy);
+        EXPECT_EQ(to_string(*policy), text);
+        FlatOptions options;
+        options.repeated_literals = *policy;
+        EXPECT_EQ(normalized(options).repeated_literals, *policy);
+    }
+    EXPECT_FALSE(parse_repeated_literals("invalid"));
 }
 
 TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)

@@ -1,5 +1,4 @@
-// The subgoal layers and the history of the relational encoder: the levels as layers minus the goal and the lower
-// levels, the history steps and their truncation, the entities and targets of both, the layouts, thread counts,
+// The subgoal layers and the history of the relational encoder: placement across goal levels, the history steps and their truncation, the entities and targets of both, the layouts, thread counts,
 // capacities, streams, and the inputs that are refused.
 
 #include "support.hpp"
@@ -297,8 +296,7 @@ std::string level_suffix(u32 level)
 
 using Named = std::map<std::string, std::vector<Tuple>>;
 
-/// The subgoal relations of a row: the literals of each layer that the goal and the lower layers do not have, at the
-/// layer's level, with the variants for their truth in `atoms`.
+/// The subgoal relations of a row, placed by the schema's policy, with variants for their truth in `atoms`.
 Named subgoal_reference(const EncodingSchema& schema, i64 num_objects, const std::vector<Literal>& goal,
                         const std::vector<std::vector<Literal>>& layers, const std::set<AtomKey>& atoms)
 {
@@ -308,8 +306,17 @@ Named subgoal_reference(const EncodingSchema& schema, i64 num_objects, const std
     {
         std::set<Literal> level;
         for (const Literal& literal : layers[l])
-            if (!seen.count(literal))
+        {
+            bool include = true;
+            if (schema.options().repeated_literals == RepeatedLiterals::Lowest)
+                include = !seen.count(literal);
+            else if (schema.options().repeated_literals == RepeatedLiterals::Highest)
+                for (u32 higher = l + 1; higher < layers.size(); ++higher)
+                    if (std::find(layers[higher].begin(), layers[higher].end(), literal) != layers[higher].end())
+                        include = false;
+            if (include)
                 level.insert(literal);
+        }
         seen.insert(layers[l].begin(), layers[l].end());
         for (const Literal& literal : level)
         {
@@ -472,23 +479,38 @@ TEST(EncoderLayers, SubgoalLevelsAreTheLayersMinusTheGoalAndTheLowerLevels)
         EXPECT_EQ(g.target_entity[k], 4 + static_cast<i64>(k));
 }
 
-TEST(EncoderLayers, ALiteralInTheGoalAndInALayerIsEncodedOnceAtTheGoal)
+TEST(EncoderLayers, RepeatedGoalLiteralsFollowThePlacementPolicy)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
     const test::Rows rows = test::random_walk(*table, 0, 1, 1);
-    // layer 1: (on c b) (the goal's) only
-    const Masks masks = make_masks(*table, {0}, {{{on("on", true, {2, 0})}, {on("on", true, {2, 0})}}});
-    const auto encoder = FlatEncoder::create(table, layer_options(2, false));
-    EncodeInput in = input_of(rows);
-    in.subgoals = layer_input(masks);
-    const auto bundle = encoder->encode(in);
-    const EncodingSchema& schema = encoder->schema();
-    validate(*bundle, schema);
-    const Graph g = decode(*bundle, schema)[0];
-    for (const char* name : {"[+]on[sg]", "[+]on[ssg]", "[+]on[sg][sat]", "[+]on[ssg][unsat]"})
-        EXPECT_TRUE(g.tuples[*schema.find(name)].empty()) << name;
-    EXPECT_EQ(g.tuples[*schema.find("[+]on[g]")].size(), 2u);
-    EXPECT_EQ(g.role.size(), 3u + 1u + 2u);  // objects, auxiliary, goal entities; no subgoal entity
+    const Masks masks = make_masks(*table, {0}, {{{on("on", true, {2, 0}), on("on", true, {2, 0})}, {},
+                                               {on("on", true, {2, 0})}}});
+    for (const auto policy : {RepeatedLiterals::Every, RepeatedLiterals::Lowest, RepeatedLiterals::Highest})
+        for (const Layout layout : {Layout::Graph, Layout::Relation})
+        {
+            SCOPED_TRACE(to_string(policy));
+            auto options = layer_options(3, false, 0, layout);
+            options.repeated_literals = policy;
+            const auto encoder = FlatEncoder::create(table, options);
+            EncodeInput in = input_of(rows);
+            in.subgoals = layer_input(masks);
+            const auto bundle = encoder->encode(in);
+            const EncodingSchema& schema = encoder->schema();
+            validate(*bundle, schema);
+            const Graph g = decode(*bundle, schema)[0];
+            auto count = [&](const char* name) { return g.tuples[*schema.find(name)].size(); };
+            EXPECT_EQ(count("[+]on[g]"), policy == RepeatedLiterals::Highest ? 1u : 2u);
+            EXPECT_EQ(count("[+]on[sg]"), policy == RepeatedLiterals::Every ? 1u : 0u);
+            EXPECT_EQ(count("[+]on[ssg]"), 0u);
+            EXPECT_EQ(count("[+]on[sssg]"), policy == RepeatedLiterals::Lowest ? 0u : 1u);
+            EXPECT_EQ(count("[+]on[sg][sat]"), 0u);
+            EXPECT_EQ(count("[+]on[sg][unsat]"), count("[+]on[sg]"));
+            EXPECT_EQ(count("[+]on[sssg][unsat]"), count("[+]on[sssg]"));
+            EXPECT_EQ(ints(*bundle, "goal_complete"), (std::vector<i64>{1}));
+            EXPECT_EQ(g.target_group.size(), policy == RepeatedLiterals::Every ? 4u : 2u);
+            for (usize i = 0; i < g.target_entity.size(); ++i)
+                EXPECT_EQ(g.target_entity[i], 4 + static_cast<i64>(i));
+        }
 }
 
 TEST(EncoderLayers, FewerLayersThanLevelsAndNoLayersAreTheSameAsEmptyLayers)
@@ -577,29 +599,32 @@ TEST(EncoderLayers, RandomLayersMatchTheSetReferenceInBothLayouts)
     for (const SubgoalProblem& p : {SubgoalProblem{"blocks", "smedium"}, SubgoalProblem{"wide_predicates", "p01"},
                                      SubgoalProblem{"gripper", "p01"}, SubgoalProblem{"features", "p01"}})
         for (const Layout layout : {Layout::Graph, Layout::Relation})
-        {
-            SCOPED_TRACE(std::string(p.domain) + (layout == Layout::Graph ? " graph" : " relation"));
-            const auto table = rl::TaskTable::single(test::pddl_task(p.domain, p.problem));
-            const test::Rows rows = test::random_walk(*table, 0, 40, 5);
-            const auto layers = random_layers(*table->task(0), rows.size(), 3, 17);
-            const Masks masks = make_masks(*table, std::vector<u32>(rows.size(), 0), layers);
-            FlatOptions options = layer_options(3, false, 0, layout);
-            const auto encoder = FlatEncoder::create(table, options);
-            EncodeInput in = input_of(rows);
-            in.subgoals = layer_input(masks);
-            const auto bundle = encoder->encode(in);
-            validate(*bundle, encoder->schema());
-            const auto graphs = decode(*bundle, encoder->schema());
-            for (u64 g = 0; g < rows.size(); ++g)
+            for (const auto policy : {RepeatedLiterals::Every, RepeatedLiterals::Lowest, RepeatedLiterals::Highest})
             {
-                const Named expected = subgoal_reference(
-                    encoder->schema(), graphs[g].num_objects, encoding_goal(*table->task(0)), layers[g],
-                    true_atoms(*table, 0, rows.data.data() + g * rows.words));
-                expect_subgoals(encoder->schema(), graphs[g], expected, "row");
-                for (const auto& entry : expected)
-                    tuples += entry.second.size();
+                SCOPED_TRACE(to_string(policy));
+                SCOPED_TRACE(std::string(p.domain) + (layout == Layout::Graph ? " graph" : " relation"));
+                const auto table = rl::TaskTable::single(test::pddl_task(p.domain, p.problem));
+                const test::Rows rows = test::random_walk(*table, 0, 40, 5);
+                const auto layers = random_layers(*table->task(0), rows.size(), 3, 17);
+                const Masks masks = make_masks(*table, std::vector<u32>(rows.size(), 0), layers);
+                FlatOptions options = layer_options(3, false, 0, layout);
+                options.repeated_literals = policy;
+                const auto encoder = FlatEncoder::create(table, options);
+                EncodeInput in = input_of(rows);
+                in.subgoals = layer_input(masks);
+                const auto bundle = encoder->encode(in);
+                validate(*bundle, encoder->schema());
+                const auto graphs = decode(*bundle, encoder->schema());
+                for (u64 g = 0; g < rows.size(); ++g)
+                {
+                    const Named expected = subgoal_reference(
+                        encoder->schema(), graphs[g].num_objects, encoding_goal(*table->task(0)), layers[g],
+                        true_atoms(*table, 0, rows.data.data() + g * rows.words));
+                    expect_subgoals(encoder->schema(), graphs[g], expected, "row");
+                    for (const auto& entry : expected)
+                        tuples += entry.second.size();
+                }
             }
-        }
     EXPECT_GT(tuples, 2000u);
 }
 
