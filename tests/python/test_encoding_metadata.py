@@ -154,6 +154,14 @@ def test_host_capacity_tails_and_overflow(case, layout, implicit):
     assert_metadata([helper(overflow) for helper in HELPERS], wanted)
 
 
+def test_simple_batch_metadata(case):
+    task, rows = case
+    reference = encoding.FlatRelationEncoder(task, include_actions=False, goal_derivations=()).encode(rows)
+    batch = encoding.SimpleEncoder(task, include_actions=False, goal_derivations=()).encode(rows)
+    assert not hasattr(batch, "relation_offsets")
+    assert_metadata([helper(batch) for helper in HELPERS], expected(reference))
+
+
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 def test_host_streams_and_suites(case, layout):
     task, rows = case
