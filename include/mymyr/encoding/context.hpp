@@ -53,8 +53,12 @@ public:
     /// relation, ascending), schema_arity (u32 [schemas]: the objects of each action schema's ground actions),
     /// relation_virtual (u32 [relations]: the virtual index of each relation's predicate, k_no_virtual for none) and
     /// virtual_relation (u32: the key relation of each virtual index), both empty without predicate virtual nodes, and
-    /// relation_arity (u32 [relations]: the encoded arity of each relation) and numeric_args (i32 [rows, max_arity]: the
-    /// objects of each numeric slot's function term, in slot order, -1 padded). An instance has two lists of cells, each
+    /// relation_arity (u32 [relations]: the encoded arity of each relation), numeric_args (i32 [rows, max_arity]: the
+    /// objects of each numeric slot's function term, in slot order, -1 padded) and literal_ranges (u32 [instances,
+    /// domain predicates, detail::k_literal_columns]: the literal section that detail::resolve_literal reads, see
+    /// detail/literals.hpp). The static tuples of every static domain predicate are in static_args, and the rows are
+    /// max_arity wide, the arity of the widest domain predicate or numeric function, whatever the options leave out of
+    /// the cells. An instance has two lists of cells, each
     /// sorted by relation id with at most one cell per relation: the cells of a graph with the instance's goal, and the
     /// cells of a graph whose row has goal masks of its own (the two lists share their state and action cells).
     /// Per-graph cell counts (detail::count_graph) are per cell, in the order of the list the graph uses, not per

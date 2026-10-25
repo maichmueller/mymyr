@@ -2,6 +2,7 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/encoding/detail/horizon.hpp"
+#include "mymyr/encoding/detail/literals.hpp"
 
 #include <algorithm>
 #include <array>
@@ -158,6 +159,7 @@ struct InstanceRows
     u64 numeric_tuples = 0;
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
+    std::vector<u32> literal_ranges;                        // [domain predicates, detail::k_literal_columns]
     u64 num_objects = 0, words = 0, fluent_slots = 0, derived_words = 0, derived_slots = 0;
     u64 fingerprint = 0;
     u64 goal_complete = 1;
@@ -326,6 +328,57 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         }
         return std::pair{first, static_rows};
     };
+    // the static rows of each predicate, appended once: the cells and the literal section share them
+    std::vector<std::optional<std::pair<u32, u32>>> static_ranges(predicates);
+    auto static_rows_of = [&](u32 ip, u32 logical)
+    {
+        if (!static_ranges[ip])
+            static_ranges[ip] = append_static_rows(ip, logical);
+        return *static_ranges[ip];
+    };
+    // The literal section: where the atoms of every domain predicate are, whatever the options leave out of the cells.
+    auto fill_literal_ranges = [&]
+    {
+        const u32 domain_predicates = table.num_domain_predicates();
+        out.literal_ranges.assign(u64{domain_predicates} * detail::k_literal_columns, 0);
+        for (u32 tp = 0; tp < domain_predicates; ++tp)
+        {
+            u32* r = out.literal_ranges.data() + u64{tp} * detail::k_literal_columns;
+            r[detail::k_literal_arity] = table.predicate_arities()[tp];
+            r[detail::k_literal_predicate_kind] = detail::k_literal_absent_predicate;
+        }
+        for (u32 ip = 0; ip < predicates; ++ip)
+        {
+            const u32 tp = instance.pred_map[ip];
+            if (tp >= domain_predicates)
+                continue;
+            u32* r = out.literal_ranges.data() + u64{tp} * detail::k_literal_columns;
+            const u32 logical = static_cast<u32>(arity[ip]);
+            const std::string& name = table.predicate_names()[tp];
+            r[detail::k_literal_arity] = logical;
+            if (kind[ip] == rl::k_pred_static)
+            {
+                r[detail::k_literal_predicate_kind] = detail::k_literal_static_predicate;
+                std::tie(r[detail::k_literal_static_begin], r[detail::k_literal_static_end]) = static_rows_of(ip, logical);
+            }
+            else if (kind[ip] == rl::k_pred_derived)
+            {
+                r[detail::k_literal_predicate_kind] = detail::k_literal_derived_predicate;
+                r[detail::k_literal_derived_begin] = static_cast<u32>(derived_offsets[ip]);
+                r[detail::k_literal_derived_end] = static_cast<u32>(derived_offsets[ip + 1]);
+                detail::check_slot_range(derived_pred, derived_padded, derived_width, r[detail::k_literal_derived_begin],
+                                         r[detail::k_literal_derived_end], ip, logical, name);
+            }
+            else
+            {
+                r[detail::k_literal_predicate_kind] = detail::k_literal_fluent_predicate;
+                r[detail::k_literal_fluent_begin] = static_cast<u32>(fluent_offsets[ip]);
+                r[detail::k_literal_fluent_end] = static_cast<u32>(fluent_offsets[ip + 1]);
+                detail::check_slot_range(atom_pred, atom_padded, fluent_width, r[detail::k_literal_fluent_begin],
+                                         r[detail::k_literal_fluent_end], ip, logical, name);
+            }
+        }
+    };
     for (u32 ip = 0; ip < predicates && !horizon; ++ip)
     {
         const u32 tp = instance.pred_map[ip];
@@ -356,7 +409,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         else
         {
             cell.op = static_cast<u32>(CellOp::Static);
-            std::tie(cell.a, cell.b) = append_static_rows(ip, logical);
+            std::tie(cell.a, cell.b) = static_rows_of(ip, logical);
             if (schema.shared_statics())
             {
                 // the tuples go to the static block of the batch: the cell has no row in a graph
@@ -473,7 +526,6 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
             const Lane lane = fixed ? Lane::Static : derived ? Lane::Derived : Lane::Fluent;
             const u32 slot_begin = static_cast<u32>(derived ? derived_offsets[ip] : fluent_offsets[ip]);
             const u32 slot_end = static_cast<u32>(derived ? derived_offsets[ip + 1] : fluent_offsets[ip + 1]);
-            std::optional<std::pair<u32, u32>> static_range;
             for (const HorizonRelation& d : horizon->by_predicate[tp])
             {
                 const Relation& relation = schema.relation(d.relation);
@@ -488,9 +540,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 case detail::HorizonKind::Facts:
                     if (fixed)
                     {
-                        if (!static_range)
-                            static_range = append_static_rows(ip, logical);
-                        std::tie(cell.a, cell.b) = *static_range;
+                        std::tie(cell.a, cell.b) = static_rows_of(ip, logical);
                         cell.op = detail::horizon_op(d.kind, d.scope, d.lead, false, static_cast<u32>(CellOp::Static));
                     }
                     else
@@ -580,6 +630,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         }
         append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
         append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
+        fill_literal_ranges();
         return out;
     }
     out.row_cells = out.cells;
@@ -714,6 +765,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
     }
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
     append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
+    fill_literal_ranges();
     return out;
 }
 }  // namespace
@@ -747,12 +799,14 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     const std::shared_ptr<const EncodingSchema> own = EncodingSchema::create(*table, schema->options());
     if (own->fingerprint() != schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the schema is not the schema of the table's domain");
-    // The relation of each domain predicate's state atoms, and the widest of them.
+    // The relation of each domain predicate's state atoms.
     std::vector<i32> state_relation(table->num_domain_predicates(), -1);
-    // The rows of the object arrays are as wide as the widest predicate that has a cell: a state or goal cell reads a
-    // row of its predicate's arity, whether the predicate's state relation is in the schema or only its goal relations.
-    // (An action relation reads the expansion's bindings and no row.)
+    // The rows of the object arrays are as wide as the widest domain predicate (or numeric function): a state or goal
+    // cell reads a row of its predicate's arity, and the literal section resolves the atoms of every domain predicate,
+    // whether the schema has relations of it or not. (An action relation reads the expansion's bindings and no row.)
     u32 max_arity = 1;
+    for (u32 tp = 0; tp < table->num_domain_predicates(); ++tp)
+        max_arity = std::max(max_arity, table->predicate_arities()[tp]);
     for (u32 id = 0; id < own->num_relations(); ++id)
     {
         const Relation& relation = own->relation(id);
@@ -897,6 +951,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     std::vector<u64> inst;
     std::vector<u32> cells;
     std::vector<i32> slot_args, derived_args, static_args, goal_args, numeric_args;
+    std::vector<u32> literal_ranges;
     std::vector<u64> goal_words;
     for (u32 i = 0; i < instances.size(); ++i)
     {
@@ -967,6 +1022,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         numeric_args.insert(numeric_args.end(), rows.numeric_args.begin(), rows.numeric_args.end());
         goal_words.insert(goal_words.end(), rows.goal_words.begin(), rows.goal_words.end());
         goal_args.insert(goal_args.end(), rows.goal_args.begin(), rows.goal_args.end());
+        literal_ranges.insert(literal_ranges.end(), rows.literal_ranges.begin(), rows.literal_ranges.end());
     }
     auto shape = [&](const std::vector<i32>& rows) { return std::vector<i64>{static_cast<i64>(rows.size() / max_arity), max_arity}; };
     rl::ArrayBundle::Builder builder;
@@ -988,6 +1044,10 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     builder.add("static_relations", rl::DType::U32, {static_cast<i64>(own->static_relations().size())},
                 std::vector<u32>(own->static_relations().begin(), own->static_relations().end()));
     builder.add("numeric_args", rl::DType::I32, shape(numeric_args), numeric_args);
+    builder.add("literal_ranges", rl::DType::U32,
+                {static_cast<i64>(instances.size()), static_cast<i64>(table->num_domain_predicates()),
+                 detail::k_literal_columns},
+                literal_ranges);
     context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
@@ -1000,7 +1060,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
     // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations,
-    // numeric_args
+    // numeric_args, literal_ranges
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -1028,6 +1088,8 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     v.numeric_storage = m_table->numeric() && m_table->numeric_storage() == NumericStorage::I32
                             ? detail::k_numeric_storage_i32
                             : detail::k_numeric_storage_f64;
+    v.literal_ranges = reinterpret_cast<const u32*>(at(14));
+    v.num_predicates = m_table->num_domain_predicates();
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;
