@@ -1633,6 +1633,13 @@ arrays have the capacity sizes, zero after the batch; `validate` accepts such a 
 CPU. `mymyr/encoding/schema.hpp` is the catalog (`EncodingSchema`), `mymyr/encoding/options.hpp` the options
 (`FlatOptions`).
 
+Literals resolve through the context: `detail::resolve_literal(context.view(), instance, predicate, objects, width)`
+(`mymyr/encoding/detail/literals.hpp`, host and device code) gives the `LiteralKind` and slot of an atom given as a
+table domain predicate id and instance-local objects, by binary search in the context's literal section (every domain
+predicate's slot ranges and static rows, whatever the options leave out). `mymyr/encoding/literals.hpp` has the host
+loops: `resolve_literals` over arrays of literals and `literal_masks`, the goal or layer masks of rows of literals
+(`LiteralMasks` with `unsatisfiable`), with `FixedLiterals::Decide` or `Raise` for the literals of fixed truth.
+
 With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the calls take the capacity
 `StaticShape{instances, args}` and report `ExtraSizes::statics` (`StaticSizes{instances, tuples, args}`) after the
 batch's: `count(in, pool, scratch, &extra)`, `encode_capacity(..., sizes, &static_shape, &extra)`, `encode_into(...,
