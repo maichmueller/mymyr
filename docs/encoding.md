@@ -338,8 +338,8 @@ goal entities as targets of group 0.
 **`goals=`** gives every row a goal of its own instead of its instance's: `(goal_pos, goal_neg)` or `(goal_pos,
 goal_neg, goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns
 them. The arrays are `[N, W]` (`[N, D]` for the derived pair), u64 words or u32 halves, or `[1, W]` for one goal that
-every row shares. A row's goal relations then hold exactly its masked literals, with no constant part, and its
-`goal_complete` is 1. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
+every row shares. These masks define the row's whole goal, with no constant part, and its `goal_complete` is 1.
+With subgoal layers, `repeated_literals` decides which [levels](#subgoals) hold these literals. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
 that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
 pair a row's derived goal part is empty. The masks of `rl.goal_masks` (`table.goal_masks()`) are the instance's goal
 over fluent slots only: they give no derived masks, and a goal with such a part keeps only its fluent literals. A call
