@@ -320,7 +320,6 @@ def test_device_stream_metadata_capture(case, layout, implicit):
     device_rows = torch.from_numpy(rows.view(np.int64)).to("cuda:0")
     stream.wait_stream(torch.cuda.current_stream(0))
     with torch.cuda.stream(stream):
-        encoder.warm(device=0)
         ring = encoder.device_stream(4, device=0)
         ring.append(device_rows[:1])
         warm = ring.flush(capacities=caps)
