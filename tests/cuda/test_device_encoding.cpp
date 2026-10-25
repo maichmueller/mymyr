@@ -292,6 +292,7 @@ TEST(DeviceEncodingContext, DeviceViewsReadTheValuesOfTheHostViews)
     SKIP_WITHOUT_GPU();
     const auto ctx = device_context();
     u32 checked = 0;
+    u64 literal_kinds = 0;
     for (const Group& group : groups())
     {
         SCOPED_TRACE(group.name);
@@ -310,10 +311,18 @@ TEST(DeviceEncodingContext, DeviceViewsReadTheValuesOfTheHostViews)
         const auto hv = host->view();
         EXPECT_EQ(reinterpret_cast<const std::byte*>(dv.cells) - static_cast<const std::byte*>(lease.generation->data()),
                   reinterpret_cast<const std::byte*>(hv.cells) - host->arrays().block());
-        EXPECT_EQ(device_probe(dv, table->size(), ctx, ctx->stream()), host_probe(hv, table->size()));
+        const auto expected = host_probe(hv, table->size());
+        EXPECT_EQ(device_probe(dv, table->size(), ctx, ctx->stream()), expected);
+        for (u32 i = 0; i < table->size(); ++i)
+            literal_kinds |= expected[u64{i} * test::k_probe_width + 13];
         ++checked;
     }
     EXPECT_EQ(checked, groups().size());
+    using encoding::detail::LiteralKind;
+    const u64 misses = u64{1} << static_cast<u32>(LiteralKind::StaticFalse) |
+                       u64{1} << static_cast<u32>(LiteralKind::Unreachable) |
+                       u64{1} << static_cast<u32>(LiteralKind::Invalid);
+    EXPECT_EQ(literal_kinds & misses, misses);
 }
 
 // ------------------------------------------------------------------------------------------------ lifetime

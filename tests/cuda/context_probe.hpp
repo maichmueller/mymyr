@@ -10,14 +10,15 @@
 
 namespace mymyr::test
 {
-inline constexpr u32 k_probe_width = 13;
+inline constexpr u32 k_probe_width = 14;
 
 MYMYR_HD u64 probe_mix(u64 h, u64 v) { return (h ^ v) * 0x100000001b3ull; }
 
 /// out[0..6]: objects, words, fluent slots, derived words, derived slots, cells, encoding fingerprint; out[7..10]:
 /// hashes of the instance's cells, fluent slot rows, derived slot rows and static rows; out[11]: relations and the
 /// widest arity; out[12]: a hash of the instance's literal section and of the resolution (resolve_literal) of the atom
-/// of every slot and static row it lists.
+/// of every slot and static row it lists, plus missing tuples and invalid ids; out[13]: a bitset of the literal kinds
+/// resolved by these queries.
 MYMYR_HD void probe_instance(const encoding::detail::ContextView& c, u32 instance, u64* out)
 {
     using namespace encoding::detail;
@@ -52,6 +53,17 @@ MYMYR_HD void probe_instance(const encoding::detail::ContextView& c, u32 instanc
     out[10] = rows(v.static_args, static_rows);
     out[11] = u64{v.num_relations} << 32 | v.max_arity;
     u64 literals = 0xcbf29ce484222325ull;
+    u64 kinds = 0;
+    auto resolve = [&](i64 inst, i64 predicate, const i32* objects, u32 width)
+    {
+        const LiteralSlot s = resolve_literal(c, inst, predicate, objects, width);
+        literals = probe_mix(literals, u64{static_cast<u32>(s.kind)} << 32 | s.slot);
+        kinds |= u64{1} << static_cast<u32>(s.kind);
+    };
+    resolve(-1, 0, nullptr, 0);
+    resolve(c.num_instances, 0, nullptr, 0);
+    resolve(instance, -1, nullptr, 0);
+    resolve(instance, c.num_predicates, nullptr, 0);
     for (u32 p = 0; p < c.num_predicates; ++p)
     {
         const u32* r = c.literal_ranges + (u64{instance} * c.num_predicates + p) * k_literal_columns;
@@ -61,11 +73,29 @@ MYMYR_HD void probe_instance(const encoding::detail::ContextView& c, u32 instanc
         for (u32 set = 0; set < 3; ++set)
             for (u32 at = r[2 * set]; at < r[2 * set + 1]; ++at)
             {
-                const LiteralSlot s = resolve_literal(c, instance, p, sets[set] + u64{at} * v.max_arity, v.max_arity);
-                literals = probe_mix(literals, u64{static_cast<u32>(s.kind)} << 32 | s.slot);
+                resolve(instance, p, sets[set] + u64{at} * v.max_arity, v.max_arity);
             }
+        // Unary and binary queries include tuples absent from static rows and from reachable atom slots.
+        const u32 arity = r[k_literal_arity];
+        if (arity <= 2 && v.num_objects)
+        {
+            const i32 last = static_cast<i32>(v.num_objects - 1);
+            for (u32 sample = 0; sample < 4; ++sample)
+            {
+                const i32 objects[3] = {sample & 1 ? last : 0, sample & 2 ? last : 0, 0};
+                resolve(instance, p, objects, arity);
+                resolve(instance, p, objects, arity + 1);  // padding must be -1
+            }
+            const i32 negative[2] = {-1, -1};
+            const i32 past_end[2] = {static_cast<i32>(v.num_objects), static_cast<i32>(v.num_objects)};
+            resolve(instance, p, negative, arity);
+            resolve(instance, p, past_end, arity);
+            if (arity)
+                resolve(instance, p, negative, arity - 1);
+        }
     }
     out[12] = literals;
+    out[13] = kinds;
 }
 
 /// One thread per instance: probe_instance(context, i, out + i * k_probe_width). Enqueued on `stream`.
