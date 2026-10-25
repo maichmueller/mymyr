@@ -19,6 +19,7 @@
 #include "mymyr/core/random.hpp"
 #include "mymyr/cuda/device_rng.hpp"
 #include "mymyr/cuda/multi_iw.hpp"
+#include "mymyr/cuda/multi_iw_kernels.hpp"
 #include "mymyr/cuda/rollouts.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/search/goal.hpp"
@@ -34,6 +35,7 @@
 #include <numeric>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace mymyr;
@@ -930,4 +932,73 @@ TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
         EXPECT_NE(message.find("2560400 bytes per search"), std::string::npos);
         EXPECT_NE(message.find("table_bytes is 1024"), std::string::npos);
     }
+}
+
+TEST(DeviceIw, LazyGrowthShrinksTableGroups)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80, TaskOptions::Atoms::Lazy, 4093, true);
+    ASSERT_EQ(task->words(), 64u);
+    const std::vector<State> starts(2, task->initial_state());
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    o.table_bytes = 1024;
+    o.chunk_states = 1;
+    cuda::DeviceMultiIw device(context(), task, o);
+    const auto batch = device.run(starts);
+    EXPECT_GT(task->words(), 64u);
+    EXPECT_EQ(batch.stats.groups, 2u);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, starts[i], true), search::iw(*task, cpu_options(o, starts[i])), "lazy table groups");
+}
+
+TEST(DeviceIw, PairTableRelayoutAcrossChunkBoundary)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto stream = ctx->stream();
+    const std::vector<std::pair<u32, u32>> pairs{{0, 0}, {4095, 4095}, {1, 4094}, {63, 4095}};
+    u32 from = 64;
+    std::vector<u64> host(cuda::miw::table_words(2, from), 0);
+    for (const auto& [a, b] : pairs)
+    {
+        host[u64{a} * from + (b >> 6)] |= 1ull << (b & 63);
+        host[u64{b} * from + (a >> 6)] |= 1ull << (a & 63);
+    }
+    cuda::DeviceBuffer source(ctx, host.size() * sizeof(u64), stream);
+    cuda::check(cudaMemcpyAsync(source.data(), host.data(), source.size(), cudaMemcpyHostToDevice, stream), "pair table upload");
+    cuda::check(cudaStreamSynchronize(stream), "pair table upload sync");
+    for (u32 to : {65u, 67u})
+    {
+        cuda::DeviceBuffer target(ctx, cuda::miw::table_words(2, to) * sizeof(u64), stream);
+        cuda::check(cuda::miw::launch_table_relayout(static_cast<const u64*>(source.data()), static_cast<u64*>(target.data()),
+                                                    2, 1, from, to, stream), "pair table relayout");
+        host.resize(cuda::miw::table_words(2, to));
+        cuda::check(cudaMemcpyAsync(host.data(), target.data(), target.size(), cudaMemcpyDeviceToHost, stream), "pair table download");
+        cuda::check(cudaStreamSynchronize(stream), "pair table sync");
+        std::vector<u64> expected(host.size(), 0);
+        for (const auto& [a, b] : pairs)
+        {
+            const u64 lo = std::min(a, b), hi = std::max(a, b), index = hi * (hi + 1) / 2 + lo;
+            expected[index >> 6] |= 1ull << (index & 63);
+        }
+        EXPECT_EQ(host, expected);
+        source = std::move(target);
+        from = to;
+    }
+}
+
+TEST(DeviceIw, HighAtomSlotsKeepSearchesSeparate)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(300);
+    ASSERT_GT(task->atoms().fluent_slots(), 65536u);
+    const std::vector<State> starts(3, task->initial_state());
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    cuda::DeviceMultiIw device(context(), task, o);
+    const auto batch = device.run(starts);
+    const auto cpu = search::iw(*task, cpu_options(o, starts[0]));
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, starts[i], true), cpu, "high atom slots");
 }

@@ -676,7 +676,7 @@ void DeviceMultiIw::Impl::grow_table(u32 arity)
     if (B > group)
         throw Regroup{group};
     DevArray<u64> t;
-    t.ensure(ctx, u64{B} * per, s);
+    t.ensure(ctx, u64{B} * per, s, 0, tw > 64);
     check(miw::launch_table_relayout(table.data(), t.data(), arity, B, RW, tw, s), "launch_table_relayout");
     table = std::move(t);
     RW = tw;
@@ -797,6 +797,10 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
                 out.effective_width[i] = 0;
                 out.plan_length[i] = -1;
                 host.plan_at[i] = ~u64{0};
+                if (host.goal_w)
+                    std::fill_n(host.goal.data() + u64{i} * host.goal_w, host.goal_w, 0);
+                if (host.reached_w)
+                    std::fill_n(host.reached.data() + u64{i} * host.reached_w, host.reached_w, 0);
             }
         }
     }
@@ -1339,7 +1343,7 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
         const u32 group = table_group(arity, RW, o.table_bytes);
         if (B > group)
             throw Regroup{group};
-        table.ensure(ctx, u64{B} * per, s);
+        table.ensure(ctx, u64{B} * per, s, 0, RW > 64);
         if (arity == 2 && RW > 64)
             check(cudaMemsetAsync(table.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
         check(miw::launch_table_init(table_view(arity), nodes(), R, s), "launch_table_init");
