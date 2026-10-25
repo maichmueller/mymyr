@@ -29,8 +29,9 @@ def _array(batch: Any, name: str) -> Any:
 
 def _arange(reference: Any, size: int) -> Any:
     xp = _namespace(reference)
-    device = {"device": reference.device} if xp.__name__ == "torch" else {}
-    return xp.arange(size, dtype=reference.dtype, **device)
+    device = getattr(reference, "device", None)
+    placement = {} if device is None else {"device": device}
+    return xp.arange(size, dtype=reference.dtype, **placement)
 
 
 def _cast(array: Any, dtype: Any) -> Any:

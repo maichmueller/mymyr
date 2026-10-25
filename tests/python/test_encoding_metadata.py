@@ -208,6 +208,7 @@ def test_host_batch_uses_its_export_framework(case, framework, implicit):
         elif framework == "jax":
             import jax
             assert isinstance(value, jax.Array)
+            assert value.device == batch.entity_offsets.device
         else:
             assert isinstance(value, np.ndarray)
         np.testing.assert_array_equal(value, helper(reference))
