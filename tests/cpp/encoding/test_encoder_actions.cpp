@@ -687,7 +687,9 @@ TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
             options.include_derived = wide;
             const auto encoder = FlatEncoder::create(table, options);
             const EncodingSchema& schema = encoder->schema();
-            EXPECT_EQ(encoder->context().max_arity(), wide ? 3u : 1u);
+            // the rows are as wide as the widest domain predicate (link/3, trio/3), whichever relations the options
+            // keep, and the action relation join/4 does not widen them
+            EXPECT_EQ(encoder->context().max_arity(), 3u);
             const auto batch = encoder->encode(input_of(rows, expanded.get()));
             validate(*batch, schema);
             const auto entity_offsets = ints(*batch, "entity_offsets");
