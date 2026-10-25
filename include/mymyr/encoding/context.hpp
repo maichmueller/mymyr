@@ -58,7 +58,9 @@ public:
     /// domain predicates, detail::k_literal_columns]: the literal section that detail::resolve_literal reads, see
     /// detail/literals.hpp). The static tuples of every static domain predicate are in static_args, and the rows are
     /// max_arity wide, the arity of the widest domain predicate or numeric function, whatever the options leave out of
-    /// the cells. An instance has two lists of cells, each
+    /// the cells. Thus excluding static predicates does not save their tuple storage, and excluding a wide predicate
+    /// does not narrow these rows; this memory cost applies to both the host context and its device upload.
+    /// An instance has two lists of cells, each
     /// sorted by relation id with at most one cell per relation: the cells of a graph with the instance's goal, and the
     /// cells of a graph whose row has goal masks of its own (the two lists share their state and action cells).
     /// Per-graph cell counts (detail::count_graph) are per cell, in the order of the list the graph uses, not per
