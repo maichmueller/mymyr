@@ -38,6 +38,41 @@ costs its own instance's width, and the words past it are zero padding. `rl.nume
 and `rl.decode(table, rows, task_ids)` turns rows back into States (`Task.decode` reads rows in the task's own
 layout, with only its own numeric words last).
 
+## Action masks without an expansion
+
+`rl.applicable_schemas(table, states, task_ids=None, *, pool=None)` returns bool `[N, S]`, where
+`S` is the maximum schema count across the table's domains. A schema is true when it has an applicable full binding.
+`rl.applicable_objects(table, states, schema, prefix, depth, task_ids=None, *, num_objects=None, pool=None)`
+returns bool `[N, O]`: object `o` is true exactly when `(schema, prefix[:depth], o, ...)` has an applicable completion.
+`O` defaults to the maximum object count of the table; `num_objects` can increase it with false padding.
+`rl.is_applicable(table, states, schema, binding, task_ids=None, *, pool=None)` returns bool `[N]` for full labels.
+
+```python
+schemas = rl.applicable_schemas(task, states)
+objects = rl.applicable_objects(task, states, schema=0, prefix=None, depth=0)
+# Choose objects, extend an int32 prefix [N, depth], then ask for the next parameter.
+```
+
+Schemas are domain-local indices, passed as an integer for all rows or int32 `[N]`. Objects are instance-local
+indices. Prefixes are int32 `[N, >= depth]` (`None` at depth zero); bindings are int32 `[N, >= arity]`, with
+ignored padding past each schema's arity. Invalid schemas (including `-1` padding), objects and bindings produce
+false rows. A scalar schema's depth must be below its arity; with per-row schemas, shorter schemas produce false
+rows. Depth must be below the table's maximum arity. Zero-parameter schemas participate in `applicable_schemas` and
+`is_applicable` with binding shape `[N, 0]`.
+
+These functions take a Task, TaskTable or TaskSuite and the same CPU state inputs as `expand`: NumPy, torch or JAX
+arrays, a State, or a list of States. Outputs use the state array's framework (States produce NumPy arrays).
+Calls release the GIL, accept `pool=ThreadPool(T)` and support concurrent callers. They are eager CPU operations;
+CUDA inputs raise `ValueError` with “runs on the CPU; pass host rows”.
+
+The masks equal `schema_masks(rl.expand(...))` and `prefix_masks(rl.expand(...), ...)` with witness pruning off.
+Full-label checks equal membership in that expansion's labels, including derived and numeric preconditions and
+numeric effect applicability. Matchers compile lazily per schema and parameter; each candidate needs one witness
+for its remaining parameters. Numeric effects may require several witnesses before a candidate is accepted. Views
+and axiom closures are reused for consecutive equal rows in a workspace, including parameter-by-parameter decoding.
+The witness search can backtrack exponentially in the number of remaining parameters; it avoids storing or
+visiting the full applicable set when a witness can be found early.
+
 ## Derived words
 
 Derived atoms are never stored in states. `rl.expand(..., derived=True)` also returns, for every successor, the bitset of

@@ -1110,6 +1110,7 @@ private:
         {
             plan::Schema c;
             c.arity = s.arity();
+            c.masks = std::make_unique<plan::MaskMatcher[]>(c.arity + 1);
             c.bind_size = c.arity;
             // Effect-relevant parameters: in literal effects, conditions of conditional effects (literals and numeric
             // constraints), numeric effects (targets and values) and total-cost effects: bindings that differ only in
@@ -1490,5 +1491,141 @@ private:
 void compile_task(const TaskData& t, const TaskOptions& options, plan::Compiled& out)
 {
     Compiler(t, options, out).run();
+}
+
+plan::Matcher compile_mask(const plan::Compiled& C, u32 schema, u32 depth)
+{
+    const plan::Schema& ps = C.schemas.at(schema);
+    const plan::Matcher& src = ps.pre[1];
+    const bool exists = depth == ps.arity;
+    const u32 first = exists ? 0 : depth, total = ps.arity;
+    plan::Matcher m;
+    m.total = total;
+    m.first_free = first;
+    m.never = src.never;
+    m.use_fc = src.use_fc;
+    m.dom0 = src.dom0;
+    m.unary = src.unary;
+    m.unary_begin = src.unary_begin;
+    m.relevant.assign(total, 0);
+    for (u32 v = first; v < total; ++v)
+        m.relevant[v] = (!exists && v == depth) || (ps.numeric() && ps.pre[0].relevant[v]);
+
+    std::vector<u8> placed(total, 0);
+    std::fill(placed.begin(), placed.begin() + first, 1);
+    for (u32 group = 0; group < 2; ++group)
+        for (;;)
+        {
+            u32 best = total;
+            i64 best_score = std::numeric_limits<i64>::lowest();
+            for (u32 v = first; v < total; ++v)
+            {
+                if (placed[v] || (m.relevant[v] != 0) != (group == 0))
+                    continue;
+                i64 links = 0;
+                for (u32 e = src.fc_out_begin[v]; e < src.fc_out_begin[v + 1]; ++e)
+                    links += placed[src.fc_out[e].to];
+                const i64 score = links * 1000000 + i64{src.unary_begin[v + 1] - src.unary_begin[v]} * 10000 -
+                                  static_cast<i64>(bits::count(src.dom0.data() + usize{v} * C.ow, C.ow));
+                if (best == total || score > best_score)
+                    best = v, best_score = score;
+            }
+            if (best == total)
+                break;
+            placed[best] = 1;
+            m.free_params.push_back(best);
+            m.first_exist += group == 0;
+        }
+    std::vector<i32> position(total, -1);
+    for (u32 d = 0; d < m.free_params.size(); ++d)
+        position[m.free_params[d]] = static_cast<i32>(d);
+
+    // Every fully prebound literal is checked, including unary and binary constraints folded into domains or rows.
+    for (const plan::Check& c : ps.pre_lits)
+    {
+        bool bound = true;
+        for (u32 i = 0; i < c.pat.var_count; ++i)
+            bound &= C.pattern_vars[c.pat.var_begin + i].param < first;
+        if (bound)
+            m.pre_checks.push_back(c);
+    }
+    std::vector<std::vector<u32>> checks(m.free_params.size()), nums(m.free_params.size());
+    auto distribute = [&](const auto& input, const auto& begins, const auto& vars, auto& output,
+                          auto& pre, auto& var_begin, auto& free_vars, auto& at_step,
+                          auto& per_param_begin, auto& per_param)
+    {
+        std::vector<std::vector<u32>> per(total);
+        var_begin.push_back(0);
+        for (u32 i = 0; i < input.size(); ++i)
+        {
+            i32 last = -1;
+            for (u32 j = begins[i]; j < begins[i + 1]; ++j)
+                last = std::max(last, position[vars[j]]);
+            if (last < 0)
+            {
+                pre.push_back(input[i]);
+                continue;
+            }
+            const u32 ci = static_cast<u32>(output.size());
+            output.push_back(input[i]);
+            at_step[last].push_back(ci);
+            for (u32 j = begins[i]; j < begins[i + 1]; ++j)
+                if (vars[j] >= first)
+                {
+                    free_vars.push_back(vars[j]);
+                    per[vars[j]].push_back(ci);
+                }
+            var_begin.push_back(static_cast<u32>(free_vars.size()));
+        }
+        per_param_begin.push_back(0);
+        for (const auto& indices : per)
+        {
+            per_param.insert(per_param.end(), indices.begin(), indices.end());
+            per_param_begin.push_back(static_cast<u32>(per_param.size()));
+        }
+    };
+    distribute(src.checks, src.check_vars_begin, src.check_vars, m.checks, m.pre_checks,
+               m.check_vars_begin, m.check_vars, checks, m.fc_checks_begin, m.fc_checks);
+    m.npre = src.npre;
+    distribute(src.nchecks, src.ncheck_vars_begin, src.ncheck_vars, m.nchecks, m.npre,
+               m.ncheck_vars_begin, m.ncheck_vars, nums, m.fc_nchecks_begin, m.fc_nchecks);
+
+    m.fc_out_begin.push_back(0);
+    for (u32 v = 0; v < total; ++v)
+    {
+        for (u32 e = src.fc_out_begin[v]; e < src.fc_out_begin[v + 1]; ++e)
+        {
+            const plan::Edge& edge = src.fc_out[e];
+            if (v < first && edge.to >= first)
+            {
+                m.fc_pre.push_back({edge.base, v, edge.neg});
+                m.fc_pre_to.push_back(edge.to);
+            }
+            else if (v >= first && edge.to >= first)
+                m.fc_out.push_back(edge);
+        }
+        m.fc_out_begin.push_back(static_cast<u32>(m.fc_out.size()));
+    }
+    for (u32 d = 0; d < m.free_params.size(); ++d)
+    {
+        const u32 v = m.free_params[d];
+        plan::Step st;
+        st.param = v;
+        st.row_begin = static_cast<u32>(m.rows.size());
+        for (u32 from = 0; from < total; ++from)
+            if (position[from] < static_cast<i32>(d))
+                for (u32 e = src.fc_out_begin[from]; e < src.fc_out_begin[from + 1]; ++e)
+                    if (const plan::Edge& edge = src.fc_out[e]; edge.to == v)
+                        m.rows.push_back({edge.base, from, edge.neg});
+        st.row_end = static_cast<u32>(m.rows.size());
+        st.check_begin = static_cast<u32>(m.step_checks.size());
+        m.step_checks.insert(m.step_checks.end(), checks[d].begin(), checks[d].end());
+        st.check_end = static_cast<u32>(m.step_checks.size());
+        st.ncheck_begin = static_cast<u32>(m.step_nchecks.size());
+        m.step_nchecks.insert(m.step_nchecks.end(), nums[d].begin(), nums[d].end());
+        st.ncheck_end = static_cast<u32>(m.step_nchecks.size());
+        m.steps.push_back(st);
+    }
+    return m;
 }
 }  // namespace mymyr::detail

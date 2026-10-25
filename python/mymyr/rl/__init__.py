@@ -41,6 +41,13 @@ past it are counted in ``total`` and ``overflow`` is set; a batch holds at most 
 ``pool=ThreadPool(T)`` splits one batch over T threads; any number of Python threads may call ``expand`` on one shared
 table at once.
 
+Action masks without an expansion: :func:`applicable_schemas` returns bool [N, S], and
+:func:`applicable_objects` returns bool [N, O] for the next object given a schema and a parameter prefix.
+A bit is true iff an applicable full binding extends it, including numeric effect applicability rules.
+:func:`is_applicable` checks full labels in bool [N]. These functions accept CPU state arrays or States,
+return the input framework's bool arrays, release the GIL and split rows with ``pool=ThreadPool(T)``.
+They search for witnesses without constructing successor rows; CUDA inputs raise ValueError.
+
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read
 in place (zero-copy); outputs are views of one mymyr-owned block per call (zero-copy DLPack for torch and JAX).
@@ -119,6 +126,9 @@ from mymyr._core._rl import (
     TaskSuite,
     TaskTable,
     ThreadPool,
+    applicable_objects,
+    applicable_schemas,
+    is_applicable,
     expand,
     expand_into,
     goal_count,
@@ -141,6 +151,9 @@ __all__ = [
     "TaskSuite",
     "TaskTable",
     "ThreadPool",
+    "applicable_objects",
+    "applicable_schemas",
+    "is_applicable",
     "as_table",
     "decode",
     "expand",

@@ -250,6 +250,14 @@ public:
     /// Whether the prepared state has an applicable action (witness pruning is used regardless of the setting).
     [[nodiscard]] bool any();
 
+    /// Whether some full binding of schema is applicable in the prepared state, independent of witness settings.
+    [[nodiscard]] bool schema_applicable(u32 schema);
+    /// Objects extending prefix at depth to an applicable full binding. Writes words_for(num_objects) words;
+    /// invalid schemas, depths, prefix lengths or objects produce zeros.
+    void parameter_mask(u32 schema, std::span<const ObjectId> prefix, u32 depth, u64* out);
+    /// Prepares a mask row, reusing the view and axiom closure when its contents match the last prepared mask row.
+    void prepare_masks(StateView s);
+
     /// Effects of the binding currently in engine().bind() for `schema` (preconditions are not checked). Numeric tasks:
     /// `ok` is false when the numeric effects break the applicability rules (the delta is then incomplete).
     Delta effects(u32 schema, bool* ok = nullptr)
@@ -269,6 +277,7 @@ private:
         std::vector<detail::ExecMatcher> ces;
         bool ordered[2] = {false, false};  // emits in canonical order without sorting
         bool numeric = false;              // numeric or total-cost effects (collect_numeric)
+        std::vector<std::unique_ptr<detail::ExecMatcher>> masks;
     };
 
     /// The Delta of the action collected last for schema `se` (valid until the next collect). A schema without numeric
@@ -398,6 +407,9 @@ private:
     const u8* m_only = nullptr;  // set_schema_filter
     bool m_witness = true;
     bool m_canonical = true;
+    State m_mask_state;
+    u64 m_mask_revision = ~u64{0};
+    detail::ExecMatcher& mask_matcher(u32 schema, u32 depth);
 };
 
 /// Builds the successor words of `cur` (n words) under delta d (delete, then add) into out, grown as needed.

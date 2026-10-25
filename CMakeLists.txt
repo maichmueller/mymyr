@@ -107,6 +107,7 @@ add_library(mymyr_core STATIC
     # task fingerprint, rl.expand, task arrays
     src/mymyr/formalism/fingerprint.cpp
     src/mymyr/rl/expand.cpp
+    src/mymyr/rl/masks.cpp
     src/mymyr/rl/task_arrays.cpp
     src/mymyr/rl/device_search.cpp
     # task tables (many instances of one domain) and the CPU env pool
