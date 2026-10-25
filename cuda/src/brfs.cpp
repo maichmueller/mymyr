@@ -306,7 +306,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     auto estimate = [&](u64 ns)
     {
         const u64 est = static_cast<u64>(std::ceil(*std::ranges::max_element(ratios) * 1.25 * static_cast<double>(ns))) + 256;
-        return std::min(est, std::max<u64>(256, o.candidate_bytes / (u64{W} * sizeof(u64))));
+        return std::min(est, std::max<u64>(W > 64 ? 1u : 256u, o.candidate_bytes / (u64{W} * sizeof(u64))));
     };
     auto capacity = [&](const Chunk& k) { return k.known ? k.known : estimate(k.ns); };
     std::vector<Chunk> plan;
@@ -576,7 +576,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             // one chunk), so that the arena grows about as it would chunk by chunk; a chunk redone after it halted for
             // room (its candidates known; resumed at its rows when counted) runs alone, sized as with exact capacities
             const bool exact_group = exact || plan[i].known;
-            const u64 room_limit = std::max<u64>(count / 4, u64{1} << 20);
+            const u64 room_limit = W > 64 ? std::max<u64>(1, o.candidate_bytes / (u64{W} * 8))
+                                          : std::max<u64>(count / 4, u64{1} << 20);
             usize j = i;
             u64 room = 0, cap_max = 0;
             while (j < plan.size() && (j == i || (grouped && !exact_group && room + capacity(plan[j]) <= room_limit)))

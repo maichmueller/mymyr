@@ -79,7 +79,7 @@ struct TupleKey
 
 /// Words per search's novelty table. Wide pair tables pack the lower triangle, including its singleton diagonal;
 /// narrow pair tables retain directly indexed symmetric rows. Padding atoms are always zero in state rows.
-[[nodiscard]] constexpr u64 table_words(u32 arity, u32 words)
+[[nodiscard]] MYMYR_HD constexpr u64 table_words(u32 arity, u32 words)
 {
     if (arity < 2)
         return words;

@@ -189,3 +189,31 @@ def _gil_stays_disabled():
     yield
     if sys._is_gil_enabled():
         pytest.fail("this test enabled the GIL (it loaded a module that needs it); mark it @pytest.mark.needs_gil")
+
+
+def wide_task(tmp_path, objects=80, atoms="dense", initial_atoms=1, extra_effects=False):
+    """A four-state task whose two high-slot goals require IW(2) from the initial state."""
+    import mymyr
+
+    text = f"O {objects}\nP 1\nF 2 cell\nSI 0\nFI {initial_atoms}\n"
+    text += "".join(f"0 {i // objects} {i % objects}\n" for i in range(initial_atoms))
+    text += f"G 2\n0 1 {objects - 1} {objects - 1}\n0 1 {objects - 1} {objects - 2}\nA 3\n"
+    for i in range(2):
+        a, b = -objects, -objects + i
+        text += f"set{i} 0\nL 1\n0 0 {a} {b}\nE 1\n0\nL 0\nF {2 if extra_effects else 1}\n0 1 {a} {b}\n"
+        if extra_effects:
+            text += f"0 1 {a + 1} {b}\n"
+    text += "touch 2\nL 1\n0 1 0 1\nE 1\n0\nL 0\nF 1\n0 1 0 1\n"
+    path = tmp_path / "wide.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path, atoms=atoms)
+
+
+@pytest.fixture(params=["p01-medium", "p05-medium"])
+def rovers_task(request):
+    import mymyr
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/ipc/rovers-ipc/test"
+    return mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{request.param}.pddl", atoms="dense")

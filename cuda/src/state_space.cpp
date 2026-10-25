@@ -927,7 +927,6 @@ private:
         admit_more();
         const auto tg = Clock::now();
         u64 b = 0;
-        u32 chunk_cap = chunk_capacity(w.W);
         for (;;)
         {
             if (b == w.count)
@@ -942,7 +941,7 @@ private:
                 all_dead = all_dead && w.dead[m];
             if (all_dead && next >= I)
                 break;
-            const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_cap}));
+            const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_capacity(w.W)}));
             const u32 done = expand(w, b, ns);
             b += done;
             ++m_st.chunks;
@@ -1037,9 +1036,12 @@ private:
     /// expanded.
     u32 expand(Wave& w, u64 b, u32 ns)
     {
-        const u64 budget = std::max<u64>(u64{1} << 20, k_candidate_bytes / (u64{w.W} * 8 + 16 + 4 * u64{m_L}));
         for (;;)  // one chunk (redone after a width growth, or cut)
         {
+            if (w.W > 64)
+                ns = std::min(ns, chunk_capacity(w.W));
+            const u64 budget = std::max<u64>(w.W > 64 ? 1 : u64{1} << 20,
+                                              k_candidate_bytes / (u64{w.W} * 8 + 16 + 4 * u64{m_L}));
             u64 M = m_multi ? count_multi(w, b, ns) : count_single(w, b, ns);
             if (M > budget && ns > 1)
             {

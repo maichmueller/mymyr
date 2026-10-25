@@ -11,6 +11,7 @@
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "../cpp/support/wide_task.hpp"
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/brfs.hpp"
 #include "mymyr/cuda/expand.hpp"
@@ -710,3 +711,30 @@ TEST(CudaExpand, ThreadsAndStreamsShareATask)
         EXPECT_EQ(got[t], ref) << "thread " << t;
 }
 }  // namespace
+
+TEST(DeviceBrfs, WideRowsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    cuda::ContextOptions co;
+    co.max_bytes = u64{3} << 30;
+    const auto ctx = cuda::DeviceContext::create(0, co);
+    for (u32 objects : {65u, 80u, 129u, 192u})
+    {
+        SCOPED_TRACE(objects);
+        const auto task = wide_task(objects);
+        ASSERT_GT(task->words(), 64u);
+        BrfsOptions cpu;
+        cpu.stop_at_goal = false;
+        cpu.fingerprint = true;
+        const auto c = brfs(*task, cpu);
+        cuda::DeviceBrfsOptions gpu;
+        gpu.stop_at_goal = false;
+        gpu.fingerprint = true;
+        gpu.chunk_states = 1;
+        const auto d = cuda::brfs(ctx, task, gpu).result;
+        EXPECT_EQ(d.states, c.states);
+        EXPECT_EQ(d.generated, c.generated);
+        EXPECT_EQ(d.fingerprint, c.fingerprint);
+        EXPECT_EQ(d.num_goal_states, c.num_goal_states);
+    }
+}

@@ -226,3 +226,74 @@ def test_ground_goal_refusals(ctx):
     assert not mymyr.search.iw(classical, goal=impossible).solved
     with pytest.raises(ValueError, match="goal can never hold"):
         mc.multi_iw(classical, [classical.initial_state], ctx=ctx, goals=[impossible])
+
+
+@pytest.mark.parametrize("objects", [65, 80, 129, 192])
+@pytest.mark.parametrize("width", [1, 2])
+def test_wide_iw_equals_cpu(ctx, tmp_path, objects, width):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects)
+    assert task.words > 64
+    starts = walk(task, steps=2, walks=2)
+    for kw in ({}, {"chunk_states": 1, "max_searches": 1}):
+        batch = mc.multi_iw(task, starts, ctx=ctx, max_width=width, **kw)
+        for i, start in enumerate(starts):
+            cpu = mymyr.search.iw(task, start=start, max_width=width)
+            assert_equal(batch, i, cpu)
+        if width == 2:
+            assert batch.effective_width[0] == 2
+    batch = mc.batched_iw1(task, starts, ctx=ctx)
+    for i, start in enumerate(starts):
+        assert_equal(batch, i, mymyr.search.iw(task, start=start, max_width=1))
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_wide_seeded_rollouts_equal_cpu(ctx, tmp_path, width):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path)
+    seeds = [0, 1, 7, 12345]
+    cpu = mymyr.search.find_rollouts_parallel(task, seeds=seeds, max_width=width, threads=1)
+    for kw in ({}, {"chunk_states": 1, "max_searches": 1}):
+        batch = mc.rollouts(task, seeds, ctx=ctx, max_width=width, **kw)
+        for i, rollout in enumerate(cpu.rollouts):
+            assert_equal(batch, i, rollout)
+            assert batch.reached_atoms(i) == rollout.reached_fluent_atoms
+
+
+def test_wide_pair_table_refusal(ctx, tmp_path):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects=490)
+    slots = 64 * task.words
+    required = ((slots * (slots + 1) // 2 + 63) // 64) * 8
+    with pytest.raises(ValueError, match=rf"{required} bytes per search.*table_bytes is {1 << 30}"):
+        mc.multi_iw(task, [task.initial_state], ctx=ctx, max_width=2)
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_lazy_iw_crosses_wide_boundary(ctx, tmp_path, width):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, atoms="lazy", initial_atoms=4093, extra_effects=True)
+    assert task.words == 64
+    batch = mc.multi_iw(task, [task.initial_state] * 2, ctx=ctx, max_width=width, chunk_states=1)
+    assert task.words > 64
+    for i in range(2):
+        assert_equal(batch, i, mymyr.search.iw(task, max_width=width))
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_ipc_iw_equals_cpu(ctx, rovers_task, width):
+    task = rovers_task
+    batch = mc.multi_iw(task, [task.initial_state] * 2, ctx=ctx, max_width=width, max_states=32, chunk_states=1)
+    cpu = mymyr.search.iw(task, max_width=width, max_states=32)
+    for i in range(2):
+        assert_equal(batch, i, cpu)
+    seeds = [0, 1, 7, 12345]
+    cpu = mymyr.search.find_rollouts_parallel(task, seeds=seeds, max_width=width, max_states=32, threads=1)
+    batch = mc.rollouts(task, seeds, ctx=ctx, max_width=width, max_states=32, chunk_states=1)
+    for i, rollout in enumerate(cpu.rollouts):
+        assert_equal(batch, i, rollout)
+        assert batch.reached_atoms(i) == rollout.reached_fluent_atoms

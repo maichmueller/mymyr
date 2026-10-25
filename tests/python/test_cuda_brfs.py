@@ -357,3 +357,26 @@ def test_expand_from_many_threads(ctx):
         th.join()
     assert not errors, errors
     torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("objects", [65, 80, 129, 192])
+def test_wide_brfs_equals_cpu(ctx, tmp_path, objects):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects)
+    assert task.words > 64
+    for stop in (False, True):
+        cpu = mymyr.search.brfs(task, stop_at_goal=stop, fingerprint=True, threads=1)
+        dev = mc.brfs(task, ctx=ctx, stop_at_goal=stop, fingerprint=True, chunk_states=1)
+        assert (dev.stats.states, dev.stats.generated, dev.stats.expanded, dev.fingerprint, dev.num_goal_states) == (
+            cpu.stats.states, cpu.stats.generated, cpu.stats.expanded, cpu.fingerprint, cpu.num_goal_states)
+        assert dev.plan == cpu.plan and dev.status == cpu.status
+
+
+def test_ipc_brfs_equals_cpu(ctx, rovers_task):
+    task = rovers_task
+    cpu = mymyr.search.brfs(task, max_states=32, fingerprint=True, threads=1)
+    dev = mc.brfs(task, ctx=ctx, max_states=32, fingerprint=True, chunk_states=1)
+    assert (dev.stats.states, dev.stats.generated, dev.stats.expanded, dev.fingerprint) == (
+        cpu.stats.states, cpu.stats.generated, cpu.stats.expanded, cpu.fingerprint)
+    assert dev.status == cpu.status and dev.plan == cpu.plan

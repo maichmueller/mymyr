@@ -286,3 +286,27 @@ def test_h2_proposition_limit_names_the_size_and_limit(ctx, tmp_path):
     with pytest.raises(ValueError) as caught:
         mc.Heuristic(task, "h2", ctx=ctx)
     assert "8192" in str(caught.value) and "8191" in str(caught.value)
+
+
+@pytest.mark.parametrize("objects", [65, 80, 129, 192])
+@pytest.mark.parametrize("heuristic", ["blind", "max"])
+def test_wide_best_first_equals_cpu(ctx, tmp_path, objects, heuristic):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects)
+    assert task.words > 64
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic=heuristic)
+        dev = device_search(task, ctx=ctx, heuristic=heuristic, batch=1, chunk_states=1)
+        assert dev.status == cpu.status and dev.plan == cpu.plan
+        assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+        assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+@pytest.mark.parametrize("heuristic", ["blind", "max"])
+def test_ipc_astar_equals_cpu(ctx, rovers_task, heuristic):
+    task = rovers_task
+    cpu = mymyr.search.astar(task, heuristic=heuristic, max_expanded=2)
+    dev = mc.astar(task, ctx=ctx, heuristic=heuristic, batch=1, max_expanded=2)
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)

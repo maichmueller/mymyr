@@ -15,6 +15,7 @@
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "../cpp/support/wide_task.hpp"
 #include "mymyr/core/random.hpp"
 #include "mymyr/cuda/device_rng.hpp"
 #include "mymyr/cuda/multi_iw.hpp"
@@ -860,3 +861,73 @@ TEST(CudaRollouts, Iw2AndBudgetsEqualTheCpu)
             }
 }
 }  // namespace
+
+TEST(DeviceIw, WideRowsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    for (u32 objects : {65u, 80u, 129u, 192u})
+    {
+        SCOPED_TRACE(objects);
+        const auto task = wide_task(objects);
+        ASSERT_GT(task->words(), 64u);
+        const std::vector<State> starts(3, task->initial_state());
+        for (u32 width : {1u, 2u})
+        {
+            cuda::MultiIwOptions o;
+            o.max_width = width;
+            o.chunk_states = 2;
+            o.max_searches = 2;
+            cuda::DeviceMultiIw device(ctx, task, o);
+            for (u32 repeat = 0; repeat < 3; ++repeat)
+            {
+                const auto batch = device.run(starts);
+                for (u32 i = 0; i < starts.size(); ++i)
+                {
+                    const auto c = search::iw(*task, cpu_options(o, starts[i]));
+                    expect_same(batch.result(i, *task, starts[i], true), c, "wide rows");
+                    if (width == 2)
+                    {
+                        EXPECT_EQ(c.effective_width, 2u);
+                    }
+                }
+            }
+        }
+        cuda::DeviceRolloutOptions ro;
+        ro.iw.max_width = 2;
+        ro.seeds = {0, 1, 7, 12345};
+        const auto batch = cuda::rollouts_batch(ctx, task, ro);
+        search::ParallelRolloutOptions cpu;
+        cpu.iw.max_width = 2;
+        cpu.seeds = ro.seeds;
+        cpu.threads = 1;
+        const auto c = search::find_rollouts_parallel(*task, cpu);
+        for (u32 i = 0; i < ro.seeds.size(); ++i)
+        {
+            expect_same(batch.result(i, *task, starts[0], true), c.rollouts[i].search, "wide rollouts");
+            EXPECT_EQ(cuda::reached_atoms(batch, i, *task), c.rollouts[i].reached_fluent_atoms);
+        }
+    }
+}
+
+TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80);
+    cuda::MultiIwOptions o;
+    o.max_width = 2;
+    o.table_bytes = 1024;
+    cuda::DeviceMultiIw device(context(), task, o);
+    const std::vector<State> starts{task->initial_state()};
+    try
+    {
+        (void)device.run(starts);
+        FAIL() << "expected the novelty table size refusal";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("2560400 bytes per search"), std::string::npos);
+        EXPECT_NE(message.find("table_bytes is 1024"), std::string::npos);
+    }
+}
