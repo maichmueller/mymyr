@@ -98,6 +98,9 @@ struct HGraphEdgeType
 struct EncodingStatics
 {
 };
+struct EncodingLiteralSource
+{
+};
 }
 
 namespace nanobind::detail
@@ -202,6 +205,13 @@ template<>
 struct type_caster<mymyr::python::ann::HGraphEdgeType>
 {
     static constexpr auto Name = const_name("tuple[str, str, str]");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingLiteralSource>
+{
+    static constexpr auto Name =
+        const_name("FlatRelationEncoder | FlatHorizonEncoder | FlatTransitionEncoder | FlatTransitionEffectsEncoder | "
+                   "mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
@@ -2589,7 +2599,10 @@ encoding::FixedLiterals fixed_of(const std::string& fixed)
 
 /// The masks as (pos, neg, derived_pos, derived_neg, unsatisfiable) NumPy arrays: [rows, words] (with `layered`, [rows,
 /// layers, words]), the derived pair None for a table without derived words, unsatisfiable uint8 [rows] ([rows, layers]).
-nb::tuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
+using MasksTuple = nb::typed<nb::tuple, ann::Any, ann::Any, ann::Any, ann::Any, ann::Any>;
+using LiteralSourceArg = Arg<ann::EncodingLiteralSource>;
+
+MasksTuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
 {
     const usize rows = m.rows, layers = m.layers;
     auto words = [&](std::vector<u64>&& v, usize width)
@@ -2605,10 +2618,11 @@ nb::tuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
     }
     nb::object unsatisfiable = layered ? numpy_array(std::move(m.unsatisfiable), {rows, layers})
                                        : numpy_array(std::move(m.unsatisfiable), {rows});
-    return nb::make_tuple(pos, neg, derived_pos, derived_neg, unsatisfiable);
+    return MasksTuple(nb::make_tuple(pos, neg, derived_pos, derived_neg, unsatisfiable));
 }
 
-nb::tuple literal_slots(nb::handle source, I32Vector predicates, I32Matrix objects, std::optional<I32Vector> task_ids)
+nb::typed<nb::tuple, ann::Any, ann::Any> literal_slots(LiteralSourceArg source, I32Vector predicates, I32Matrix objects,
+                                                       std::optional<I32Vector> task_ids)
 {
     const LiteralSource s = literal_source(source);
     const usize n = predicates.shape(0);
@@ -2623,12 +2637,13 @@ nb::tuple literal_slots(nb::handle source, I32Vector predicates, I32Matrix objec
     encoding::resolve_literals(*s.context, literals, span_of(task_ids), kinds, slots);
     std::vector<u8> kind_codes(n);
     std::ranges::transform(kinds, kind_codes.begin(), [](encoding::LiteralKind k) { return static_cast<u8>(k); });
-    return nb::make_tuple(numpy_array(std::move(kind_codes), {n}), numpy_array(std::move(slots), {n}));
+    return nb::typed<nb::tuple, ann::Any, ann::Any>(
+        nb::make_tuple(numpy_array(std::move(kind_codes), {n}), numpy_array(std::move(slots), {n})));
 }
 
-nb::tuple literal_masks(nb::handle source, I32Vector predicates, I32Matrix objects, U8Vector positive, I32Vector rows,
-                        u32 num_rows, std::optional<I32Vector> task_ids, std::optional<I32Vector> layers,
-                        u32 num_layers, const std::string& fixed)
+MasksTuple literal_masks(LiteralSourceArg source, I32Vector predicates, I32Matrix objects, U8Vector positive,
+                         I32Vector rows, u32 num_rows, std::optional<I32Vector> task_ids,
+                         std::optional<I32Vector> layers, u32 num_layers, const std::string& fixed)
 {
     const LiteralSource s = literal_source(source);
     const usize n = predicates.shape(0);
@@ -2643,8 +2658,8 @@ nb::tuple literal_masks(nb::handle source, I32Vector predicates, I32Matrix objec
 
 /// The masks of rows of literals given as Task.literal takes them: `rows[r]` is a list of literals, or with `layered`
 /// a list of layers, each a list of literals. Names are parsed in the task of each row's instance.
-nb::tuple named_literal_masks(nb::handle source, nb::list rows, std::optional<I32Vector> task_ids, bool layered,
-                              const std::string& fixed_name)
+MasksTuple named_literal_masks(LiteralSourceArg source, nb::typed<nb::list, ann::Any> rows,
+                               std::optional<I32Vector> task_ids, bool layered, const std::string& fixed_name)
 {
     const encoding::FixedLiterals fixed = fixed_of(fixed_name);
     const LiteralSource s = literal_source(source);
