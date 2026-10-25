@@ -580,7 +580,7 @@ void DeviceMultiIw::Impl::ensure_nodes(u64 n)
 {
     if (n <= n_cap && n_rows.capacity() >= n_cap * W)  // (a later run may have wider rows: lazy slots)
         return;
-    const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, 1024});
+    const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, row_reserve_floor(W, 1024)});
     n_rows.ensure(ctx, cap * W, s, u64{n_tail} * W);
     n_parent.ensure(ctx, cap, s, n_tail);
     n_search.ensure(ctx, cap, s, n_tail);
@@ -628,7 +628,9 @@ u32* DeviceMultiIw::Impl::dedup_table(u64 slots)
 void DeviceMultiIw::Impl::widen(u32 nw, u32 arity)
 {
     DevArray<u64> rows;
-    rows.ensure(ctx, std::max<u64>(n_cap, 1) * nw, s);
+    const u64 cap = std::max<u64>({1, n_tail, row_reserve_floor(nw, n_cap)});
+    rows.ensure(ctx, cap * nw, s);
+    n_cap = cap;
     if (task->numeric_slots())
     {
         auto view = gen->view();
@@ -1320,7 +1322,7 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
     }
     const u32 R = static_cast<u32>(roots.size());
     n_tail = 0;
-    ensure_nodes(std::max<u64>(R, 1024));
+    ensure_nodes(R);
     u32* rd = roots_dev.ensure(ctx, std::max<u32>(R, 1), s);
     to_device(rd, roots.data(), R, s);
     ensure_lists(std::max<u32>(R, 1), 0, 0);

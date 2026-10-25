@@ -1002,3 +1002,19 @@ TEST(DeviceIw, HighAtomSlotsKeepSearchesSeparate)
     for (u32 i = 0; i < starts.size(); ++i)
         expect_same(batch.result(i, *task, starts[i], true), cpu, "high atom slots");
 }
+
+TEST(DeviceIw, VeryWideRowsRespectByteReservations)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(2048);
+    ASSERT_EQ(task->words(), 65536u);
+    cuda::ContextOptions co;
+    co.max_bytes = u64{256} << 20;
+    const auto ctx = cuda::DeviceContext::create(0, co);
+    const std::vector<State> starts{task->initial_state()};
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const auto batch = device.run(starts);
+    expect_same(batch.result(0, *task, starts[0], true), search::iw(*task, cpu_options(o, starts[0])), "very wide rows");
+}

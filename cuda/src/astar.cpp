@@ -287,6 +287,8 @@ struct Driver
         best.ensure(ctx, n, s, count);
         node_cap = std::min({g.capacity(), h.capacity(), parent.capacity(), sidx.capacity(), depth.capacity(), flags.capacity(),
                              best.capacity()});
+        if (W > 64)
+            node_cap = std::min(node_cap, rows.capacity() / W);
         check(bfk::launch_fill_u64(best.data() + count, node_cap - count, bfk::k_no_key, s), "launch_fill_u64");
     }
     [[nodiscard]] u64 state_limit() const { return std::min(node_cap, table_limit()); }
@@ -379,10 +381,20 @@ struct Driver
     void widen(u32 nw)
     {
         DevArray<u64> grown;
-        grown.ensure(ctx, std::max<u64>(rows.capacity() / W, u64{hc->count} + 1024) * nw, s);
+        const u64 cap = std::max<u64>(hc->count, row_reserve_floor(nw,
+                                       std::max<u64>(rows.capacity() / W, u64{hc->count} + 1024)));
+        grown.ensure(ctx, cap * nw, s);
         check(state_set::launch_relayout(rows.data(), W, grown.data(), nw, hc->count, s), "launch_relayout");
         rows = std::move(grown);
         W = nw;
+        if (W > 64)
+        {
+            node_cap = std::min(node_cap, rows.capacity() / W);
+            // Keep every selected parent. Changing C only when they fit one chunk preserves its cursor.
+            B = static_cast<u32>(std::max<u64>(hc->n, row_reserve_floor(W, B)));
+            C = std::min(C, B);
+            K = (B + C - 1) / C;
+        }
         check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
         check(state_set::launch_rehash(tab(), arena(), hc->count, s), "launch_rehash");
         size_step();
@@ -748,7 +760,8 @@ struct Driver
     [[nodiscard]] u64 estimate() const
     {
         const u64 m = std::max<u64>(*std::ranges::max_element(recent), hc->next_M);
-        return quantize(m + m / 4 + 256);
+        const u64 n = m + m / 4 + row_reserve_floor(W, 256);
+        return W <= 64 ? quantize(n) : std::max(m, row_reserve_floor(W, std::bit_ceil(std::max<u64>(n, 1))));
     }
     /// Steps replayed from a captured graph, looped on the device: one read per loop. An abort hands the step to the
     /// host.
@@ -756,7 +769,8 @@ struct Driver
     {
         cap = estimate();
         size_chunk(cap);
-        ensure_room(u64{K} * cap * 4);  // (a loop runs until the next step might not fit)
+        const u64 room = u64{K} * cap * 4;
+        ensure_room(W <= 64 ? room : std::max(cap, row_reserve_floor(W, room)));  // (a loop runs until the next step might not fit)
         gen->prepare(C);
         std::vector<u64> key = {cap,
                                 W,
@@ -847,7 +861,7 @@ struct Driver
 bool Driver::start(const State& s0)
 {
     W = bucket(std::max(task->words(), s0.size_words()));
-    ensure_nodes(0, 1024);
+    ensure_nodes(0, row_reserve_floor(W, 1024));
     std::vector<u64> row(W, 0);
     std::copy_n(s0.data(), s0.size_words(), row.begin());
     to_device(rows.data(), row.data(), W, s);
@@ -886,7 +900,7 @@ bool Driver::start(const State& s0)
     hc->runs = 1;
     hc->count = 1;
     hc->open_entries = 1;
-    ensure_room(1024);
+    ensure_room(row_reserve_floor(W, 1024));
     to_device(open.data(), &entry, 1, s);
     to_device(run_key.data(), &key, 1, s);
     const u64 zero = 0;
@@ -1047,7 +1061,7 @@ DeviceBestFirstResult Driver::run()
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
         const u64 per = std::max<u64>(8, (gen->view_words() + (task->words() > 64 ? task->words() : 0)) * 8);
         const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(task->words() > 64 ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
-        B = o.batch;
+        B = static_cast<u32>(row_reserve_floor(bucket(std::max(task->words(), s0.size_words())), o.batch));
         C = static_cast<u32>(std::min<u64>(chunk_cap, B));
         K = (B + C - 1) / C;
         window_cap = static_cast<u32>(std::max<u64>(2 * u64{B}, 1024));

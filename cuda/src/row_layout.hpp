@@ -20,4 +20,9 @@ inline u32 search_row_words(u32 words)
         throw std::length_error("mymyr: device search: row exceeds the 32-bit atom slot range");
     return (words + 63) / 64 * 64;
 }
+/// Default reservations hold at most 16 MiB of wide rows; narrow tasks retain their row-count tuning.
+inline u64 row_reserve_floor(u32 words, u64 rows)
+{
+    return words <= 64 ? rows : std::min(rows, std::max<u64>(1, (u64{16} << 20) / (u64{words} * 8)));
+}
 }  // namespace mymyr::cuda

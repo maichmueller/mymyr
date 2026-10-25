@@ -259,7 +259,7 @@ def test_wide_seeded_rollouts_equal_cpu(ctx, tmp_path, width):
         batch = mc.rollouts(task, seeds, ctx=ctx, max_width=width, **kw)
         for i, rollout in enumerate(cpu.rollouts):
             assert_equal(batch, i, rollout)
-            assert batch.reached_atoms(i) == rollout.reached_fluent_atoms
+            assert {task.atom(slot) for slot in batch.reached_slots(i)} == set(rollout.reached_fluent_atoms)
 
 
 def test_wide_pair_table_refusal(ctx, tmp_path):
@@ -296,4 +296,4 @@ def test_ipc_iw_equals_cpu(ctx, rovers_task, width):
     batch = mc.rollouts(task, seeds, ctx=ctx, max_width=width, max_states=32, chunk_states=1)
     for i, rollout in enumerate(cpu.rollouts):
         assert_equal(batch, i, rollout)
-        assert batch.reached_atoms(i) == rollout.reached_fluent_atoms
+        assert {task.atom(slot) for slot in batch.reached_slots(i)} == set(rollout.reached_fluent_atoms)

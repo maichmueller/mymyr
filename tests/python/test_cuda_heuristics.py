@@ -310,3 +310,31 @@ def test_ipc_astar_equals_cpu(ctx, rovers_task, heuristic):
     dev = mc.astar(task, ctx=ctx, heuristic=heuristic, batch=1, max_expanded=2)
     assert dev.status == cpu.status and dev.plan == cpu.plan
     assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+def test_very_wide_astar_respects_byte_reservations(tmp_path):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects=2048)
+    assert task.words == 65536
+    budget = 512 << 20
+    small = mc.Context(0, max_bytes=budget)
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    dev = mc.astar(task, ctx=small, heuristic="blind")
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+    assert dev.counters["device_bytes"] <= budget
+    small.synchronize()
+
+
+def test_lazy_astar_crosses_wide_boundary(ctx, tmp_path):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, atoms="lazy", initial_atoms=4093, extra_effects=True)
+    assert task.words == 64
+    dev = mc.astar(task, ctx=ctx, heuristic="blind", batch=1)
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    assert task.words > 64 and dev.counters["widenings"] > 0
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+    assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
