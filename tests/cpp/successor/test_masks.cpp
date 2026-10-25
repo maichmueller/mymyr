@@ -36,6 +36,7 @@ TEST_P(ActionMasks, EqualEnumeratedLabels)
     std::vector<u64> mask(bits::words_for(n)), expected(mask.size());
     for (u32 step = 0; step < 4; ++step)
     {
+        succ.set_witness_pruning(false);
         const auto labels = succ.applicable_actions(state);
         succ.set_witness_pruning(step % 2 == 0);
         succ.prepare(state);

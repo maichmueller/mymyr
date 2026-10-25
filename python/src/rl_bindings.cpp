@@ -693,11 +693,9 @@ struct MaskSchema
 {
     std::vector<i32> scalar;
     const i32* data;
-    bool broadcast;
-    MaskSchema(nb::handle obj, u64 rows, rlimp::Imports& imports)
-        : data(nullptr), broadcast(PyIndex_Check(obj.ptr()) && dl::dlpack_device(obj).device_type < 0)
+    MaskSchema(nb::handle obj, u64 rows, rlimp::Imports& imports) : data(nullptr)
     {
-        if (broadcast)
+        if (PyIndex_Check(obj.ptr()) && dl::dlpack_device(obj).device_type < 0)
         {
             scalar.assign(rows, int_arg<i32>(obj, "schema"));
             data = scalar.data();
@@ -1905,16 +1903,13 @@ void bind_rl(nb::module_& parent)
             const TaskIds ids(task_ids, in, *ref.suite);
             rlimp::Imports imports(-1, dl::k_stream_default, false);
             const MaskSchema sch(schema, in.view.rows, imports);
-            if (depth >= ref.suite->label_width())
-                throw nb::value_error("mymyr: depth must be below the schema arity");
-            if (sch.broadcast)
-                for (u64 i = 0; i < in.view.rows; ++i)
-                {
-                    const auto& plans = ref.suite->task_of(ids.ptr, i).compiled().schemas;
-                    if (sch.data[i] >= 0 && static_cast<u32>(sch.data[i]) < plans.size() &&
-                        depth >= plans[sch.data[i]].arity)
-                        throw nb::value_error("mymyr: depth must be below the schema arity");
-                }
+            for (u64 i = 0; i < in.view.rows; ++i)
+            {
+                const auto& plans = ref.suite->task_of(ids.ptr, i).compiled().schemas;
+                if (sch.data[i] >= 0 && static_cast<u32>(sch.data[i]) < plans.size() &&
+                    depth >= plans[sch.data[i]].arity)
+                    throw nb::value_error("mymyr: depth must be below the schema arity");
+            }
             std::vector<i64> shape;
             const i32* pre = imports.get<const i32>(prefix, "prefix", {rlimp::i32t},
                                                    {static_cast<i64>(in.view.rows), -1}, false, &shape);
@@ -1932,7 +1927,7 @@ void bind_rl(nb::module_& parent)
         "num_objects"_a = nb::none(), "pool"_a = nb::none(),
         "Objects extending prefix at depth to an applicable full binding, [N, O] bool without an expansion. "
         "schema is an int or int32 [N]; prefix is int32 [N, >= depth] (None at depth 0). Objects are instance-local; "
-        "O defaults to the table's maximum object count. Invalid labels give zero rows; a scalar schema's depth "
+        "O defaults to the table's maximum object count. Invalid labels give zero rows; the scalar depth "
         "must be below its arity. CPU inputs only.");
     m.def(
         "is_applicable",

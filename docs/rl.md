@@ -56,8 +56,8 @@ objects = rl.applicable_objects(task, states, schema=0, prefix=None, depth=0)
 Schemas are domain-local indices, passed as an integer for all rows or int32 `[N]`. Objects are instance-local
 indices. Prefixes are int32 `[N, >= depth]` (`None` at depth zero); bindings are int32 `[N, >= arity]`, with
 ignored padding past each schema's arity. Invalid schemas (including `-1` padding), objects and bindings produce
-false rows. A scalar schema's depth must be below its arity; with per-row schemas, shorter schemas produce false
-rows. Depth must be below the table's maximum arity. Zero-parameter schemas participate in `applicable_schemas` and
+false rows. The scalar depth must be below the arity of every valid selected schema, or the call raises
+`ValueError`. Zero-parameter schemas participate in `applicable_schemas` and
 `is_applicable` with binding shape `[N, 0]`.
 
 These functions take a Task, TaskTable or TaskSuite and the same CPU state inputs as `expand`: NumPy, torch or JAX

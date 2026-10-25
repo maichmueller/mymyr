@@ -166,7 +166,7 @@ struct NumRef
 struct MaskMatcher
 {
     Once once;
-    Matcher matcher;
+    std::unique_ptr<Matcher> matcher;
 };
 
 struct Schema

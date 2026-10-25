@@ -285,7 +285,7 @@ bool Successors::is_applicable(StateView s, const ActionLabel& a)
 
 void Successors::prepare_masks(StateView s)
 {
-    if (m_mask_revision != m_e.state_revision() || !(static_cast<StateView>(m_mask_state) == s))
+    if (m_mask_revision != m_e.state_revision() || !(m_mask_state.view() == s))
     {
         prepare(s);
         m_mask_state = State{s};
@@ -303,13 +303,13 @@ detail::ExecMatcher& Successors::mask_matcher(u32 schema, u32 depth)
     SchemaExec& se = m_schemas[schema];
     const u32 entry = depth == se.plan->arity ? 0 : depth + 1;
     plan::MaskMatcher& cached = se.plan->masks[entry];
-    cached.once.call([&] { cached.matcher = detail::compile_mask(m_e.compiled(), schema, depth); });
+    cached.once.call([&] { cached.matcher = std::make_unique<plan::Matcher>(detail::compile_mask(m_e.compiled(), schema, depth)); });
     if (se.masks.empty())
         se.masks.resize(se.plan->arity + 1);
     if (!se.masks[entry])
     {
         auto x = std::make_unique<detail::ExecMatcher>();
-        m_e.instantiate(*x, cached.matcher);
+        m_e.instantiate(*x, *cached.matcher);
         se.masks[entry] = std::move(x);
     }
     return *se.masks[entry];

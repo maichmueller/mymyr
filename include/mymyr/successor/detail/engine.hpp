@@ -104,6 +104,7 @@ public:
         m_nw = nw;
     }
     [[nodiscard]] const u64* state() const noexcept { return m_state; }
+    /// Changes whenever state pointers, numeric pointers or the view are reset, invalidating prepared-row caches.
     [[nodiscard]] u64 state_revision() const noexcept { return m_state_revision; }
     /// Points the engine at the numeric words of the current state (numeric tasks).
     void set_numeric(const u64* num) noexcept

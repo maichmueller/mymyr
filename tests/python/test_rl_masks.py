@@ -3,6 +3,7 @@
 import concurrent.futures
 import pathlib
 import sys
+import threading
 import time
 
 import numpy as np
@@ -32,7 +33,12 @@ def check_equal(table, states, ids=None, pool=None, seed=17):
     rng = np.random.default_rng(seed)
     for schema in range(exp.num_schemas):
         chosen = np.full(n, schema, np.int32)
-        for depth in range(width):
+        arities = []
+        for i in range(n):
+            task = table if isinstance(table, mymyr.Task) else table[int(ids[i]) if ids is not None else 0]
+            if schema < task.num_schemas:
+                arities.append(task.formalism.schemas[schema].arity)
+        for depth in range(min(arities, default=width)):
             for query in range(3):
                 prefix = rng.integers(-1, exp.num_objects + 1, (n, width), dtype=np.int32)
                 if query == 0:
@@ -139,8 +145,11 @@ def test_masks_concurrent_first_use():
     schema = np.zeros(len(states), np.int32)
     objects = np.asarray(rl.prefix_masks(exp, schema, None, 0))
     pool = rl.ThreadPool(3)
+    barrier = threading.Barrier(8)
 
     def query(_):
+        barrier.wait()
+        np.testing.assert_array_equal(rl.applicable_schemas(task, states), expected)
         for _ in range(5):
             np.testing.assert_array_equal(rl.applicable_schemas(task, states, pool=pool), expected)
             np.testing.assert_array_equal(rl.applicable_objects(task, states, schema, None, 0), objects)
@@ -195,8 +204,12 @@ def test_masks_validation_and_mutation():
     assert not rl.is_applicable(task, rows, -1, np.zeros((1, 0), np.int32)).any()
     with pytest.raises(ValueError, match="depth"):
         rl.applicable_objects(task, rows, 0, None, task.label_width)
+    arity = task.formalism.schemas[0].arity
+    with pytest.raises(ValueError, match="depth"):
+        rl.applicable_objects(task, rows, np.array([0], np.int32), None, arity)
+    schema = next(i for i, s in enumerate(task.formalism.schemas) if s.arity >= 2)
     with pytest.raises(ValueError, match="prefix"):
-        rl.applicable_objects(task, rows, np.array([0], np.int32), None, 1)
+        rl.applicable_objects(task, rows, schema, None, 1)
     with pytest.raises(ValueError, match="num_objects"):
         rl.applicable_objects(task, rows, 0, None, 0, num_objects=0)
     with pytest.raises((ValueError, TypeError), match="schema"):
