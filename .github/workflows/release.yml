@@ -1,6 +1,6 @@
 name: Release
 
-# Tags create a GitHub Release and optionally publish through the repository variables.
+# Tags create a GitHub Release and publish to TestPyPI, then PyPI.
 # A manual run builds a unique development version and publishes only to TestPyPI.
 on:
   push:
@@ -93,8 +93,8 @@ jobs:
 
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [check, wheels, verify]
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.PUBLISH_TESTPYPI == 'true' }}
+    needs: [check, wheels, verify, github-release]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.github-release.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -117,7 +117,7 @@ jobs:
   test-testpypi:
     name: Install the rehearsal from TestPyPI
     needs: [check, publish-testpypi]
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.publish-testpypi.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -144,8 +144,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: [check, wheels, verify, github-release, publish-testpypi]
-    # TestPyPI is optional; when it runs, it must have succeeded.
-    if: ${{ !cancelled() && github.event_name == 'push' && vars.PUBLISH_PYPI == 'true' && needs.verify.result == 'success' && needs.github-release.result == 'success' && (needs.publish-testpypi.result == 'success' || needs.publish-testpypi.result == 'skipped') }}
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.verify.result == 'success' && needs.github-release.result == 'success' && needs.publish-testpypi.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
