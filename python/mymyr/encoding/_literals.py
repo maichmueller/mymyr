@@ -4,7 +4,8 @@ object ids (``literal_masks``), and the lookup of each literal (``literal_slots`
 
 A literal is anything ``Task.literal`` takes: a GroundLiteral or GroundAtom, ``'(on a b)'``, ``'(not (on a b))'`` or
 ``('on', 'a', 'b')``, read in the task of its row's instance (names are looked up by name, so a literal written for
-another parse of the same problem works too). In the array forms it is a table predicate id (an index into
+another parse of the same problem works too). Problem-local derived predicates have no encoding relation and raise
+ValueError even when their atoms have derived slots. In the array forms it is a table predicate id (an index into
 ``table.predicate_names`` below ``table.num_domain_predicates``) and the instance-local ids of its objects, padded with
 -1. Its atom resolves to one of the kinds of ``LiteralKind``: a fluent or derived slot, whose bit the literal sets in
 the positive or negative mask of its row (and layer or step); an atom of a static predicate, which holds in every state

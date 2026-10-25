@@ -463,7 +463,8 @@ def test_lax_scan_encodes_every_step(cases):
 
 @pytest.mark.parametrize("name", ["gripper__prob05", "philosophers__p03-phil4"])
 @pytest.mark.parametrize("layered", [False, True])
-def test_literal_mask_objects_are_pytrees_that_encode_under_jit(name, layered):
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_literal_mask_objects_are_pytrees_that_encode_under_jit(name, layered, platform):
     task = text_task(name)
     encoder = encoding.FlatRelationEncoder(task, max_goal_level=1)
     literals = [str(next(iter(task.initial_state.atoms())))]
@@ -475,9 +476,10 @@ def test_literal_mask_objects_are_pytrees_that_encode_under_jit(name, layered):
     rows = np.asarray(task.encode([task.initial_state, task.initial_state]))
     expected = encoder.encode(rows, **{key: masks})
     caps = exact_capacities(expected)
+    expected = encoder.encode(rows, capacities=caps, **{key: masks})
     leaves, tree = jax.tree_util.tree_flatten(masks)
     assert len(leaves) == len(masks) + 1
-    converted = jax.tree_util.tree_unflatten(tree, [jnp.asarray(halves(a) if a.dtype == np.uint64 else a)
+    converted = jax.tree_util.tree_unflatten(tree, [put(halves(a) if a.dtype == np.uint64 else a, platform)
                                                  for a in leaves])
     restored = jax.jit(lambda m: m)(converted)
     assert type(restored) is type(masks)
