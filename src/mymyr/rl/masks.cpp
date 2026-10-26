@@ -113,7 +113,7 @@ void is_applicable(const TaskSuite& suite, StateBatchView rows, const i32* ids, 
             return;
         const u32 s = static_cast<u32>(schema[i]), arity = succ.arity(s);
         if (width < arity)
-            return;
+            throw std::invalid_argument("mymyr: is_applicable: binding width must be at least the schema arity");
         objects.resize(arity);
         for (u32 d = 0; d < arity; ++d)
             objects[d] = ObjectId{static_cast<u32>(binding[i * width + d])};

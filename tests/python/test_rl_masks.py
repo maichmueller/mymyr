@@ -1,6 +1,7 @@
 """Action masks and full-label applicability equal the labels of an unpruned expansion."""
 
 import concurrent.futures
+import os
 import pathlib
 import sys
 import threading
@@ -234,9 +235,32 @@ def test_masks_validation_and_mutation():
         rl.is_applicable(task, rows, 0, DeviceRows())
 
 
+@pytest.mark.parametrize("pool_size", [0, 3])
+@pytest.mark.parametrize("scalar_schema", [False, True])
+def test_masks_reject_narrow_bindings(pool_size, scalar_schema):
+    task = text_task(SMALL_TASKS[0])
+    states = [task.initial_state] * 3
+    schema = next(i for i, s in enumerate(task.formalism.schemas) if s.arity >= 2)
+    arity = task.formalism.schemas[schema].arity
+    selected = schema if scalar_schema else np.array([-1, schema, task.num_schemas], np.int32)
+    pool = rl.ThreadPool(pool_size) if pool_size else None
+    for width in (0, arity - 1):
+        binding = np.zeros((len(states), width), np.int32)
+        with pytest.raises(ValueError, match="binding.*arity"):
+            rl.is_applicable(task, states, selected, binding, pool=pool)
+    binding = np.zeros((len(states), arity), np.int32)
+    np.testing.assert_array_equal(rl.is_applicable(task, states, selected, binding, pool=pool),
+                                  rl.is_applicable(task, states, selected, binding))
+    invalid = np.array([-1, task.num_schemas, task.num_schemas + 1], np.int32)
+    assert not rl.is_applicable(task, states, invalid, binding[:, :0], pool=pool).any()
+
+
 def test_masks_childsnack_timing(capsys):
-    directory = pathlib.Path("/work/rleap1/michael.aichmueller/github/hrl/data/pddl/childsnack-ipc/test")
-    if not (directory / "p30-hard.pddl").exists():
+    data = os.environ.get("MYMYR_IPC_DATA")
+    if not data:
+        pytest.skip("set MYMYR_IPC_DATA to the IPC data directory")
+    directory = pathlib.Path(data) / "childsnack-ipc/test"
+    if not all((directory / name).is_file() for name in ("domain.pddl", "p30-hard.pddl")):
         pytest.skip("childsnack p30-hard data is absent")
     task = pddl_task(directory / "p30-hard.pddl")
     state = task.initial_state

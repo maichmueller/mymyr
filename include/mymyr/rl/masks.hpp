@@ -15,7 +15,8 @@ void parameter_masks(const TaskSuite& suite, StateBatchView rows, const i32* tas
                      const i32* prefix, u32 stride, u32 depth, u8* out, u32 num_objects, ThreadPool* pool = nullptr);
 
 /// Full-label applicability [N]. Binding rows have label_width entries, at least each selected schema's arity;
-/// malformed labels yield false. Entries past that arity are padding and ignored.
+/// narrower rows throw std::invalid_argument. Invalid schemas and objects yield false. Entries past the arity
+/// are padding and ignored.
 void is_applicable(const TaskSuite& suite, StateBatchView rows, const i32* task_ids, const i32* schema,
                    const i32* binding, u32 label_width, u8* out, ThreadPool* pool = nullptr);
 }  // namespace mymyr::rl

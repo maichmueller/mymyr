@@ -57,7 +57,8 @@ Schemas are domain-local indices, passed as an integer for all rows or int32 `[N
 indices. Prefixes are int32 `[N, >= depth]` (`None` at depth zero); bindings are int32 `[N, >= arity]`, with
 ignored padding past each schema's arity. Invalid schemas (including `-1` padding), objects and bindings produce
 false rows. The scalar depth must be below the arity of every valid selected schema, or the call raises
-`ValueError`. Zero-parameter schemas participate in `applicable_schemas` and
+`ValueError`. A binding width below any valid selected schema's arity also raises `ValueError`.
+Zero-parameter schemas participate in `applicable_schemas` and
 `is_applicable` with binding shape `[N, 0]`.
 
 These functions take a Task, TaskTable or TaskSuite and the same CPU state inputs as `expand`: NumPy, torch or JAX
@@ -68,8 +69,9 @@ CUDA inputs raise `ValueError` with “runs on the CPU; pass host rows”.
 The masks equal `schema_masks(rl.expand(...))` and `prefix_masks(rl.expand(...), ...)` with witness pruning off.
 Full-label checks equal membership in that expansion's labels, including derived and numeric preconditions and
 numeric effect applicability. Matchers compile lazily per schema and parameter; each candidate needs one witness
-for its remaining parameters. Numeric effects may require several witnesses before a candidate is accepted. Views
-and axiom closures are reused for consecutive equal rows in a workspace, including parameter-by-parameter decoding.
+for its remaining parameters. Numeric effects may require several witnesses before a candidate is accepted. Each
+workspace caches its most recently prepared row, reusing its view and axiom closure for consecutive equal rows.
+This supports parameter-by-parameter decoding with one-row calls.
 The witness search can backtrack exponentially in the number of remaining parameters; it avoids storing or
 visiting the full applicable set when a witness can be found early.
 

@@ -1956,7 +1956,8 @@ void bind_rl(nb::module_& parent)
         "table"_a, "states"_a, "schema"_a, "binding"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
         "Full-label applicability [N] bool without an expansion, including numeric effect applicability. "
         "schema is an int or int32 [N]; binding is int32 [N, L], with instance-local objects and ignored padding "
-        "past the schema's arity. Invalid labels are false. CPU inputs only.");
+        "past the schema's arity. L below a valid selected schema's arity raises ValueError. "
+        "Invalid labels are false. CPU inputs only.");
     m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {

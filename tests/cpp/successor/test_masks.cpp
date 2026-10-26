@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -103,7 +104,10 @@ TEST(ActionMaskRows, PoolAndMutableRows)
     const i32 schema[] = {-1, 0, 999};
     rl::parameter_masks(*suite, batch, nullptr, schema, nullptr, 0, 0, objects.data(), O, &pool);
     EXPECT_TRUE(std::all_of(objects.begin(), objects.begin() + O, [](u8 v) { return !v; }));
-    rl::is_applicable(*suite, batch, nullptr, schema, nullptr, 0, app.data(), &pool);
+    EXPECT_THROW(rl::is_applicable(*suite, batch, nullptr, schema, nullptr, 0, app.data()), std::invalid_argument);
+    EXPECT_THROW(rl::is_applicable(*suite, batch, nullptr, schema, nullptr, 0, app.data(), &pool), std::invalid_argument);
+    std::vector<i32> binding(3 * suite->label_width());
+    rl::is_applicable(*suite, batch, nullptr, schema, binding.data(), suite->label_width(), app.data(), &pool);
     EXPECT_EQ(app[0], 0);
     EXPECT_EQ(app[2], 0);
     std::fill(rows.begin(), rows.end(), 0);
