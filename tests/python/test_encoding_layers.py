@@ -57,31 +57,45 @@ def names_of(encoder, batch, role):
     return out
 
 
-def test_a_literal_is_encoded_once_at_its_lowest_level():
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
+def test_repeated_layer_literals_follow_the_placement_policy(policy):
     task = text_task(BLOCKS)
     state = task.initial_state
     atoms = list(state.atoms())
     goal = {(x.positive, x.predicate.name, tuple(task.objects[o.index] for o in x.objects)) for x in task.encoding_goal}
     free = [a for a in atoms if (True, a.predicate.name, tuple(o.name for o in a.objects)) not in goal]
     a, b, c = free[:3]
-    encoder = make(task, history=False, target_sources=("goal", "subgoal"))
+    encoder = make(task, history=False, target_sources=("goal", "subgoal"),
+                   **({"repeated_literals": policy} if policy is not None else {}))
     layers = [[[literal(a), literal(b)], [literal(b), literal(c), literal(a, False)]]]
     batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, layers))
     first = {f"{signed(x)}[sg]" for x in (a, b)}
     second = {f"{signed(c)}[ssg]", f"[-]{literal(a)}[ssg]"}
+    if policy in (None, "every"):
+        second.add(f"{signed(b)}[ssg]")
+    elif policy == "highest":
+        first.remove(f"{signed(b)}[sg]")
+        second.add(f"{signed(b)}[ssg]")
     assert sorted(names_of(encoder, batch, SUBGOAL_ROLE)[0]) == sorted(first | second)
 
 
-def test_a_goal_literal_in_a_layer_is_not_encoded_again():
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
+def test_a_goal_literal_in_a_layer_follows_the_placement_policy(policy):
     task = text_task(BLOCKS)
     state = task.initial_state
     goal_atom = next(x for x in task.encoding_goal if x.positive)
     name = literal(goal_atom)
-    encoder = make(task, history=False, target_sources=("goal", "subgoal"))
+    encoder = make(task, history=False, target_sources=("goal", "subgoal"),
+                   **({"repeated_literals": policy} if policy is not None else {}))
     other = next(a for a in state.atoms() if literal(a) != name)
     layers = [[[name, literal(other)]]]
     batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, layers))
-    assert names_of(encoder, batch, SUBGOAL_ROLE)[0] == [f"{signed(other)}[sg]"]
+    subgoals = {f"{signed(other)}[sg]"}
+    if policy != "lowest":
+        subgoals.add(f"[+]{name}[sg]")
+    assert set(names_of(encoder, batch, SUBGOAL_ROLE)[0]) == subgoals
+    assert (f"[+]{name}[g]" in names_of(encoder, batch, 2)[0]) == (policy != "highest")
+    assert batch.goal_complete.tolist() == [int(task.encoding_goal_complete)]
 
 
 def test_only_the_newest_steps_of_a_history_are_encoded():
@@ -127,10 +141,11 @@ def test_a_row_without_layers_or_steps_adds_nothing():
         assert not names_of(encoder, batch, SUBGOAL_ROLE)[graph]
 
 
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_single_rows_batches_and_streams_agree(layout):
+def test_single_rows_batches_and_streams_agree(layout, policy):
     task = text_task(BLOCKS)
-    encoder = make(task, layout=layout)
+    encoder = make(task, layout=layout, repeated_literals=policy)
     states = walk(task, steps=10, walks=3)
     rng = random.Random(7)
     layers, history = rows_of(rng, states, 2, 4)
@@ -260,10 +275,8 @@ def test_a_table_of_several_instances_needs_task_ids_for_its_masks():
     layers = [[[literal(a) for a in s.atoms()]] for s in states]
     batch = encoder.encode(states, task_ids=ids, subgoals=encoding.subgoal_masks(encoder, layers, task_ids=ids))
     for graph, state in enumerate(states):
-        goal = {(x.positive, x.predicate.name, tuple(tasks[graph].objects[o.index] for o in x.objects))
-                for x in tasks[graph].encoding_goal}
         held = {(True, a.predicate.name, tuple(o.name for o in a.objects)) for a in state.atoms()}
-        assert len(names_of(encoder, batch, SUBGOAL_ROLE)[graph]) == len(held - goal) > 0
+        assert len(names_of(encoder, batch, SUBGOAL_ROLE)[graph]) == len(held) > 0
 
 
 def test_inputs_that_do_not_fit_the_encoder_are_refused():
@@ -322,3 +335,131 @@ def test_a_pickled_encoder_encodes_layers_like_the_original():
     args = dict(subgoals=encoding.subgoal_masks(encoder, layers), history=encoding.history_masks(encoder, history))
     same(encoder.encode(states, **args), loaded.encode(states, **args))
     assert loaded.options == encoder.options
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("derived_layers", [False, True])
+def test_signed_fluent_and_derived_levels_targets_and_satisfaction(policy, layout, shared, derived_layers):
+    from test_encoding_goals import cells
+
+    task = text_task("philosophers__p03-phil4")
+    states = walk(task, steps=3, walks=1)
+    state = states[0]
+    fluent = next(iter(state.atoms()))
+    derived = next(iter(state.derived_atoms()))
+    other = next(a for a in state.atoms() if literal(a) != literal(fluent))
+    goal = {literal(fluent), literal(fluent, False), literal(derived), literal(derived, False)}
+    listed = goal if derived_layers else {literal(fluent), literal(fluent, False)}
+    layers = [listed | {literal(other)}, set(), {literal(fluent), literal(other)} |
+              ({literal(derived)} if derived_layers else set())]
+    encoder = make(task, max_goal_level=3, history=False, layout=layout, repeated_literals=policy,
+                   goal_derivations=("plain", "satisfied", "unsatisfied"), target_sources=("goal", "subgoal"))
+    goals = tuple(x[:, 0] for x in encoding.subgoal_masks(encoder, [[sorted(goal)]]))
+    rows = [[sorted(layer) + sorted(layer) for layer in layers]] * (1 if shared else len(states))
+    subgoals = encoding.subgoal_masks(encoder, rows)
+    batch = encoder.encode(states, goals=goals, subgoals=subgoals)
+    expected = [goal, *layers]
+    placed = []
+    for level, literals in enumerate(expected):
+        excluded = set().union(*(expected[:level] if policy == "lowest" else
+                                 expected[level + 1:] if policy == "highest" else []))
+        placed.append(literals - excluded)
+    suffixes = ["[g]", "[sg]", "[ssg]", "[sssg]"]
+    atoms = {literal(a): a for a in (fluent, derived, other)}
+    for graph, current in enumerate(states):
+        actual = cells(batch, graph)
+        refs = batch.entity_ref[int(batch.entity_offsets[graph]):int(batch.entity_offsets[graph + 1])]
+        targets = []
+        for level, literals in enumerate(placed):
+            relations = {}
+            for text in literals:
+                positive = not text.startswith("(not ")
+                name = text if positive else text[5:-1]
+                atom = atoms[name]
+                objects = tuple(o.name for o in atom.objects)
+                base = f"[{'+' if positive else '-'}]{atom.predicate.name}{suffixes[level]}"
+                relations.setdefault(base, set()).add(objects)
+                holds = current.holds(text)
+                relations.setdefault(base + ("[sat]" if holds else "[unsat]"), set()).add(objects)
+            described = encoder.describe(batch, graph).relations
+            for relation, lane, relation_level, derivation in zip(encoder.relation_names, encoder.relation_lanes,
+                                                                encoder.relation_levels, encoder.relation_derivations):
+                if lane not in ("goal", "goal_derivation", "subgoal", "subgoal_derivation") or relation_level != level:
+                    continue
+                tuples = described.get(relation, ())
+                plain = derivation is None
+                assert {tuple(t[1:] if plain else t) for t in tuples} == relations.get(relation, set()), relation
+                if plain and relation in actual:
+                    tuples_ids, tuple_indices = actual[relation]
+                    for t, index in zip(tuples_ids, tuple_indices):
+                        assert int(refs[t[0]]) == index
+                        targets.append((level != 0, t[0]))
+        begin, end = (int(x) for x in batch.target_offsets[graph:graph + 2])
+        local = (batch.target_entity[begin:end] - batch.entity_offsets[graph]).tolist()
+        assert list(zip(batch.target_group[begin:end].tolist(), local)) == sorted(targets)
+        assert len(local) == sum(len(x) for x in placed)
+    assert batch.goal_complete.tolist() == [1] * len(states)
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_repeated_literal_options_are_normalized_and_valid(policy):
+    task = text_task(BLOCKS)
+    for cls in (encoding.EncodingSchema, encoding.FlatRelationEncoder, encoding.SimpleEncoder,
+                encoding.FlatHorizonEncoder, encoding.FlatRootedHorizonEncoder,
+                encoding.FlatTransitionEncoder, encoding.FlatTransitionEffectsEncoder):
+        for levels in (0, 1):
+            kwargs = {"max_goal_level": levels}
+            if cls is encoding.FlatHorizonEncoder:
+                kwargs["horizon_mode"] = "full"
+            assert cls(task, **kwargs).options["repeated_literals"] == "every"
+            expected = policy if levels else "every"
+            assert cls(task, repeated_literals=policy, **kwargs).options["repeated_literals"] == expected
+    with pytest.raises(ValueError, match="repeated_literals"):
+        encoding.FlatRelationEncoder(task, repeated_literals="invalid")
+    with pytest.raises(TypeError, match="repeated_literals"):
+        encoding.FlatRelationEncoder(task, repeated_literals=1)
+    encoder = make(task, repeated_literals=policy)
+    restored = pickle.loads(pickle.dumps(encoder))
+    assert restored.options == encoder.options
+    masks = encoding.subgoal_masks(encoder, [[[literal(task.encoding_goal[0])]]])
+    same(encoder.encode([task.initial_state], subgoals=masks),
+         restored.encode([task.initial_state], subgoals=masks))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("as_table", [False, True])
+def test_literal_masks_for_a_task_without_fluent_atoms(layout, as_table):
+    task = mymyr.Task.from_text(ROOT / "tests/data/numeric_tasks/cs-counters.txt")
+    assert task.words == 0 and not list(task.initial_state.atoms())
+    source = rl.as_table(task) if as_table else task
+    encoder = encoding.FlatRelationEncoder(source, max_goal_level=1, layout=layout, history=True)
+    rows = [task.initial_state]
+    subgoals = encoding.subgoal_masks(encoder, [[[]]])
+    assert all(mask.shape == (1, 1, 1) and not mask.any() for mask in subgoals)
+    same(encoder.encode(rows, subgoals=subgoals), encoder.encode(rows))
+    history = encoding.history_masks(encoder, [[(-1, [])]])
+    assert all(mask.shape == (1, 1, 1) and not mask.any() for mask in history[:2])
+    batch = encoder.encode(rows, subgoals=subgoals, history=history)
+    assert batch.history_dt.tolist() == [-1]
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_layer_placement_keeps_constant_goal_literals(policy):
+    from test_encoding_goals import goals_task
+
+    task = goals_task("static_true")
+    encoder = make(task, history=False, repeated_literals=policy, target_sources=("goal", "subgoal"))
+    state = task.initial_state
+    baseline = encoder.encode([state])
+    fluent = [literal(a, a.positive) for a in task.encoding_goal if a.predicate.kind == "fluent"]
+    batch = encoder.encode([state], subgoals=encoding.subgoal_masks(encoder, [[fluent]]))
+    before = encoder.describe(baseline, 0).relations
+    after = encoder.describe(batch, 0).relations
+    static = {a.predicate.name for a in task.encoding_goal if a.predicate.kind == "static"}
+    assert static and fluent
+    for relation in before:
+        if any(f"]{p}[g]" in relation for p in static):
+            assert after[relation] == before[relation]
+    assert batch.goal_complete.tolist() == baseline.goal_complete.tolist()

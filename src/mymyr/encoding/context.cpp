@@ -1030,6 +1030,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
                             : detail::k_numeric_storage_f64;
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
+    v.repeated_literals = m_schema->options().repeated_literals;
     return v;
 }
 }

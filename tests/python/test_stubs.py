@@ -93,6 +93,11 @@ def test_stubs_parse_and_are_typed():
         assert arg in brfs, arg
     assert ": object" not in search.replace("def __eq__(self, other: object, /)", "")
     assert "-> object" not in search and "-> list:" not in search and "-> dict:" not in search
+    encoding = (d / "_encoding.pyi").read_text()
+    constructors = [line for line in encoding.splitlines() if line.startswith("    def __init__(self, table:")]
+    assert len(constructors) >= 7
+    for signature in constructors:
+        assert "repeated_literals: Literal['every', 'lowest', 'highest'] = 'every'" in signature
     core = (d / "__init__.pyi").read_text()
     assert "__version__: str" in core
     assert "_C_API: types.CapsuleType" in core

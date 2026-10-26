@@ -98,7 +98,9 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     GraphBounds& bounds = facts.bounds;
     const bool levels = schema.has_subgoals();
     const bool history = schema.has_history();
-    bounds.levels = levels ? schema.options().max_goal_level : 0;
+    bounds.levels = levels ? schema.options().max_goal_level +
+                               (schema.options().repeated_literals == encoding::RepeatedLiterals::Highest ? 1u : 0u)
+                           : 0;
     bounds.history = history;
     bounds.numeric_words = host.table().numeric_words();
     bounds.schemas = v.num_schemas;

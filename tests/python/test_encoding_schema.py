@@ -203,8 +203,10 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
-PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0xF3C870FB1B1D5A8F, 0x2F5279FDFE082E1C, 0x069637BAFBF3C417
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0xF3C870FB1B1D5A8F, 0x3E9AC82F6983223C, 0x069637BAFBF3C417
 FINGERPRINT_VARIANTS = {
+    "repeated_literals_lowest": {"max_goal_level": 1, "repeated_literals": "lowest"},
+    "repeated_literals_highest": {"max_goal_level": 1, "repeated_literals": "highest"},
     "goal_derivations": {"goal_derivations": ["plain"]},
     "goal_derivations_unsat": {"goal_derivations": ["plain", "satisfied", "unsatisfied"]},
     "max_goal_level": {"max_goal_level": 1},
@@ -259,6 +261,7 @@ def test_fingerprint_values_are_pinned():
     # the fingerprints are part of the contract: the same on every platform, standard library and build
     philosophers = text_task("philosophers__p03-phil4")
     gripper = text_task("gripper__prob05")
+    assert EncodingSchema(gripper).schema_fingerprint == 0xCEEE4F842EB5101F
     assert EncodingSchema(philosophers).schema_fingerprint == 0xA80E980B3FE26CF6
     delta = EncodingSchema(philosophers, horizon_mode="delta", goal_derivations=["added_satisfied"],
                            predicate_virtual_nodes=True)  # fmt: skip

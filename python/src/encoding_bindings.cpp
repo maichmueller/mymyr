@@ -97,6 +97,9 @@ struct HGraphEdgeType
 struct EncodingStatics
 {
 };
+struct EncodingRepeatedLiterals
+{
+};
 }
 
 namespace nanobind::detail
@@ -120,6 +123,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingEntityArrays>
 {
     static constexpr auto Name = const_name("typing.Literal['auto', 'always']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingRepeatedLiterals>
+{
+    static constexpr auto Name = const_name("typing.Literal['every', 'lowest', 'highest']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingStatics>
@@ -358,8 +366,9 @@ encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse,
     return out;
 }
 
-encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_static, bool include_derived,
-                                     bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
+encoding::FlatOptions schema_options(nb::handle max_goal_level, nb::handle repeated_literals, bool include_static,
+                                     bool include_derived, bool include_numeric, bool nullary, bool equality,
+                                     bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, nb::handle numeric_dtype, bool emit_counts,
                                      nb::handle entity_arrays, nb::handle statics, nb::handle outputs, bool constant_labels,
@@ -376,6 +385,8 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     if (level < 0 || level > 3)
         throw nb::value_error(("mymyr: encoding: max_goal_level must be in [0, 3], got " + std::to_string(level)).c_str());
     options.max_goal_level = static_cast<u32>(level);
+    options.repeated_literals = choice(repeated_literals, "repeated_literals", parse_repeated_literals,
+                                       "'every', 'lowest', 'highest'");
     options.include_static = include_static;
     options.include_derived = include_derived;
     options.include_numeric = include_numeric;
@@ -425,6 +436,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     nb::dict out;
     out["goal_derivations"] = nb::tuple(texts_of(o.goal_derivations.members()));
     out["max_goal_level"] = o.max_goal_level;
+    out["repeated_literals"] = std::string(encoding::to_string(o.repeated_literals));
     out["include_static"] = o.include_static;
     out["include_derived"] = o.include_derived;
     out["include_numeric"] = o.include_numeric;
@@ -455,7 +467,9 @@ nb::dict options_dict(const encoding::FlatOptions& o)
 constexpr const char* k_option_doc =
     "goal_derivations: the variants of the goal relations (plain, satisfied, unsatisfied; added_satisfied and "
     "added_unsatisfied for the delta horizon). max_goal_level: subgoal levels beyond the goal (0 to 3): the "
-    "relations `[sg]`, `[ssg]`, `[sssg]` of each level hold the literals of the `subgoals` layers of a row. history: "
+    "relations `[sg]`, `[ssg]`, `[sssg]` of each level hold the literals of the `subgoals` layers of a row. "
+    "repeated_literals: 'every' keeps a literal at every listing level, 'lowest' at its lowest, 'highest' at its "
+    "highest (the goal is level 0); each cell contains unique tuples. history: "
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
     "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
@@ -507,24 +521,26 @@ enum class HorizonArgs
 };
 
 // the options other than the horizon's, in the order of the signatures
-#define MYMYR_ENCODING_ARGS_BASE                                                                                       \
-    TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived, \
-        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,         \
-        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,     \
-        Arg<ann::EncodingNumericDtype> numeric_dtype, bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays,  \
+#define MYMYR_ENCODING_ARGS_BASE                                                                                      \
+    TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level,                                          \
+        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,              \
+        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,        \
+        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,    \
+        Arg<ann::EncodingNumericDtype> numeric_dtype, bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays, \
         Arg<ann::EncodingStatics> statics
 #define MYMYR_ENCODING_ARGS MYMYR_ENCODING_ARGS_BASE, TextSequenceArg outputs, bool constant_labels
-#define MYMYR_ENCODING_PASS_BASE                                                                                       \
-    table, goal_derivations, max_goal_level, include_static, include_derived, include_numeric, nullary, equality,       \
-        predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, numeric_dtype, emit_counts,     \
-        entity_arrays, statics
+#define MYMYR_ENCODING_PASS_BASE                                                                                      \
+    table, goal_derivations, max_goal_level, repeated_literals, include_static, include_derived, include_numeric,     \
+        nullary, equality, predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, numeric_dtype,\
+        emit_counts, entity_arrays, statics
 #define MYMYR_ENCODING_PASS MYMYR_ENCODING_PASS_BASE, outputs, constant_labels
-#define MYMYR_ENCODING_DEFAULTS_BASE                                                                                   \
-    "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0, "include_static"_a = true,     \
-    "include_derived"_a = true, "include_numeric"_a = true, "nullary"_a = true, "equality"_a = false,                    \
-    "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),                  \
-    "layout"_a = "graph", "index_dtype"_a = "int32", "numeric_dtype"_a = "float32", "emit_counts"_a = true,             \
-    "entity_arrays"_a = "always", "statics"_a = "repeat"
+#define MYMYR_ENCODING_DEFAULTS_BASE                                                                                  \
+    "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,                              \
+    "repeated_literals"_a = std::string(encoding::to_string(encoding::k_default_repeated_literals)),                  \
+    "include_static"_a = true, "include_derived"_a = true, "include_numeric"_a = true, "nullary"_a = true,            \
+    "equality"_a = false, "predicate_virtual_nodes"_a = false, "include_actions"_a = true,                            \
+    "target_sources"_a = nb::tuple(), "layout"_a = "graph", "index_dtype"_a = "int32", "numeric_dtype"_a = "float32", \
+    "emit_counts"_a = true, "entity_arrays"_a = "always", "statics"_a = "repeat"
 #define MYMYR_ENCODING_DEFAULTS MYMYR_ENCODING_DEFAULTS_BASE, "outputs"_a = nb::make_tuple("relations"), "constant_labels"_a = false
 
 /// The constructor of the classes that are built from a table and the encoding options (EncodingSchema, the encoders):
@@ -542,7 +558,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                 "mymyr: encoding: a horizon encoder needs a horizon_mode ('full', 'delta' or 'action'); "
                 "FlatRelationEncoder encodes states without a horizon");
         const encoding::FlatOptions options = schema_options(
-            max_goal_level, include_static, include_derived, include_numeric, nullary, equality, predicate_virtual_nodes,
+            max_goal_level, repeated_literals, include_static, include_derived, include_numeric, nullary, equality,
+            predicate_virtual_nodes,
             include_actions, goal_derivations, target_sources, layout, index_dtype, numeric_dtype, emit_counts,
             entity_arrays, statics, outputs, constant_labels, horizon_mode, root_policy, parent_relation,
             sibling_relation, cousin_relation, history, history_max_steps,
@@ -593,7 +610,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
         cls.def(
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
-                        TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived,
+                        TextSequenceArg goal_derivations, IntArg max_goal_level,
+                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
                         bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
@@ -613,7 +631,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
         cls.def(
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
-                        TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived,
+                        TextSequenceArg goal_derivations, IntArg max_goal_level,
+                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
                         bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
@@ -2675,7 +2694,8 @@ void bind_encoding(nb::module_& parent)
              "here). goals: a goal for every row instead of its instance's goal, (goal_pos, goal_neg) or "
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
-             "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "masks define the whole row goal (no constant part), and goal_complete is 1. With subgoal layers, "
+             "repeated_literals decides which levels hold these literals. "
              "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
              "call with them equals a call without `goals` only for an instance whose complete goal has no literal "
              "over a static or derived predicate or over an atom without a slot. "
@@ -2689,8 +2709,8 @@ void bind_encoding(nb::module_& parent)
              "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "subgoals: the subgoal layers of each row, (pos, neg) or (pos, neg, derived_pos, derived_neg): masks "
              "[N, L, W] ([N, L, D]), or [1, L, W] for layers shared by all rows, with L at most max_goal_level; layer "
-             "l fills the relations of level l + 1. A literal that the goal or a lower layer has is encoded once, at "
-             "its lowest level. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
+             "l fills the relations of level l + 1, with repeated_literals deciding the placement of literals "
+             "listed at several levels. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
              "dt, count, derived_pos, derived_neg): masks [N, H, W] ([N, H, D]) of its steps oldest first, dt "
              "[N, H] integers and count [N] the valid steps of each row (a prefix; None: all H); only the newest "
              "history_max_steps of them are encoded. `mymyr.encoding.subgoal_masks` and `history_masks` build both "

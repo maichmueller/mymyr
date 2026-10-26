@@ -47,7 +47,7 @@ std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 
 using R = SlotRole;
 
-constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x6922fd5d8c1ee19e, PIN_TARGETS = 0xed98cc0c8c0e4c86,
+constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x6922fd5d8c1ee19e, PIN_TARGETS = 0xf88bb678fcce1733,
                 PIN_FULL = 0xf998a7b0c07c1bcd;
 
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewise)
@@ -371,6 +371,7 @@ TEST(EncodingOptions, NormalizationAndText)
     o.horizon.mode = HorizonMode::Full;
     EXPECT_EQ(normalized(o).horizon.root, RootPolicy::Exclude);
     EXPECT_EQ(normalized(FlatOptions{}).horizon.root, RootPolicy::Include);
+    EXPECT_EQ(normalized(FlatOptions{}).repeated_literals, RepeatedLiterals::Every);
     for (const auto text : {"plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"})
         EXPECT_EQ(to_string(*parse_goal_derivation(text)), text);
     for (const auto text : {"goal", "subgoal", "action", "history"})
@@ -383,6 +384,39 @@ TEST(EncodingOptions, NormalizationAndText)
     EXPECT_EQ(to_string(*parse_index_type("int64")), "int64");
     EXPECT_FALSE(parse_layout("row"));
     EXPECT_FALSE(parse_goal_derivation(""));
+    for (const auto text : {"every", "lowest", "highest"})
+    {
+        const auto policy = parse_repeated_literals(text);
+        ASSERT_TRUE(policy);
+        EXPECT_EQ(to_string(*policy), text);
+        FlatOptions options;
+        options.repeated_literals = *policy;
+        EXPECT_EQ(normalized(options).repeated_literals, RepeatedLiterals::Every);
+        options.max_goal_level = 1;
+        EXPECT_EQ(normalized(options).repeated_literals, *policy);
+    }
+    EXPECT_FALSE(parse_repeated_literals("invalid"));
+    for (const u32 levels : {0u, 1u, 2u, 3u})
+    {
+        FlatOptions options;
+        options.max_goal_level = levels;
+        const u64 every = EncodingSchema::create(blocks(), options)->fingerprint();
+        options.repeated_literals = RepeatedLiterals::Lowest;
+        const u64 lowest = EncodingSchema::create(blocks(), options)->fingerprint();
+        options.repeated_literals = RepeatedLiterals::Highest;
+        const u64 highest = EncodingSchema::create(blocks(), options)->fingerprint();
+        if (levels == 0)
+        {
+            EXPECT_EQ(every, lowest);
+            EXPECT_EQ(every, highest);
+        }
+        else
+        {
+            EXPECT_NE(every, lowest);
+            EXPECT_NE(every, highest);
+            EXPECT_NE(lowest, highest);
+        }
+    }
 }
 
 TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)

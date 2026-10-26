@@ -538,7 +538,8 @@ def horizon_nullary_tuples(name, context, nodes):
     literals = [goal_literals(context)] + [set(map(parse_literal, layer)) for layer in context.layers or ()]
     if level >= len(literals) or (positive, predicate, ()) not in literals[level]:
         return []
-    if any((positive, predicate, ()) in literals[lower] for lower in range(level)):
+    if any(kind == "subgoal" and where == level and parse_literal(text) == (positive, predicate, ())
+           for kind, where, text in context.dropped):
         return []
     if not rest:
         return [lead[0]]
@@ -591,8 +592,8 @@ def _root_state_entity(expected, actual, context):
 def _repeated_literal_horizon(expected, actual, context):
     """A literal that the goal and a layer, or two layers, list is in mifrost's horizon graph at the highest of its
     levels, once for each level it is listed in, in each relation family of that level (goal, satisfaction at the
-    nodes, added satisfaction); the native encoder has it once, at the lowest. The expectation moves the equal tuples
-    of the highest level to the lowest, keeping one, when it finds as many equal tuples as the literal has levels."""
+    nodes, added satisfaction); the native encoder has it once at every representable listing level. The expectation
+    distributes the equal tuples to those levels only when their count matches the number of listing levels."""
     if context.dag is None or not context.layers:
         return expected, actual
     levels = {}
@@ -606,16 +607,19 @@ def _repeated_literal_horizon(expected, actual, context):
         if len(listed) < 2 or not arguments:
             continue
         sign = "+" if positive else "-"
-        high, low = f"[{_level_suffix(max(listed))}]", f"[{_level_suffix(min(listed))}]"
+        high = f"[{_level_suffix(max(listed))}]"
+        dropped = {level for kind, level, literal in context.dropped
+                   if kind == "subgoal" and parse_literal(literal) == (positive, predicate, arguments)}
         for name in [n for n in tuples if n.startswith(f"[{sign}]{predicate}{high}")]:
             moved = [t for t in tuples[name] if t[len(t) - len(arguments) :] == arguments]
             by_tuple = Counter(moved)
             if not moved or any(count != len(listed) for count in by_tuple.values()):
                 continue
             tuples[name] = [t for t in tuples[name] if t not in by_tuple]
-            target = f"[{sign}]{predicate}{low}" + name[len(f"[{sign}]{predicate}{high}") :]
-            tuples.setdefault(target, [])
-            tuples[target] += [t for t in by_tuple if t not in tuples[target]]
+            for level in sorted(listed - dropped):
+                target = f"[{sign}]{predicate}[{_level_suffix(level)}]" + name[len(f"[{sign}]{predicate}{high}") :]
+                tuples.setdefault(target, [])
+                tuples[target] += [t for t in by_tuple if t not in tuples[target]]
     return replace(expected, tuples={n: ts for n, ts in tuples.items() if ts}), actual
 
 
@@ -787,10 +791,9 @@ def _level_suffix(level):
 def _repeated_literal(expected, actual, context):
     """A literal that is in two levels (the goal and a layer, or two layers) is in mifrost's graph at the highest of
     them, once for each level it is listed in (as one subgoal entity with equal tuples, and in the satisfaction
-    relations of that level) and nowhere else. The native encoder has it once, at the lowest of them. The expectation
-    moves each such literal, when it finds as many equal tuples as the literal has levels, to its lowest level: the
-    entity and the tuple of the highest level become the entity and the tuple of the lowest, and one satisfaction
-    tuple of the highest level the same of the lowest."""
+    relations of that level) and nowhere else. The native encoder has it once at every listing level that its masks
+    can hold, and in the goal when listed there. The expectation distributes the entity and tuples to those levels
+    only when the reference's equal tuple count matches the number of listing levels."""
     if not context.layers:
         return expected, actual
     levels = {}
@@ -806,8 +809,8 @@ def _repeated_literal(expected, actual, context):
             continue
         sign = "+" if positive else "-"
         text = literal_text(positive, predicate, arguments)
-        high, low = f"[{_level_suffix(max(listed))}]", f"[{_level_suffix(min(listed))}]"
-        entity, target = f"{text}{high}", f"{text}{low}"
+        high = f"[{_level_suffix(max(listed))}]"
+        entity = f"{text}{high}"
         relation = f"[{sign}]{predicate}{high}"
         copies = [t for t in tuples.get(relation, []) if t[0] == entity]
         if ("subgoal", entity) not in entities or len(copies) != len(listed) or len(set(copies)) != 1:
@@ -818,21 +821,28 @@ def _repeated_literal(expected, actual, context):
             if found:
                 if len(found) != len(listed) or len(set(found)) != 1:
                     break
-                derived[f"[{sign}]{predicate}{low}{kind}"] = (relation + kind, found[0])
+                derived[kind] = found[0]
         else:
-            role = "goal" if min(listed) == 0 else "subgoal"
             tuples[relation] = [t for t in tuples[relation] if t[0] != entity]
-            moved = tuples.setdefault(f"[{sign}]{predicate}{low}", [])
-            if (target,) + copies[0][1:] not in moved:
-                moved.append((target,) + copies[0][1:])
-            for goal_relation, (level_relation, row) in derived.items():
-                tuples[level_relation] = [t for t in tuples[level_relation] if t != row]
-                if row not in tuples.setdefault(goal_relation, []):
-                    tuples[goal_relation].append(row)
+            for kind, row in derived.items():
+                tuples[relation + kind] = [t for t in tuples[relation + kind] if t != row]
             entities.remove(("subgoal", entity))
-            if (role, target) not in entities:
-                last = max(i for i, (r, _) in enumerate(entities) if r in ("object", "auxiliary", "goal", role))
-                entities.insert(last + 1, (role, target))
+            dropped = {level for kind, level, literal in context.dropped
+                       if kind == "subgoal" and parse_literal(literal) == (positive, predicate, arguments)}
+            for level in sorted(listed - dropped):
+                suffix = f"[{_level_suffix(level)}]"
+                target = f"{text}{suffix}"
+                target_relation = f"[{sign}]{predicate}{suffix}"
+                moved = tuples.setdefault(target_relation, [])
+                if (target,) + copies[0][1:] not in moved:
+                    moved.append((target,) + copies[0][1:])
+                for kind, row in derived.items():
+                    if row not in tuples.setdefault(target_relation + kind, []):
+                        tuples[target_relation + kind].append(row)
+                role = "goal" if level == 0 else "subgoal"
+                if (role, target) not in entities:
+                    last = max(i for i, (r, _) in enumerate(entities) if r in ("object", "auxiliary", "goal", role))
+                    entities.insert(last + 1, (role, target))
     return replace(expected, entities=entities, tuples={n: ts for n, ts in tuples.items() if ts}), actual
 
 
@@ -842,7 +852,7 @@ def _literal_without_slot(expected, actual, context):
     given to it (the harness leaves it out, and ``Context.dropped`` lists it). The expectation drops what mifrost made
     of exactly those literals: their entity, their tuples (the argument rows of their relations when the graph has no
     target entities) and their satisfaction tuples. A literal that is also a goal literal is in the goal of the native
-    graph, and mifrost's copy of it is moved onto that goal tuple by ``repeated_literal``; nothing is dropped for it."""
+    graph; ``repeated_literal`` places its reference copy in the goal and excludes its unrepresentable layer copies."""
     if not context.dropped or context.dag is not None:
         return expected, actual
     goal = goal_literals(context)
@@ -866,7 +876,7 @@ def _literal_without_slot(expected, actual, context):
         text = literal_text(positive, predicate, arguments)
         if kind == "subgoal":
             if (positive, predicate, arguments) in goal:
-                continue  # a goal literal is in the goal of both graphs; repeated_literal moves the reference's copy
+                continue  # repeated_literal keeps the goal copy and excludes the unrepresentable layer copies
             suffix = _level_suffix(where)
             relation = f"[{sign}]{predicate}[{suffix}]"
             satisfaction = [relation + "[sat]", relation + "[unsat]"]
@@ -954,8 +964,10 @@ REGISTRY = (
     ),
     Difference(
         "repeated_literal_horizon",
-        "A literal that the goal and a layer, or two layers, list is encoded once, at the lowest of its levels; "
-        "mifrost's horizon graph has it once for each level it is listed in, all at the highest of them.",
+        "With repeated_literals='every' (the default), a literal that several goal levels list is encoded once "
+        "at each listing level; "
+        "mifrost's horizon graph has it once for each listing level, all at the highest. Under 'highest', "
+        "placement agrees but native cells keep one tuple instead of duplicate tuples.",
         "the tuples of the highest level of a literal that is listed in several levels, in every relation of that "
         "level, when there are as many equal tuples as levels",
         (("f01", "C7T"), ("f01", "C7S")),
@@ -1044,9 +1056,11 @@ REGISTRY = (
     ),
     Difference(
         "repeated_literal",
-        "A literal that the goal and a layer, or two layers, list is encoded once, at the lowest of its levels; "
+        "With repeated_literals='every' (the default), a literal that several goal levels list is encoded once "
+        "at each representable listing level; "
         "mifrost encodes it once for each level it is listed in, all at the highest of them, and leaves it out of "
-        "the other levels.",
+        "the other levels. Under repeated_literals='highest', placement agrees but native cells keep one tuple "
+        "instead of duplicate tuples.",
         "the subgoal entity and the equal tuples of the highest level of a literal that is listed in several levels, "
         "and its satisfaction tuples",
         (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1"), ("f08", "C4_L1N"), ("f08", "C4_L2"), ("f08", "C4_L2N"),
