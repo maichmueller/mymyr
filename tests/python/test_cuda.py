@@ -70,7 +70,7 @@ def test_outputs_collected_during_unrelated_capture(source, capture_thread):
             output = (encoder, encoder.encode(states))
             del encoder
         elif source == "brfs":
-            result = getattr(mc, source)(task, ctx=ctx)
+            result = mc.brfs(task, ctx=ctx, max_states=128)
             output = (result, result.state_words("torch"))
             del result
         elif source == "last_context":
