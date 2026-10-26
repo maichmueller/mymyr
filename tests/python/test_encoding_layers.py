@@ -424,6 +424,23 @@ def test_repeated_literal_options_are_reported_and_valid_without_layers(policy):
          restored.encode([task.initial_state], subgoals=masks))
 
 
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("as_table", [False, True])
+def test_literal_masks_for_a_task_without_fluent_atoms(layout, as_table):
+    task = mymyr.Task.from_text(ROOT / "tests/data/numeric_tasks/cs-counters.txt")
+    assert task.words == 0 and not list(task.initial_state.atoms())
+    source = rl.as_table(task) if as_table else task
+    encoder = encoding.FlatRelationEncoder(source, max_goal_level=1, layout=layout, history=True)
+    rows = [task.initial_state]
+    subgoals = encoding.subgoal_masks(encoder, [[[]]])
+    assert all(mask.shape == (1, 1, 1) and not mask.any() for mask in subgoals)
+    same(encoder.encode(rows, subgoals=subgoals), encoder.encode(rows))
+    history = encoding.history_masks(encoder, [[(-1, [])]])
+    assert all(mask.shape == (1, 1, 1) and not mask.any() for mask in history[:2])
+    batch = encoder.encode(rows, subgoals=subgoals, history=history)
+    assert batch.history_dt.tolist() == [-1]
+
+
 @pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
 def test_layer_placement_keeps_constant_goal_literals(policy):
     from test_encoding_goals import goals_task

@@ -65,7 +65,7 @@ def _masks(rows, layer_lists, widths):
 
 
 def _widths(encoder):
-    return encoder.table.words, encoder.table.derived_words
+    return max(1, encoder.table.words), encoder.table.derived_words
 
 
 def _check_sequence(value, what):
