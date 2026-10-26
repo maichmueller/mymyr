@@ -17,6 +17,7 @@
 
 #include "env_harness.hpp"
 #include "mymyr/cuda/expand.hpp"
+#include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -43,7 +44,8 @@ namespace
 /// A flat expansion on the host.
 struct Flat
 {
-    std::vector<u64> succ;
+    std::vector<u64> succ, hashes;
+    std::vector<u8> noops;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
     u64 total = 0;
@@ -61,6 +63,8 @@ Flat host_expand(const rl::TaskTable& T, const std::vector<u64>& rows, const std
     f.binding.assign(std::max<u64>(cap, 1) * L, 0x5A5A5A5A);
     f.goal.assign(std::max<u64>(cap, 1), 0x5A);
     f.offsets.assign(N + 1, 0);
+    f.hashes.assign(std::max<u64>(cap, 1), 0x5A5A5A5A5A5A5A5Aull);
+    f.noops.assign(std::max<u64>(cap, 1), 0x5A);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
@@ -71,6 +75,8 @@ Flat host_expand(const rl::TaskTable& T, const std::vector<u64>& rows, const std
     x.binding = f.binding.data();
     x.goal = f.goal.data();
     x.offsets = f.offsets.data();
+    x.succ_hash = f.hashes.data();
+    x.noop = f.noops.data();
     rl::expand(T, rl::StateBatchView{rows.data(), N, W, 0}, ids.data(), x);
     f.total = x.total;
     f.words_needed = x.words_needed;
@@ -88,11 +94,15 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, u64 N, 
     cuda::DeviceBuffer binding = to_device(ctx, std::vector<i32>(c * L, 0x5A5A5A5A), s);
     cuda::DeviceBuffer goal = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     cuda::DeviceBuffer offsets(ctx, (N + 1) * sizeof(i32), s);
+    cuda::DeviceBuffer hashes = to_device(ctx, std::vector<u64>(c, 0x5A5A5A5A5A5A5A5Aull), s);
+    cuda::DeviceBuffer noops = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
     x.label_width = L;
     x.succ = static_cast<u64*>(succ.data());
+    x.succ_hash = static_cast<u64*>(hashes.data());
+    x.noop = static_cast<u8*>(noops.data());
     x.parent = static_cast<i32*>(parent.data());
     x.schema = static_cast<i32*>(schema.data());
     x.binding = static_cast<i32*>(binding.data());
@@ -101,6 +111,8 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, u64 N, 
     ex.write(x);
     Flat f;
     f.succ = to_host<u64>(succ.data(), c * W, s);
+    f.hashes = to_host<u64>(hashes.data(), c, s);
+    f.noops = to_host<u8>(noops.data(), c, s);
     f.parent = to_host<i32>(parent.data(), c, s);
     f.schema = to_host<i32>(schema.data(), c, s);
     f.binding = to_host<i32>(binding.data(), c * L, s);
@@ -129,6 +141,8 @@ void expect_flat_equal(const Flat& d, const Flat& h)
     ASSERT_EQ(d.schema, h.schema);
     ASSERT_EQ(d.binding, h.binding);
     ASSERT_EQ(d.succ, h.succ);
+    ASSERT_EQ(d.hashes, h.hashes);
+    ASSERT_EQ(d.noops, h.noops);
     ASSERT_EQ(d.goal, h.goal);
 }
 
@@ -573,6 +587,8 @@ Flat device_async(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, const c
                     live ? static_cast<const u32*>(d_live.data()) : nullptr);
     Flat f;
     f.succ = to_host<u64>(succ.data(), c * W, s);
+    f.hashes = to_host<u64>(hashes.data(), c, s);
+    f.noops = to_host<u8>(noops.data(), c, s);
     f.parent = to_host<i32>(parent.data(), c, s);
     f.schema = to_host<i32>(schema.data(), c, s);
     f.binding = to_host<i32>(binding.data(), c * L, s);
@@ -1057,6 +1073,52 @@ TEST(DeviceTableExpand, SaturatedScanKeepsCapacityStatusExactPastTheU32Boundary)
             const u32 overflow = c == 0 ? 0u : 1u;
             EXPECT_EQ(status[2], valid ? 1u : 0u);
             EXPECT_EQ(status[3], overflow | (valid ? 0u : 2u));
+        }
+    }
+}
+
+TEST(DeviceTableWide, LabelOnlySuccessorWindowsKeepTheirDigests)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const cudaStream_t s = ctx->stream();
+    for (const auto& task : {lights(20, 0), lights(300, 14)})
+    {
+        const auto table = rl::TaskTable::single(task);
+        const u32 W = table->words(), L = std::max<u32>(table->label_width(), 1);
+        std::vector<u64> rows(W, 0);
+        const State initial = task->initial_state();
+        std::copy(initial.words().begin(), initial.words().end(), rows.begin());
+        const u64 total = host_expand(*table, rows, {0}, 0, L).total;
+        const Flat expected = host_expand(*table, rows, {0}, total, L);
+        const auto states = to_device(ctx, rows, s);
+        cuda::ChunkGenerator gen(ctx, task, s);
+        gen.begin({static_cast<const u64*>(states.data()), W, W, 1, rows.data(), W}, false, true);
+        gen.views();
+        gen.count();
+        cuda::DeviceBuffer scratch(ctx, std::max<u64>(total * L * sizeof(u32), 1), s);
+        cuda::DeviceBuffer error(ctx, sizeof(u32), s);
+        for (u64 first = 0; first < total; first += 3)
+        {
+            const u64 n = std::min<u64>(3, total - first);
+            cuda::DeviceBuffer hashes(ctx, n * sizeof(u64), s), noops(ctx, n, s);
+            cuda::DeviceBuffer binding(ctx, n * L * sizeof(u32), s);
+            cuda::lifted::Labels labels;
+            labels.binding = static_cast<u32*>(binding.data());
+            labels.capacity = first + n;
+            labels.first = first;
+            labels.label_width = L;
+            labels.scratch = static_cast<u32*>(scratch.data());
+            labels.scratch_rows = total;
+            labels.scratch_indexed = 1;
+            labels.error = static_cast<u32*>(error.data());
+            cuda::check(cudaMemsetAsync(error.data(), 0, sizeof(u32), s), "memset");
+            gen.write(labels, nullptr, W, nullptr, static_cast<u64*>(hashes.data()), static_cast<u8*>(noops.data()));
+            EXPECT_EQ(to_host<u32>(error.data(), 1, s)[0], 0u);
+            EXPECT_EQ(to_host<u64>(hashes.data(), n, s),
+                      (std::vector<u64>(expected.hashes.begin() + first, expected.hashes.begin() + first + n)));
+            EXPECT_EQ(to_host<u8>(noops.data(), n, s),
+                      (std::vector<u8>(expected.noops.begin() + first, expected.noops.begin() + first + n)));
         }
     }
 }

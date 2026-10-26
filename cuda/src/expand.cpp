@@ -7,6 +7,7 @@
 #include "mymyr/cuda/expand.hpp"
 
 #include "numeric_pad.hpp"
+#include "expand_drop.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/thread_pool.hpp"
@@ -46,10 +47,12 @@ struct DeviceExpander::Impl
     BucketLaunch launch = BucketLaunch::PerBucket;
     cudaStream_t s = nullptr;
     u64 chunk_rows = 0;  // set_chunk_rows
-    Scratch ctl, sort, numeric_in, numeric_out;
+    Scratch ctl, sort, numeric_in, numeric_out, digest_offsets;
+    detail::ExpansionDrop drop;
+    bool drop_noops = false;
     // an expansion's rows apart from the caller's outputs: Multi's labels of deferred successors the caller does not
     // take, or of a mapped write; Single's and PerInstance's expansion before it is scattered to the caller's rows
-    Scratch t_succ, t_schema, t_binding, t_parent, t_goal, t_derived, t_offsets;
+    Scratch t_succ, t_schema, t_binding, t_parent, t_goal, t_derived, t_offsets, t_hash, t_noop;
     PinnedBuffer host_ctl{k_ctl_words * sizeof(u32)};
     PinnedBuffer totals;  // per chunk
 
@@ -269,9 +272,11 @@ struct DeviceExpander::Impl
             lab.scratch_indexed = 1;
             lab.error = d + k_error;
             u64* words = successor_rows && base < out.capacity ? successor_rows + base * W : nullptr;
-            gen->write(lab, words, W, d + k_words_needed);
+            u64* hashes = out.succ_hash && base < out.capacity ? out.succ_hash + base : nullptr;
+            u8* noops = out.noop && base < out.capacity ? out.noop + base : nullptr;
+            gen->write(lab, words, W, d + k_words_needed, hashes, noops);
             while (gen->resolve_missing())
-                gen->write(lab, words, W, d + k_words_needed);
+                gen->write(lab, words, W, d + k_words_needed, hashes, noops);
             host_need = std::max(host_need, gen->host_words_needed(W));
             if (out.offsets)
                 check(lifted::launch_state_offsets(gen->seg_offsets(), S, c.rows, base, out.offsets + c.first, s),
@@ -475,11 +480,13 @@ struct DeviceExpander::Impl
             const u64 cap = map ? c.total : base < out.capacity ? std::min(out.capacity - base, c.total) : 0;
             lifted::SuccessorRows rows;
             rows.words = out.succ && cap ? (map ? out.succ : out.succ + base * W) : nullptr;
+            rows.hash = out.succ_hash && cap ? (map ? out.succ_hash : out.succ_hash + base) : nullptr;
+            rows.noop = out.noop && cap ? (map ? out.noop : out.noop + base) : nullptr;
             rows.out_words = W;
             rows.words_needed = d + k_words_needed;
             // the successors after the labels, by launch_put_multi: the widest instance's long segments do not
             // bound the launch; the labels it reads are the caller's or scratch
-            const bool defer = map || rows.words;
+            const bool defer = map || rows.words || rows.hash || rows.noop;
             rows.deferred = defer ? 1 : 0;
             lifted::Labels lab;
             lab.binding = !map && out.binding ? reinterpret_cast<u32*>(out.binding) + base * L
@@ -669,7 +676,7 @@ struct DeviceExpander::Impl
         u32* sc = nullptr;
         if (opt.canonical_order && gen->sorts(opt.witness_pruning) && n)
             sc = static_cast<u32*>(sort.ensure(ctx, n * L * sizeof(u32), s));
-        gen->write(async_labels(out, d, L, sc), out.succ, W, d + k_words_needed);
+        gen->write(async_labels(out, d, L, sc), out.succ, W, d + k_words_needed, out.succ_hash, out.noop);
         if (out.derived && n)
             gen->derived_rows(out.succ, W, W, n, out.derived, out.derived_words);
         if (!out.goal || !n)
@@ -695,9 +702,11 @@ struct DeviceExpander::Impl
             check(cudaMemsetAsync(out.derived, 0, n * out.derived_words * sizeof(u64), s), "cudaMemsetAsync");
         lifted::SuccessorRows rows;
         rows.words = n ? out.succ : nullptr;
+        rows.hash = n ? out.succ_hash : nullptr;
+        rows.noop = n ? out.noop : nullptr;
         rows.out_words = W;
         rows.words_needed = d + k_words_needed;
-        const bool defer = rows.words != nullptr;
+        const bool defer = rows.words || rows.hash || rows.noop;
         rows.deferred = defer ? 1 : 0;
         lifted::Labels lab = async_labels(out, d, L, sc);
         if (defer)
@@ -796,7 +805,8 @@ struct DeviceExpander::Impl
         std::vector<u64> succ(out.succ ? n * RW : 0);
         std::vector<i32> parent(out.parent ? n : 0), schema(out.schema ? n : 0), binding(out.binding ? n * L : 0);
         std::vector<u8> goal(out.goal ? n : 0);
-        std::vector<u64> derived(out.derived ? n * out.derived_words : 0);
+        std::vector<u64> derived(out.derived ? n * out.derived_words : 0), hashes(out.succ_hash ? n : 0);
+        std::vector<u8> noops(out.noop ? n : 0);
         rl::Expansion e;
         e.capacity = n;
         e.words = out.words;
@@ -809,6 +819,8 @@ struct DeviceExpander::Impl
         e.goal = out.goal ? goal.data() : nullptr;
         e.derived = out.derived ? derived.data() : nullptr;
         e.derived_words = out.derived_words;
+        e.succ_hash = out.succ_hash ? hashes.data() : nullptr;
+        e.noop = out.noop ? noops.data() : nullptr;
         e.offsets = out.offsets ? h_offsets.data() : nullptr;
         expand_host(e);
         auto up = [&](void* dst, const void* src, u64 bytes)
@@ -823,6 +835,8 @@ struct DeviceExpander::Impl
         up(out.goal, goal.data(), goal.size());
         up(out.derived, derived.data(), derived.size() * sizeof(u64));
         up(out.offsets, h_offsets.data(), h_offsets.size() * sizeof(i32));
+        up(out.succ_hash, hashes.data(), hashes.size() * sizeof(u64));
+        up(out.noop, noops.data(), noops.size());
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // the pageable sources
         out.total = e.total;
         out.words_needed = e.words_needed;
@@ -933,6 +947,8 @@ struct DeviceExpander::Impl
         auto* ts = out.succ ? scratch_of<u64>(t_succ, ctx, T * std::max<u32>(RW, 1), s) : nullptr;
         auto* tsc = out.schema ? scratch_of<i32>(t_schema, ctx, T, s) : nullptr;
         auto* tb = out.binding ? scratch_of<i32>(t_binding, ctx, T * L, s) : nullptr;
+        auto* th = out.succ_hash ? scratch_of<u64>(t_hash, ctx, T, s) : nullptr;
+        auto* tn = out.noop ? scratch_of<u8>(t_noop, ctx, T, s) : nullptr;
         auto* tp = scratch_of<i32>(t_parent, ctx, T, s);
         auto* tg = out.goal ? scratch_of<u8>(t_goal, ctx, T, s) : nullptr;
         auto* toff = scratch_of<i32>(t_offsets, ctx, n + parts.size(), s);
@@ -955,6 +971,8 @@ struct DeviceExpander::Impl
             e.schema = tsc ? tsc + p.base : nullptr;
             e.binding = tb ? tb + p.base * L : nullptr;
             e.goal = tg ? tg + p.base : nullptr;
+            e.succ_hash = th ? th + p.base : nullptr;
+            e.noop = tn ? tn + p.base : nullptr;
             e.derived_words = out.derived ? own_derived_words(p.instance) : 0;
             e.derived = td ? td + dbase[k] : nullptr;
             e.offsets = toff + p.start + k;
@@ -999,6 +1017,10 @@ struct DeviceExpander::Impl
             x.out_binding = out.binding;
             x.out_parent = out.parent;
             x.out_goal = out.goal;
+            x.hash = th ? th + p.base : nullptr;
+            x.noop = tn ? tn + p.base : nullptr;
+            x.out_hash = out.succ_hash;
+            x.out_noop = out.noop;
             check(lifted::launch_part_scatter(x, s), "launch_part_scatter");
         }
         u32* d = dctl();
@@ -1025,7 +1047,7 @@ struct DeviceExpander::Impl
     void write_single_mapped(rl::Expansion& out, const RowMap& map)
     {
         const u64 T = total;
-        const bool any = out.succ || out.schema || out.binding || out.parent || out.goal || out.derived;
+        const bool any = out.succ || out.schema || out.binding || out.parent || out.goal || out.derived || out.succ_hash || out.noop;
         rl::Expansion e;
         e.capacity = any ? T : 0;
         e.words = table->numeric() ? out.words : std::max<u32>(1, std::min(out.words, table->words()));
@@ -1036,6 +1058,8 @@ struct DeviceExpander::Impl
         e.schema = out.schema ? scratch_of<i32>(t_schema, ctx, T, s) : nullptr;
         e.binding = out.binding ? scratch_of<i32>(t_binding, ctx, T * e.label_width, s) : nullptr;
         e.goal = out.goal ? scratch_of<u8>(t_goal, ctx, T, s) : nullptr;
+        e.succ_hash = out.succ_hash ? scratch_of<u64>(t_hash, ctx, T, s) : nullptr;
+        e.noop = out.noop ? scratch_of<u8>(t_noop, ctx, T, s) : nullptr;
         e.derived_words = out.derived ? own_derived_words(0) : 0;
         e.derived = e.derived_words ? scratch_of<u64>(t_derived, ctx, T * e.derived_words, s) : nullptr;
         e.offsets = scratch_of<i32>(t_offsets, ctx, in.rows + 1, s);
@@ -1071,6 +1095,10 @@ struct DeviceExpander::Impl
         x.out_binding = out.binding;
         x.out_parent = out.parent;
         x.out_goal = out.goal;
+        x.hash = e.succ_hash;
+        x.noop = e.noop;
+        x.out_hash = out.succ_hash;
+        x.out_noop = out.noop;
         check(lifted::launch_part_scatter(x, s), "launch_part_scatter");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // as write(): the outputs are done
     }
@@ -1230,6 +1258,8 @@ u64 DeviceExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::
                                     " instances needs task ids");
     I.in = in;
     I.opt = opt;
+    I.drop_noops = opt.drop_noops;
+    I.opt.drop_noops = false;
     I.ids = task_ids;
     I.stride = in.stride ? in.stride : in.words + in.numeric_words;
     I.on_host = I.host_batch();
@@ -1252,18 +1282,38 @@ void DeviceExpander::write(rl::Expansion& out)
 {
     Impl& I = *m;
     I.check_write(out);
+    if (I.drop_noops && out.capacity && !out.index)
+        throw std::invalid_argument("mymyr: expand: drop_noops requires index");
     DeviceGuard guard(I.ctx->device());
+    rl::Expansion dest = out;
+    if ((I.drop_noops || out.index) && !dest.offsets)
+        dest.offsets = scratch_of<i32>(I.digest_offsets, I.ctx, I.in.rows + 1, I.s);
+    rl::Expansion raw = I.drop_noops ? I.drop.prepare(dest, I.in.rows, I.ctx, I.s) : dest;
     if (I.on_host)
+        I.write_host(raw);
+    else
+        switch (I.mode)
+        {
+            case Mode::Single: I.write_single(raw); break;
+            case Mode::Multi: I.write_multi(raw, nullptr); break;
+            case Mode::PerInstance: I.write_parts(raw, nullptr); break;
+            case Mode::Host: break;
+        }
+    out.generated = I.total;
+    out.total = raw.total;
+    out.words_needed = raw.words_needed;
+    if (I.drop_noops)
     {
-        I.write_host(out);
-        return;
+        I.drop.compact(raw, dest, I.in.rows, I.ctx, I.s);
+        i32 kept = 0;
+        check(cudaMemcpyAsync(&kept, dest.offsets + I.in.rows, sizeof(i32), cudaMemcpyDeviceToHost, I.s), "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");
+        out.total = static_cast<u32>(kept);
     }
-    switch (I.mode)
+    else if (out.index)
     {
-        case Mode::Single: I.write_single(out); break;
-        case Mode::Multi: I.write_multi(out, nullptr); break;
-        case Mode::PerInstance: I.write_parts(out, nullptr); break;
-        case Mode::Host: break;
+        check(launch_expansion_indices(detail::expansion_rows(dest), I.in.rows, I.s), "launch_expansion_indices");
+        check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");
     }
 }
 
@@ -1345,13 +1395,22 @@ void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl
     I.in = in;
     I.rows_dev = rows_dev;
     I.opt = options;
+    I.drop_noops = options.drop_noops;
+    I.opt.drop_noops = false;
     I.ids = task_ids;
     I.stride = in.stride ? in.stride : in.words + in.numeric_words;
     I.total = 0;
     I.counted = true;  // the checks of write() on the destinations
     I.check_write(out);
     I.counted = false;
-    I.expand_async(out, status);
+    if (options.drop_noops && out.capacity && !out.index)
+        throw std::invalid_argument("mymyr: expand: drop_noops requires index");
+    rl::Expansion raw = options.drop_noops ? I.drop.prepare(out, in.rows, I.ctx, I.s) : out;
+    I.expand_async(raw, status);
+    if (options.drop_noops)
+        I.drop.compact(raw, out, in.rows, I.ctx, I.s);
+    else if (out.index || out.succ_hash || out.noop)
+        check(launch_expansion_indices(detail::expansion_rows(out), in.rows, I.s), "launch_expansion_indices");
 }
 
 void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)
@@ -1374,6 +1433,11 @@ void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansio
     lifted::Flat f{flat.offsets, flat.capacity, flat.succ, flat.words + flat.numeric_words, flat.schema, flat.binding, flat.label_width, flat.goal, flat.derived, flat.derived_words};
     lifted::Padded p{out.k, out.index, out.mask, out.count, out.succ, out.words + out.numeric_words, out.schema, out.binding, out.label_width,
                      out.goal, d + k_overflow, out.derived, out.derived_words};
+    f.hash = flat.succ_hash;
+    f.noop = flat.noop;
+    f.index = flat.index;
+    p.hash = out.succ_hash;
+    p.noop = out.noop;
     if (flat.numeric_words)
         check(numeric::launch_pad(f, rows, p, flat.numeric_words, s), "numeric::launch_pad");
     else

@@ -162,6 +162,8 @@ struct SuccessorRows
     /// successors one thread each: a state with many successors (gripper's pick over 80 balls) no longer bounds a
     /// launch with its one thread's writes.
     u32 deferred = 0;
+    u64* hash = nullptr;  // [capacity - first] native state hashes, even without words
+    u8* noop = nullptr;   // [capacity - first] bitwise equality to the parent
 };
 
 /// Goal test of the parents: out[0] += the goal states among them, out[1] = min(out[1], row of the first one).
@@ -297,9 +299,11 @@ struct HostRows
     const u32* binding = nullptr;  // [n, label_width]
     const u64* words = nullptr;    // [n, out_words] (null: no words)
     u64 n = 0;
+    const u64* hash = nullptr;
+    const u8* noop = nullptr;
 };
 cudaError_t launch_place_host(HostRows h, const u32* offsets, u32 num_schemas, Labels labels, u64* out_words, u32 out_width,
-                              cudaStream_t s);
+                              cudaStream_t s, u64* hashes = nullptr, u8* noops = nullptr);
 
 /// Scatters host counts: counts[segment[i]] = value[i].
 cudaError_t launch_scatter_counts(const u32* segment, const u32* value, u64 n, u32* counts, cudaStream_t s);
@@ -339,6 +343,8 @@ struct Padded
     u32* overflow = nullptr;  // set to 1 when some count > K or a successor is past the flat capacity
     u64* derived = nullptr;   // [rows, K, derived_words], zero padding
     u32 derived_words = 0;
+    u64* hash = nullptr;
+    u8* noop = nullptr;
 };
 struct Flat
 {
@@ -352,6 +358,9 @@ struct Flat
     const u8* goal = nullptr;
     const u64* derived = nullptr;  // [capacity, derived_words]
     u32 derived_words = 0;
+    const u64* hash = nullptr;
+    const u8* noop = nullptr;
+    const i32* index = nullptr;
 };
 cudaError_t launch_pad(Flat flat, u64 rows, Padded out, cudaStream_t s);
 
@@ -576,6 +585,10 @@ struct PartScatter
     i32* out_binding = nullptr;
     i32* out_parent = nullptr;
     u8* out_goal = nullptr;
+    const u64* hash = nullptr;
+    const u8* noop = nullptr;
+    u64* out_hash = nullptr;
+    u8* out_noop = nullptr;
 };
 cudaError_t launch_part_scatter(const PartScatter& p, cudaStream_t s);
 

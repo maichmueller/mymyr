@@ -7,6 +7,7 @@
 // translation unit instantiates its own kernels.
 
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/core/hash.hpp"
 
 #include <atomic>
 #include <concepts>
@@ -711,7 +712,7 @@ struct RowWriter
     {
         const bool inside = pos >= a.lab.first && pos < a.lab.capacity;
         const SuccessorRows& out = a.out;
-        if (!(out.words && inside) && !out.words_needed && !out.missing_flag)
+        if (!(inside && (out.words || out.hash || out.noop)) && !out.words_needed && !out.missing_flag)
             return;
         if constexpr (WB == k_wide)
             successor_chunks(pos, b, inside);
@@ -816,6 +817,11 @@ struct RowWriter
         effects<WB>(b, 0, y, missing, max_add);
         if (missing && out.missing_flag)
             *out.missing_flag = 1;
+        if (inside && (out.hash || out.noop) && max_add > WB)
+        {
+            successor_chunks(pos, b, inside);
+            return;
+        }
         const u32 ow = out.out_words;
         const bool fits = !missing && ptrim <= ow && max_add <= ow;
         if (!fits && !missing && out.words_needed)
@@ -827,6 +833,19 @@ struct RowWriter
                 if (y[i])
                     ex = ex > i + 1 ? ex : i + 1;
             atomicMax(out.words_needed, ex);
+        }
+        if (inside && (out.hash || out.noop))
+        {
+            const u64 at = pos - a.lab.first;
+            if (out.hash)
+                out.hash[at] = hash::state_words(y, WB);
+            if (out.noop)
+            {
+                bool same = !missing;
+                for (u32 i = 0; i < WB; ++i)
+                    same = same && y[i] == (i < pw ? st[i] : 0);
+                out.noop[at] = same ? 1 : 0;
+            }
         }
         if (out.words && inside)
         {
@@ -857,6 +876,8 @@ struct RowWriter
         const SuccessorRows& out = a.out;
         const u32 ow = out.out_words;
         u64* r = out.words && inside ? out.words + (pos - a.lab.first) * ow : nullptr;
+        const bool digest = inside && (out.hash || out.noop);
+        bool same = true;
         bool missing = false, fits = true;
         u32 max_add = 0, ex = 0, end = 0;
         for (u32 c0 = 0; c0 == 0 || c0 < end; c0 += k_max_words)
@@ -874,20 +895,47 @@ struct RowWriter
                 if (missing && out.missing_flag)
                     *out.missing_flag = 1;
                 fits = !missing && ptrim <= ow && max_add <= ow;
-                if (fits && !r)
+                if (fits && !r && !digest)
                     return;
-                if (!fits && (missing || !out.words_needed))
+                if (!fits && !digest && (missing || !out.words_needed))
                     break;
                 // a fitting row: its written words; otherwise the words its exact width may reach
-                end = fits ? written_words(pos) : (pw > max_add ? pw : max_add);
+                end = fits && !digest ? written_words(pos) : (pw > max_add ? pw : max_add);
+                if (fits && r && written_words(pos) > end)
+                    end = written_words(pos);
             }
-            if (fits)
-                for (u32 i = 0; i < k_max_words && c0 + i < end; ++i)
+            for (u32 i = 0; i < k_max_words; ++i)
+            {
+                if (y[i])
+                    ex = c0 + i + 1;
+                if (digest)
+                    same = same && y[i] == (c0 + i < pw ? st[c0 + i] : 0);
+                if (fits && r && c0 + i < written_words(pos))
                     r[c0 + i] = y[i];
-            else
-                for (u32 i = 0; i < k_max_words; ++i)
-                    if (y[i])
-                        ex = c0 + i + 1;
+            }
+        }
+        if (digest)
+        {
+            const u64 at = pos - a.lab.first;
+            if (out.noop)
+                out.noop[at] = same && !missing ? 1 : 0;
+            if (out.hash)
+            {
+                u64 h = hash::k_seed ^ (u64{ex} * hash::k_p1);
+                for (u32 c0 = 0; c0 < ex; c0 += k_max_words)
+                {
+                    u64 y[k_max_words];
+                    for (u32 i = 0; i < k_max_words; ++i)
+                        y[i] = c0 + i < pw ? st[c0 + i] : 0;
+                    bool m = false;
+                    u32 hi = 0;
+                    effects<k_max_words>(b, c0, y, m, hi);
+                    for (u32 i = 0; i < k_max_words && c0 + i < ex; i += 2)
+                        h = hash::mulfold(h ^ y[i] ^ hash::k_p1,
+                                         (c0 + i + 1 < ex ? y[i + 1] : 0) ^ hash::k_p2);
+                }
+                out.hash[at] = hash::mix64(h);
+            }
         }
         if (fits)
             return;
@@ -1553,6 +1601,8 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
     }
     ptrim = g.max(ptrim);
     apply(i0, y0, y1, true);
+    const bool digest = inside && (out.hash || out.noop);
+    bool same = y0 == (i0 < pw ? st[i0] : 0) && y1 == (i1 < pw ? st[i1] : 0);
     if (missing && out.missing_flag && g.sub == 0)
         *out.missing_flag = 1;
     const bool fits = !missing && ptrim <= ow && max_add <= ow;
@@ -1571,15 +1621,17 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
         if (i1 < lim)
             row[i1] = fits ? y1 : 0;
     }
-    for (u32 base = span; base < nw && (width || row); base += span)
+    for (u32 base = span; base < (digest && max_add > nw ? max_add : nw) && (width || row || digest); base += span)
     {
         const u32 k0 = base + i0, k1 = base + i1;
         u64 z0 = 0, z1 = 0;
-        if (fits || width)
+        if (fits || width || digest)
         {
             z0 = k0 < pw ? st[k0] : 0;
             z1 = k1 < pw ? st[k1] : 0;
             apply(k0, z0, z1, false);
+            if (digest)
+                same = same && z0 == (k0 < pw ? st[k0] : 0) && z1 == (k1 < pw ? st[k1] : 0);
             hi = z1 ? k1 + 1 : z0 ? k0 + 1 : hi;
         }
         if (row)
@@ -1588,6 +1640,38 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
                 row[k0] = fits ? z0 : 0;
             if (k1 < lim)
                 row[k1] = fits ? z1 : 0;
+        }
+    }
+    if (digest)
+    {
+        const bool equal = __all_sync(g.gm, same && !missing);
+        if (out.noop && g.sub == 0)
+            out.noop[pos] = equal ? 1 : 0;
+        if (out.hash)
+        {
+            const u32 trimmed = g.max(hi);
+            u64 h = hash::k_seed ^ (u64{trimmed} * hash::k_p1);
+            for (u32 base = 0; base < trimmed; base += span)
+            {
+                u64 z0 = y0, z1 = y1;
+                if (base)
+                {
+                    z0 = base + i0 < pw ? st[base + i0] : 0;
+                    z1 = base + i1 < pw ? st[base + i1] : 0;
+                    apply(base + i0, z0, z1, false);
+                }
+                // Every lane participates in the shuffles; lane zero chains the ordered pairs.
+                for (u32 q = 0; q < span && base + q < trimmed; q += 2)
+                {
+                    const u64 a0 = __shfl_sync(g.gm, q < g.G ? z0 : z1, q % g.G, g.G);
+                    const u64 a1 = __shfl_sync(g.gm, q + 1 < g.G ? z0 : z1, (q + 1) % g.G, g.G);
+                    if (g.sub == 0)
+                        h = hash::mulfold(h ^ a0 ^ hash::k_p1,
+                                         (base + q + 1 < trimmed ? a1 : 0) ^ hash::k_p2);
+                }
+            }
+            if (g.sub == 0)
+                out.hash[pos] = hash::mix64(h);
         }
     }
     if (width)

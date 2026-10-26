@@ -259,7 +259,8 @@ TEST_P(DeviceConditionalEffectsSuite, StopAtGoalReturnsTheCpuPlan)
 /// Host copies of every output array of an expansion.
 struct Flat
 {
-    std::vector<u64> succ;
+    std::vector<u64> succ, hashes;
+    std::vector<u8> noops;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
     u64 total = 0;
@@ -270,12 +271,13 @@ struct Flat
 /// Device buffers of one expansion (all arrays, poisoned) and their host copies.
 struct DeviceFlat
 {
-    cuda::DeviceBuffer succ, parent, schema, binding, goal, offsets;
+    cuda::DeviceBuffer succ, parent, schema, binding, goal, offsets, hashes, noops;
     rl::Expansion x;
     DeviceFlat(const cuda::ContextPtr& ctx, u64 rows, u64 cap, u32 W, u32 L, cudaStream_t s) :
         succ(ctx, std::max<u64>(cap * W * 8, 8), s), parent(ctx, std::max<u64>(cap * 4, 4), s),
         schema(ctx, std::max<u64>(cap * 4, 4), s), binding(ctx, std::max<u64>(cap * L * 4, 4), s),
-        goal(ctx, std::max<u64>(cap, 1), s), offsets(ctx, (rows + 1) * 4, s)
+        goal(ctx, std::max<u64>(cap, 1), s), offsets(ctx, (rows + 1) * 4, s),
+        hashes(ctx, std::max<u64>(cap * 8, 8), s), noops(ctx, std::max<u64>(cap, 1), s)
     {
         x.capacity = cap;
         x.words = W;
@@ -286,7 +288,9 @@ struct DeviceFlat
         x.binding = static_cast<i32*>(binding.data());
         x.goal = static_cast<u8*>(goal.data());
         x.offsets = static_cast<i32*>(offsets.data());
-        for (auto* b : {&this->succ, &this->parent, &this->schema, &this->binding, &this->goal})
+        x.succ_hash = static_cast<u64*>(hashes.data());
+        x.noop = static_cast<u8*>(noops.data());
+        for (auto* b : {&this->succ, &this->parent, &this->schema, &this->binding, &this->goal, &this->hashes, &this->noops})
             cuda::check(cudaMemsetAsync(b->data(), 0x5A, b->size(), s), "memset");
     }
     Flat host(u64 rows, cudaStream_t s) const
@@ -294,6 +298,8 @@ struct DeviceFlat
         const u64 cap = x.capacity;
         Flat f;
         f.succ = to_host<u64>(x.succ, cap * x.words, s);
+        f.hashes = to_host<u64>(x.succ_hash, cap, s);
+        f.noops = to_host<u8>(x.noop, cap, s);
         f.parent = to_host<i32>(x.parent, cap, s);
         f.schema = to_host<i32>(x.schema, cap, s);
         f.binding = to_host<i32>(x.binding, cap * x.label_width, s);
@@ -316,6 +322,8 @@ Flat cpu_expand(const TaskPtr& task, const std::vector<u64>& states, u64 rows, u
     f.binding.assign(cap * L, 0x5A5A5A5A);
     f.goal.assign(cap, 0x5A);
     f.offsets.assign(rows + 1, 0);
+    f.hashes.assign(cap, 0x5A5A5A5A5A5A5A5Aull);
+    f.noops.assign(cap, 0x5A);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
@@ -326,6 +334,8 @@ Flat cpu_expand(const TaskPtr& task, const std::vector<u64>& states, u64 rows, u
     x.binding = f.binding.data();
     x.goal = f.goal.data();
     x.offsets = f.offsets.data();
+    x.succ_hash = f.hashes.data();
+    x.noop = f.noops.data();
     rl::expand(*rl::TaskTable::single(task), {states.data(), rows, in_words, 0}, nullptr, x, o);
     f.total = x.total;
     f.words_needed = x.words_needed;

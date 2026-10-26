@@ -160,22 +160,22 @@ def test_torch_ops_equal_rl_expand():
     h = rt.register(task)
     s = env.states.clone()
     x = rl.expand(task, s, words=s.shape[1], goal=True, derived=True)
-    flat = torch.ops.mymyr.expand_flat_derived(h, s, None, None, False)
+    flat = torch.ops.mymyr.expand_flat(h, s, None, None, False, derived=True)
     assert torch.equal(flat[6], x.derived) and torch.equal(flat[0], x.succ)
-    capped = torch.ops.mymyr.expand_flat_derived(h, s, None, x.total + 4, False)
+    capped = torch.ops.mymyr.expand_flat(h, s, None, x.total + 4, False, derived=True)
     assert capped[6].shape == (x.total + 4, x.derived_words) and torch.equal(capped[6][: x.total], x.derived)
     assert (capped[6][x.total :] == 0).all()
     K = int((x.offsets[1:] - x.offsets[:-1]).max())
-    padded = torch.ops.mymyr.expand_derived(h, s, None, K, False)
+    padded = torch.ops.mymyr.expand(h, s, None, K, False, derived=True)
     ref = x.pad(K)
     assert torch.equal(padded[6], ref.derived) and torch.equal(padded[0], ref.succ)
     # the fake implementations give the real shapes
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     with FakeTensorMode(allow_non_fake_inputs=True):
-        fake = torch.ops.mymyr.expand_flat_derived(h, s, None, x.total + 4, False)
+        fake = torch.ops.mymyr.expand_flat(h, s, None, x.total + 4, False, derived=True)
         assert fake[6].shape == capped[6].shape
-        fake = torch.ops.mymyr.expand_derived(h, s, None, K, False)
+        fake = torch.ops.mymyr.expand(h, s, None, K, False, derived=True)
         assert fake[6].shape == padded[6].shape
 
 
@@ -245,11 +245,11 @@ def test_torch_ops_without_derived_atoms_have_zero_width_words():
     env = rt.BatchedEnv(task, 4)
     h = rt.register(task)
     s = env.states.clone()
-    flat = torch.ops.mymyr.expand_flat_derived(h, s, None, 64, False)
+    flat = torch.ops.mymyr.expand_flat(h, s, None, 64, False, derived=True)
     assert flat[6].shape == (64, 0)
-    uncapped = torch.ops.mymyr.expand_flat_derived(h, s, None, None, False)
+    uncapped = torch.ops.mymyr.expand_flat(h, s, None, None, False, derived=True)
     assert uncapped[6].shape[1] == 0 and uncapped[6].shape[0] == uncapped[0].shape[0]
-    padded = torch.ops.mymyr.expand_derived(h, s, None, 8, False)
+    padded = torch.ops.mymyr.expand(h, s, None, 8, False, derived=True)
     assert padded[6].shape == (s.shape[0], 8, 0)
 
 
@@ -353,25 +353,25 @@ def test_torch_ops_on_cuda():
     dev = torch.from_numpy(rows.view(np.int64)).cuda()
     host = rl.expand(task, rows, goal=True, derived=True)
     h = rt.register(task)
-    flat = torch.ops.mymyr.expand_flat_derived(h, dev, None, None, False)
+    flat = torch.ops.mymyr.expand_flat(h, dev, None, None, False, derived=True)
     assert flat[6].device.type == "cuda" and same(flat[6], host.derived) and same(flat[0], host.succ)
-    capped = torch.ops.mymyr.expand_flat_derived(h, dev, None, host.total + 4, False)
+    capped = torch.ops.mymyr.expand_flat(h, dev, None, host.total + 4, False, derived=True)
     assert capped[6].shape == (host.total + 4, host.derived_words) and same(capped[6][: host.total], host.derived)
     assert (capped[6][host.total :] == 0).all()
     K = int(np.diff(host.offsets).max())
-    padded = torch.ops.mymyr.expand_derived(h, dev, None, K, False)
+    padded = torch.ops.mymyr.expand(h, dev, None, K, False, derived=True)
     assert same(padded[6], host.pad(K).derived) and same(padded[0], host.pad(K).succ)
 
     capacity = host.total + 4
 
     @torch.compile(fullgraph=True, backend="aot_eager")
     def compiled(states):
-        return torch.ops.mymyr.expand_flat_derived(h, states, None, capacity, False)
+        return torch.ops.mymyr.expand_flat(h, states, None, capacity, False, derived=True)
 
     assert torch.equal(compiled(dev)[6], capped[6])
     # a task without derived atoms: zero-width words on the device
     blocks = text_task("blocks__probBLOCKS-8-0")
     _, brows, _ = encode_rows([blocks], per_task=6)
     bh = rt.register(blocks)
-    zero = torch.ops.mymyr.expand_flat_derived(bh, torch.from_numpy(brows.view(np.int64)).cuda(), None, 64, False)
+    zero = torch.ops.mymyr.expand_flat(bh, torch.from_numpy(brows.view(np.int64)).cuda(), None, 64, False, derived=True)
     assert zero[6].shape == (64, 0) and zero[6].device.type == "cuda"

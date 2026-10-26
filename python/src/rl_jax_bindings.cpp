@@ -57,6 +57,7 @@
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
+#include "mymyr/cuda/rl_ops.hpp"
 #endif
 
 #if defined(MYMYR_HAS_XLA_FFI)
@@ -120,7 +121,7 @@ struct Entry : FfiEntry
         cuda::ContextPtr ctx;
         std::unique_ptr<cuda::DeviceEnv> fast, general;
         std::unique_ptr<cuda::SuiteExpander> expander;
-        cuda::Scratch succ, schema, binding, goal, derived, offsets;
+        cuda::Scratch succ, schema, binding, goal, derived, offsets, hashes, noops, indices;
     };
     std::mutex devices_mutex;
     std::map<int, std::shared_ptr<Device>> devices;
@@ -1277,12 +1278,13 @@ cuda::SuiteExpander& device_expander(Entry& e, Entry::Device& d, cudaStream_t s)
 }
 
 /// The expansion of `st` on the device into the slot's flat scratch (all successors): the flat arrays.
-rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i32* ids, cudaStream_t s, bool derived)
+rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i32* ids, cudaStream_t s, bool derived, bool hashes, bool noops, bool drop)
 {
     cuda::SuiteExpander& x0 = device_expander(e, d, s);
     rl::ExpandOptions opt;
     opt.canonical_order = e.cfg.canonical_order;
     opt.witness_pruning = e.cfg.witness_pruning;
+    opt.drop_noops = drop;
     const u64 N = st.rows;
     const u64 total = x0.count(rl::StateBatchView{st.as<u64>(), N, e.W, 0, e.NN}, ids, opt);
     rl::Expansion x;
@@ -1301,6 +1303,9 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
         x.derived = x.derived_words ? static_cast<u64*>(d.derived.ensure(d.ctx, rows * x.derived_words * 8, s)) : nullptr;
     }
     x.offsets = static_cast<i32*>(d.offsets.ensure(d.ctx, (N + 1) * 4, s));
+    if (hashes) x.succ_hash = static_cast<u64*>(d.hashes.ensure(d.ctx, rows * 8, s));
+    if (noops || drop) x.noop = static_cast<u8*>(d.noops.ensure(d.ctx, rows, s));
+    if (drop) x.index = static_cast<i32*>(d.indices.ensure(d.ctx, rows * 4, s));
     x0.write(x);
     if (x.words_needed > e.W)
         fail("a successor needs " + std::to_string(x.words_needed) + " words; the rows have " + std::to_string(e.W));
@@ -1313,20 +1318,21 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashes, bo
                        ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count, ffi::RemainingRets rest)
 {
     return guarded([&] {
-        if (hashes || noops || drop)
-            fail("successor digests and drop_noops require the CPU backend in this build");
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
-        const PaddedBufs p = padded_results(*e, sv.rows, succ, schema, binding, goal, mask, count, rest);
+        const PaddedBufs p = padded_results(*e, sv.rows, succ, schema, binding, goal, mask, count, rest, hashes, noops, drop);
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
         if (sv.rows == 0)
             return;
-        const rl::Expansion x = device_expand(*e, *d, sv, ids, st, p.derived.has_value());
+        const rl::Expansion x = device_expand(*e, *d, sv, ids, st, p.derived.has_value(), hashes, noops, drop);
         rl::PaddedExpansion out = make_padded(*e, p);
         d->expander->pad(x, sv.rows, out);
+        if (p.digests.generated)
+            cuda::check(cuda::launch_expansion_generated(static_cast<u32>(x.generated), p.digests.generated->as<u32>(), st),
+                        "launch_expansion_generated");
     });
 }
 
@@ -1337,12 +1343,10 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashe
                             ffi::RemainingRets rest)
 {
     return guarded([&] {
-        if (hashes || noops || drop)
-            fail("successor digests and drop_noops require the CPU backend in this build");
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
-        const FlatBufs f = flat_results(*e, sv.rows, succ, parent, schema, binding, goal, offsets, rest);
+        const FlatBufs f = flat_results(*e, sv.rows, succ, parent, schema, binding, goal, offsets, rest, hashes, noops, drop);
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
@@ -1360,7 +1364,11 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashe
         opt.canonical_order = e->cfg.canonical_order;
         opt.witness_pruning = e->cfg.witness_pruning;
         rl::Expansion x = make_flat(*e, f);
+        opt.drop_noops = drop;
         x0.expand(rl::StateBatchView{sv.as<u64>(), sv.rows, e->W, 0, e->NN}, ids, x, opt);
+        if (f.digests.generated)
+            cuda::check(cuda::launch_expansion_generated(static_cast<u32>(x.generated), f.digests.generated->as<u32>(), st),
+                        "launch_expansion_generated");
     });
 }
 

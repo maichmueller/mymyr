@@ -78,6 +78,25 @@ host, expanded on the host's threads and the successors copied back, which synch
 those instances take the host and the others stay on the device, so the environments' general path serves every
 table and suite; the fast path and CUDA graph capture need every instance on the device. Unsupported schema/axiom
 plans use the documented CPU fallback.
+`rl.expand(..., hashes=True, noops=True)` returns native state hashes and bitwise parent-equality flags on the
+device. `drop_noops=True` stably removes no-ops per parent, keeping every action for all-no-op parents; `index`
+retains each kept action's canonical position. Capacity bounds the count before filtering (`generated`), and status
+bit 0 reports overflow before filtering. Derived atoms are excluded from both digests. Numeric values enter the
+hash and equality in their public packed encoding. `mymyr.hash_rows(rows, numeric_words=..., stream=...)` computes
+the same hashes on CUDA arrays, with int64 bit patterns for torch and uint32 pairs for JAX.
+
+The label-only `rl.expand_into` path accepts `succ_hash=`, `noop=`, and `index=` without a `succ=` destination.
+Digests are computed while building each successor, including wide rows and successor windows. With `status=` and
+`stream=`, device-complete Single and Multi tables keep counts, validation, compaction, and every requested output
+on the caller's stream. Warm up the same shapes and options on that stream before capture; the graph retains its
+workspace across replays. Numeric conversion and CPU-fallback paths retain their documented host synchronization.
+
+The torch ops `mymyr::expand` and `mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops`, and `drop_noops`
+flags and return `(succ, parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status)`. Absent
+outputs are empty tensors. `rows=False` is the label-only form; `capacity=` makes the device form capturable.
+The padded op also takes `k`, pads parent and canonical indices with -1, and leaves `offsets` as CSR counts.
+All outputs have fake implementations for `torch.compile(fullgraph=True)`.
+
 The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
 [Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule
 has a numeric comparison or more parameters than the device kernels take; then the task's axioms run on the CPU

@@ -24,6 +24,7 @@
 #include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/expand.hpp"
+#include "mymyr/cuda/rl_ops.hpp"
 #include "mymyr/cuda/kernels.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/runtime.hpp"
@@ -749,7 +750,9 @@ struct DeviceFlat
 {
     std::shared_ptr<cuda::DeviceBuffer> buf;
     OpStream os;
-    u64 rows = 0, capacity = 0, total = 0;
+    u64 rows = 0, capacity = 0, total = 0, generated = 0;
+    u64 off_hash = 0, off_noop = 0, off_index = 0;
+    bool has_hash = false, has_noop = false, has_index = false;
     u32 words = 0, label_width = 0, words_needed = 0, numeric_words = 0;
     u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0, off_offsets = 0;
     u32 derived_words = 0;
@@ -776,7 +779,11 @@ struct DeviceFlat
         x.derived = has_derived && derived_words ? at<u64>(off_derived) : nullptr;
         x.derived_words = derived_words;
         x.offsets = at<i32>(off_offsets);
+        x.succ_hash = has_hash ? at<u64>(off_hash) : nullptr;
+        x.noop = has_noop ? at<u8>(off_noop) : nullptr;
+        x.index = has_index ? at<i32>(off_index) : nullptr;
         x.total = total;
+        x.generated = generated;
         x.words_needed = words_needed;
         return x;
     }
@@ -793,7 +800,7 @@ struct DeviceFlat
 };
 
 DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal,
-                                std::optional<u32> derived)
+                                std::optional<u32> derived, bool hashes, bool noops, bool drop)
 {
     DeviceFlat f;
     BlockLayout lay;
@@ -812,6 +819,12 @@ DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows
     f.off_binding = lay.add(cap, u64{L} * sizeof(i32));
     f.off_goal = lay.add(goal ? cap : 0, 1);
     f.off_derived = lay.add(derived ? cap : 0, u64{f.derived_words} * sizeof(u64));
+    f.has_hash = hashes;
+    f.has_noop = noops || drop;
+    f.has_index = drop;
+    f.off_hash = lay.add(hashes ? cap : 0, sizeof(u64));
+    f.off_noop = lay.add(f.has_noop ? cap : 0, 1);
+    f.off_index = lay.add(drop ? cap : 0, sizeof(i32));
     f.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     f.buf = device_output(c, lay.bytes, os);
     return f;
@@ -826,7 +839,8 @@ struct DevicePadded
     u32 k = 0, words = 0, label_width = 0, numeric_words = 0;
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
-    bool has_goal = false, has_derived = false, overflow = false;
+    bool has_goal = false, has_derived = false, overflow = false, has_hash = false, has_noop = false;
+    u64 off_hash = 0, off_noop = 0;
     Framework fw = Framework::DLPack;
     WordEncoding enc;
 
@@ -873,6 +887,8 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.label_width = f.label_width;
     p.has_goal = f.has_goal;
     p.has_derived = f.has_derived;
+    p.has_hash = f.has_hash;
+    p.has_noop = f.has_noop;
     p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
@@ -885,6 +901,8 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
     p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
     p.off_derived = lay.add(f.has_derived ? NK : 0, u64{f.derived_words} * sizeof(u64));
+    p.off_hash = lay.add(f.has_hash ? NK : 0, sizeof(u64));
+    p.off_noop = lay.add(f.has_noop ? NK : 0, 1);
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
@@ -901,13 +919,15 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     out.goal = f.has_goal ? reinterpret_cast<u8*>(b + p.off_goal) : nullptr;
     out.derived_words = f.derived_words;
     out.derived = f.has_derived && f.derived_words ? reinterpret_cast<u64*>(b + p.off_derived) : nullptr;
+    out.succ_hash = f.has_hash ? reinterpret_cast<u64*>(b + p.off_hash) : nullptr;
+    out.noop = f.has_noop ? reinterpret_cast<u8*>(b + p.off_noop) : nullptr;
     {
         ExpanderLease ex(ref, c, f.os.s);
         nb::gil_scoped_release release;
         ex->set_stream(f.os.s);
         ex->pad(f.view(), f.rows, out);
     }
-    p.overflow = out.overflow;
+    p.overflow = out.overflow || f.generated > f.capacity || f.words_needed > f.words;
     return p;
 }
 
@@ -928,7 +948,7 @@ nb::object device_expand(const ExpandArgs& a)
     std::vector<std::shared_ptr<void>> keep{in.im.keep};
     const i32* ids = device_task_ids(a.task_ids, *c, os, w.rows, keep);
     const auto [fw, enc] = output_kind(in, w, a.framework);
-    const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
+    const rl::ExpandOptions opt{a.canonical, a.witness, a.validate, a.drop_noops};
     const std::optional<u64> fixed_cap = opt_int_arg<u64>(a.capacity, "capacity", 0, rl::k_max_rows);
     const std::optional<u32> fixed_words = opt_int_arg<u32>(a.words, "words", 0);
     const std::optional<u32> k = opt_int_arg<u32>(a.k, "k", 1);
@@ -946,10 +966,11 @@ nb::object device_expand(const ExpandArgs& a)
         for (int attempt = 0;; ++attempt)
         {
             f = allocate_device_flat(*c, os, w.rows, cap, W, NN, L, a.goal,
-                                     a.derived ? std::optional<u32>(tt.derived_words()) : std::nullopt);
+                                     a.derived ? std::optional<u32>(tt.derived_words()) : std::nullopt, a.hashes, a.noops, a.drop_noops);
             rl::Expansion x = f.view();
             ex->write(x);
             f.total = x.total;
+            f.generated = x.generated;
             f.words_needed = x.words_needed;
             if (x.words_needed <= W || fixed_words || attempt >= 3)
                 break;
@@ -1118,6 +1139,24 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
                                       .c_str());
         take_cap(d.im.shape[0]);
     }
+    if (!a.succ_hash.is_none())
+    {
+        DeviceInput d = dest(a.succ_hash, "succ_hash");
+        x.succ_hash = device_dest<u64>(d, "succ_hash", {u64t, i64t}, 1);
+        take_cap(d.im.shape[0]);
+    }
+    if (!a.noop.is_none())
+    {
+        DeviceInput d = dest(a.noop, "noop");
+        x.noop = device_dest<u8>(d, "noop", {boolt, u8t}, 1);
+        take_cap(d.im.shape[0]);
+    }
+    if (!a.index.is_none())
+    {
+        DeviceInput d = dest(a.index, "index");
+        x.index = device_dest<i32>(d, "index", {i32t}, 1);
+        take_cap(d.im.shape[0]);
+    }
     if (!a.offsets.is_none())
     {
         DeviceInput d = dest(a.offsets, "offsets");
@@ -1136,7 +1175,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             throw nb::value_error("mymyr: expand_into: row_count needs one entry");
     }
     x.capacity = cap.value_or(0);
-    const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
+    const rl::ExpandOptions opt{a.canonical, a.witness, a.validate, a.drop_noops};
     const rl::StateBatchView view{w.data, w.rows, w.words - NN, w.stride, NN};
     if (!a.status.is_none())
     {
@@ -1151,7 +1190,9 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             throw nb::value_error("mymyr: expand_into: an expansion with 'status' does not wait for the device: pass "
                                   "stream=, the stream that reads its outputs (for instance torch.cuda.current_stream())");
         const u64 outputs = (x.succ ? 1u : 0u) | (x.parent ? 2u : 0u) | (x.schema ? 4u : 0u) |
-                            (x.binding ? 8u : 0u) | (x.goal ? 16u : 0u) | (x.derived ? 32u : 0u);
+                            (x.binding ? 8u : 0u) | (x.goal ? 16u : 0u) | (x.derived ? 32u : 0u) |
+                            (x.succ_hash ? 64u : 0u) | (x.noop ? 128u : 0u) | (x.index ? 256u : 0u) |
+                            (a.drop_noops ? 512u : 0u);
         const ExpansionShape shape{w.rows, w.words, w.stride, x.capacity, x.words, x.label_width, x.derived_words,
                                    outputs, ids ? 1u : 0u, a.canonical, a.witness, a.validate, rows_dev ? 1u : 0u};
         bool waited = false;
@@ -1193,6 +1234,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (waited)
         {
             r["total"] = x.total;
+        r["generated"] = x.generated;
             r["words_needed"] = x.words_needed;
             r["overflow"] = x.overflow();
         }
@@ -1208,10 +1250,50 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     c->release_after(os.s, std::move(keep));
     nb::dict r;
     r["total"] = x.total;
+        r["generated"] = x.generated;
     r["words_needed"] = x.words_needed;
     r["overflow"] = x.overflow();
     r["capacity"] = x.capacity;
     return r;
+}
+
+nb::object device_hash_rows(nb::handle states, unsigned numeric_words, nb::handle stream)
+{
+    const int device = dl::dlpack_device(states).device_id;
+    static std::mutex mutex;
+    static std::map<int, PyContextPtr> contexts;
+    PyContextPtr c;
+    {
+        std::lock_guard lock(mutex);
+        auto& entry = contexts[device];
+        if (!entry) entry = std::make_shared<PyContext>(cuda::DeviceContext::create(device));
+        c = entry;
+    }
+    const OpStream os = c->stream_of(stream);
+    cudaStreamCaptureStatus capture;
+    {
+        cuda::DeviceGuard guard(device);
+        cuda::check(cudaStreamIsCapturing(os.s, &capture), "cudaStreamIsCapturing");
+    }
+    if (capture == cudaStreamCaptureStatusNone) c->drain();
+    DeviceInput in = import_device(states, *c, os, "states");
+    const WordsLayout w = device_words(in);
+    if (numeric_words > w.words)
+        throw nb::value_error("mymyr: hash_rows: numeric_words exceeds the row width");
+    const auto [fw, enc] = output_kind(in, w, nb::none());
+    auto buf = device_output(*c, w.rows * sizeof(u64), os);
+    {
+        nb::gil_scoped_release release;
+        cuda::DeviceGuard guard(device);
+        cuda::check(cuda::launch_hash_rows(w.data, w.rows, w.stride, w.words - numeric_words, numeric_words,
+                                          static_cast<u64*>(buf->data()), os.s), "launch_hash_rows");
+    }
+    if (capture == cudaStreamCaptureStatusNone)
+        c->release_after(os.s, {in.im.keep});
+    std::vector<i64> shape{static_cast<i64>(w.rows)};
+    if (fw == Framework::Jax) shape.push_back(1);
+    return export_region(buf, 0, os, fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64,
+                         std::move(shape), fw == Framework::Jax, fw, enc);
 }
 
 // ------------------------------------------------------------------------------------------------ device BrFS
@@ -1706,6 +1788,7 @@ void bind_cuda(nb::module_& parent)
         "(data pointer, rows, words, row stride in words, framework, DLPack device type, device id) of a device state "
         "array as the CUDA operations import it: tests use it to check that inputs are read in place");
 
+    device_hooks().hash_rows = &device_hash_rows;
     device_hooks().expand = &device_expand;
     device_hooks().expand_into = &device_expand_into;
     m.def("_check_async_expansion",
@@ -1793,6 +1876,17 @@ void bind_cuda(nb::module_& parent)
                 return nb::none();
             return p.array(p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] bool goal flags (if requested)")
+        .def_prop_ro("succ_hash", [](const DevicePadded& p) -> MaybeArray {
+            if (!p.has_hash) return nb::none();
+            std::vector<i64> shape{static_cast<i64>(p.rows), p.k};
+            if (p.fw == Framework::Jax) shape.push_back(1);
+            return p.array(p.off_hash, p.fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64,
+                           std::move(shape), p.fw == Framework::Jax);
+        }, "[N, K] native successor hashes, zero padding")
+        .def_prop_ro("noop", [](const DevicePadded& p) -> MaybeArray {
+            if (!p.has_noop) return nb::none();
+            return p.array(p.off_noop, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] bitwise equality with the parent, false padding")
         .def_prop_ro("derived", [](const DevicePadded& p) -> MaybeArray {
             if (!p.has_derived)
                 return nb::none();
@@ -1834,6 +1928,23 @@ void bind_cuda(nb::module_& parent)
         }, "[M, D] derived words of the successors (expand(..., derived=True))")
         .def_prop_ro("derived_words", [](const PyDeviceExpansion& e) { return e.flat.derived_words; },
                      "Derived words per row (D) of the derived array (0 if not requested).")
+        .def_prop_ro("succ_hash", [](const PyDeviceExpansion& e) -> MaybeArray {
+            if (!e.flat.has_hash) return nb::none();
+            std::vector<i64> shape{static_cast<i64>(e.flat.valid())};
+            if (e.fw == Framework::Jax) shape.push_back(1);
+            return e.array(e.flat.off_hash, e.fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64,
+                           std::move(shape), e.fw == Framework::Jax);
+        }, "[M] native successor hashes, if requested")
+        .def_prop_ro("noop", [](const PyDeviceExpansion& e) -> MaybeArray {
+            if (!e.flat.has_noop) return nb::none();
+            return e.array(e.flat.off_noop, rl::DType::Bool, {static_cast<i64>(e.flat.valid())});
+        }, "[M] bitwise equality with the parent, if requested")
+        .def_prop_ro("index", [](const PyDeviceExpansion& e) -> MaybeArray {
+            if (!e.flat.has_index) return nb::none();
+            return e.array(e.flat.off_index, rl::DType::I32, {static_cast<i64>(e.flat.valid())});
+        }, "[M] canonical successor positions with drop_noops")
+        .def_prop_ro("generated", [](const PyDeviceExpansion& e) { return e.flat.generated; },
+                     "Successors before no-op filtering; generated > capacity reports overflow.")
         .def_prop_ro("counts", [](const PyDeviceExpansion& e) -> ArrayOut {
             const std::vector<i32> off = e.flat.host_offsets();
             std::vector<i32> c(e.flat.rows);
@@ -1867,7 +1978,7 @@ void bind_cuda(nb::module_& parent)
         .def_prop_ro("table", [](const PyDeviceExpansion& e) { return SuiteArg(e.ref.obj); },
                      "The table (or Task) the expansion was made over.")
         .def_prop_ro("overflow", [](const PyDeviceExpansion& e) {
-            return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
+            return e.flat.generated > e.flat.capacity || e.flat.words_needed > e.flat.words;
         },
                      "Whether the outputs miss rows or words: total > capacity or words_needed > words.")
         .def_prop_ro("framework", [](const PyDeviceExpansion& e) { return framework_name(e.fw); },

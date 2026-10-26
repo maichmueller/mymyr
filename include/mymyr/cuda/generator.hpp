@@ -211,7 +211,8 @@ public:
     /// CPU-fallback rows placed. A window past row 0 needs an indexed scratch when the generator sorts (sorts()), and
     /// a classical task (numeric rows are written from row 0). words_needed
     /// (device u32, may be null) gets the widest successor that does not fit out_words (such rows are zero).
-    void write(const lifted::Labels& labels, u64* words, u32 out_words, u32* words_needed = nullptr);
+    void write(const lifted::Labels& labels, u64* words, u32 out_words, u32* words_needed = nullptr,
+               u64* hashes = nullptr, u8* noops = nullptr);
     /// Lazy slots: after write(), whether atoms without a slot were met (synchronizes the stream). If so they are
     /// interned in canonical order and the upload is refreshed: rerun write() (the task's width may have grown).
     /// Always false in frozen mode (no synchronization).
@@ -273,7 +274,7 @@ private:
     void build_lists();
     void host_work(const ChunkInput& in, bool witness, bool canonical);
     /// The CPU-fallback rows of write(): labels and words at their segments' offsets.
-    void place_host(const lifted::Labels& labels, u64* words, u32 out_words);
+    void place_host(const lifted::Labels& labels, u64* words, u32 out_words, u64* hashes, u8* noops);
     /// Views of `p` into `views` and, with device axioms, the derived bitsets into `derived` (reruns after interning
     /// derived atoms under lazy slots). Returns the derived words (0 without device axioms).
     u32 views_and_axioms(const lifted::Parents& p, u64* views, Scratch& derived, u64** derived_out);
@@ -322,6 +323,7 @@ private:
     lifted::Parents m_parents{};
     Scratch m_numeric_error;
     Scratch m_views, m_counts, m_offsets, m_scan, m_derived, m_schema_sets;
+    Scratch m_h_hash, m_h_noop;
     Scratch m_put_mask;  // [2, S] u8 per witness setting: the schema's rows are deferred (launch_put)
     Scratch m_deep_work;  // the deep launches' scratch (lifted::SchemaSet::work, deep_work_words)
     Scratch m_missing;  // bitmap over canonical ids + flag

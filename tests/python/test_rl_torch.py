@@ -283,14 +283,15 @@ def test_expand_ops_equal_rl_expand(blocks):
     h = rt.register(blocks)
     s = env.states.clone()
     succ, schema, binding, off, goal = expand_rows(blocks, s)
-    fsucc, fparent, fschema, fbinding, fgoal, foff = torch.ops.mymyr.expand_flat(h, s, None, None, False)
+    fsucc, fparent, fschema, fbinding, fgoal, foff, *_ = torch.ops.mymyr.expand_flat(h, s, None, None, False)
     assert torch.equal(fsucc, succ) and torch.equal(fschema, schema) and torch.equal(fbinding, binding)
     assert torch.equal(foff.to(torch.int64), off) and torch.equal(fgoal, goal)
     K = int((off[1:] - off[:-1]).max())
-    psucc, pschema, pbinding, pgoal, pmask, pcount = torch.ops.mymyr.expand(h, s, None, K, False)
+    psucc, pparent, pschema, pbinding, pgoal, poff, *_ = torch.ops.mymyr.expand(h, s, None, K, False)
+    pmask, pcount = pparent >= 0, poff[1:] - poff[:-1]
     assert torch.equal(pcount.to(torch.int64), off[1:] - off[:-1])
     assert torch.equal(psucc[pmask], succ) and torch.equal(pschema[pmask], schema)
-    csucc, cparent, *_, coff = torch.ops.mymyr.expand_flat(h, s, None, 16, False)
+    csucc, cparent, _, _, _, coff, *_ = torch.ops.mymyr.expand_flat(h, s, None, 16, False)
     assert csucc.shape[0] == 16 and torch.equal(coff, foff) and torch.equal(csucc, succ[:16])
 
 

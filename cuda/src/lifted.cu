@@ -66,7 +66,7 @@ __global__ void k_check_rows(const u64* data, u64 stride, u32 words, u64 rows, u
 
 // ------------------------------------------------------------------------------------------------ host rows, offsets
 
-__global__ void k_place_host(HostRows h, const u32* offsets, u32 S, Labels lab, u64* out_words, u32 out_width)
+__global__ void k_place_host(HostRows h, const u32* offsets, u32 S, Labels lab, u64* out_words, u32 out_width, u64* hashes, u8* noops)
 {
     if (lab.live && *lab.live == 0)
         return;
@@ -85,6 +85,10 @@ __global__ void k_place_host(HostRows h, const u32* offsets, u32 S, Labels lab, 
             lab.schema[pos] = seg % S;
         if (lab.parent)
             lab.parent[pos] = lab.parent_base + seg / S;
+        if (hashes && h.hash)
+            hashes[pos] = h.hash[i];
+        if (noops && h.noop)
+            noops[pos] = h.noop[i];
         if (h.words && out_words)
             for (u32 k = 0; k < out_width; ++k)
                 out_words[pos * out_width + k] = h.words[i * out_width + k];
@@ -137,7 +141,9 @@ __global__ void k_pad(Flat f, u64 rows, Padded o)
         if (k < c && j >= f.capacity && o.overflow)
             *o.overflow = 1;
         if (o.index)
-            o.index[at] = valid ? static_cast<i32>(j) : -1;
+            o.index[at] = valid ? (f.index ? f.index[j] : static_cast<i32>(j)) : -1;
+        if (o.hash) o.hash[at] = valid && f.hash ? f.hash[j] : 0;
+        if (o.noop) o.noop[at] = valid && f.noop ? f.noop[j] : 0;
         if (o.mask)
             o.mask[at] = valid ? 1 : 0;
         if (o.succ)
@@ -271,10 +277,10 @@ cudaError_t launch_put(const rl::dev::TaskView& t, Parents p, u32 num_schemas, c
 }
 
 cudaError_t launch_place_host(HostRows h, const u32* offsets, u32 num_schemas, Labels labels, u64* out_words, u32 out_width,
-                              cudaStream_t s)
+                              cudaStream_t s, u64* hashes, u8* noops)
 {
     if (h.n)
-        k_place_host<<<grid_for(h.n), k_block, 0, s>>>(h, offsets, num_schemas, labels, out_words, out_width);
+        k_place_host<<<grid_for(h.n), k_block, 0, s>>>(h, offsets, num_schemas, labels, out_words, out_width, hashes, noops);
     return cudaGetLastError();
 }
 

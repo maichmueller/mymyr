@@ -1,0 +1,235 @@
+"""Device successor identities, stable no-op filtering and captured destination-passing expansion."""
+
+import numpy as np
+import pytest
+
+import mymyr
+from mymyr import rl
+from conftest import ROOT, text_task, walk
+from test_rl_noops import DOMAINS, pddl_task
+
+torch = pytest.importorskip("torch")
+mc = pytest.importorskip("mymyr.cuda", exc_type=ImportError)
+if not torch.cuda.is_available() or not mc.available():
+    pytest.skip("requires a visible CUDA device", allow_module_level=True)
+
+
+def array(x):
+    result = x.cpu().numpy()
+    return result.view(np.uint64) if result.dtype == np.int64 else result
+
+
+def compare(table, rows, ids=None, *, derived=True):
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    device_ids = None if ids is None else torch.as_tensor(ids, device="cuda")
+    for drop in (False, True):
+        opts = dict(hashes=True, noops=True, drop_noops=drop, derived=derived, goal=True)
+        want = rl.expand(table, rows, ids, **opts)
+        got = rl.expand(table, source, device_ids, **opts)
+        assert got.generated == want.generated and got.total == want.total and got.overflow == want.overflow
+        for name in ("succ", "parent", "schema", "binding", "goal", "offsets", "succ_hash", "noop", "derived", "index"):
+            expected = getattr(want, name)
+            actual = getattr(got, name)
+            if expected is None:
+                assert actual is None
+            else:
+                np.testing.assert_array_equal(array(actual), expected, err_msg=name)
+        np.testing.assert_array_equal(array(mymyr.hash_rows(got.succ, numeric_words=want.numeric_words,
+                                                           stream=torch.cuda.current_stream())), want.succ_hash)
+        if want.total:
+            pad, ref = got.pad(), want.pad()
+            for name in ("succ", "schema", "binding", "goal", "mask", "count", "index", "succ_hash", "noop"):
+                np.testing.assert_array_equal(array(getattr(pad, name)), getattr(ref, name), err_msg=name)
+        cap = want.generated + 3
+        hashes = torch.full((cap,), -1, dtype=torch.int64, device="cuda")
+        noops = torch.ones(cap, dtype=torch.bool, device="cuda")
+        indices = torch.full((cap,), -2, dtype=torch.int32, device="cuda")
+        offsets = torch.empty(len(rows) + 1, dtype=torch.int32, device="cuda")
+        status = torch.empty(1, dtype=torch.int32, device="cuda")
+        result = rl.expand_into(table, source, device_ids, succ_hash=hashes, noop=noops, index=indices,
+                               offsets=offsets, status=status, drop_noops=drop, stream=torch.cuda.current_stream())
+        assert int(status.item()) == 0
+        np.testing.assert_array_equal(array(offsets), want.offsets)
+        np.testing.assert_array_equal(array(hashes[:want.total]), want.succ_hash)
+        np.testing.assert_array_equal(array(noops[:want.total]), want.noop)
+        full_indices = np.concatenate([np.arange(c, dtype=np.int32) for c in want.counts]) if len(rows) else []
+        np.testing.assert_array_equal(array(indices[:want.total]), want.index if drop else full_indices)
+        if not result.get("total") and result.get("total") != 0:
+            assert not hashes[want.total:].any() and not noops[want.total:].any()
+            assert torch.all(indices[want.total:] == -1)
+
+
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("multi", [False, True])
+def test_ipc_host_device_digests(domain, multi):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    base = ROOT / "tests/data/ipc" / f"{domain}-ipc" / "train"
+    first = mymyr.Task.from_pddl(base / "domain.pddl", base / "p01.pddl", atoms="dense")
+    if multi:
+        second = mymyr.Task.from_pddl(base / "domain.pddl", base / "p02.pddl", atoms="dense")
+        table = rl.TaskTable([first, second])
+        states = [walk(t, steps=4, walks=1) for t in (first, second)]
+        rows = np.zeros((sum(map(len, states)), table.words), np.uint64)
+        ids = np.concatenate([np.full(len(s), i, np.int32) for i, s in enumerate(states)])
+        offset = 0
+        for task, ss in zip((first, second), states):
+            rows[offset:offset + len(ss), :task.words] = task.encode(ss)
+            offset += len(ss)
+        compare(table, rows, ids)
+    else:
+        compare(first, np.asarray(first.encode(walk(first, steps=6, walks=1))))
+
+
+@pytest.mark.parametrize("name", ["miconic-simpleadl__s2-0", "openstacks-opt08-adl__p03", "philosophers__p03-phil4"])
+def test_conditional_and_axiom_digests(name):
+    task = text_task(name, atoms="dense")
+    compare(task, np.asarray(task.encode(walk(task, steps=4, walks=1))))
+
+
+@pytest.mark.parametrize("storage", ["i32", "f64"])
+def test_numeric_device_digests(storage):
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"), numeric_storage=storage)
+    compare(task, np.asarray(task.encode(walk(task, steps=5, walks=1))))
+
+
+def test_suite_digests_and_global_order():
+    a, b = text_task("gripper__prob05", atoms="dense"), text_task("blocks__probBLOCKS-8-0", atoms="dense")
+    suite = rl.TaskSuite([rl.as_table(a), rl.as_table(b)])
+    states = [walk(t, steps=5, walks=1) for t in (a, b)]
+    rows = np.zeros((2 * min(map(len, states)), suite.words), np.uint64)
+    ids = np.arange(len(rows), dtype=np.int32) % 2
+    for i, task in enumerate((a, b)):
+        rows[i::2, :task.words] = task.encode(states[i][:len(rows) // 2])
+    compare(suite, rows, ids)
+
+
+@pytest.mark.parametrize("words", [1, 4, 16, 65, 129])
+def test_wide_label_only_digests_and_narrow_destinations(words):
+    n = int(np.ceil(np.sqrt(words * 64)))
+    task = pddl_task("""(define (domain bits) (:requirements :strips :conditional-effects)
+      (:predicates (p ?x ?y) (q))
+      (:action idle :parameters (?x ?y) :precondition (and) :effect (and))
+      (:action set :parameters (?x ?y) :precondition (and) :effect (p ?x ?y))
+      (:action conditional :parameters (?x ?y) :precondition (and) :effect (when (q) (p ?x ?y))))""",
+      """(define (problem bits) (:domain bits) (:objects """ + " ".join(f"o{i}" for i in range(n)) +
+      ") (:init (q)) (:goal (p o0 o0)))", atoms="dense")
+    rows = np.asarray(task.encode([task.initial_state]))
+    compare(task, rows, derived=False)
+    narrow = rl.expand(task, torch.as_tensor(rows.view(np.int64), device="cuda"), words=1, hashes=True, noops=True)
+    full = rl.expand(task, rows, hashes=True, noops=True)
+    np.testing.assert_array_equal(array(narrow.succ_hash), full.succ_hash)
+    np.testing.assert_array_equal(array(narrow.noop), full.noop)
+
+
+def test_fallback_schema_digests():
+    task = pddl_task("""(define (domain many) (:requirements :strips)
+      (:predicates (p)) (:action idle :parameters (?p0 ?p1 ?p2 ?p3 ?p4 ?p5 ?p6 ?p7 ?p8 ?p9 ?p10 ?p11 ?p12 ?p13 ?p14 ?p15 ?p16 ?p17 ?p18 ?p19 ?p20 ?p21 ?p22 ?p23 ?p24 ?p25 ?p26 ?p27 ?p28 ?p29 ?p30 ?p31 ?p32)
+      :precondition (and) :effect (and)))""",
+      """(define (problem many) (:domain many) (:objects x) (:init) (:goal (p)))""", atoms="dense")
+    compare(task, np.asarray(task.encode([task.initial_state])))
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_capture_replay_drops_noops_and_preserves_canonical_positions(multi):
+    task = pddl_task(atoms="dense")
+    table = rl.TaskTable([task, pddl_task(atoms="dense")]) if multi else task
+    rows = np.asarray(task.encode([task.initial_state] * 3))
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    ids = torch.tensor([0, 1, 0], dtype=torch.int32, device="cuda") if multi else None
+    cap = 16
+    opts = dict(device="cuda", dtype=torch.int32)
+    out = dict(succ_hash=torch.zeros(cap, dtype=torch.int64, device="cuda"), noop=torch.zeros(cap, dtype=torch.bool, device="cuda"),
+               index=torch.full((cap,), -1, **opts), schema=torch.zeros(cap, **opts), parent=torch.zeros(cap, **opts),
+               binding=torch.zeros((cap, 1), **opts), offsets=torch.zeros(4, **opts), status=torch.zeros(1, **opts))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    def run():
+        return rl.expand_into(table, source, ids, **out, drop_noops=True, stream=stream)
+    with torch.cuda.stream(stream):
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for row in (rows, np.zeros_like(rows), rows):
+        source.copy_(torch.as_tensor(row.view(np.int64), device="cuda"))
+        graph.replay()
+        expected = rl.expand(table, row, None if ids is None else array(ids), hashes=True, drop_noops=True)
+        assert int(out["status"].item()) == 0
+        np.testing.assert_array_equal(array(out["offsets"]), expected.offsets)
+        for name in ("succ_hash", "noop", "index", "schema", "parent", "binding"):
+            np.testing.assert_array_equal(array(out[name][:expected.total]), getattr(expected, name))
+        assert not out["succ_hash"][expected.total:].any()
+        assert torch.all(out["index"][expected.total:] == -1)
+    # Overflow is measured before the no-op drop, even when the kept expansion would fit.
+    short = {name: (value[:6] if name not in ("status", "offsets") else value) for name, value in out.items()}
+    rl.expand_into(table, source, ids, **short, drop_noops=True, stream=torch.cuda.current_stream())
+    assert int(short["status"].item()) & 1
+    torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("words", [0, 1, 4, 16, 65, 131])
+@pytest.mark.parametrize("numeric_words", [0, 2])
+def test_device_hash_rows_matches_host_and_captures(words, numeric_words):
+    rng = np.random.default_rng(14)
+    rows = rng.integers(0, 2**64 - 1, (7, words + numeric_words), dtype=np.uint64)
+    if words:
+        rows[:, words - 1] = 0
+    expected = mymyr.hash_rows(rows, numeric_words=numeric_words)
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        mymyr.hash_rows(source, numeric_words=numeric_words, stream=stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = mymyr.hash_rows(source, numeric_words=numeric_words, stream=stream)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph.replay()
+    np.testing.assert_array_equal(array(actual), expected)
+    source.zero_()
+    graph.replay()
+    np.testing.assert_array_equal(array(actual), mymyr.hash_rows(np.zeros_like(rows), numeric_words=numeric_words))
+    torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("rows", [False, True])
+def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
+    from mymyr.rl.torch import register
+    task = pddl_task(atoms="dense")
+    handle = register(task)
+    host = np.asarray(task.encode([task.initial_state] * 2))
+    source = torch.as_tensor(host.view(np.int64), device="cuda")
+    opts = dict(derived=rows, rows=rows, hashes=True, noops=True, drop_noops=True)
+    def run(s):
+        if padded:
+            return torch.ops.mymyr.expand(handle, s, None, 4, capacity=16, **opts)
+        return torch.ops.mymyr.expand_flat(handle, s, None, 16, **opts)
+    eager = run(source)
+    compiled = torch.compile(run, backend="eager", fullgraph=True)
+    actual = compiled(source)
+    assert len(actual) == 11
+    for a, b in zip(actual, eager):
+        assert torch.equal(a, b)
+    assert not int(actual[-1].item())
+    expected = rl.expand(task, host, hashes=True, drop_noops=True)
+    if padded:
+        np.testing.assert_array_equal(array(actual[7]), expected.pad(4).succ_hash)
+        np.testing.assert_array_equal(array(actual[9]), expected.pad(4).index)
+    else:
+        np.testing.assert_array_equal(array(actual[7][:expected.total]), expected.succ_hash)
+        np.testing.assert_array_equal(array(actual[9][:expected.total]), expected.index)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run(source)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = run(source)
+    torch.cuda.current_stream().wait_stream(stream)
+    source.zero_()
+    graph.replay()
+    assert not captured[5].any() and not captured[7].any()
+    torch.cuda.synchronize()

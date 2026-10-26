@@ -287,7 +287,7 @@ ChunkGenerator::ChunkGenerator(ContextPtr ctx, TaskPtr task, cudaStream_t stream
     m_last = std::make_shared<LastUse>(m_ctx->device());
     for (Scratch* x : {&m_dev_derived, &m_goal_views, &m_goal_derived, &m_goal_rows, &m_views, &m_counts, &m_offsets, &m_scan,
                        &m_derived, &m_schema_sets, &m_put_mask, &m_deep_work, &m_missing, &m_h_seg, &m_h_rank, &m_h_bind, &m_h_words, &m_h_counts_seg,
-                       &m_h_counts, &m_numeric_error})
+                       &m_h_counts, &m_numeric_error, &m_h_hash, &m_h_noop})
         x->track(m_last);
     const plan::Compiled& C = m_task->compiled();
     m_S = static_cast<u32>(C.schemas.size());
@@ -792,7 +792,7 @@ void ChunkGenerator::count_host()
     check(lifted::launch_scan(counts, offsets, n, temp, tb, m_s), "launch_scan");
 }
 
-void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_words, u32* words_needed)
+void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_words, u32* words_needed, u64* hashes, u8* noops)
 {
     const lifted::Views views{static_cast<u64*>(m_views.data()), m_view_words};
     // binding labels under witness pruning carry the witnesses: the CPU's (rl::dev::MatchOrder::Witness)
@@ -814,6 +814,8 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
     out.words = words;
     out.out_words = out_words;
     out.words_needed = words_needed;
+    out.hash = hashes;
+    out.noop = noops;
     if (m_missing_words)
     {
         out.missing_bits = static_cast<u32*>(m_missing.data());
@@ -829,13 +831,13 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
             if (set.count)
                 check(numeric::launch_write(m_view, m_parents, views, set, seg_offsets(), labels, out,
                                              static_cast<u32*>(m_numeric_error.data()), m_s), "numeric write");
-        place_host(labels, words, out_words);
+        place_host(labels, words, out_words, hashes, noops);
         return;
     }
     // the lists without conditional effects label their rows, launch_put writes the successors one thread each
     // (a state with many successors does not bound the launch with its one thread's writes)
     lifted::SuccessorRows dout = out;
-    dout.deferred = labels.binding && words && fixed.count + fc.count + deep.count + deep_fc.count ? 1 : 0;
+    dout.deferred = labels.binding && (words || hashes || noops) && fixed.count + fc.count + deep.count + deep_fc.count ? 1 : 0;
     if (fixed.count)
         check(lifted::launch_write(m_view, m_parents, views, fixed, seg_offsets(), labels, dout, m_s), "launch_write");
     if (fixed_ce.count)
@@ -848,7 +850,7 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
         check(lifted::launch_write(m_view, m_parents, views, deep, seg_offsets(), labels, dout, m_s), "launch_write (deep)");
     if (deep_fc.count)
         check(lifted::launch_write(m_view, m_parents, views, deep_fc, seg_offsets(), labels, dout, m_s), "launch_write (deep fc)");
-    place_host(labels, words, out_words);
+    place_host(labels, words, out_words, hashes, noops);
     // after the CPU-fallback rows, so that every row below the capacity is labeled when launch_put reads the labels
     // (a fallback row's schema is not deferred)
     if (dout.deferred)
@@ -857,7 +859,7 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
               "launch_put");
 }
 
-void ChunkGenerator::place_host(const lifted::Labels& labels, u64* words, u32 out_words)
+void ChunkGenerator::place_host(const lifted::Labels& labels, u64* words, u32 out_words, u64* hashes, u8* noops)
 {
     const u64 n = m_host_segment.size();
     if (n == 0)
@@ -889,8 +891,33 @@ void ChunkGenerator::place_host(const lifted::Labels& labels, u64* words, u32 ou
         upload_vec(m_ctx, m_h_words, m_staging, m_s);
         h.words = static_cast<const u64*>(m_h_words.data());
     }
-    // (pageable uploads are staged before cudaMemcpyAsync returns: the host vectors may be reused at once)
-    check(lifted::launch_place_host(h, seg_offsets(), m_S, labels, words, out_words, m_s), "launch_place_host");
+    std::vector<u64> digests(hashes ? n : 0);
+    std::vector<u8> flags(noops ? n : 0);
+    if (hashes || noops)
+        for (u64 i = 0; i < n; ++i)
+        {
+            const u32 slots = m_task->numeric_slots();
+            const u32 aw = m_host_row_words - slots;
+            const u64* row = m_host_words.data() + i * m_host_row_words;
+            const u64* parent = m_deferred.host_states + u64{m_host_segment[i] / m_S} * m_deferred.host_stride;
+            const State successor = numeric::decode(*m_task, row, m_host_row_words);
+            if (hashes)
+                digests[i] = successor.hash();
+            if (noops)
+                flags[i] = bits::equal(row, aw, parent, m_deferred.words - slots) &&
+                           std::equal(row + aw, row + m_host_row_words, parent + m_deferred.words - slots) ? 1 : 0;
+        }
+    if (hashes)
+    {
+        upload_vec(m_ctx, m_h_hash, digests, m_s);
+        h.hash = static_cast<const u64*>(m_h_hash.data());
+    }
+    if (noops)
+    {
+        upload_vec(m_ctx, m_h_noop, flags, m_s);
+        h.noop = static_cast<const u8*>(m_h_noop.data());
+    }
+    check(lifted::launch_place_host(h, seg_offsets(), m_S, labels, words, out_words, m_s, hashes, noops), "launch_place_host");
 }
 
 bool ChunkGenerator::resolve_missing()

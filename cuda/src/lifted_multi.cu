@@ -107,6 +107,10 @@ __global__ void k_part_scatter(PartScatter p, u32 shift)
                 p.out_parent[at] = static_cast<i32>(r);
             if (p.out_goal)
                 p.out_goal[at] = p.goal[j];
+            if (p.out_hash)
+                p.out_hash[at] = p.hash[j];
+            if (p.out_noop)
+                p.out_noop[at] = p.noop[j];
         }
     }
 }

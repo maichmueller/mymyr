@@ -62,8 +62,8 @@ asynchronous device table: host expansion is rejected when a device live count i
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
 output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
 `k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
-expansion path, including tables of instances with axioms and suites). The torch ops `expand_derived` and
-`expand_flat_derived` return the words as a seventh result, and `Env.expand(..., derived=True)` /
+expansion path, including tables of instances with axioms and suites). The torch ops `expand` and
+`expand_flat` return the words as their seventh result with `derived=True`, and `Env.expand(..., derived=True)` /
 `Env.expand_flat(..., derived=True)` of `mymyr.rl.jax` fill the `derived` field (uint32 pairs).
 
 ```python
@@ -80,7 +80,7 @@ print(expansion.derived.shape)
 
 ## Successor hashes and no-op actions
 
-On the host, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
+On host and CUDA arrays, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
 and `noop` (bool), one per successor. The hash is the native state hash: trimmed atom words seeded by the numeric
 words. For instances with the same numeric width it equals
 `mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. For mixed numeric widths, use each instance's numeric
@@ -117,9 +117,19 @@ the width. Tables require fixed atom slots. Every requested array is filtered al
 flags and derived words. The padded view adds zero-padded hashes and no-op flags; its `index` contains canonical
 successor positions when filtering, with -1 padding (without filtering it contains flat row indices).
 
-JAX CPU `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit`; hashes use uint32
+JAX `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit`; hashes use uint32
 pairs (low word first), and `generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
 Absent digests are `None` and cost no digest work.
+
+CUDA digests also work without storing successor rows, including the bounded observation-action path. With
+`status=` and `stream=`, device-complete Single and Multi tables compute and compact on the stream without a host
+wait; status bit 0 reports pre-drop capacity overflow. Warm up the same shapes and options before CUDA graph
+capture. Numeric conversion and CPU-fallback schemas retain the general path's synchronization. Device
+`hash_rows(..., numeric_words=..., stream=...)` returns the same native hashes. Torch `expand` and `expand_flat`
+accept `derived`, `rows`, `hashes`, `noops`, and `drop_noops`, returning eleven tensors: `(succ, parent, schema,
+binding, goal, offsets, derived, succ_hash, noop, index, status)`; absent fields are empty. `rows=False` selects
+label-only output, and `capacity=` keeps counts and status on the device. The padded op takes `k` and uses parent
+-1 for padding while `offsets` retain CSR counts. Both trace with `torch.compile(fullgraph=True)`.
 
 ## JAX and PyTorch
 

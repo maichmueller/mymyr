@@ -29,10 +29,9 @@ the states again; required on a device).
   device's general path), tagged ``cudagraph_unsafe``.
 - ``mymyr::random_actions(env, draws, count, first_env, max_actions)``: the random policy's next choices [N] int64
   (the counter-based RNG at the draw counters; no step).
-- ``mymyr::expand(table, states, task_ids, k, witness_pruning)``: the padded expansion [N, k] (succ, schema, binding,
-  goal, mask, count).
-- ``mymyr::expand_flat(table, states, task_ids, capacity, witness_pruning)``: the flat expansion (succ, parent, schema,
-  binding, goal, offsets). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
+- ``mymyr::expand(table, states, task_ids, k, witness_pruning)``: the padded expansion [N, k] with the same fields as expand_flat.
+- ``mymyr::expand_flat(table, states, task_ids, capacity, witness_pruning)``: the flat expansion (succ, parent, schema, binding, goal, offsets,
+  derived, succ_hash, noop, index, status). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
   size under ``torch.compile``; a capacity gives static shapes (rows past it are dropped, rows past the total are
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
 - ``mymyr::encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
@@ -48,8 +47,9 @@ the states again; required on a device).
   views follow as keyword tensors: ``action_schema``, ``action_binding``, ``action_offsets``, ``action_parent``,
   ``node_offsets``, ``edge_offsets``, ``edge_src``, ``edge_dst``, ``edge_schema``, ``edge_binding`` and
   ``action_succ``.
-- ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
-  seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
+The expansion ops take ``derived``, ``rows``, ``hashes``, ``noops`` and ``drop_noops`` flags and return the same
+eleven fields: succ, parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status. Absent parts
+are empty tensors; a capacity keeps counts and status on the device.
 """
 
 import itertools
@@ -65,9 +65,7 @@ from mymyr.encoding import _device
 __all__ = [
     "encode_flat",
     "expand",
-    "expand_derived",
     "expand_flat",
-    "expand_flat_derived",
     "lookup",
     "random_actions",
     "refresh",
@@ -490,149 +488,131 @@ def _(env, draws, count, first_env, max_actions):
 # ------------------------------------------------------------------------------------------------ expansion
 
 
-@_op("mymyr::expand", mutates_args=(), tags=_unsafe)
-def expand(
-    table: int, states: Tensor, task_ids: Optional[Tensor], k: int, witness_pruning: bool = False
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """``mymyr::expand``: the padded expansion of ``states`` [N, row_words] over the registered table ``table``:
-    (succ [N, k, row_words], schema [N, k], binding [N, k, label_width], goal [N, k], mask [N, k], count [N]). ``k``
-    > 0 is the padded width; ``witness_pruning`` as in ``rl.expand``."""
-    t = lookup(table)
-    if k <= 0:
-        raise ValueError("mymyr: expand needs k > 0 (the padded width is a static shape)")
-    words = states.shape[1] - t.numeric_words
-    x = mymyr.rl.expand(
-        t, states, task_ids, words=words, k=k, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
-    )
-    p = x.padded
-    return p.succ, p.schema, p.binding, p.goal, p.mask, p.count
-
-
-def _padded_outputs(table: int, states: Tensor, k: int) -> tuple[Tensor, ...]:
-    t = lookup(table)
+def _expansion_outputs(t: Any, states: Tensor, capacity: Any, derived: bool, rows: bool,
+                       hashes: bool, noops: bool, drop_noops: bool) -> tuple[Tensor, ...]:
     n, rw = states.shape
     return (
-        states.new_empty((n, k, rw)),
-        states.new_empty((n, k), dtype=torch.int32),
-        states.new_empty((n, k, t.label_width), dtype=torch.int32),
-        states.new_empty((n, k), dtype=torch.bool),
-        states.new_empty((n, k), dtype=torch.bool),
-        states.new_empty(n, dtype=torch.int32),
+        states.new_zeros((capacity, rw) if rows else (0, 0)),
+        states.new_full((capacity,), -1, dtype=torch.int32),
+        states.new_full((capacity,), -1, dtype=torch.int32),
+        states.new_full((capacity, t.label_width), -1, dtype=torch.int32),
+        states.new_zeros((capacity,) if rows else (0,), dtype=torch.bool),
+        states.new_empty(n + 1, dtype=torch.int32),
+        states.new_zeros((capacity, t.derived_words) if derived else (0, 0)),
+        states.new_zeros((capacity,) if hashes else (0,)),
+        states.new_zeros((capacity,) if noops or drop_noops else (0,), dtype=torch.bool),
+        states.new_full((capacity,) if drop_noops else (0,), -1, dtype=torch.int32),
+        states.new_zeros(1, dtype=torch.int32),
     )
-
-
-@expand.register_fake
-def _(table, states, task_ids, k, witness_pruning=False):
-    return _padded_outputs(table, states, k)
 
 
 @_op("mymyr::expand_flat", mutates_args=(), tags=_unsafe)
 def expand_flat(
-    table: int,
-    states: Tensor,
-    task_ids: Optional[Tensor],
-    capacity: Optional[int] = None,
-    witness_pruning: bool = False,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """``mymyr::expand_flat``: the flat expansion of ``states`` over the registered table ``table``: (succ [M,
-    row_words], parent [M], schema [M], binding [M, label_width], goal [M], offsets [N + 1]). ``capacity=None`` sizes
-    the outputs by the data; a capacity gives static shapes (see the module docstring)."""
+    table: int, states: Tensor, task_ids: Optional[Tensor], capacity: Optional[int] = None,
+    witness_pruning: bool = False, derived: bool = False, rows: bool = True,
+    hashes: bool = False, noops: bool = False, drop_noops: bool = False,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Flat CSR expansion: succ, parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status.
+
+    Absent fields are empty tensors. Capacity bounds the count before dropping; status bit 0 reports overflow,
+    bit 1 invalid input or insufficient row width. A CUDA capacity call has no host wait and captures after warm-up.
+    Label-only calls (rows=False) build requested digests without storing successor rows.
+    """
     t = lookup(table)
-    n, rw = states.shape
-    words = rw - t.numeric_words
+    if derived and not rows:
+        raise ValueError("mymyr: derived outputs require successor rows")
+    if capacity is None and not rows:
+        offsets = states.new_empty(states.shape[0] + 1, dtype=torch.int32)
+        counted = mymyr.rl.expand_into(t, states, task_ids, offsets=offsets,
+                                      witness_pruning=witness_pruning, stream=_stream(states))
+        capacity = counted["generated"]
     if capacity is None:
-        x = mymyr.rl.expand(
-            t, states, task_ids, words=words, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
-        )
-        return x.succ, x.parent, x.schema, x.binding, x.goal, x.offsets
-    out = _flat_outputs(t, states, capacity)
-    succ, parent, schema, binding, goal, offsets = out
-    mymyr.rl.expand_into(
-        t, states, task_ids, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, offsets=offsets,
-        witness_pruning=witness_pruning, stream=_stream(states),
-    )  # fmt: skip
+        x = mymyr.rl.expand(t, states, task_ids, words=states.shape[1] - t.numeric_words, goal=rows,
+                            derived=derived, hashes=hashes, noops=noops, drop_noops=drop_noops,
+                            witness_pruning=witness_pruning, stream=_stream(states))
+        empty = states.new_empty(0)
+        return (x.succ if rows else states.new_empty((0, 0)), x.parent, x.schema, x.binding,
+                x.goal if rows else empty.bool(), x.offsets, x.derived if derived else states.new_empty((0, 0)),
+                x.succ_hash if hashes else empty, x.noop if noops or drop_noops else empty.bool(),
+                x.index if drop_noops else empty.int(), states.new_tensor([int(x.overflow)], dtype=torch.int32))
+    out = _expansion_outputs(t, states, capacity, derived, rows, hashes, noops, drop_noops)
+    succ, parent, schema, binding, goal, offsets, der, digest, noop, index, status = out
+    result = mymyr.rl.expand_into(
+        t, states, task_ids, succ=succ if rows else None, parent=parent, schema=schema, binding=binding,
+        goal=goal if rows else None, offsets=offsets, derived=der if derived else None,
+        succ_hash=digest if hashes else None, noop=noop if noops or drop_noops else None,
+        index=index if drop_noops else None, drop_noops=drop_noops,
+        status=status if states.is_cuda else None, stream=_stream(states), witness_pruning=witness_pruning,
+    )
+    if not states.is_cuda:
+        status.fill_(int(result["overflow"]) | (2 if result["words_needed"] > states.shape[1] - t.numeric_words else 0))
     return out
 
 
-def _flat_outputs(t: Any, states: Tensor, m: Any) -> tuple[Tensor, ...]:
-    """The flat outputs; rows past the total stay padding (succ 0, parent / schema / binding -1, goal False)."""
-    n, rw = states.shape
-    return (
-        states.new_zeros((m, rw)),
-        states.new_full((m,), -1, dtype=torch.int32),
-        states.new_full((m,), -1, dtype=torch.int32),
-        states.new_full((m, t.label_width), -1, dtype=torch.int32),
-        states.new_zeros(m, dtype=torch.bool),
-        states.new_empty(n + 1, dtype=torch.int32),
-    )
-
-
 @expand_flat.register_fake
-def _(table, states, task_ids, capacity=None, witness_pruning=False):
+def _(table, states, task_ids, capacity=None, witness_pruning=False, derived=False, rows=True,
+      hashes=False, noops=False, drop_noops=False):
     m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
-    return _flat_outputs(lookup(table), states, m)
+    return _expansion_outputs(lookup(table), states, m, derived, rows, hashes, noops, drop_noops)
 
 
-# ------------------------------------------------------------------------------------------------ derived words
-
-
-@_op("mymyr::expand_derived", mutates_args=(), tags=_unsafe)
-def expand_derived(
-    table: int, states: Tensor, task_ids: Optional[Tensor], k: int, witness_pruning: bool = False
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """``mymyr::expand_derived``: :func:`expand` with the successors' derived words as a seventh result, int64 [N, k,
-    table.derived_words]."""
-    t = lookup(table)
-    if k <= 0:
-        raise ValueError("mymyr: expand_derived needs k > 0 (the padded width is a static shape)")
-    words = states.shape[1] - t.numeric_words
-    x = mymyr.rl.expand(
-        t, states, task_ids, words=words, k=k, goal=True, derived=True, witness_pruning=witness_pruning,
-        stream=_stream(states),
-    )
-    p = x.padded
-    return p.succ, p.schema, p.binding, p.goal, p.mask, p.count, p.derived
-
-
-@expand_derived.register_fake
-def _(table, states, task_ids, k, witness_pruning=False):
+def _pad_expansion(flat: tuple[Tensor, ...], states: Tensor, k: int, rows: bool, derived: bool,
+                   hashes: bool, noops: bool, drop_noops: bool) -> tuple[Tensor, ...]:
+    succ, parent, schema, binding, goal, offsets, der, digest, noop, index, status = flat
     n = states.shape[0]
-    return (*_padded_outputs(table, states, k), states.new_empty((n, k, lookup(table).derived_words)))
+    pos = offsets[:-1, None].to(torch.int64) + torch.arange(k, device=states.device)
+    counts = offsets[1:] - offsets[:-1]
+    valid = (torch.arange(k, device=states.device) < counts[:, None]) & (pos < schema.shape[0])
+    at = pos.clamp(0, max(schema.shape[0] - 1, 0))
+    # A sentinel makes gathering safe even for capacity zero.
+    def gather(x, fill=0):
+        extra = x.new_full((1, *x.shape[1:]), fill)
+        padded = torch.cat((x, extra), dim=0)
+        selected = padded[torch.where(valid, at, x.shape[0])]
+        mask = valid.reshape((*valid.shape, *((1,) * (x.ndim - 1))))
+        return torch.where(mask, selected, torch.full_like(selected, fill))
+    status = status | torch.any(counts > k).to(torch.int32).reshape(1)
+    return (gather(succ) if rows else succ, gather(parent, -1), gather(schema, -1), gather(binding, -1),
+            gather(goal) if rows else goal, offsets, gather(der) if derived else der,
+            gather(digest) if hashes else digest, gather(noop) if noops or drop_noops else noop,
+            gather(index, -1) if drop_noops else index, status)
 
 
-@_op("mymyr::expand_flat_derived", mutates_args=(), tags=_unsafe)
-def expand_flat_derived(
-    table: int,
-    states: Tensor,
-    task_ids: Optional[Tensor],
-    capacity: Optional[int] = None,
-    witness_pruning: bool = False,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """``mymyr::expand_flat_derived``: :func:`expand_flat` with the successors' derived words as a seventh result,
-    int64 [M, table.derived_words]."""
-    t = lookup(table)
+@_op("mymyr::expand", mutates_args=(), tags=_unsafe)
+def expand(
+    table: int, states: Tensor, task_ids: Optional[Tensor], k: int, witness_pruning: bool = False,
+    derived: bool = False, rows: bool = True, hashes: bool = False, noops: bool = False,
+    drop_noops: bool = False, capacity: Optional[int] = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Padded [N, k] expansion with the same eleven fields as expand_flat; offsets remain CSR counts.
+
+    Capacity bounds successors before dropping and makes CUDA calls capturable after warm-up. Parent -1 marks
+    padding; hashes/noop pad with zero/False, and canonical indices with -1. Status also reports counts above k.
+    """
+    if k <= 0:
+        raise ValueError("mymyr: expand needs k > 0")
+    flat = expand_flat(table, states, task_ids, capacity, witness_pruning, derived, rows, hashes, noops, drop_noops)
+    return _pad_expansion(flat, states, k, rows, derived, hashes, noops, drop_noops)
+
+
+@expand.register_fake
+def _(table, states, task_ids, k, witness_pruning=False, derived=False, rows=True,
+      hashes=False, noops=False, drop_noops=False, capacity=None):
     n, rw = states.shape
-    words = rw - t.numeric_words
-    if capacity is None:
-        x = mymyr.rl.expand(
-            t, states, task_ids, words=words, goal=True, derived=True, witness_pruning=witness_pruning,
-            stream=_stream(states),
-        )
-        return x.succ, x.parent, x.schema, x.binding, x.goal, x.offsets, x.derived
-    out = _flat_outputs(t, states, capacity)
-    derived = states.new_zeros((capacity, t.derived_words))
-    succ, parent, schema, binding, goal, offsets = out
-    mymyr.rl.expand_into(
-        t, states, task_ids, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, derived=derived,
-        offsets=offsets, witness_pruning=witness_pruning, stream=_stream(states),
-    )  # fmt: skip
-    return (*out, derived)
-
-
-@expand_flat_derived.register_fake
-def _(table, states, task_ids, capacity=None, witness_pruning=False):
-    m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
-    return (*_flat_outputs(lookup(table), states, m), states.new_empty((m, lookup(table).derived_words)))
+    t = lookup(table)
+    return (
+        states.new_empty((n, k, rw) if rows else (0, 0)),
+        states.new_empty((n, k), dtype=torch.int32),
+        states.new_empty((n, k), dtype=torch.int32),
+        states.new_empty((n, k, t.label_width), dtype=torch.int32),
+        states.new_empty((n, k) if rows else (0,), dtype=torch.bool),
+        states.new_empty(n + 1, dtype=torch.int32),
+        states.new_empty((n, k, t.derived_words) if derived else (0, 0)),
+        states.new_empty((n, k) if hashes else (0,)),
+        states.new_empty((n, k) if noops or drop_noops else (0,), dtype=torch.bool),
+        states.new_empty((n, k) if drop_noops else (0,), dtype=torch.int32),
+        states.new_empty(1, dtype=torch.int32),
+    )
 
 
 # ------------------------------------------------------------------------------------------------ encoding

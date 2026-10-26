@@ -146,7 +146,8 @@ const char* order_name(Order o)
 
 struct Flat
 {
-    std::vector<u64> succ;
+    std::vector<u64> succ, hashes;
+    std::vector<u8> noops;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
     u64 total = 0;
@@ -164,6 +165,8 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
     f.binding.assign(std::max<u64>(cap, 1) * L, 0x5A5A5A5A);
     f.goal.assign(std::max<u64>(cap, 1), 0x5A);
     f.offsets.assign(N + 1, 0);
+    f.hashes.assign(std::max<u64>(cap, 1), 0x5A5A5A5A5A5A5A5Aull);
+    f.noops.assign(std::max<u64>(cap, 1), 0x5A);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
@@ -174,6 +177,8 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
     x.binding = f.binding.data();
     x.goal = f.goal.data();
     x.offsets = f.offsets.data();
+    x.succ_hash = f.hashes.data();
+    x.noop = f.noops.data();
     rl::expand(S, rl::StateBatchView{rows.data(), N, W, 0}, ids.data(), x);
     f.total = x.total;
     f.words_needed = x.words_needed;
@@ -191,11 +196,15 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     cuda::DeviceBuffer binding = to_device(ctx, std::vector<i32>(c * L, 0x5A5A5A5A), s);
     cuda::DeviceBuffer goal = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     cuda::DeviceBuffer offsets(ctx, (N + 1) * sizeof(i32), s);
+    cuda::DeviceBuffer hashes = to_device(ctx, std::vector<u64>(c, 0x5A5A5A5A5A5A5A5Aull), s);
+    cuda::DeviceBuffer noops = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
     x.label_width = L;
     x.succ = static_cast<u64*>(succ.data());
+    x.succ_hash = static_cast<u64*>(hashes.data());
+    x.noop = static_cast<u8*>(noops.data());
     x.parent = static_cast<i32*>(parent.data());
     x.schema = static_cast<i32*>(schema.data());
     x.binding = static_cast<i32*>(binding.data());
@@ -204,6 +213,8 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     ex.write(x);
     Flat f;
     f.succ = to_host<u64>(succ.data(), c * W, s);
+    f.hashes = to_host<u64>(hashes.data(), c, s);
+    f.noops = to_host<u8>(noops.data(), c, s);
     f.parent = to_host<i32>(parent.data(), c, s);
     f.schema = to_host<i32>(schema.data(), c, s);
     f.binding = to_host<i32>(binding.data(), c * L, s);
@@ -223,6 +234,8 @@ void expect_flat_equal(const Flat& d, const Flat& h)
     ASSERT_EQ(d.schema, h.schema);
     ASSERT_EQ(d.binding, h.binding);
     ASSERT_EQ(d.succ, h.succ);
+    ASSERT_EQ(d.hashes, h.hashes);
+    ASSERT_EQ(d.noops, h.noops);
     ASSERT_EQ(d.goal, h.goal);
 }
 

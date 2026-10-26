@@ -17,6 +17,7 @@ struct ExpandArgs
     nb::handle framework;
     bool validate = true;
     nb::handle stream, ctx;
+    bool hashes = false, noops = false, drop_noops = false;
 };
 
 /// The arguments of rl.expand_into.
@@ -25,10 +26,13 @@ struct ExpandIntoArgs
     nb::handle table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets;
     bool canonical = true, witness = false, validate = true;
     nb::handle stream, ctx, status, row_count;
+    nb::handle succ_hash, noop, index;
+    bool drop_noops = false;
 };
 
 struct DeviceHooks
 {
+    nb::object (*hash_rows)(nb::handle, unsigned, nb::handle) = nullptr;
     nb::object (*expand)(const ExpandArgs&) = nullptr;
     nb::dict (*expand_into)(const ExpandIntoArgs&) = nullptr;
 };
