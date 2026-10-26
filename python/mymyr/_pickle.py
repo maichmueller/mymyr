@@ -20,6 +20,8 @@ can store by reference (native nanobind functions cannot be pickled).
   fingerprint; loading builds the encoder again and checks the fingerprint.
 - A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
   space and costs) and is built again when loaded.
+- A mymyr.rl.GoalTemplates pickles as its source, its generator options (None for templates from conditions) and its
+  packed arrays; loading validates the arrays against the source (nothing is generated again).
 """
 
 from mymyr import _core
@@ -95,3 +97,7 @@ def _restore_flat_encoder(name, table, options, fingerprint):
             f"its table and options has {encoder.schema_fingerprint:#018x} (the catalog or its rules differ)"
         )
     return encoder
+
+
+def _restore_goal_templates(source, options, state):
+    return _core._rl.GoalTemplates._restore(source, options, state)

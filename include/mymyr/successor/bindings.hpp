@@ -117,6 +117,9 @@ using ConjunctionSink = FunctionRef<bool(const GroundConjunction&)>;
 u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& target, StateView s, PartialBinding partial,
                        const BindingOptions& options, BindingSink* bindings, ConjunctionSink* conjunctions);
 
+/// The compiled order of the free variables of (target, fixed variables of partial).
+std::vector<u32> binding_order(const Task& task, Workspace& ws, const BindingTarget& target, PartialBinding partial);
+
 /// Adapts a callback returning bool or void to one returning bool.
 template<class Arg, class F>
 auto bool_callback(F& f)
@@ -178,6 +181,15 @@ u64 for_each_ground_conjunction(const Task& task, Workspace& ws, SchemaId schema
     detail::ConjunctionSink sink(f);
     return detail::enumerate_bindings(task, ws, {nullptr, schema}, s, partial, options, nullptr, &sink);
 }
+
+/// The order in which the bindings of `condition` with the variables of `partial` fixed bind the free variables: the
+/// free variables (each once), the first varying slowest. Bindings come in lexicographic order over these variables
+/// by object index, so the first binding in a state is the lexicographically smallest one in this order. A function of
+/// (task, condition, set of fixed variables) alone. Throws as for_each_binding.
+[[nodiscard]] std::vector<u32> binding_order(const Task& task, Workspace& ws, const ConjunctiveCondition& condition,
+                                             PartialBinding partial = {});
+/// binding_order over a schema's applicable actions.
+[[nodiscard]] std::vector<u32> binding_order(const Task& task, Workspace& ws, SchemaId schema, PartialBinding partial = {});
 
 /// The bindings as owning tuples (at most `limit`).
 [[nodiscard]] std::vector<std::vector<ObjectId>> bindings(const Task& task, Workspace& ws, const ConjunctiveCondition& condition,

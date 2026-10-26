@@ -20,6 +20,7 @@
 #include "dlpack.hpp"
 #include "py_domain.hpp"
 #include "py_expansion.hpp"
+#include "py_formula.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
@@ -30,6 +31,7 @@
 #include "mymyr/core/threads.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/pool.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -1327,6 +1329,121 @@ ExpansionBuffers expansion_buffers(nb::handle obj)
     return out;
 }
 
+// ------------------------------------------------------------------------------------------------ goal templates
+
+namespace
+{
+struct PyGoalTemplates
+{
+    std::shared_ptr<const rl::GoalTemplates> t;
+    nb::object source;  // the TaskSuite, TaskTable, Task or TaskHandle the templates are over
+};
+
+using DistinctArg = Arg<ann::TemplateDistinct>;
+/// An instance of a source: an index (Python index rules) or one of its Tasks.
+using InstanceArg = Arg<std::variant<int, PyTask, PyHandle>>;
+using ConditionLists = nb::typed<nb::sequence, nb::typed<nb::sequence, PyConjunctiveCondition>>;
+
+rl::Distinct distinct_arg(nb::handle h)
+{
+    if (nb::isinstance<nb::bool_>(h))
+        return nb::cast<bool>(h) ? rl::Distinct::All : rl::Distinct::None;
+    if (nb::isinstance<nb::str>(h) && nb::cast<std::string>(h) == "equality")
+        return rl::Distinct::Equality;
+    throw nb::value_error("mymyr: distinct must be True, False or 'equality'");
+}
+
+nb::object distinct_value(rl::Distinct d)
+{
+    if (d == rl::Distinct::Equality)
+        return nb::str("equality");
+    return nb::bool_(d == rl::Distinct::All);
+}
+
+/// Global instance index of an int (Python index rules) or of a Task / TaskHandle of the templates' source.
+u32 template_instance(const PyGoalTemplates& t, nb::handle h)
+{
+    const SuiteRef r = suite_of(t.source);
+    const i64 n = r.suite->size();
+    if (nb::isinstance<PyTask>(h) || nb::isinstance<PyHandle>(h))
+    {
+        const PyTaskCore* core = owner_of(h).core;
+        for (u32 g = 0; g < n; ++g)
+            if (r.owner(g).core == core)
+                return g;
+        throw nb::value_error("mymyr: the task is not an instance of the templates' source");
+    }
+    i64 i = int_arg<i64>(h, "instance");
+    if (i < 0)
+        i += n;
+    if (i < 0 || i >= n)
+        throw nb::index_error("mymyr: instance index out of range");
+    return static_cast<u32>(i);
+}
+
+std::optional<nb::dict> template_options(const rl::GoalTemplates& t)
+{
+    const rl::TemplateOptions* o = t.options();
+    if (!o)
+        return std::nullopt;
+    nb::dict d;
+    d["max_subgoals_per_size"] = o->max_subgoals_per_size;
+    d["max_size"] = o->max_size;
+    d["max_subsets_per_size"] = o->max_subsets_per_size;
+    d["max_component_samples"] = o->max_component_samples;
+    d["max_products"] = o->max_products;
+    d["distinct"] = distinct_value(o->distinct);
+    d["seed"] = o->seed;
+    return d;
+}
+
+rl::TemplateOptions options_of(nb::handle max_subgoals_per_size, nb::handle max_size, nb::handle max_subsets_per_size,
+                               nb::handle max_component_samples, nb::handle max_products, nb::handle distinct, nb::handle seed)
+{
+    rl::TemplateOptions o;
+    o.max_subgoals_per_size = int_arg<u32>(max_subgoals_per_size, "max_subgoals_per_size", 1);
+    o.max_size = int_arg<u32>(max_size, "max_size", 1);
+    o.max_subsets_per_size = int_arg<u32>(max_subsets_per_size, "max_subsets_per_size", 1);
+    o.max_component_samples = int_arg<u32>(max_component_samples, "max_component_samples", 1);
+    o.max_products = int_arg<u32>(max_products, "max_products", 1);
+    o.distinct = distinct_arg(distinct);
+    o.seed = int_arg<u64>(seed, "seed");
+    o.validate();
+    return o;
+}
+
+nb::object make_templates(rl::GoalTemplates&& t, nb::object source)
+{
+    return nb::cast(PyGoalTemplates{std::make_shared<const rl::GoalTemplates>(std::move(t)), std::move(source)},
+                    nb::rv_policy::move);
+}
+
+/// The raw bytes of one array of the packed form.
+nb::bytes array_bytes(const rl::ArrayBundle& b, std::string_view name)
+{
+    const rl::ArrayInfo& a = *b.find(name);
+    return nb::bytes(static_cast<const char*>(b.data(a)), a.elements() * rl::dtype_bytes(a.dtype));
+}
+
+template<class T>
+std::vector<T> bytes_array(nb::handle state, const char* name)
+{
+    nb::object v = state[name];
+    if (!nb::isinstance<nb::bytes>(v))
+        throw nb::value_error("mymyr: GoalTemplates: corrupt pickle state");
+    const auto b = nb::borrow<nb::bytes>(v);
+    if (b.size() % sizeof(T))
+        throw nb::value_error("mymyr: GoalTemplates: corrupt pickle state");
+    std::vector<T> out(b.size() / sizeof(T));
+    std::memcpy(out.data(), b.c_str(), b.size());
+    return out;
+}
+
+constexpr const char* k_template_arrays[] = {"instance_offsets", "template_size", "num_vars", "distinct", "literal_offsets",
+                                             "predicate",        "polarity",      "kind",     "arity",    "terms",
+                                             "goal_literal"};
+}  // namespace
+
 void bind_rl(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl", "Batched RL primitives (mymyr.rl)");
@@ -2149,5 +2266,182 @@ void bind_rl(nb::module_& parent)
             return "CpuEnvPool(num_envs=" + std::to_string(p.pool().num_envs()) + ", threads=" +
                    std::to_string(p.pool().threads()) + ")";
         });
+
+    // --- lifted goal templates
+    nb::class_<PyGoalTemplates>(
+        m, "GoalTemplates",
+        "Lifted goal templates per instance (rl.lifted_goal_templates, GoalTemplates.from_conditions): conjunctions of "
+        "lifted literals, largest first, packed into flat arrays (arrays()). Immutable and picklable.")
+        .def_static(
+            "from_conditions",
+            [](SuiteArg source, ConditionLists conditions) {
+                const SuiteRef r = suite_of(source);
+                const u32 n = r.suite->size();
+                if (nb::len(conditions) != n)
+                    throw nb::value_error(("mymyr: GoalTemplates: conditions for " + std::to_string(nb::len(conditions)) +
+                                           " instances, the source has " + std::to_string(n))
+                                              .c_str());
+                std::vector<std::vector<ConjunctiveCondition>> lists(n);
+                u32 g = 0;
+                for (nb::handle per : conditions)
+                {
+                    const PyTaskCore& core = r.core_of(g);
+                    for (nb::handle h : nb::borrow<nb::sequence>(per))
+                    {
+                        if (!nb::isinstance<PyConjunctiveCondition>(h))
+                            throw nb::type_error("mymyr: GoalTemplates: expected ConjunctiveConditions");
+                        const PyConjunctiveCondition& c = *nb::inst_ptr<PyConjunctiveCondition>(h);
+                        if (c.o.data.get() != core.data.get())
+                            throw nb::value_error(("mymyr: GoalTemplates: a condition of instance " + std::to_string(g) +
+                                                   " belongs to another task")
+                                                      .c_str());
+                        lists[g].push_back(*c.c);
+                    }
+                    ++g;
+                }
+                rl::GoalTemplates t = [&]
+                {
+                    nb::gil_scoped_release release;
+                    return rl::GoalTemplates::from_conditions(r.suite, lists);
+                }();
+                return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+            },
+            "source"_a, "conditions"_a,
+            "Templates given as conditions: conditions[i] lists instance i's ConjunctiveConditions in match order (largest "
+            "first by convention). Each needs literals, untyped variables, no numeric constraints, and either no "
+            "equalities or one disequality per pair of variables (distinct; ConjunctiveCondition.lift(True) makes such "
+            "a condition). Terms may be objects.")
+        .def_static(
+            "_restore",
+            [](SuiteArg source, nb::object options, nb::dict state) {
+                const SuiteRef r = suite_of(source);
+                rl::GoalTemplates::Arrays a;
+                a.instance_offsets = bytes_array<i32>(state, "instance_offsets");
+                a.template_size = bytes_array<i32>(state, "template_size");
+                a.num_vars = bytes_array<i32>(state, "num_vars");
+                a.distinct = bytes_array<u8>(state, "distinct");
+                a.literal_offsets = bytes_array<i32>(state, "literal_offsets");
+                a.predicate = bytes_array<i32>(state, "predicate");
+                a.polarity = bytes_array<u8>(state, "polarity");
+                a.kind = bytes_array<i32>(state, "kind");
+                a.arity = bytes_array<i32>(state, "arity");
+                a.terms = bytes_array<i32>(state, "terms");
+                a.goal_literal = bytes_array<i32>(state, "goal_literal");
+                a.max_arity = int_arg<u32>(state["max_arity"], "max_arity");
+                std::optional<rl::TemplateOptions> o;
+                if (!options.is_none())
+                    o = options_of(options["max_subgoals_per_size"], options["max_size"], options["max_subsets_per_size"],
+                                   options["max_component_samples"], options["max_products"], options["distinct"],
+                                   options["seed"]);
+                rl::GoalTemplates t = [&]
+                {
+                    nb::gil_scoped_release release;
+                    return rl::GoalTemplates::from_arrays(r.suite, a, o ? &*o : nullptr);
+                }();
+                return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+            },
+            "source"_a, "options"_a.none(), "state"_a)
+        .def_prop_ro("source", [](const PyGoalTemplates& t) { return SuiteArg(t.source); },
+                     "The TaskSuite, TaskTable, Task or TaskHandle the templates are over.")
+        .def_prop_ro("num_instances", [](const PyGoalTemplates& t) { return t.t->num_instances(); }, "Instances (I).")
+        .def_prop_ro("num_templates", [](const PyGoalTemplates& t) { return t.t->num_templates(); },
+                     "Templates of every instance (K).")
+        .def_prop_ro("max_vars", [](const PyGoalTemplates& t) { return t.t->max_vars(); },
+                     "The most variables a template has (the width of order).")
+        .def_prop_ro("max_arity", [](const PyGoalTemplates& t) { return t.t->max_arity(); },
+                     "The largest literal arity (the width of terms).")
+        .def_prop_ro("nbytes", [](const PyGoalTemplates& t) { return t.t->arrays().bytes(); },
+                     "Bytes of the packed arrays.")
+        .def_prop_ro("options", [](const PyGoalTemplates& t) { return template_options(*t.t); },
+                     "The options of lifted_goal_templates (a dict), or None for templates from conditions.")
+        .def(
+            "arrays",
+            [](const PyGoalTemplates& t, FrameworkArg framework) {
+                const Framework fw = parse_framework(framework, nb::none());
+                return nb::borrow<BundleDict>(export_bundle(t.t->shared_arrays(), fw, default_words(fw)));
+            },
+            "framework"_a = nb::none(),
+            "The packed form (zero-copy, read-only views): instance_offsets [I + 1] (instance i's templates are "
+            "[instance_offsets[i], instance_offsets[i + 1]), largest first), template_size / num_vars / distinct [K], "
+            "literal_offsets [K + 1], order [K, max_vars] (the variables in binding order, -1 padding), and per literal "
+            "predicate (the instance's domain table's predicate id), polarity, kind (0 static, 1 fluent, 2 derived), "
+            "arity, terms [L, max_arity] (>= 0 a variable, < 0 the object -(t + 1), -2**31 padding) and goal_literal (the "
+            "index in the instance's task.goal_condition.literals, -1 for templates from conditions); scalars "
+            "num_instances, num_templates, num_literals, max_vars, max_arity.")
+        .def(
+            "conditions",
+            [](const PyGoalTemplates& t, InstanceArg instance) {
+                const u32 g = template_instance(t, instance);
+                const FormulaOwner o = task_owner(suite_of(t.source).owner(g));
+                nb::typed<nb::list, PyConjunctiveCondition> out{nb::list()};
+                for (ConjunctiveCondition& c : t.t->conditions(g))
+                    out.append(make_conjunctive_condition(o, std::move(c)));
+                return out;
+            },
+            "instance"_a,
+            "An instance's templates (an index into the source, or one of its Tasks) as ConjunctiveConditions over its "
+            "task, largest first: variables ?x<i>, the literals, and with distinct one disequality per pair of variables. "
+            "Task.bindings(c, state, limit=1) gives a template's first binding, in the order of c.binding_order(task).")
+        .def(
+            "goal_literals",
+            [](const PyGoalTemplates& t, InstanceArg instance) {
+                const u32 g = template_instance(t, instance);
+                nb::typed<nb::list, nb::typed<nb::tuple, int, nb::ellipsis>> out{nb::list()};
+                for (u32 k = t.t->first(g); k < t.t->first(g + 1); ++k)
+                {
+                    nb::list l;
+                    for (u32 i : t.t->goal_literals(k))
+                        l.append(i);
+                    out.append(nb::tuple(l));
+                }
+                return out;
+            },
+            "instance"_a,
+            "Per template of an instance, the indices of its literals in the instance's task.goal_condition.literals "
+            "(empty for templates from conditions).")
+        .def("__len__", [](const PyGoalTemplates& t) { return t.t->num_templates(); })
+        .def("__reduce__",
+             [](nb::handle self) {
+                 const PyGoalTemplates& t = *nb::inst_ptr<PyGoalTemplates>(self);
+                 const rl::ArrayBundle& b = t.t->arrays();
+                 nb::dict state;
+                 for (const char* name : k_template_arrays)
+                     state[name] = array_bytes(b, name);
+                 state["max_arity"] = t.t->max_arity();
+                 const std::optional<nb::dict> options = template_options(*t.t);
+                 return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_goal_templates"),
+                                       nb::make_tuple(t.source, options ? nb::object(*options) : nb::none(), state));
+             })
+        .def("__repr__", [](const PyGoalTemplates& t) {
+            return "GoalTemplates(" + std::to_string(t.t->num_instances()) + " instances, " +
+                   std::to_string(t.t->num_templates()) + " templates, max_vars=" + std::to_string(t.t->max_vars()) + ")";
+        });
+    m.def(
+        "lifted_goal_templates",
+        [](SuiteArg source, IntArg max_subgoals_per_size, IntArg max_size, IntArg max_subsets_per_size,
+           IntArg max_component_samples, IntArg max_products, DistinctArg distinct, IntArg seed) {
+            const SuiteRef r = suite_of(source);
+            const rl::TemplateOptions o = options_of(max_subgoals_per_size, max_size, max_subsets_per_size,
+                                                     max_component_samples, max_products, distinct, seed);
+            rl::GoalTemplates t = [&]
+            {
+                nb::gil_scoped_release release;
+                return rl::GoalTemplates::generate(r.suite, o);
+            }();
+            return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+        },
+        "source"_a, nb::kw_only(), "max_subgoals_per_size"_a = 2, "max_size"_a = 10, "max_subsets_per_size"_a = 100,
+        "max_component_samples"_a = 5, "max_products"_a = 1000, "distinct"_a = true, "seed"_a = 0,
+        "Lifted goal templates of every instance of a TaskSuite, TaskTable or Task: the goals of lifted hindsight "
+        "relabelling, a GoalTemplates. Per instance, from its goal literals (task.goal_condition.literals; numeric "
+        "constraints are skipped): the graph joining literals that share an object; per connected component the first "
+        "max_subsets_per_size connected subsets of each size 1..max_size in lexicographic order; for c = 1..max_size "
+        "components, up to max_component_samples uniform draws of c components (counter-based RNG keyed by seed and the "
+        "instance index), each contributing the first max_products concatenations of one subset per drawn component; "
+        "subgoals of at most max_size literals, the first max_subgoals_per_size per size, sizes largest first. Each "
+        "subgoal is lifted (every object, constants included, becomes a variable ?x<i> by first appearance); distinct "
+        "(True) makes distinct variables bind distinct objects, False lets them share one, 'equality' does the former "
+        "when the domain declares :equality. Deterministic in (task, instance index, options): other instances do not "
+        "change an instance's templates.");
 }
 }  // namespace mymyr::python

@@ -836,6 +836,30 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                 "state"_a, "limit"_a = nb::none(), "partial"_a = nb::none(),
                 "The ground conditions of the bindings in a state (at most limit; partial fixes variables as in "
                 "Task.bindings), in the order of Task.bindings.")
+            .def(
+                "binding_order",
+                [](const PyConjunctiveCondition& x, Arg<std::variant<PyTask, PyHandle>> task, PartialArg partial) {
+                    const Owner o = owner_of(task);
+                    if (o.core->data.get() != x.o.data.get())
+                        throw nb::value_error("mymyr: the condition belongs to another task");
+                    const std::vector<std::optional<ObjectId>> fixed = condition_partial(*o.core, x.c, partial);
+                    std::vector<u32> order;
+                    {
+                        nb::gil_scoped_release release;
+                        const Task& t = *o.core->task;
+                        const WorkspaceLease ws = t.workspace();
+                        order = mymyr::binding_order(t, *ws, *x.c, fixed);
+                    }
+                    nb::list l;
+                    for (u32 v : order)
+                        l.append(v);
+                    return nb::typed<nb::tuple, int, nb::ellipsis>(nb::tuple(l));
+                },
+                "task"_a, "partial"_a = nb::none(),
+                "The free variables (indices) in the order Task.bindings binds them on this task, the first varying "
+                "slowest: the bindings come in lexicographic order over these variables by object index, so the first "
+                "binding in a state is the smallest in that order. A function of the task, the condition and which "
+                "variables partial fixes (as in Task.bindings), not of the state.")
             .def("__len__", [](const PyConjunctiveCondition& x) { return x.c->literals.size() + x.c->equalities.size() + x.c->constraints.size(); },
                  "The number of conjuncts: literals, equalities and numeric constraints.")
             .def("__eq__",
