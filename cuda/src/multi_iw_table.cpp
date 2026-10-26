@@ -18,8 +18,14 @@ struct DeviceTableIw::Impl
     std::vector<std::unique_ptr<DeviceMultiIw>> iw;  // per instance, made on first use
     DeviceBuffer order, rows;
 
-    DeviceMultiIw& of(u32 i)
+    DeviceMultiIw& of(u32 i, const std::vector<u32>& idx)
     {
+        if (o.landmarks && o.landmarks->size() > 1)
+        {
+            MultiIwOptions local = o;
+            local.landmarks = pick<search::LandmarkNovelty>(*o.landmarks, idx);
+            iw[i] = std::make_unique<DeviceMultiIw>(ctx, table->task(i), local);
+        }
         if (!iw[i])
             iw[i] = std::make_unique<DeviceMultiIw>(ctx, table->task(i), o);
         return *iw[i];
@@ -28,6 +34,8 @@ struct DeviceTableIw::Impl
     /// The searches of each instance (ascending search index).
     [[nodiscard]] std::vector<std::vector<u32>> groups(std::span<const u32> task_ids, u64 n) const
     {
+        if (o.landmarks && o.landmarks->size() > 1 && o.landmarks->size() != n)
+            throw std::invalid_argument("mymyr: device LIW: landmarks must contain one graph or one per search");
         if (task_ids.size() != n)
             throw std::invalid_argument("mymyr: device IW over a table: " + std::to_string(task_ids.size()) + " task ids for " +
                                         std::to_string(n) + " searches");
@@ -241,7 +249,7 @@ MultiIwBatch DeviceTableIw::run(DeviceStarts starts, std::span<const u32> task_i
         const u32 local_tail = starts.numeric_words ? nn : m->table->task(i)->numeric_slots();
         const DeviceStarts part{static_cast<const u64*>(m->rows.data()), starts.words,
                                 starts.words - tail + local_tail, static_cast<u32>(k), nn};
-        const MultiIwBatch b = m->of(i).run(part, gg, gs, s);
+        const MultiIwBatch b = m->of(i, idx).run(part, gg, gs, s);
         merge.add(b, idx);
     }
     return merge.finish();
@@ -268,7 +276,7 @@ MultiIwBatch DeviceTableIw::run(std::span<const State> starts, std::span<const u
         const std::vector<State> part = Impl::pick(starts, idx);
         const std::vector<search::GoalSpec::AtomGoal> gg = Impl::pick(goals, idx);
         const std::vector<u64> gs = Impl::pick(seeds, idx);
-        merge.add(m->of(i).run(part, gg, gs), idx);
+        merge.add(m->of(i, idx).run(part, gg, gs), idx);
     }
     return merge.finish();
 }
@@ -284,6 +292,15 @@ std::vector<search::IwResult> multi_iw(ContextPtr ctx, rl::TaskTablePtr table, s
     for (u32 i = 0; i < b.n; ++i)
         out.push_back(b.result(i, *table->task(task_ids[i]), starts[i], options.costs));
     return out;
+}
+
+std::vector<search::IwResult> liw(ContextPtr ctx, rl::TaskTablePtr table, std::span<const u32> task_ids,
+                                  std::span<const State> starts, MultiIwOptions options,
+                                  std::span<const search::GoalSpec::AtomGoal> goals)
+{
+    if (!options.landmarks)
+        options.landmarks.emplace(1);
+    return multi_iw(std::move(ctx), std::move(table), task_ids, starts, options, goals);
 }
 
 MultiIwBatch batched_iw1(ContextPtr ctx, rl::TaskTablePtr table, DeviceStarts starts, std::span<const u32> task_ids,

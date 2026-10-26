@@ -21,6 +21,8 @@ Only in CUDA builds of mymyr (``CMAKE_ARGS="-DMYMYR_CUDA=ON"``); importing this 
   the context's), ``ctx=`` the context (None: the task's default context on the input's device). Host inputs take the
   CPU path unchanged. ``expand_into(..., status=, stream=)`` leaves the total, the overflow and the validation on the
   device and does not wait for it; it runs on ``stream`` (required with ``status``), the stream that reads its outputs.
+- :func:`liw`: landmark-restricted IW(1) from each start, with a shared graph or one per search and the CPU's
+  grouping options. ``rollouts(..., landmarks=...)`` uses randomized LIW(1).
 - :func:`multi_iw`, :func:`rollouts`, :func:`batched_iw1`: many IW searches at once on the device. Search i of
   ``multi_iw`` equals ``mymyr.search.iw`` from ``starts[i]`` (status, plan, goal state, per-pass counts) whatever the
   group and chunk sizes (exact batch novelty); ``rollouts`` are the CPU's randomized rollouts of the same seeds,
@@ -83,6 +85,7 @@ device_count = _impl.device_count
 IwBatch = _impl.IwBatch
 SuiteIwBatch = _suite.SuiteIwBatch
 rollouts = _impl.rollouts
+liw = _impl.liw
 Heuristic = _impl.Heuristic
 DeviceSearchResult = _impl.DeviceSearchResult
 astar = _impl.astar
@@ -138,6 +141,7 @@ __all__ = [
     "gbfs",
     "generate_state_space",
     "generate_state_spaces",
+    "liw",
     "multi_iw",
     "rollouts",
     "state_space",

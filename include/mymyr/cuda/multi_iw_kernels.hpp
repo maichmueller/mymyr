@@ -308,6 +308,13 @@ struct Table
     u64* bits = nullptr;
     u32 arity = 1;
     u32 row_words = 0;  // atoms < 64 * row_words
+    // LIW: rank-major atom words plus an empty-tuple word per rank. The last rank of each search is BOT.
+    u32 ranks = 0;  // 0: ordinary IW; otherwise the largest rank count in the group (BOT included)
+    const u32* rank_counts = nullptr;  // [searches]
+    const u64* rank_offsets = nullptr;  // CSR [searches * ranks + 1]
+    const u32* rank_slots = nullptr;
+    u64* node_masks = nullptr;  // [node capacity, mask_words], including BOT
+    u32 mask_words = 0;
 };
 
 /// The owner map of exact novelty: open addressing over (search, tuple) keys.

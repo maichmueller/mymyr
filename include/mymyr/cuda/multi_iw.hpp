@@ -41,9 +41,11 @@
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/rl/task_table.hpp"
 #include "mymyr/search/iw.hpp"
+#include "mymyr/search/iw_family.hpp"
 #include "mymyr/task/task.hpp"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -54,6 +56,9 @@ struct MultiIwOptions
 {
     u32 max_width = 1;  // the ladder 0..max_width (the device runs widths 0, 1 and 2)
     bool optimize_iw1 = true;
+    /// Present: LIW(1), without optimized IW(1). One grouping shared by all searches, or one per search.
+    /// A null graph gives every state the BOT coordinate. Widths above 1 are refused.
+    std::optional<std::vector<search::LandmarkNovelty>> landmarks;
     search::WidthZero width_zero = search::WidthZero::ExpandDepthOne;
     bool witness_pruning = false;  // search::iw()'s default: every applicable action is a transition
     bool canonical_order = true;
@@ -183,6 +188,11 @@ private:
                                                      const MultiIwOptions& options = {},
                                                      std::span<const search::GoalSpec::AtomGoal> goals = {});
 
+/// Landmark-restricted IW(1) from each start. A missing landmark option uses BOT for every state.
+[[nodiscard]] std::vector<search::IwResult> liw(ContextPtr ctx, TaskPtr task, std::span<const State> starts,
+                                               MultiIwOptions options = {},
+                                               std::span<const search::GoalSpec::AtomGoal> goals = {});
+
 /// Exact batched IW(1) (an RL building block): optimized IW(1) from each of the device start rows; per search
 /// the status, plan length, goal row and counts (MultiIwBatch). options.max_width is forced to 1.
 [[nodiscard]] MultiIwBatch batched_iw1(ContextPtr ctx, TaskPtr task, DeviceStarts starts, MultiIwOptions options = {},
@@ -231,6 +241,11 @@ private:
 [[nodiscard]] std::vector<search::IwResult> multi_iw(ContextPtr ctx, rl::TaskTablePtr table, std::span<const u32> task_ids,
                                                      std::span<const State> starts, const MultiIwOptions& options = {},
                                                      std::span<const search::GoalSpec::AtomGoal> goals = {});
+
+/// LIW(1) over a task table, with landmark groupings in input search order.
+[[nodiscard]] std::vector<search::IwResult> liw(ContextPtr ctx, rl::TaskTablePtr table, std::span<const u32> task_ids,
+                                               std::span<const State> starts, MultiIwOptions options = {},
+                                               std::span<const search::GoalSpec::AtomGoal> goals = {});
 
 /// batched_iw1 over a table: optimized IW(1) from each device start row on its instance task_ids[i].
 [[nodiscard]] MultiIwBatch batched_iw1(ContextPtr ctx, rl::TaskTablePtr table, DeviceStarts starts, std::span<const u32> task_ids,

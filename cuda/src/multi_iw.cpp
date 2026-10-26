@@ -49,15 +49,18 @@ struct Regroup
 };
 
 /// Bytes of one search's novelty table of `arity` over rows of `words` atom words.
-u64 table_bytes_per_search(u32 arity, u32 words) { return arity ? 8 * miw::table_words(arity, std::max(words, 1u)) : 8; }
+u64 table_bytes_per_search(u32 arity, u32 words, u32 ranks = 0)
+{
+    return arity ? 8 * (ranks ? u64{ranks} * (std::max(words, 1u) + 1) : miw::table_words(arity, std::max(words, 1u))) : 8;
+}
 
 /// Searches per group whose novelty tables of `arity` fit `budget`; refuses a pass whose single table does not fit
 /// (it is called when that pass starts, or grows its table).
-u32 table_group(u32 arity, u32 words, u64 budget)
+u32 table_group(u32 arity, u32 words, u64 budget, u32 ranks = 0)
 {
-    const u64 per = table_bytes_per_search(arity, words);
+    const u64 per = table_bytes_per_search(arity, words, ranks);
     if (arity && per > budget)
-        throw std::invalid_argument("mymyr: device IW(" + std::to_string(arity) + "): the novelty table requires " +
+        throw std::invalid_argument("mymyr: device " + std::string(ranks ? "LIW(" : "IW(") + std::to_string(arity) + "): the novelty table requires " +
                                     std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * std::max(words, 1u)) +
                                     " atom slots, and table_bytes is " + std::to_string(budget) +
                                     " (raise table_bytes=, or lower max_width)");
@@ -66,12 +69,12 @@ u32 table_group(u32 arity, u32 words, u64 budget)
 
 /// Searches per group: the tables of the widest pass up to max_width whose single table fits `budget`. Wider passes
 /// are refused only when a search reaches them (table_group in run_pass), so that the passes before them still run.
-u32 group_size(u32 max_width, u32 words, u64 budget)
+u32 group_size(u32 max_width, u32 words, u64 budget, u32 ranks = 0)
 {
     u32 arity = max_width;
-    while (arity > 0 && table_bytes_per_search(arity, words) > budget)
+    while (arity > 0 && table_bytes_per_search(arity, words, ranks) > budget)
         --arity;
-    return table_group(arity, words, budget);
+    return table_group(arity, words, budget, ranks);
 }
 
 /// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
@@ -270,6 +273,10 @@ std::string multi_iw_unsupported(const Task& task, const MultiIwOptions& o)
 {
     if (std::string why = ChunkGenerator::search_unsupported(task); !why.empty())
         return why;
+    if (o.landmarks && task.numeric_slots())
+        return "LIW does not support tasks with numeric fluents";
+    if (o.landmarks && o.max_width > 1)
+        return "LIW arity " + std::to_string(o.max_width) + " (the device runs LIW(1); use CPU search.liw for LIW(2))";
     if (o.max_width > 2)
         return "IW arity " + std::to_string(o.max_width) + " (the device runs arities 0, 1 and 2)";
     return {};
@@ -317,6 +324,11 @@ struct DeviceMultiIw::Impl
     DevArray<u32> sa_u32;  // the u32 arrays, B each
     DevArray<unsigned long long> sa_u64;
     DevArray<u64> rng, goal_pos, goal_neg, reached, table;
+    std::vector<novelty::LandmarkCoordinates> coordinates;
+    u32 landmark_ranks = 0, mask_words = 0;
+    DevArray<u32> rank_counts, rank_slots;
+    DevArray<u64> rank_offsets, node_masks;
+    void upload_landmarks(u32 begin, u32 count);
     miw::Searches sv;
     // chunk scratch
     DevArray<u8> row_flags, host_goal_dev, c_flags;
@@ -372,7 +384,20 @@ struct DeviceMultiIw::Impl
     {
         return {n_rows.data(), n_parent.data(), n_search.data(), n_label.data(), n_flags.data(), W, LW};
     }
-    [[nodiscard]] miw::Table table_view(u32 arity) const { return {table.data(), arity, RW}; }
+    [[nodiscard]] miw::Table table_view(u32 arity) const
+    {
+        miw::Table t{table.data(), arity, RW};
+        if (o.landmarks && arity)
+        {
+            t.ranks = landmark_ranks;
+            t.rank_counts = rank_counts.data();
+            t.rank_offsets = rank_offsets.data();
+            t.rank_slots = rank_slots.data();
+            t.node_masks = node_masks.data();
+            t.mask_words = mask_words;
+        }
+        return t;
+    }
 
     void setup();
     void alloc_searches(u32 count);
@@ -542,6 +567,12 @@ DeviceMultiIw::DeviceMultiIw(ContextPtr ctx, TaskPtr task, const MultiIwOptions&
         throw std::invalid_argument("mymyr: DeviceMultiIw: chunk_states must be at least 1");
     if (m->o.max_next_layer_states == 0)
         throw std::invalid_argument("mymyr: DeviceMultiIw: max_next_layer_states must be positive");
+    if (m->o.landmarks)
+    {
+        m->o.optimize_iw1 = false;
+        if (m->o.landmarks->empty())
+            m->o.landmarks->emplace_back();
+    }
     m->setup();
 }
 
@@ -603,6 +634,8 @@ void DeviceMultiIw::Impl::alloc_searches(u32 count)
 
 void DeviceMultiIw::Impl::ensure_nodes(u64 n)
 {
+    if (o.landmarks)
+        node_masks.ensure(ctx, std::max(n, n_cap) * mask_words, s, u64{n_tail} * mask_words);
     if (n <= n_cap && n_rows.capacity() >= n_cap * W)  // (a later run may have wider rows: lazy slots)
         return;
     const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, row_reserve_floor(W, 1024)});
@@ -611,6 +644,8 @@ void DeviceMultiIw::Impl::ensure_nodes(u64 n)
     n_search.ensure(ctx, cap, s, n_tail);
     n_label.ensure(ctx, cap * LW, s, u64{n_tail} * LW);
     n_flags.ensure(ctx, cap, s, n_tail);
+    if (o.landmarks)
+        node_masks.ensure(ctx, cap * mask_words, s, u64{n_tail} * mask_words);
     n_cap = cap;
 }
 
@@ -655,6 +690,8 @@ void DeviceMultiIw::Impl::widen(u32 nw, u32 arity)
     DevArray<u64> rows;
     const u64 cap = std::max<u64>({1, n_tail, row_reserve_floor(nw, n_cap)});
     rows.ensure(ctx, cap * nw, s);
+    if (o.landmarks)
+        node_masks.ensure(ctx, cap * mask_words, s, u64{n_tail} * mask_words);
     n_cap = cap;
     if (task->numeric_slots())
     {
@@ -698,13 +735,23 @@ void DeviceMultiIw::Impl::grow_table(u32 arity)
     const u32 tw = task->words();
     if (arity == 0 || tw <= RW)
         return;
-    const u64 per = miw::table_words(arity, tw);
-    const u32 group = table_group(arity, tw, o.table_bytes);
+    const u64 per = table_bytes_per_search(arity, tw, landmark_ranks) / 8;
+    const u32 group = table_group(arity, tw, o.table_bytes, landmark_ranks);
     if (B > group)
         throw Regroup{group};
     DevArray<u64> t;
     t.ensure(ctx, u64{B} * per, s, 0, lifted::wide_row(tw));
-    check(miw::launch_table_relayout(table.data(), t.data(), arity, B, RW, tw, s), "launch_table_relayout");
+    if (o.landmarks)
+    {
+        check(cudaMemsetAsync(t.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
+        const u64 rows = u64{B} * landmark_ranks;
+        check(cudaMemcpy2DAsync(t.data(), u64{tw + 1} * 8, table.data(), u64{RW + 1} * 8,
+                                u64{RW} * 8, rows, cudaMemcpyDeviceToDevice, s), "LIW atom table growth");
+        check(cudaMemcpy2DAsync(t.data() + tw, u64{tw + 1} * 8, table.data() + RW, u64{RW + 1} * 8,
+                                8, rows, cudaMemcpyDeviceToDevice, s), "LIW empty tuple growth");
+    }
+    else
+        check(miw::launch_table_relayout(table.data(), t.data(), arity, B, RW, tw, s), "launch_table_relayout");
     table = std::move(t);
     RW = tw;
 }
@@ -796,13 +843,42 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
               "numeric starts");
         starts = DeviceStarts{converted, W, W, n};
     }
+    coordinates.clear();
+    landmark_ranks = 0;
+    if (o.landmarks)
+    {
+        const auto& graphs = *o.landmarks;
+        if (graphs.size() != 1 && graphs.size() != n)
+            throw std::invalid_argument("mymyr: device LIW: landmarks must contain one graph or one per search");
+        auto slots_of = [&](std::span<const CanonicalAtom> atoms)
+        {
+            std::vector<u32> slots;
+            for (CanonicalAtom a : atoms)
+                if (a < task->atoms().layout().fluent_count)
+                    if (const u32 slot = task->atoms().slot_if_any(a); slot != AtomIndex::k_empty)
+                        slots.push_back(slot);
+            return slots;
+        };
+        for (const auto& lm : graphs)
+        {
+            std::vector<std::vector<u32>> disjunctive;
+            if (lm.graph)
+                for (const auto& set : lm.graph->disjunctive())
+                    disjunctive.push_back(slots_of(set));
+            coordinates.push_back(lm.graph ? novelty::LandmarkCoordinates::make(slots_of(lm.graph->landmarks()), disjunctive,
+                                        lm.disjunctive, lm.all_private, slots_of(lm.unshared_atoms))
+                                          : novelty::LandmarkCoordinates());
+            landmark_ranks = std::max(landmark_ranks, coordinates.back().num_ranks());
+        }
+        mask_words = bits::words_for(landmark_ranks);
+    }
     // group size: the novelty tables of a group fit table_bytes
-    u32 group = group_size(o.max_width, task->words(), o.table_bytes);
+    u32 group = group_size(o.max_width, task->words(), o.table_bytes, landmark_ranks);
     if (o.max_searches)
         group = std::min(group, o.max_searches);
     for (u32 g0 = 0; g0 < n;)
     {
-        group = std::min(group, group_size(o.max_width, task->words(), o.table_bytes));
+        group = std::min(group, group_size(o.max_width, task->words(), o.table_bytes, landmark_ranks));
         const u32 count = std::min(group, n - g0);
         const DeviceStarts gs{starts.data + static_cast<u64>(g0) * starts.stride, starts.stride, starts.words, count};
         const MultiIwStats before = st;
@@ -872,10 +948,36 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     return out;
 }
 
+void DeviceMultiIw::Impl::upload_landmarks(u32 begin, u32 count)
+{
+    std::vector<u32> counts, slots;
+    std::vector<u64> offsets{0};
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& coords = coordinates[coordinates.size() == 1 ? 0 : begin + i];
+        counts.push_back(coords.num_ranks());
+        std::vector<std::vector<u32>> members(landmark_ranks);
+        for (u32 j = 0; j < coords.atoms().size(); ++j)
+            for (u32 rank : coords.ranks_at(j))
+                members[rank].push_back(coords.atoms()[j]);
+        for (const auto& rank : members)
+        {
+            slots.insert(slots.end(), rank.begin(), rank.end());
+            offsets.push_back(slots.size());
+        }
+    }
+    to_device(rank_counts.ensure(ctx, counts.size(), s), counts.data(), counts.size(), s);
+    to_device(rank_offsets.ensure(ctx, offsets.size(), s), offsets.data(), offsets.size(), s);
+    to_device(rank_slots.ensure(ctx, std::max<usize>(slots.size(), 1), s), slots.data(), slots.size(), s);
+    sync();
+}
+
 void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std::span<const search::GoalSpec::AtomGoal> goals,
                                     std::span<const u64> seeds, MultiIwBatch& out, Host& host)
 {
     alloc_searches(count);
+    if (o.landmarks)
+        upload_landmarks(g0, count);
     h_goals.assign(goals.begin(), goals.end());
     goal_programs.reset();
     if (per_search_goals && host_goal)
@@ -1397,12 +1499,17 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
     if (arity >= 1)
     {
         RW = std::max<u32>(1, task->words());
-        const u64 per = miw::table_words(arity, RW);
-        const u32 group = table_group(arity, RW, o.table_bytes);
+        const u64 per = table_bytes_per_search(arity, RW, landmark_ranks) / 8;
+        const u32 group = table_group(arity, RW, o.table_bytes, landmark_ranks);
         if (B > group)
             throw Regroup{group};
-        table.ensure(ctx, u64{B} * per, s, 0, lifted::wide_row(RW));
-        if (arity == 2 && lifted::wide_row(RW))
+        const u64 need = u64{B} * per * sizeof(u64);
+        if (o.landmarks && need > table.bytes() && need > device_room(*ctx))
+            throw std::invalid_argument("mymyr: device LIW(1): the novelty tables require " + std::to_string(need) +
+                                        " bytes, beyond the CUDA context's available memory (raise Context max_bytes=, "
+                                        "or lower max_searches= / table_bytes=)");
+        table.ensure(ctx, u64{B} * per, s, 0, o.landmarks.has_value() || lifted::wide_row(RW));
+        if (o.landmarks || (arity == 2 && lifted::wide_row(RW)))
             check(cudaMemsetAsync(table.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
         check(miw::launch_table_init(table_view(arity), nodes(), R, s), "launch_table_init");
     }
@@ -1534,7 +1641,7 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
             r.x.b.emit_count = r.e.count;
         }
         const u64 slots = std::bit_ceil(std::max<u64>(2 * ecap, 1024));
-        if (lifted::wide_row(RW))
+        if (o.landmarks || lifted::wide_row(RW))
         {
             r.map.wide = wide_keys.ensure(ctx, ecap, s);
             r.map.sorted = sorted_keys.ensure(ctx, ecap, s);
@@ -1611,7 +1718,8 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
     k.all(r.e.count, r.e.offset, r.e.slot, r.e.capacity, r.map.keys, r.map.vals, r.map.mask, r.root.slots, r.root.owner,
           r.root_cap, r.cut_scan, r.kept, scan_ws.data(), scan_tiles);
     k.all(sa_u32.data(), sa_u64.data(), sv.rng, sv.goal_pos, sv.goal_neg, sv.goal_words, sv.reached, sv.reached_words,
-          r.t.bits, r.t.arity, r.t.row_words, r.map.wide, r.map.sorted, r.map.candidates,
+          r.t.bits, r.t.arity, r.t.row_words, r.t.ranks, r.t.rank_counts, r.t.rank_offsets, r.t.rank_slots,
+          r.t.node_masks, r.t.mask_words, r.map.wide, r.map.sorted, r.map.candidates,
           r.map.sorted_candidates, r.map.scratch, r.map.scratch_bytes, gen->capture_key());
     r.key.swap(k.v);
 }
@@ -1982,6 +2090,14 @@ std::vector<search::IwResult> multi_iw(ContextPtr ctx, TaskPtr task, std::span<c
     for (u32 i = 0; i < b.n; ++i)
         out.push_back(b.result(i, *task, starts[i], options.costs));
     return out;
+}
+
+std::vector<search::IwResult> liw(ContextPtr ctx, TaskPtr task, std::span<const State> starts,
+                                  MultiIwOptions options, std::span<const search::GoalSpec::AtomGoal> goals)
+{
+    if (!options.landmarks)
+        options.landmarks.emplace(1);
+    return multi_iw(std::move(ctx), std::move(task), starts, options, goals);
 }
 
 MultiIwBatch batched_iw1(ContextPtr ctx, TaskPtr task, DeviceStarts starts, MultiIwOptions options, cudaStream_t stream)

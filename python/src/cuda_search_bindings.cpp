@@ -7,6 +7,7 @@
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
 #include "py_formula.hpp"
+#include "py_landmarks.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 
@@ -70,6 +71,8 @@ using Slots = nb::typed<nb::sequence, int>;
 using GoalArg = std::variant<PyGroundCondition, nb::typed<nb::tuple, Slots, Slots>>;
 using GoalsArg = Arg<nb::typed<nb::sequence, GoalArg>>;
 using SeedsArg = nb::typed<nb::sequence, int>;
+using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, nb::typed<nb::sequence, PyFactLandmarkGraph>>>;
+using UnsharedArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 /// Start states: host states (a State, a sequence of States, a host word array) or, for batched_iw1, a CUDA device
 /// word array [N, W] uint64 / [N, 2W] uint32 read in place.
 using StartsArg = StatesLike;
@@ -86,6 +89,42 @@ struct PyIwBatch
 
 /// The owner of search i's labels and states (its instance's task).
 const Owner& owner_of_search(const PyIwBatch& x, u32 i) { return x.owners.at(x.ids.empty() ? 0 : x.ids.at(i)); }
+
+std::vector<search::LandmarkNovelty> landmark_options(const PyIwBatch& x, nb::handle graphs, bool disjunctive,
+                                                       bool all_private, nb::handle unshared, u32 count = ~u32{0})
+{
+    if (count == ~u32{0})
+        count = static_cast<u32>(x.starts.size());
+    const bool shared = graphs.is_none() || nb::isinstance<PyFactLandmarkGraph>(graphs);
+    nb::sequence sequence;
+    if (!shared)
+    {
+        sequence = nb::cast<nb::sequence>(graphs);
+        if (nb::len(sequence) != count)
+            throw nb::value_error("mymyr: landmarks must be one graph or one per search");
+    }
+    std::vector<search::LandmarkNovelty> out;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const Owner& owner = x.owners[x.ids.empty() ? 0 : x.ids[i]];
+        search::LandmarkNovelty lm;
+        lm.disjunctive = disjunctive;
+        lm.all_private = all_private;
+        const nb::handle graph = shared ? graphs : sequence[i];
+        if (!graph.is_none())
+        {
+            const auto& g = nb::cast<const PyFactLandmarkGraph&>(graph);
+            same_task(owner, g.o, "the landmark graph");
+            lm.graph = g.g;
+        }
+        if (!unshared.is_none())
+            for (nb::handle atom : unshared)
+                if (auto c = canonical_atom(owner, atom, false))
+                    lm.unshared_atoms.push_back(*c);
+        out.push_back(std::move(lm));
+    }
+    return out;
+}
 
 u32 checked_index(const PyIwBatch& x, i64 i)
 {
@@ -564,11 +603,69 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "instance's task; the searches of an instance run together, the instances one after the other.");
 
     m.def(
+        "liw",
+        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
+           bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
+           IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
+           IntArg table_bytes, TaskIdsArg task_ids, LandmarksArg landmarks, bool disjunctive, bool all_private,
+           UnsharedArg unshared_atoms) {
+            const u32 max_width = int_arg<u32>(max_width_in, "max_width");
+            cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
+                                                         exact, max_states, max_expanded, max_depth, max_seconds,
+                                                         max_searches, chunk_states, table_bytes);
+            PyIwBatch x;
+            if (nb::isinstance<PyTable>(task))
+            {
+                // over a table: search i on instance task_ids[i]
+                const TableRef ref = table_of(task);
+                const cuda::ContextPtr c = table_device_context(ref.obj, ctx, 0);
+                for (u32 i = 0; i < ref.table->size(); ++i)
+                    x.owners.push_back(ref.owner(i));
+                x.starts = table_starts(starts, *ref.table);
+                x.ids = search_task_ids(task_ids, x.starts.size(), *ref.table, c->stream(),
+                                        reinterpret_cast<std::intptr_t>(c->stream()));
+                check_start_owners(starts, *ref.table, x.ids);
+                trim_table_starts(x.starts, *ref.table, x.ids);
+                const std::vector<search::GoalSpec::AtomGoal> g = table_goals(goals, *ref.table, x.ids);
+                opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms);
+                nb::gil_scoped_release release;
+                cuda::DeviceTableIw run(c, ref.table, opts);
+                x.b = run.run(x.starts, x.ids, g);
+                return x;
+            }
+            if (!task_ids.is_none())
+                throw nb::value_error("mymyr: task_ids go with a TaskTable (a task runs every search itself)");
+            const Owner o = owner_of(task);
+            const TaskPtr& t = o.core->task;
+            const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
+            x.owners.push_back(o);
+            x.starts = host_starts(starts, *t);
+            const std::vector<search::GoalSpec::AtomGoal> g = goals_of(goals, *t, x.starts.size());
+            opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms);
+            {
+                nb::gil_scoped_release release;
+                cuda::DeviceMultiIw run(c, t, opts);
+                x.b = run.run(x.starts, g);
+            }
+            return x;
+        },
+        "task"_a, "starts"_a, nb::kw_only(), "ctx"_a = nb::none(), "goals"_a = nb::none(), MYMYR_MULTI_IW_COMMON_ARGS,
+        "task_ids"_a = nb::none(), "landmarks"_a, "disjunctive"_a = false, "all_private"_a = false,
+        "unshared_atoms"_a = nb::none(),
+        "Landmark-restricted IW(1) from every start: search i equals mymyr.search.liw for every group and chunk "
+        "size in exact mode (status, plan, goal state and per-pass counts). Runs width zero then LIW(1), without "
+        "optimized IW(1). landmarks: one FactLandmarkGraph shared by all searches, or one per search; None uses BOT. "
+        "disjunctive, all_private and unshared_atoms select the CPU landmark grouping. Widths above 1 and numeric "
+        "fluents require CPU search. table_bytes bounds the novelty tables per group; a pass whose single table "
+        "exceeds it raises ValueError naming table_bytes. TaskTable searches use task_ids in input order.");
+
+    m.def(
         "rollouts",
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
            IntArg max_next_layer_states, IntArg max_width_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
-           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes) {
+           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes, LandmarksArg landmarks, bool disjunctive, bool all_private,
+           UnsharedArg unshared_atoms) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
@@ -593,6 +690,11 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
             if (!start.is_none() && state_of(start).core->task->uid() != t->uid())
                 throw nb::value_error("mymyr: start belongs to another task");
             x.starts.push_back(start.is_none() ? t->initial_state() : state_of(start).s);
+            if (!landmarks.is_none())
+            {
+                opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms,
+                                                  static_cast<u32>(s.size()));
+            }
             std::vector<search::GoalSpec::AtomGoal> g;
             if (!goal.is_none())
                 g.assign(s.size(), goal_of(goal, *t));
@@ -605,6 +707,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         },
         "task"_a, "seeds"_a, nb::kw_only(), "ctx"_a = nb::none(), "start"_a = nb::none(), "goal"_a = nb::none(),
         "max_next_layer_states"_a = nb::none(), MYMYR_MULTI_IW_COMMON_ARGS,
+        "landmarks"_a = nb::none(), "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),
+        "With landmarks, randomized LIW(1) rollouts (one graph or one per seed), with the CPU grouping options. "
         "Randomized IW rollouts on the device, one per seed: rollout k equals the CPU rollout of the same seed "
         "(every next layer shuffled by the rollout's SplitMix64 stream, "
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
