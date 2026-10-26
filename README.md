@@ -26,13 +26,14 @@ x86_64 with glibc 2.34 or newer and macOS arm64 with macOS 15 or newer. Change `
 Wheels include the PDDL parser and C++ SDK. For Gymnasium environments, install `mymyr[gym]`; install JAX or PyTorch
 separately when using those integrations.
 
-CUDA wheels for free-threaded CPython 3.14 and 3.15 on Linux x86_64 are attached to each
-[GitHub Release](https://github.com/maichmueller/mymyr/releases) with the version `<version>+cu13`; they need an
-NVIDIA driver 580 or newer and carry GPU code for compute capabilities 8.9 and 9.0:
+Releases after 0.1.0 attach CUDA wheels for free-threaded CPython 3.14 and 3.15 on Linux x86_64 to their
+[GitHub Release](https://github.com/maichmueller/mymyr/releases), with the version `<version>+cu13` (v0.1.0 has CPU
+wheels only). They need an NVIDIA driver 580 or newer and carry GPU code for compute capabilities 8.6, 8.9 and 9.0.
+With `<version>` the release's version:
 
 ```bash
-uv pip install --python .venv/bin/python "mymyr==0.1.0+cu13" \
-    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v0.1.0
+uv pip install --python .venv/bin/python "mymyr==<version>+cu13" \
+    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v<version>
 ```
 
 See [Installing a CUDA wheel](docs/cuda.md#installing-a-cuda-wheel) for other GPUs and source builds.

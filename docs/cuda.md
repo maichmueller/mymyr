@@ -1,40 +1,46 @@
 # CUDA
 
-The optional CUDA backend needs an NVIDIA GPU at runtime. The wheels on PyPI contain the CPU backend; CUDA wheels
-for Linux are attached to the GitHub Releases ([Installing a CUDA wheel](#installing-a-cuda-wheel)). For a source
+The optional CUDA backend needs an NVIDIA GPU at runtime. The wheels on PyPI contain the CPU backend; the GitHub
+Releases after 0.1.0 carry CUDA wheels for Linux ([Installing a CUDA wheel](#installing-a-cuda-wheel)). For a source
 build, set `MYMYR_CUDA=ON` and `CMAKE_CUDA_COMPILER` during the CMake configure or Python package build. The device
 searches and generators take the options and return the result fields of the CPU ones
 ([API conventions](conventions.md)); a device result adds `counters`, a dict of device counts and times.
 
 ## Installing a CUDA wheel
 
-Every [GitHub Release](https://github.com/maichmueller/mymyr/releases) carries CUDA wheels next to the CPU wheels,
-with the local version `<version>+cu13`, e.g. `mymyr-0.1.0+cu13-cp314-cp314t-manylinux_2_34_x86_64.whl`:
+The [GitHub Releases](https://github.com/maichmueller/mymyr/releases) after 0.1.0 carry CUDA wheels next to the CPU
+wheels (v0.1.0 has CPU wheels only), with the local version `<version>+cu13`, e.g.
+`mymyr-<version>+cu13-cp314-cp314t-manylinux_2_34_x86_64.whl`:
 
 - Linux x86_64 with glibc 2.34 or newer, free-threaded CPython 3.14 and 3.15 (`cp314t`, `cp315t`);
-- SASS for compute capabilities 8.9 (Ada: L4, L40S, RTX 40 series) and 9.0 (Hopper: H100, H200) and no PTX, so
-  other GPUs need a wheel built for them ([Building a CUDA wheel](#building-a-cuda-wheel));
+- SASS for compute capabilities 8.6 (Ampere: A10, A40, RTX 30 series), 8.9 (Ada: L4, L40S, RTX 40 series) and 9.0
+  (Hopper: H100, H200) and no PTX, so other GPUs, among them the A100 (8.0) and Blackwell GPUs, need a wheel built for
+  them ([Building a CUDA wheel](#building-a-cuda-wheel));
 - an NVIDIA driver 580 or newer ([Driver](#driver)); the CUDA runtime is linked into the extension, so no CUDA
   toolkit is needed;
-- the XLA FFI targets of `mymyr.rl.jax` and `mymyr.encoding.jax`; JAX and torch are installed separately.
+- the XLA FFI targets of `mymyr.rl.jax` and `mymyr.encoding.jax`; JAX and torch are installed separately. The wheels
+  are tested with torch 2.14 for CUDA 13.0 loaded first in the same process;
+- about 1.3 GB per wheel: the device code of the three architectures is in the extension and again in the C++ SDK's
+  static library.
 
-PyPI has no `+cu13` files: ask for the version and add the release's assets as a source of packages,
+PyPI has no `+cu13` files: ask for the version and add the release's assets as a source of packages, with
+`<version>` the release's version,
 
 ```bash
 uv venv .venv --python 3.14t
-uv pip install --python .venv/bin/python "mymyr==0.1.0+cu13" \
-    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v0.1.0
+uv pip install --python .venv/bin/python "mymyr==<version>+cu13" \
+    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v<version>
 ```
 
 or install a wheel by its URL, with the `+` written as `%2B`:
 
 ```bash
 uv pip install --python .venv/bin/python \
-    https://github.com/maichmueller/mymyr/releases/download/v0.1.0/mymyr-0.1.0%2Bcu13-cp314-cp314t-manylinux_2_34_x86_64.whl
+    https://github.com/maichmueller/mymyr/releases/download/v<version>/mymyr-<version>%2Bcu13-cp314-cp314t-manylinux_2_34_x86_64.whl
 ```
 
 `pip install` takes the same arguments. `mymyr.build_info()` names the toolkit and the GPU code of the build, e.g.
-`mymyr 0.1.0+cu13 (Release, gcc 16.1.0, CUDA 13.4.92, sm_89 sm_90)`.
+`mymyr <version>+cu13 (Release, gcc 16.1.0, CUDA 13.4.92, sm_86 sm_89 sm_90)`.
 
 ## Building
 
@@ -59,11 +65,14 @@ The test that checks the device Philox generator against cuRAND's is built when 
 `ci/cuda_wheel.sh` builds the release's CUDA wheels, and builds a wheel for other GPUs or Python ABIs the same way. It
 runs in the manylinux image of the release wheels (`manylinux-x86_64-image` under `[tool.cibuildwheel.linux]` in
 `pyproject.toml`): it installs GCC 16, the dependencies and the CUDA 13.4 compiler (checksums in `ci/cuda_redist.json`)
-into a toolchain directory that later builds reuse, builds the wheel with the version `<version>+cu13`, repairs it with
-auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and runs the CPU test suite on
-it. It needs network access, and its work directory takes about 7 GB for one architecture. One architecture compiled
-in 50 minutes with 8 build jobs and 4 parallel nvcc compiles; every further architecture compiles the device code
-again.
+into a toolchain directory that later builds reuse, builds the wheel with the version `<version>+cu13` and pinned build
+requirements, repairs it with auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and
+runs the CPU test suite on it with torch loaded first. It needs network access, and its work directory takes about 7 GB
+per architecture. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc compiles. Nearly all of
+that time is per architecture (cicc and ptxas; the front end that the architectures share is a few percent), so the
+three architectures of the release wheels take three times as long. `--stage compile --minutes N` stops the build
+cleanly after N minutes, and `--stage finish` on the same work directory and toolchain resumes it and then packages and
+tests the wheel; the release workflow splits each wheel across two jobs this way.
 
 From the repository root, with podman (`docker run` takes the same arguments):
 
@@ -89,9 +98,10 @@ apptainer exec --containall --bind "$PWD":/src --bind ~/.cache/mymyr-cuda-toolch
 `100-real` for B200), `--python` a CPython ABI of the image (`cp314t`, `cp315t`, `cp314`, `cp315`), and
 `--jobs` and `--cuda-jobs` bound the parallel compiles (nvcc needs up to 3 GB per compile, 7 GB for the largest
 kernels); `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
-`ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheel/wheelhouse --python <python3.14t> --archs 80 v<version>`
-from a checkout of the same version on a GPU node: it installs the wheel into a fresh environment (seeing the
-interpreter's torch and JAX) and runs the CUDA tests on GPU 0.
+`ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheel/wheelhouse --python <python3.14t> --abis cp314t --archs 80 v<version>`
+from a checkout of the same version on a GPU node: it installs the pinned test requirements (torch 2.14 for CUDA 13.0
+among them) and the wheel into a fresh environment that also sees the interpreter's JAX, checks that the
+environment's mymyr is the wheel's and exchanges arrays with torch on GPU 0, and runs the CUDA tests on GPU 0.
 
 ## Driver
 
