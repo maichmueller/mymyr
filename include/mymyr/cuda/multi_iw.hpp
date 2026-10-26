@@ -67,7 +67,7 @@ struct MultiIwOptions
     bool track_reached = false;    // the fluent atoms of every state each search created (the rollouts' report)
     bool plans = true;             // plans and goal states of the solved searches
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
-    // launch configuration: in exact mode no result depends on it
+    // launch configuration: exact results are independent of it unless a wall-time limit interrupts the search
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
     // Novelty tables of a group. A pass whose one table exceeds it is refused (std::invalid_argument) when a search
     // reaches that pass: the passes before it run, and searches they solve need no wider table.
