@@ -50,10 +50,11 @@ width when all instances have that width; otherwise omit each instance's numeric
 ``noops=True`` compares atom and numeric words bit for bit with the parent (signed zeros and NaN payloads
 count as changes). ``drop_noops=True`` stably removes no-ops per parent unless all successors are no-ops, in which
 case it keeps them all. ``index`` maps kept rows to positions in the full parent expansion; every requested array is
-compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; outputs are undefined on capacity
-overflow. ``expand_into`` accepts ``succ_hash=``, ``noop=`` and ``index=``; digests need no ``succ=`` destination,
-and dropping requires ``index=``. The padded hashes/no-ops have zero padding; with dropping its ``index`` holds the
-canonical positions (-1 padding), otherwise flat row indices.
+compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; on capacity overflow
+with dropping, ``generated`` stays exact but ``total``, offsets and the kept rows are undefined.
+``expand_into`` accepts ``succ_hash=``, ``noop=`` and ``index=``; digests need no ``succ=`` destination, and dropping
+requires ``index=`` when any per-successor array is written. The padded hashes/no-ops have zero padding; with dropping,
+``pad().canonical`` holds the positions (-1 padding); ``pad().index`` is always the flat row.
 
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read

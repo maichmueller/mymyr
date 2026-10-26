@@ -19,6 +19,7 @@
 //   - State words: little-endian u64, fluent slot i at word i >> 6, bit i & 63; missing words are zero.
 //     Under lazy slots a successor may need more words than the output rows have (new atoms): such rows are not
 //     written, and `words_needed` reports the width that fits all of them (words_needed > words is an overflow too).
+//     The width bounds the stored `succ` rows only: without `succ` nothing depends on it and `words_needed` stays 0.
 //   - Derived words (optional, `derived`): the successor's derived atoms as a bitset in derived-slot order, from one axiom
 //     evaluation of the successor row (shared with the goal flag). Rows are `derived_words` wide; an instance with fewer
 //     derived words (or none) has zeros past its own. They equal the evaluation the encoder does itself, bit for bit.
@@ -27,14 +28,21 @@
 //     seeded by the instance's numeric words, exactly State::hash() (not Python's task-aware hash). Derived atoms
 //     and table padding do not enter it. `noop` compares trimmed atom words and numeric words bit for bit with the
 //     parent; signed zero and NaN payload changes count as changes. Newly interned nonzero atom slots are changes.
+//     Digests are computed from the exact successor: they are exact for every row within the capacity, also for a
+//     row that does not fit the output width (words_needed > words).
 //   - With drop_noops, remove no-op rows per parent unless every successor is a no-op (then keep all). Empty parents
 //     stay empty. Order is stable; every requested array is compacted alike. `index` is required with drop_noops
 //     when capacity is nonzero, and gives each kept row's position in that parent's full expansion order (canonical
 //     by default; the requested generator order otherwise). It can also be requested without dropping.
-//   - `generated` counts all successors before dropping; `total` and offsets count kept rows. Capacity bounds the
-//     pre-drop count, including with label-only outputs. On generated > capacity the kept outputs are undefined.
-//     Width overflow also includes dropped rows. No digest or filtering work runs when those outputs/options are absent.
+//   - `generated` counts all successors before dropping, on every path (equal to `total` without drop_noops); `total`
+//     and offsets count kept rows. Capacity bounds the pre-drop count, including with label-only outputs:
+//     generated > capacity is the overflow. On that overflow with drop_noops, `generated` is exact, but `total`,
+//     offsets and every kept output are unspecified (an implementation may count only the rows it stored); size the
+//     capacity from `generated`. Without drop_noops, `total` and offsets stay the true counts. Width overflow also
+//     includes dropped rows. No digest or filtering work runs when those outputs/options are absent.
 //   - The padded [N, K] view (pad()) is built from the flat CSR by a scatter, with a validity mask and true counts.
+//     Its `index` is always the flat row; `canonical` carries the flat `index` (the position in the parent's full
+//     order).
 //   - Numeric tasks: a row is [bits | slots], the `words` atom words followed by the table's numeric words
 //     (`numeric_words` = table.numeric_words(); instance i uses the first numeric_words of its own, as in
 //     task/numeric.hpp: two int32 per word or one double per word, and the rest stay zero). Inputs, flat and padded
@@ -98,9 +106,9 @@ struct Expansion
     u64* succ_hash = nullptr;  // [capacity]: State::hash() of the successor
     u8* noop = nullptr;        // [capacity]: 1 iff atom and numeric words equal the parent's
     i32* index = nullptr;      // [capacity]: position within the parent's full successor order
-    u64 generated = 0;         // successors before drop_noops; capacity bounds this count
+    u64 generated = 0;         // successors before drop_noops (set on every path); capacity bounds this count
     u64 total = 0;         // kept successors of the whole batch (may exceed capacity)
-    u32 words_needed = 0;  // widest successor (trimmed); > words means some rows did not fit
+    u32 words_needed = 0;  // widest successor (trimmed) of rows that did not fit `succ`; > words: some did not
     u32 numeric_words = 0;  // numeric tables: table.numeric_words() (a row is words + numeric_words wide)
     [[nodiscard]] bool overflow() const noexcept { return generated > capacity || total > capacity || words_needed > words; }
 };
@@ -154,7 +162,7 @@ inline void expand(const TaskTable& table, StateBatchView in, const i32* task_id
 struct PaddedExpansion
 {
     u32 k = 0;
-    i32* index = nullptr;    // [rows, K]: flat.index when present, else flat row; -1 padding
+    i32* index = nullptr;    // [rows, K]: flat row; -1 padding
     u8* mask = nullptr;      // [rows, K]: 1 = valid
     i32* count = nullptr;    // [rows]: true successor counts (may exceed K)
     u32 words = 0;           // atom words per successor row of `succ`
@@ -169,11 +177,12 @@ struct PaddedExpansion
     u64* derived = nullptr;  // [rows, K, derived_words], zero padding
     u64* succ_hash = nullptr;  // [rows, K], zero padding
     u8* noop = nullptr;        // [rows, K], zero padding
+    i32* canonical = nullptr;  // [rows, K]: flat.index (position in the parent's full successor order), -1 padding
 };
 
 /// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null are not
-/// written; an array whose flat source is null is filled with its padding (-1 for schema and binding, 0 for succ,
-/// goal, derived, succ_hash and noop).
+/// written; an array whose flat source is null is filled with its padding (-1 for schema, binding and canonical, 0 for
+/// succ, goal, derived, succ_hash and noop).
 void pad(const Expansion& flat, u64 rows, PaddedExpansion& out);
 
 /// Goal flags of a batch (evaluates axioms when the goal mentions derived predicates): out[i] = the goal test of

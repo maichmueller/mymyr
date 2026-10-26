@@ -187,7 +187,7 @@ def expand(handle: int, states, task_ids, k: int, label_width: int, derived_word
             _u32((*n, k, 2) if hashes else (0, 2)),
             _bool((*n, k) if noops or drop_noops else (0,)),
             _i32((*n, k) if drop_noops else (0,)),
-            _i32((1,)),
+            _i32(n),  # successors of each state before drop_noops (one per state, so that vmap batches it)
         )
     call = jax.ffi.ffi_call(
         "mymyr_expand",

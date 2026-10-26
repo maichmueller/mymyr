@@ -57,10 +57,13 @@ def check_expansion(task, states):
         assert not pad.overflow
         for p, count in enumerate(kept.counts):
             at = slice(kept.offsets[p], kept.offsets[p + 1])
-            np.testing.assert_array_equal(pad.index[p, :count], kept.index[at])
+            np.testing.assert_array_equal(pad.canonical[p, :count], kept.index[at])
+            np.testing.assert_array_equal(pad.index[p, :count], np.arange(at.start, at.stop))
             np.testing.assert_array_equal(pad.succ_hash[p, :count], kept.succ_hash[at])
             np.testing.assert_array_equal(pad.noop[p, :count], kept.noop[at])
-        assert np.all(pad.index[~pad.mask] == -1)
+        # `index` gathers the flat rows; `canonical` is the position in the parent's full expansion.
+        np.testing.assert_array_equal(kept.succ[pad.index[pad.mask]], pad.succ[pad.mask])
+        assert np.all(pad.index[~pad.mask] == -1) and np.all(pad.canonical[~pad.mask] == -1)
         assert np.all(pad.succ_hash[~pad.mask] == 0) and not pad.noop[~pad.mask].any()
         h = np.zeros(full.total, np.uint64)
         n = np.zeros(full.total, np.bool_)
@@ -80,7 +83,8 @@ def check_expansion(task, states):
         np.testing.assert_array_equal(offsets, full.offsets)
     plain = rl.expand(task, states)
     assert plain.succ_hash is None and plain.noop is None and plain.index is None
-    assert plain.pad().succ_hash is None and plain.pad().noop is None
+    assert plain.pad().succ_hash is None and plain.pad().noop is None and plain.pad().canonical is None
+    assert full.pad().canonical is None
     return full
 
 
@@ -119,6 +123,12 @@ def test_mixed_noops_all_noop_fallback_and_dead_end():
     assert short.generated == full.total > short.capacity and short.overflow and short.pad().overflow
     with pytest.raises(ValueError, match="requires index"):
         rl.expand_into(task, states, drop_noops=True, noop=np.zeros(full.total, bool))
+    # Counting needs no index: no per-successor array is written.
+    offsets = np.zeros(len(states) + 1, np.int32)
+    counted = rl.expand_into(task, states, offsets=offsets, drop_noops=True)
+    assert counted["generated"] == full.total and counted["overflow"]
+    empty_counted = rl.expand_into(task, states[2:], offsets=offsets[:2], drop_noops=True)
+    assert empty_counted["generated"] == 0 and not empty_counted["overflow"] and offsets[:2].tolist() == [0, 0]
     zero = rl.expand(task, states, drop_noops=True, capacity=0)
     assert zero.overflow and zero.generated == full.total
     empty = rl.expand(task, np.empty((0, task.words), np.uint64), drop_noops=True, hashes=True)
@@ -137,6 +147,14 @@ def test_lazy_slots_hash_and_new_atoms():
     short = rl.expand(task, [task.initial_state], hashes=True, noops=True, words=1)
     assert short.overflow and short.words_needed == full.words
     np.testing.assert_array_equal(short.succ_hash, full.succ_hash)
+    # Label-only digests of a fresh lazy task: no row is stored, so its width cannot overflow.
+    fresh = pddl_task(domain, problem, atoms="lazy")
+    h = np.zeros(full.total, np.uint64)
+    n = np.ones(full.total, np.bool_)
+    result = rl.expand_into(fresh, [fresh.initial_state], succ_hash=h, noop=n)
+    assert not result["overflow"] and result["words_needed"] == 0 and result["generated"] == full.total
+    np.testing.assert_array_equal(h, full.succ_hash)
+    assert not n.any()
 
 
 def test_numeric_noop_compares_signed_zero_and_nan_bits():
@@ -193,8 +211,8 @@ def test_jax_cpu_matches_numpy(drop, hashes, noops):
     padded = jax.jit(lambda s: env.expand(s, 5, **opts))(source)
     ref = expected.pad(5)
     assert int(padded.generated) == expected.generated
-    for name in ("succ", "schema", "binding", "mask", "count", "noop", "index", "succ_hash"):
-        if name in ("noop", "index", "succ_hash") and getattr(padded, name) is None:
+    for name in ("succ", "schema", "binding", "mask", "count", "noop", "canonical", "succ_hash"):
+        if name in ("noop", "canonical", "succ_hash") and getattr(padded, name) is None:
             continue
         got, want = np.asarray(getattr(padded, name)), getattr(ref, name)
         if name in ("succ", "succ_hash"):
@@ -204,6 +222,20 @@ def test_jax_cpu_matches_numpy(drop, hashes, noops):
         np.testing.assert_array_equal(got, want)
     limited = jax.jit(lambda s: env.expand_flat(s, 1, **opts))(source)
     assert int(limited.generated) > 1
+    # vmap over a batch of state batches: each batch gets its own pre-drop count and rows.
+    batches = jnp.stack([source, source[::-1]])
+    mapped = jax.jit(jax.vmap(lambda s: env.expand(s, 5, **opts)))(batches)
+    flipped = rl.expand(task, np.ascontiguousarray(rows[::-1]), hashes=hashes, noops=noops, drop_noops=drop)
+    assert np.asarray(mapped.generated).tolist() == [expected.generated, flipped.generated]
+    for b, ref_b in enumerate((ref, flipped.pad(5))):
+        np.testing.assert_array_equal(np.asarray(mapped.count)[b], ref_b.count)
+        np.testing.assert_array_equal(np.asarray(mapped.schema)[b], ref_b.schema)
+        if hashes:
+            np.testing.assert_array_equal(np.asarray(mapped.succ_hash)[b].copy().view(np.uint64)[..., 0], ref_b.succ_hash)
+        if noops or drop:
+            np.testing.assert_array_equal(np.asarray(mapped.noop)[b], ref_b.noop)
+        if drop:
+            np.testing.assert_array_equal(np.asarray(mapped.canonical)[b], ref_b.canonical)
 
 
 def test_only_noop_action_keeps_all_rows():

@@ -64,3 +64,10 @@ def test_hash_rows_numeric_words(name):
     assert not np.array_equal(hashes, mymyr.hash_rows(rows))
     with pytest.raises(ValueError, match="numeric_words"):
         mymyr.hash_rows(rows, numeric_words=rows.shape[1] + 1)
+    # States hash with their own numeric words; numeric_words= applies to arrays only.
+    np.testing.assert_array_equal(mymyr.hash_rows(states), hashes)
+    np.testing.assert_array_equal(mymyr.hash_rows(tuple(states)), hashes)
+    with pytest.raises(ValueError, match="numeric_words"):
+        mymyr.hash_rows(states, numeric_words=task.numeric_words)
+    with pytest.raises(TypeError):
+        mymyr.hash_rows([states[0], rows[0]])

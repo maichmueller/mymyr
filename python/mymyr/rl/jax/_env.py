@@ -113,8 +113,8 @@ class PaddedExpansion(NamedTuple):
     derived: Any = None  # [N, K, 2 D] uint32 derived words of the successors (expand(..., derived=True))
     succ_hash: Any = None  # [N, K, 2] uint32 pairs
     noop: Any = None  # [N, K] bool
-    index: Any = None  # [N, K] canonical successor positions, -1 padding
-    generated: Any = None  # scalar pre-drop count
+    canonical: Any = None  # [N, K] position in the parent's full successor order (drop_noops=True), -1 padding
+    generated: Any = None  # scalar: successors before drop_noops
 
 
 class FlatExpansion(NamedTuple):
@@ -590,7 +590,9 @@ class Env:
         """The padded expansion [N, K] of uint32 state rows [N, 2 row_words] of instances ``task_ids`` [N] (None: a
         table of one) in canonical order (count > K overflows). On a CUDA device it synchronizes on the successor count
         (it is not the environment step). ``derived=True`` adds the successors' derived words (``table.derived_words``
-        words, as uint32 pairs), the result's ``derived`` field."""
+        words, as uint32 pairs), the result's ``derived`` field. ``hashes``, ``noops`` and ``drop_noops`` add
+        ``succ_hash`` (uint32 pairs), ``noop`` and ``canonical`` (each kept successor's position in its parent's full
+        order) as :func:`mymyr.rl.expand` does; ``generated`` counts the successors before dropping."""
         with self._dev():
             ids = self._ids(task_ids, states.shape[0])
             dw = self.derived_words if derived else None
@@ -598,7 +600,8 @@ class Env:
                               hashes=hashes, noops=noops, drop_noops=drop_noops)
             if hashes or noops or drop_noops:
                 return PaddedExpansion(*out[:6], out[6] if derived else None, out[7] if hashes else None,
-                                       out[8] if noops or drop_noops else None, out[9] if drop_noops else None, out[10][0])
+                                       out[8] if noops or drop_noops else None, out[9] if drop_noops else None,
+                                       jnp.sum(out[10]))
             return PaddedExpansion(*out, generated=jnp.sum(out[5]))
 
     def expand_flat(

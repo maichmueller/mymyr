@@ -283,8 +283,8 @@ struct PaddedResult
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
     bool has_goal = false, has_derived = false, overflow = false;
-    bool has_hashes = false, has_noops = false;
-    u64 off_hashes = 0, off_noops = 0;
+    bool has_hashes = false, has_noops = false, has_canonical = false;
+    u64 off_hashes = 0, off_noops = 0, off_canonical = 0;
     Framework fw = Framework::Numpy;
     WordEncoding enc;
 };
@@ -301,6 +301,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     p.has_goal = f.has_goal;
     p.has_hashes = f.has_hashes;
     p.has_noops = f.has_noops;
+    p.has_canonical = f.has_index;
     p.has_derived = f.has_derived;
     p.derived_words = f.derived_words;
     p.fw = fw;
@@ -308,6 +309,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     const u64 NK = checked_mul({f.rows, k}, "a padded expansion (rows x k)");
     p.off_hashes = lay.add(f.has_hashes ? NK : 0, sizeof(u64));
     p.off_noops = lay.add(f.has_noops ? NK : 0, 1);
+    p.off_canonical = lay.add(f.has_index ? NK : 0, sizeof(i32));
     p.off_index = lay.add(NK, sizeof(i32));
     p.off_mask = lay.add(NK, 1);
     p.off_count = lay.add(f.rows, sizeof(i32));
@@ -322,6 +324,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     out.k = k;
     out.succ_hash = f.has_hashes ? reinterpret_cast<u64*>(b + p.off_hashes) : nullptr;
     out.noop = f.has_noops ? reinterpret_cast<u8*>(b + p.off_noops) : nullptr;
+    out.canonical = f.has_index ? reinterpret_cast<i32*>(b + p.off_canonical) : nullptr;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
@@ -641,8 +644,6 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
     if ((is_cuda_array(states) || is_cuda_array(succ_hash) || is_cuda_array(noop) || is_cuda_array(index)) &&
         (!succ_hash.is_none() || !noop.is_none() || !index.is_none() || drop))
         throw nb::type_error("mymyr: successor digests and drop_noops require host arrays in this build");
-    if (drop && index.is_none())
-        throw nb::value_error("mymyr: expand_into: drop_noops requires index");
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
                                        is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status)))
@@ -1795,7 +1796,7 @@ void bind_rl(nb::module_& parent)
                      "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k}));
-        }, "[N, K] int32: canonical successor position with drop_noops, else flat row; -1 padding")
+        }, "[N, K] int32: row of the flat arrays, -1 = none")
         .def_prop_ro("mask", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] bool")
@@ -1835,6 +1836,12 @@ void bind_rl(nb::module_& parent)
                 return nb::none();
             return padded_array(p, p.off_noops, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] successor noop, zero padding; None if absent")
+        .def_prop_ro("canonical", [](const PaddedResult& p) -> ArrayOut {
+            if (!p.has_canonical)
+                return nb::none();
+            return padded_array(p, p.off_canonical, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] int32: the flat index (position in the parent's full successor order, the environment action), "
+           "-1 padding; None if the expansion has no index")
         .def("__repr__", [](const PaddedResult& p) {
             return "PaddedExpansion(states=" + std::to_string(p.rows) + ", k=" + std::to_string(p.k) +
                    (p.overflow ? ", overflow" : "") + ")";

@@ -741,8 +741,10 @@ ffi::Error env_step_cpu(i64 handle, MYMYR_STEP_PARAMS)
     });
 }
 
-/// rl::expand of the states into the entry's host scratch (all successors): the offsets and the total.
-u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived, bool hashes, bool noops, bool drop, u64& generated)
+/// rl::expand of the states into the entry's host scratch (all successors): the offsets and the kept total.
+/// `generated` receives the successors before drop_noops, `counts` (null: not wanted) those of each state.
+u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived, bool hashes, bool noops, bool drop, u64& generated,
+                i32* counts = nullptr)
 {
     const rl::StateBatchView in{st.as<u64>(), st.rows, e.W, 0, e.NN};
     rl::ExpandOptions opt;
@@ -757,6 +759,8 @@ u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived, bool has
     rl::expand(*e.suite, in, ids, x, opt);  // counts only
     const u64 total = x.total;
     generated = total;
+    for (u64 i = 0; counts && i < st.rows; ++i)
+        counts[i] = e.scratch_offsets[i + 1] - e.scratch_offsets[i];
     opt.drop_noops = drop;
     e.scratch_succ.resize(std::max<u64>(total, 1) * e.row_words());
     e.scratch_schema.resize(std::max<u64>(total, 1));
@@ -800,7 +804,9 @@ struct DigestBufs
     std::optional<View> hashes, noops, index, generated;
 };
 
-DigestBufs digest_results(const ffi::RemainingRets& rest, u64 rows, bool hashes, bool noops, bool drop)
+/// `generated` is int32 [generated_rows]: one total (flat) or the count of each state (padded, so that a vmapped
+/// call over a batch of state batches keeps one count per state).
+DigestBufs digest_results(const ffi::RemainingRets& rest, u64 rows, bool hashes, bool noops, bool drop, u64 generated_rows)
 {
     DigestBufs d;
     if (rest.size() != 5)
@@ -834,7 +840,7 @@ DigestBufs digest_results(const ffi::RemainingRets& rest, u64 rows, bool hashes,
             fail("index must have one position per successor");
     }
     d.generated = get(4, "generated", ffi::DataType::S32, true);
-    expect_rows(*d.generated, 1, "generated");
+    expect_rows(*d.generated, generated_rows, "generated");
     return d;
 }
 
@@ -878,7 +884,7 @@ PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> suc
     p.mask = view(*mask, "mask", ffi::DataType::PRED, false);
     p.count = view(*count, "count", ffi::DataType::S32, true);
     p.K = static_cast<u32>(p.schema.cols);
-    p.digests = digest_results(rest, N * p.K, hashes, noops, drop);
+    p.digests = digest_results(rest, N * p.K, hashes, noops, drop, N);
     expect_rows(p.schema, N, "schema");
     expect_rows(p.count, N, "count");
     if (p.succ.rows != N * p.K || p.goal.count != N * p.K || p.mask.count != N * p.K || p.binding.rows != N * p.K)
@@ -905,7 +911,7 @@ rl::PaddedExpansion make_padded(const Entry& e, const PaddedBufs& p)
     out.goal = p.goal.as<u8>();
     out.succ_hash = p.digests.hashes ? p.digests.hashes->as<u64>() : nullptr;
     out.noop = p.digests.noops ? p.digests.noops->as<u8>() : nullptr;
-    out.index = p.digests.index ? p.digests.index->as<i32>() : nullptr;
+    out.canonical = p.digests.index ? p.digests.index->as<i32>() : nullptr;
     if (p.derived)
     {
         out.derived_words = e.suite->derived_words();
@@ -926,7 +932,8 @@ ffi::Error expand_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBu
         const PaddedBufs p = padded_results(*e, st.rows, succ, schema, binding, goal, mask, count, rest, hashes, noops, drop);
         std::lock_guard lock(e->host_mutex);
         u64 generated = 0;
-        const u64 total = host_expand(*e, st, ids, p.derived.has_value(), hashes, noops, drop, generated);
+        const u64 total = host_expand(*e, st, ids, p.derived.has_value(), hashes, noops, drop, generated,
+                                      p.digests.generated ? p.digests.generated->as<i32>() : nullptr);
         rl::Expansion x;
         x.capacity = generated;
         x.words = e->W;
@@ -947,8 +954,6 @@ ffi::Error expand_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBu
         x.succ_hash = hashes ? e->scratch_hashes.data() : nullptr;
         x.noop = noops || drop ? e->scratch_noops.data() : nullptr;
         x.index = drop ? e->scratch_indices.data() : nullptr;
-        if (p.digests.generated)
-            *p.digests.generated->as<i32>() = static_cast<i32>(generated);
         rl::PaddedExpansion out = make_padded(*e, p);
         rl::pad(x, st.rows, out);
     });
@@ -977,7 +982,7 @@ FlatBufs flat_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, f
     f.goal = view(*goal, "goal", ffi::DataType::PRED, true);
     f.offsets = view(*offsets, "offsets", ffi::DataType::S32, true);
     f.M = f.parent.rows;
-    f.digests = digest_results(rest, f.M, hashes, noops, drop);
+    f.digests = digest_results(rest, f.M, hashes, noops, drop, 1);
     if (f.succ.rows != f.M || f.schema.rows != f.M || f.goal.rows != f.M || f.binding.rows != f.M)
         fail("the flat results must have the same capacity M");
     if (f.offsets.rows != N + 1)

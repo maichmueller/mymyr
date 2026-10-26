@@ -237,13 +237,14 @@ TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
         opt.drop_noops = true;
         ThreadPool pool(3);
         rl::ExpandScratch scratch;
-        auto run = [&]
+        auto run_into = [&](rl::Expansion& x)
         {
             if (pooled)
-                rl::expand(*table, in, nullptr, kept.x, opt, pool, scratch);
+                rl::expand(*table, in, nullptr, x, opt, pool, scratch);
             else
-                rl::expand(*table, in, nullptr, kept.x, opt);
+                rl::expand(*table, in, nullptr, x, opt);
         };
+        auto run = [&] { run_into(kept.x); };
         run();
         EXPECT_EQ(kept.x.generated, full.x.total);
         EXPECT_LT(kept.x.total, full.x.total);
@@ -265,6 +266,46 @@ TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
                 }
             EXPECT_EQ(next, kept.offsets[p + 1]);
         }
+        // Label-only: the same digests, flags and positions without stored rows; no width applies to them.
+        std::vector<i32> label_index(ref.succ.size()), label_offsets(states.size() + 1);
+        std::vector<u64> label_hashes(ref.succ.size());
+        std::vector<u8> label_noops(ref.succ.size());
+        rl::Expansion labels;
+        labels.capacity = ref.succ.size();
+        labels.index = label_index.data();
+        labels.succ_hash = label_hashes.data();
+        labels.noop = label_noops.data();
+        labels.offsets = label_offsets.data();
+        run_into(labels);
+        EXPECT_FALSE(labels.overflow());
+        EXPECT_EQ(labels.words_needed, 0u);
+        EXPECT_EQ(labels.generated, full.x.total);
+        const auto kept_rows = static_cast<std::ptrdiff_t>(kept.x.total);  // rows past it are scratch
+        EXPECT_TRUE(std::equal(indices.begin(), indices.begin() + kept_rows, label_index.begin()));
+        EXPECT_TRUE(std::equal(kh.begin(), kh.begin() + kept_rows, label_hashes.begin()));
+        EXPECT_TRUE(std::equal(kn.begin(), kn.begin() + kept_rows, label_noops.begin()));
+        EXPECT_EQ(label_offsets, kept.offsets);
+        // The padded view: `index` is the flat row, `canonical` the position in the parent's full order.
+        const u32 K = 8;
+        std::vector<i32> pad_index(states.size() * K), pad_canonical(states.size() * K), pad_count(states.size());
+        std::vector<u8> pad_mask(states.size() * K);
+        rl::PaddedExpansion padded;
+        padded.k = K;
+        padded.index = pad_index.data();
+        padded.canonical = pad_canonical.data();
+        padded.mask = pad_mask.data();
+        padded.count = pad_count.data();
+        rl::pad(kept.x, states.size(), padded);
+        for (usize p = 0; p < states.size(); ++p)
+            for (u32 k = 0; k < K; ++k)
+            {
+                const usize at = p * K + k;
+                const i32 j = kept.offsets[p] + static_cast<i32>(k);
+                const bool valid = j < kept.offsets[p + 1];
+                EXPECT_EQ(pad_mask[at], valid ? 1 : 0);
+                EXPECT_EQ(pad_index[at], valid ? j : -1);
+                EXPECT_EQ(pad_canonical[at], valid ? indices[static_cast<usize>(j)] : -1);
+            }
         kept.x.capacity = kept.x.total;
         run();
         EXPECT_TRUE(kept.x.overflow());
