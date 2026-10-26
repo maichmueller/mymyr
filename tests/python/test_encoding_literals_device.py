@@ -185,14 +185,18 @@ def test_custom_ops_fake_compile_and_cuda_graph_replay(case, layered):
         rt.unregister(handle)
 
 
-def test_device_masks_encode_as_host_goals_and_layers(case):
+@pytest.mark.parametrize("halves", [False, True])
+def test_device_masks_encode_as_host_goals_and_layers(case, halves):
     tasks, encoder, p, o, signs, rows, task_ids, layers = case
+    encoder = encoding.FlatRelationEncoder(encoder.table, max_goal_level=2)
     states = np.concatenate([tasks[i].encode([tasks[i].initial_state]) for i in task_ids])
     goals = encoding.literal_masks(encoder, p, o, signs, rows, 3, task_ids)
     subgoals = encoding.literal_masks(encoder, p, o, signs, rows, 3, task_ids, layers=layers, num_layers=2)
-    dg = encoding.literal_masks(encoder, tensor(p), tensor(o), tensor(signs), tensor(rows), 3, tensor(task_ids))
+    dtype = torch.uint32 if halves else torch.int64
+    dg = encoding.literal_masks(encoder, tensor(p), tensor(o), tensor(signs), tensor(rows), 3, tensor(task_ids),
+                                word_dtype=dtype)
     ds = encoding.literal_masks(encoder, tensor(p), tensor(o), tensor(signs), tensor(rows), 3, tensor(task_ids),
-                                layers=tensor(layers), num_layers=2)
+                                layers=tensor(layers), num_layers=2, word_dtype=dtype)
     host = encoder.encode(states, task_ids, goals=goals, subgoals=subgoals)
     device = encoder.encode(tensor(states.view(np.int64)), tensor(task_ids), goals=dg, subgoals=ds)
     from test_encoding_cuda import same_batch
@@ -219,6 +223,8 @@ def test_single_instance_defaults_nullary_empty_and_validation():
         encoding.literal_slots(encoder, predicates.long(), objects)
     with pytest.raises(TypeError, match="bool"):
         encoding.literal_masks(encoder, predicates, objects, positive.int(), rows, 1)
+    with pytest.raises(TypeError, match="host integers"):
+        encoding.literal_masks(encoder, predicates, objects, positive, rows, tensor(np.array(1, np.int32)))
     handle = rt.register(encoder)
     try:
         with pytest.raises(ValueError, match="num_layers"):

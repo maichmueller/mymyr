@@ -1218,7 +1218,8 @@ predicates) and instance-local objects with the same semantics as the host helpe
 | slots result | `(kinds, slots, status)`: uint8 `[K]`, int32 `[K]` (-1 without a slot), int64 scalar |
 | mask result | `GoalMasks` or `LayerMasks`, int64 words, bool `unsatisfiable`, int64 scalar `status` |
 
-Mask shapes come from `num_rows`, the table's word counts, and explicit `num_layers` when `layers` is supplied.
+Mask shapes come from the host integer `num_rows`, the table's word counts, and an explicit host integer
+`num_layers` when `layers` is supplied.
 `word_dtype=torch.uint32` returns low/high halves of each word. CUDA masks require `fixed="decide"`: static and
 unreachable literals that fail set `unsatisfiable`; those that hold contribute no bit. Invalid literals, task ids,
 rows or layers are skipped and OR value 4 into `status`; reading that scalar is the caller's choice. Host masks

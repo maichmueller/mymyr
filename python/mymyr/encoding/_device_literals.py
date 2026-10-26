@@ -62,6 +62,8 @@ def slots(encoder, predicates, objects, task_ids=None):
 
 
 def masks(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, layers=None, num_layers=1):
+    if isinstance(num_rows, torch.Tensor) or isinstance(num_layers, torch.Tensor):
+        raise TypeError("mymyr: encoding: num_rows and num_layers must be host integers")
     num_rows, num_layers = operator.index(num_rows), operator.index(num_layers)
     if not 0 <= num_rows <= 0xffffffff or not 0 <= num_layers <= 0xffffffff:
         raise ValueError("mymyr: encoding: num_rows and num_layers must be in [0, 2**32)")
