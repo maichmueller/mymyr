@@ -521,7 +521,8 @@ def expand_flat(
     t = lookup(table)
     if derived and not rows:
         raise ValueError("mymyr: derived outputs require successor rows")
-    if capacity is None and not rows:
+    dynamic_labels = capacity is None and not rows
+    if dynamic_labels:
         offsets = states.new_empty(states.shape[0] + 1, dtype=torch.int32)
         counted = mymyr.rl.expand_into(t, states, task_ids, offsets=offsets,
                                       witness_pruning=witness_pruning, stream=_stream(states))
@@ -542,10 +543,13 @@ def expand_flat(
         goal=goal if rows else None, offsets=offsets, derived=der if derived else None,
         succ_hash=digest if hashes else None, noop=noop if noops or drop_noops else None,
         index=index if drop_noops else None, drop_noops=drop_noops,
-        status=status if states.is_cuda else None, stream=_stream(states), witness_pruning=witness_pruning,
+        status=status if states.is_cuda and not dynamic_labels else None, stream=_stream(states), witness_pruning=witness_pruning,
     )
-    if not states.is_cuda:
+    if not states.is_cuda or dynamic_labels:
         status.fill_(int(result["overflow"]) | (2 if result["words_needed"] > states.shape[1] - t.numeric_words else 0))
+    if dynamic_labels:
+        count = result["total"]
+        return tuple(x if i in (5, 10) else x[:count] for i, x in enumerate(out))
     return out
 
 
