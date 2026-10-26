@@ -274,7 +274,7 @@ private:
     mutable std::mutex m_frozen_mutex;
     mutable std::array<std::shared_ptr<const Task>, 3> m_frozen;
     mutable std::array<std::shared_ptr<SlotMap>, 3> m_slot_maps;
-    /// Name-based maps by target uid. An entry holds its target weakly and goes when the target does.
+    /// Name-based maps by target uid. Entries hold their targets weakly; each insertion drops the expired ones.
     struct Translation
     {
         std::weak_ptr<const Task> target;

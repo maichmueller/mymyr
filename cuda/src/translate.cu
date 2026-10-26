@@ -52,7 +52,7 @@ __global__ void init_status(i32* status)
 {
     status[0] = 0;
     status[1] = INT_MAX;
-    status[2] = -1;
+    status[2] = INT_MAX;
 }
 
 // A warp owns a row; lane zero writes packed numeric pairs without competing stores.
@@ -124,19 +124,27 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
             {
                 atomicOr(status, static_cast<i32>(flags));
                 atomicMin(status + 1, static_cast<i32>(row));
+                if (flags & 2)
+                    atomicMin(status + 2, static_cast<i32>(row));
             }
         }
     }
 }
 
+// During the translation status[2] holds the first row with flag 2. An invalid source slot or task id is reported
+// before any missing value, as the host does.
 __global__ void finish_status(TranslateView map, const u64* source, u64 stride, u32 sw, const i32* ids, i32* status)
 {
     if (status[1] == INT_MAX)
     {
         status[1] = -1;
+        status[2] = -1;
         return;
     }
-    const u32 row = static_cast<u32>(status[1]);
+    const bool invalid = status[0] & 2;
+    const u32 row = static_cast<u32>(invalid ? status[2] : status[1]);
+    status[1] = static_cast<i32>(row);
+    status[2] = -1;
     const i32 id = ids ? ids[row] : 0;
     if (id < 0 || static_cast<u32>(id) >= map.count)
         return;
@@ -146,12 +154,16 @@ __global__ void finish_status(TranslateView map, const u64* source, u64 stride, 
         for (u64 bits = in[w]; bits; bits &= bits - 1)
         {
             const u32 slot = w * 64 + static_cast<u32>(__ffsll(static_cast<long long>(bits)) - 1);
-            if (slot >= inst.slots || map.slots[inst.slots_begin + slot] == missing)
+            const u32 mapped = slot < inst.slots ? map.slots[inst.slots_begin + slot] : missing;
+            const bool bad = slot >= inst.slots || (mapped < checked_static && mapped >= inst.target_slots);
+            if (invalid ? bad : mapped == missing)
             {
                 status[2] = static_cast<i32>(slot);
                 return;
             }
         }
+    if (invalid)
+        return;
     for (u32 n = 0; n < inst.numeric_slots; ++n)
     {
         f64 value = 0;

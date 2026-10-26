@@ -1311,7 +1311,8 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
     for (u32 i = 0; i < map.maps.size(); ++i)
     {
         if (!map.targets[i]->atoms().frozen())
-            throw nb::value_error("mymyr: translate: a device target must have fixed atom slots");
+            throw nb::value_error("mymyr: translate: a device target must have fixed atom slots (device rows cannot "
+                                  "intern lazy slots; translate into target.frozen() or translate host rows)");
         snapshots.push_back(map.maps[i]->snapshot());
         key.push_back(map.targets[i]->uid());
         key.push_back(snapshots.back()->size());
@@ -1436,7 +1437,15 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
         std::array<i32, 3> flags{};
         cuda::check(cudaMemcpyAsync(flags.data(), error, sizeof(flags), cudaMemcpyDeviceToHost, os.s), "translate status");
         cuda::check(cudaStreamSynchronize(os.s), "translate status wait");
-        if (flags[0] && (!drop || (flags[0] & 2)))
+        if (flags[0] & 2)
+        {
+            if (flags[2] < 0)
+                throw nb::value_error(("mymyr: translate: task_ids[" + std::to_string(flags[1]) +
+                                       "] is outside the source table").c_str());
+            throw nb::value_error(("mymyr: translate: row " + std::to_string(flags[1]) + " sets an unknown source slot " +
+                                   std::to_string(flags[2])).c_str());
+        }
+        if (flags[0] && !drop)
         {
             i32 id = 0;
             if (ids && flags[1] >= 0)
@@ -1444,7 +1453,7 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
                 cuda::check(cudaMemcpyAsync(&id, ids + flags[1], sizeof(id), cudaMemcpyDeviceToHost, os.s), "translate error instance");
                 cuda::check(cudaStreamSynchronize(os.s), "translate error instance wait");
             }
-            std::string name = "invalid source slot or task id";
+            std::string name = "a source value";
             if (id >= 0 && static_cast<usize>(id) < map.sources.size() && flags[2] >= 0)
             {
                 const auto& src = *map.sources[static_cast<usize>(id)];

@@ -89,4 +89,41 @@ TEST(DeviceTranslate, PackedIntegersConvertToReorderedDoubles)
     EXPECT_DOUBLE_EQ(std::bit_cast<f64>(rows[2]), 3);
     EXPECT_EQ(flags, (std::array<i32, 3>{0, -1, -1}));
 }
+
+TEST(DeviceTranslate, InvalidSlotsAreReportedBeforeMissingAtoms)
+{
+    const auto ctx = cuda::DeviceContext::create(0);
+    const auto stream = ctx->stream();
+    cuda::TranslateInstance inst;
+    inst.slots = 3;
+    inst.source_words = inst.target_words = 1;
+    inst.target_slots = 2;
+    const std::array<u32, 3> slots{1, 0, ~u32{0}};
+    // Row 0 holds the missing slot 2; row 1 also sets slot 3, past the source's slots; row 2 sets only slot 4.
+    const std::array<u64, 3> source{4, 4 | 8, 16};
+    const u64 constant = 0;
+    cuda::DeviceBuffer di(ctx, sizeof(inst)), dm(ctx, sizeof(slots)), dc(ctx, 8), ds(ctx, sizeof(source));
+    cuda::DeviceBuffer out(ctx, sizeof(source)), mask(ctx, 3), status(ctx, 3 * sizeof(i32));
+    const auto upload = [&](void* dst, const void* src, usize bytes) {
+        cuda::check(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, stream), "translate invalid upload");
+    };
+    upload(di.data(), &inst, sizeof(inst));
+    upload(dm.data(), slots.data(), sizeof(slots));
+    upload(dc.data(), &constant, 8);
+    upload(ds.data(), source.data(), sizeof(source));
+    const cuda::TranslateView view{static_cast<const cuda::TranslateInstance*>(di.data()), static_cast<const u32*>(dm.data()),
+                                   nullptr, static_cast<const u64*>(dc.data()), nullptr, 1};
+    const auto run = [&](u64 rows) {
+        cuda::check(cuda::translate_rows(view, static_cast<const u64*>(ds.data()), rows, 1, 1, nullptr,
+                                          static_cast<u64*>(out.data()), 1, 1, static_cast<u8*>(mask.data()),
+                                          static_cast<i32*>(status.data()), stream), "translate invalid test");
+        std::array<i32, 3> flags{};
+        cuda::check(cudaMemcpyAsync(flags.data(), status.data(), sizeof(flags), cudaMemcpyDeviceToHost, stream),
+                    "translate invalid status");
+        ctx->synchronize();
+        return flags;
+    };
+    EXPECT_EQ(run(3), (std::array<i32, 3>{3, 1, 3}));
+    EXPECT_EQ(run(1), (std::array<i32, 3>{1, 0, 2}));
+}
 }

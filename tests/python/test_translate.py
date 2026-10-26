@@ -266,8 +266,14 @@ def test_device_missing_and_status():
     torch.cuda.synchronize()
     assert status[0].item() == 1 and status[1].item() == 1
     assert status[2].item() >= 0
-    with pytest.raises(ValueError, match="fixed atom slots"):
-        source.translate(rows, parse(DOMAIN, PROBLEM, atoms="lazy"))
+    lazy = parse(DOMAIN, PROBLEM, atoms="lazy")
+    before = lazy.num_atoms
+    with pytest.raises(ValueError, match=r"fixed atom slots .*target\.frozen\(\)"):
+        source.translate(rows, lazy)
+    assert lazy.num_atoms == before
+    host = source.translate(source.encode(states), lazy)
+    assert np.array_equal(source.translate(rows, lazy.frozen()).cpu().numpy().view(np.uint64),
+                          lazy.translate(host, lazy.frozen()))
 
 
 def test_equal_layout_rows_are_identity():

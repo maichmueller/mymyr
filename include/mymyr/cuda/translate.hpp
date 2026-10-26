@@ -27,10 +27,12 @@ struct TranslateView
     u32 count = 0;
 };
 
-/// Name-based row translation without allocation or host reads. status is int32 [3]: flags, first row, first slot;
-/// flags: 1 missing atom/value, 2 invalid source row/id, 4 unrepresentable numeric value. No error: [0, -1, -1].
-/// Numeric error slots follow the instance's fluent slots, followed by missing constant facts. lossless is bool [rows]. All buffers outlive the stream
-/// work and every graph replay that uses them. Source and target rows must not overlap.
+/// Name-based row translation without allocation or host reads. status is int32 [3]: flags over all rows, then the
+/// first error as the host reports it: flags 1 missing atom/value, 2 invalid source slot or task id, 4 unrepresentable
+/// numeric value. With flag 2 the error is the first row with an invalid source slot (that slot) or task id (-1);
+/// otherwise the first row with a missing or unrepresentable value and its first such slot, where numeric slots follow
+/// the instance's fluent slots, followed by missing constant facts. No error: [0, -1, -1]. lossless is bool [rows].
+/// All buffers outlive the stream work and every graph replay that uses them. Source and target rows must not overlap.
 cudaError_t translate_rows(TranslateView map, const u64* source, u64 rows, u64 stride, u32 source_words,
                             const i32* task_ids, u64* target, u32 target_words, u32 target_row_words,
                             u8* lossless, i32* status, cudaStream_t stream);
