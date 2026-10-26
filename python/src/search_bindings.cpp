@@ -2308,9 +2308,12 @@ const char* k_tree_doc =
     "Every row's goal flag uses this search's goal; a custom goal is also called for rows the search did not test. "
     "Partial trees survive budget and cancellation stops. Recorded beams use the serial step.";
 
-const char* k_iw_family_doc =
-    "The IW family variants also call the observer's on_transition(parent, action, child, state, outcome) for "
-    "every transition (outcome: a TransitionOutcome; child None when pruned). Numeric tasks raise ValueError.";
+const char* k_transition_doc =
+    "The observer's on_transition(parent, action, child, state, outcome) is called for every transition, with the "
+    "most specific TransitionOutcome (BLOCKED and SELF_LOOP before the other reasons; child None when the successor "
+    "got no id).";
+
+const char* k_iw_family_doc = "Numeric tasks raise ValueError.";
 
 const char* k_parallel_doc =
     "Parallel hooks (the make_worker protocol): an observer with make_worker(k) -> observer | None, or a goal "
@@ -2379,14 +2382,19 @@ void bind_search(nb::module_& parent)
 
     nb::enum_<search::TransitionOutcome>(m, "TransitionOutcome",
                                          "What became of a transition's successor (observer.on_transition).")
-        .value("OPENED", search::TransitionOutcome::Opened)
-        .value("REOPENED", search::TransitionOutcome::Reopened)
-        .value("DUPLICATE", search::TransitionOutcome::Duplicate)
-        .value("PRUNED", search::TransitionOutcome::Pruned)
-        .value("DEAD_END", search::TransitionOutcome::DeadEnd)
-        .value("GOAL", search::TransitionOutcome::Goal)
-        .value("BLOCKED", search::TransitionOutcome::Blocked)
-        .value("SELF_LOOP", search::TransitionOutcome::SelfLoop);
+        .value("OPENED", search::TransitionOutcome::Opened, "Entered the search as a new node or open state.")
+        .value("REOPENED", search::TransitionOutcome::Reopened,
+               "Reached on a cheaper path and re-entered the open list (astar_iw).")
+        .value("DUPLICATE", search::TransitionOutcome::Duplicate,
+               "Already known, nothing changed: a width-0 duplicate queue entry, a state already in the tree or among "
+               "the next layer's candidates, a stored state not reached on a cheaper path.")
+        .value("PRUNED", search::TransitionOutcome::Pruned,
+               "Rejected for another reason: not novel, beyond a depth or incumbent bound, or cut by a budget.")
+        .value("DEAD_END", search::TransitionOutcome::DeadEnd, "An infinite heuristic value (astar_iw).")
+        .value("GOAL", search::TransitionOutcome::Goal, "A goal found on generation (rollout_iw).")
+        .value("BLOCKED", search::TransitionOutcome::Blocked, "One of blocked_states; checked before anything else.")
+        .value("SELF_LOOP", search::TransitionOutcome::SelfLoop,
+               "Equal to the state it was generated from; reported before the other reasons except BLOCKED.");
 
     bind_landmarks(m);
 
@@ -3346,7 +3354,8 @@ void bind_search(nb::module_& parent)
                      "(a transition ordering strategy). ",
                     k_layer_doc,
                     k_tree_doc,
-                    k_control_doc})
+                    k_control_doc,
+                    k_transition_doc})
             .c_str());
 
     m.def(
@@ -3408,7 +3417,8 @@ void bind_search(nb::module_& parent)
                      "subplans of the subproblems solved before the one that failed. ",
                     k_layer_doc,
                     k_tree_doc,
-                    k_control_doc})
+                    k_control_doc,
+                    k_transition_doc})
             .c_str());
 
     m.def(
@@ -3591,7 +3601,8 @@ void bind_search(nb::module_& parent)
                      "and weights return FAILED with a message. Novelty statistics are in result.novelty. "
                      "heuristic and costs: as for astar; novelty pruning does not guarantee optimality. ",
                     k_heuristic_doc,
-                    k_control_doc}).c_str());
+                    k_control_doc,
+                    k_transition_doc}).c_str());
 
     m.def(
         "gbfs",
@@ -3945,6 +3956,7 @@ void bind_search(nb::module_& parent)
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -3989,6 +4001,7 @@ void bind_search(nb::module_& parent)
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -4029,6 +4042,7 @@ void bind_search(nb::module_& parent)
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -4074,6 +4088,7 @@ void bind_search(nb::module_& parent)
                      "incumbent_bound: a plan of this length is known elsewhere. max_states counts generated tree "
                      "nodes; there is no max_expanded. ",
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -4116,6 +4131,7 @@ void bind_search(nb::module_& parent)
                      "states holding it). max_seconds spans the whole batch, the other budgets apply per rollout.",
                     k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc,
                     k_parallel_doc,
                     " A worker is a rollout (an index into seeds)."})
@@ -4196,6 +4212,7 @@ void bind_search(nb::module_& parent)
                      "goal=[['(on a b)']]); max_expanded caps the expansions of all workers together, max_states "
                      "applies per worker, max_seconds to the call.",
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc,
                     k_parallel_doc,
                     " A worker is 0 (the certifier) or 1..K."})

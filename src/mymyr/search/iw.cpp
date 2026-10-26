@@ -1026,7 +1026,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                             return reject(TransitionOutcome::Blocked);
                         }
                     if (child == cv)
-                        return reject(TransitionOutcome::SelfLoop);  // self loop
+                        return reject(TransitionOutcome::SelfLoop);
                     const u32 dup = seen.find(tree, child);
                     if (k == 0)
                     {
@@ -1081,11 +1081,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     {
                         const u32 nn = apply_delta(cur.data(), n, d, next);
                         const StateView child{next.data(), nn, d.num, NN};
+                        TransitionOutcome outcome = child == cv ? TransitionOutcome::SelfLoop : TransitionOutcome::Pruned;
                         if (!c.blocked.empty() && c.blocked.contains(child))
+                        {
                             ++st.blocked;
-                        report(s, b, child, k_none,
-                               !c.blocked.empty() && c.blocked.contains(child) ? TransitionOutcome::Blocked
-                               : child == cv ? TransitionOutcome::SelfLoop : TransitionOutcome::Pruned, false);
+                            outcome = TransitionOutcome::Blocked;
+                        }
+                        report(s, b, child, k_none, outcome, false);
                     }
                     return true;
                 });
@@ -1132,9 +1134,18 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         const u32 nn = apply_delta(cur.data(), n, d, next);
                         const StateView child{next.data(), nn, d.num, NN};
                         bool admitted = false;
+                        TransitionOutcome outcome = TransitionOutcome::Pruned;
                         if (!c.blocked.empty() && c.blocked.contains(child))
+                        {
                             ++st.blocked;  // checked first: a blocked state marks no tuple
-                        else if (!add.empty())
+                            outcome = TransitionOutcome::Blocked;
+                        }
+                        else if (add.empty())
+                        {
+                            if (child == cv)
+                                outcome = TransitionOutcome::SelfLoop;  // a self loop adds no atom
+                        }
+                        else
                         {
                             reserve_for_add();
                             admitted = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
@@ -1144,13 +1155,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                                 admitted = seen.find(tree, child) == k_none;
                                 if (admitted)
                                     seen.insert(child, tree.size());
+                                else
+                                    outcome = TransitionOutcome::Duplicate;  // a candidate before
                             }
                         }
                         if (!admitted)
                         {
-                            report(s, b, child, k_none,
-                                   !c.blocked.empty() && c.blocked.contains(child) ? TransitionOutcome::Blocked
-                                   : child == cv ? TransitionOutcome::SelfLoop : TransitionOutcome::Pruned, false);
+                            report(s, b, child, k_none, outcome, false);
                             return true;
                         }
                         report(s, b, child, tree.size() < budget.max_states ? tree.size() : k_none,

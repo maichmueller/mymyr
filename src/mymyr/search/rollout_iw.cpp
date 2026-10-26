@@ -584,6 +584,8 @@ private:
             {
                 if (!m_hot)
                     return;
+                if (outcome == TransitionOutcome::Pruned && m_nodes[child].state == m_nodes[cur].state)
+                    outcome = TransitionOutcome::SelfLoop;
                 const Action act(a);
                 m_hot->on_generate(cur, act, child, cv, true);
                 m_hot->on_transition(cur, act, child, cv, outcome);
@@ -593,7 +595,7 @@ private:
             if (!m_blocked.empty() && m_blocked.contains(cv))
             {
                 ++m_st.blocked;
-                report(TransitionOutcome::Pruned, true);
+                report(TransitionOutcome::Blocked, true);
                 mark_solved(child);
                 return true;
             }

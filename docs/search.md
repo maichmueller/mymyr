@@ -411,7 +411,7 @@ or tree is deleted. `tree.task` owns the task that interprets the labels and row
 | `offsets` | int64 `[N + 1]`: transition CSR offsets; empty for node recording |
 | `t_schema`, `t_binding` | int32 `[T]`, `[T, label_width]`: transition action labels with -1 padding |
 | `t_row`, `t_child` | int32 `[T]`: successor row and admitted node id (-1 when rejected) |
-| `t_outcome` | uint8 `[T]`: numeric `TransitionOutcome` values, including `BLOCKED` and `SELF_LOOP` |
+| `t_outcome` | uint8 `[T]`: numeric `TransitionOutcome` values as [observers](#observers) get them: `OPENED`, `DUPLICATE`, `BLOCKED`, `SELF_LOOP` or `PRUNED` |
 | `row_goal` | uint8 `[R]`: the pass's goal test for every row |
 
 Node `i` occupies row `i`. In transition recording, additional distinct successors follow the nodes in
@@ -452,10 +452,27 @@ variants. The events are `on_start(state)`, `on_expand(id, state)`, `on_generate
 `on_prune(parent, action, state)`, `on_pass(width, stats)` (after an IW pass, a BrFS layer with its depth, an EHC
 lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
-with status `CANCELLED`) and `on_end(status, stats)`; the IW family variants also send
-`on_transition(parent, action, child, state, outcome)`. A search never calls an event the subclass does not override,
+with status `CANCELLED`) and `on_end(status, stats)`. A search never calls an event the subclass does not override,
 and an observer that overrides none is not installed. `on_expand` and `on_generate` are called once per expanded and
 generated state, so their counts equal the result's statistics.
+
+`iw`, `iw_pass`, `siw`, the IW family variants, `astar_iw`, `rollout_iw`, `find_rollouts_parallel` and
+`atomic_goal_portfolio` also send `on_transition(parent, action, child, state, outcome)` for every generated
+transition, after its `on_generate` and `on_prune`; `child` is None when the successor got no id. The outcome is the
+most specific `TransitionOutcome`, the same in all of them:
+
+| Outcome | The successor |
+| --- | --- |
+| `OPENED` | entered the search as a new node or open state |
+| `REOPENED` | was reached on a cheaper path and re-entered the open list (`astar_iw`) |
+| `DUPLICATE` | is already known and nothing changed: a width-0 duplicate queue entry, a state already in the tree or among the next layer's candidates, a stored state not reached on a cheaper path |
+| `BLOCKED` | is one of `blocked_states` (checked first) |
+| `SELF_LOOP` | equals the state it was generated from |
+| `DEAD_END` | has an infinite heuristic value (`astar_iw`) |
+| `GOAL` | is a goal found on generation (`rollout_iw`) |
+| `PRUNED` | was rejected for any other reason: not novel, beyond a depth or incumbent bound, or cut by a budget |
+
+The other searches (`brfs`, `astar`, `gbfs`, `beam`, `ehc`, `anytime_astar`) do not send `on_transition`.
 
 ```python
 from pathlib import Path

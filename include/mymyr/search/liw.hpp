@@ -18,7 +18,7 @@
 // the shared ranks). A null graph means no landmarks: every state has the coordinate BOT.
 //
 // Pass semantics, statistics, budgets, blocked states, goal specs, observer events (plus on_transition with Opened,
-// Duplicate or Pruned) and SearchControl::coordination are those of the IW family engine (search/iw.hpp and
+// Duplicate, Blocked, SelfLoop or Pruned) and SearchControl::coordination are those of the IW family engine (search/iw.hpp and
 // src/mymyr/search/novelty_brfs.hpp). LiwOptions::layers selects an ordered or randomized layer order.
 
 #include "mymyr/search/iw.hpp"
