@@ -571,9 +571,13 @@ Flat device_async(const cuda::ContextPtr& ctx, cuda::DeviceExpander& ex, const c
     cuda::DeviceBuffer binding = to_device(ctx, std::vector<i32>(c * L, 0x5A5A5A5A), s);
     cuda::DeviceBuffer goal = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     cuda::DeviceBuffer offsets(ctx, (N + 1) * sizeof(i32), s), word(ctx, sizeof(u32), s);
+    cuda::DeviceBuffer hashes = to_device(ctx, std::vector<u64>(c, 0x5A5A5A5A5A5A5A5Aull), s);
+    cuda::DeviceBuffer noops = to_device(ctx, std::vector<u8>(c, 0x5A), s);
     rl::Expansion x;
     x.capacity = cap;
     x.words = static_cast<u32>(W);
+    x.succ_hash = static_cast<u64*>(hashes.data());
+    x.noop = static_cast<u8*>(noops.data());
     x.label_width = L;
     x.succ = static_cast<u64*>(succ.data());
     x.parent = static_cast<i32*>(parent.data());
@@ -607,6 +611,8 @@ void expect_async_equal(const Flat& d, const Flat& h, u64 n, u64 cap, u64 W, u32
     EXPECT_EQ(prefix(d.schema, n), prefix(h.schema, n));
     EXPECT_EQ(prefix(d.binding, n * L), prefix(h.binding, n * L));
     EXPECT_EQ(prefix(d.goal, n), prefix(h.goal, n));
+    EXPECT_EQ(prefix(d.hashes, n), prefix(h.hashes, n));
+    EXPECT_EQ(prefix(d.noops, n), prefix(h.noops, n));
     EXPECT_EQ(prefix(d.succ, n * W), prefix(h.succ, n * W));
     EXPECT_TRUE(std::all_of(d.succ.begin() + static_cast<i64>(n * W), d.succ.begin() + static_cast<i64>(cap * W),
                             [](u64 w) { return w == 0; }));

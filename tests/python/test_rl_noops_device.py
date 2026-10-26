@@ -233,3 +233,57 @@ def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
     graph.replay()
     assert not captured[5].any() and not captured[7].any()
     torch.cuda.synchronize()
+
+
+def test_all_noop_fallback_empty_parents_and_zero_capacity():
+    task = pddl_task("""(define (domain idle) (:requirements :strips)
+      (:predicates (p)) (:action idle :parameters () :precondition (and) :effect (and)))""",
+      """(define (problem idle) (:domain idle) (:init) (:goal (p)))""", atoms="dense")
+    rows = np.asarray(task.encode([task.initial_state] * 3))
+    compare(task, rows)
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    empty = rl.expand(task, source[:0], hashes=True, drop_noops=True)
+    assert empty.total == empty.generated == 0 and empty.offsets.tolist() == [0]
+    zero = rl.expand(task, source, capacity=0, hashes=True, drop_noops=True)
+    assert zero.generated == 3 and zero.overflow and zero.total == 0
+    kept = rl.expand(task, source, hashes=True, drop_noops=True)
+    assert kept.generated == kept.total == 3 and kept.noop.all() and not kept.index.any()
+
+
+def test_jax_cuda_digests_match_host():
+    jax = pytest.importorskip("jax")
+    from mymyr._core import _rl_jax
+    if not _rl_jax.has_ffi():
+        pytest.skip("built without the XLA FFI headers")
+    from mymyr.rl.jax import Env
+    task = pddl_task(atoms="dense")
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    source = jax.device_put(rows.view(np.uint32), jax.devices("cuda")[0])
+    expected = rl.expand(task, rows, hashes=True, drop_noops=True)
+    env = Env(task, device="cuda")
+    actual = jax.jit(lambda s: env.expand_flat(s, 16, hashes=True, noops=True, drop_noops=True))(source)
+    assert int(actual.generated) == expected.generated
+    for name in ("succ", "succ_hash", "parent", "schema", "binding", "noop", "index", "offsets"):
+        value = np.asarray(getattr(actual, name)).copy()
+        if name in ("succ", "succ_hash"):
+            value = value.view(np.uint64)
+            if name == "succ_hash":
+                value = value.ravel()
+        np.testing.assert_array_equal(value if name == "offsets" else value[:expected.total], getattr(expected, name))
+    padded = jax.jit(lambda s: env.expand(s, 4, hashes=True, drop_noops=True))(source)
+    np.testing.assert_array_equal(np.asarray(padded.succ_hash).copy().view(np.uint64)[..., 0], expected.pad(4).succ_hash)
+    generic = rl.expand(task, source, hashes=True, drop_noops=True)
+    np.testing.assert_array_equal(np.asarray(generic.succ_hash).copy().view(np.uint64).ravel(), expected.succ_hash)
+    np.testing.assert_array_equal(np.asarray(mymyr.hash_rows(generic.succ)).copy().view(np.uint64).ravel(), expected.succ_hash)
+
+
+def test_numeric_noop_uses_public_float_bits():
+    task = pddl_task("""(define (domain values) (:requirements :strips :fluents)
+      (:predicates (p)) (:functions (x))
+      (:action keep :parameters () :precondition (and) :effect (assign (x) (x)))
+      (:action zero :parameters () :precondition (and) :effect (assign (x) 0)))""",
+      """(define (problem values) (:domain values) (:init (= (x) 0)) (:goal (and)))""",
+      atoms="dense", numeric_storage="f64")
+    rows = np.tile(task.encode([task.initial_state]), (3, 1))
+    rows[:, -1] = np.array([0, 0x8000000000000000, 0x7ff8000000001234], np.uint64)
+    compare(task, rows)

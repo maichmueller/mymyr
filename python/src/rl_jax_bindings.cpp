@@ -1326,7 +1326,11 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashes, bo
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
         if (sv.rows == 0)
+        {
+            if (p.digests.generated)
+                cuda::check(cuda::launch_expansion_generated(0, p.digests.generated->as<u32>(), st), "launch_expansion_generated");
             return;
+        }
         const rl::Expansion x = device_expand(*e, *d, sv, ids, st, p.derived.has_value(), hashes, noops, drop);
         rl::PaddedExpansion out = make_padded(*e, p);
         d->expander->pad(x, sv.rows, out);
@@ -1359,6 +1363,12 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashe
             cuda::check(cudaMemsetAsync(f.goal.data, 0, f.goal.count, st), "cudaMemsetAsync");
         if (f.derived && f.derived->count)
             cuda::check(cudaMemsetAsync(f.derived->data, 0, f.derived->count * 4, st), "cudaMemsetAsync");
+        if (f.digests.hashes && f.digests.hashes->count)
+            cuda::check(cudaMemsetAsync(f.digests.hashes->data, 0, f.digests.hashes->count * 4, st), "cudaMemsetAsync");
+        if (f.digests.noops && f.digests.noops->count)
+            cuda::check(cudaMemsetAsync(f.digests.noops->data, 0, f.digests.noops->count, st), "cudaMemsetAsync");
+        if (f.digests.index && f.digests.index->count)
+            cuda::check(cudaMemsetAsync(f.digests.index->data, 0xFF, f.digests.index->count * 4, st), "cudaMemsetAsync");
         cuda::SuiteExpander& x0 = device_expander(*e, *d, st);
         rl::ExpandOptions opt;
         opt.canonical_order = e->cfg.canonical_order;
