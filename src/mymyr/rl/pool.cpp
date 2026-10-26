@@ -72,6 +72,7 @@ void size_batch(PoolBatch& b, u64 n, u32 W, u32 NN, u32 L, bool goals, bool step
     b.terminated.resize(n);
     b.truncated.resize(step ? n : 0);
     b.invalid.resize(step ? n : 0);
+    b.revisited.resize(step ? n : 0);
     b.goal.resize(n);
     b.at_goal.resize(n);
     b.final_states.resize(step ? n * (W + NN) : 0);
@@ -124,6 +125,9 @@ struct CpuEnvPool::Impl
     std::vector<u64> states, draws, gpos, gneg;
     std::vector<i32> task_ids, steps;
     std::vector<u8> at_goal;  // per env: its state is a goal (EnvBatch::at_goal)
+    std::vector<u64> visited;
+    std::vector<i32> visited_count;
+    alignas(std::atomic_ref<i32>::required_alignment) i32 visited_status = 0;
     EnvBatch batch;
     InstanceSampling sampling;
     std::vector<u32> resets;  // per env: the sampler's reset counter
@@ -344,6 +348,7 @@ struct CpuEnvPool::Impl
             append(out.terminated, o.terminated);
             append(out.truncated, o.truncated);
             append(out.invalid, o.invalid);
+            append(out.revisited, o.revisited);
             append(out.goal, o.goal);
             append(out.at_goal, o.at_goal);
             append(out.final_states, o.final_states);
@@ -461,7 +466,16 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
             I.task_ids[e] = I.sample(e);
         std::fill(I.resets.begin(), I.resets.end(), 1u);
     }
+    if (options.visited_capacity && (options.visited_capacity < 2 || options.visited_capacity > (1u << 20) ||
+                                     (options.visited_capacity & (options.visited_capacity - 1))))
+        throw std::invalid_argument("mymyr: CpuEnvPool: visited capacity must be a power of two in [2, 2^20]");
+    I.visited.resize(u64{I.N} * options.visited_capacity);
+    I.visited_count.resize(options.visited_capacity ? I.N : 0);
     EnvBatch& b = I.batch;
+    b.visited_capacity = options.visited_capacity;
+    b.visited = I.visited.data();
+    b.visited_count = I.visited_count.data();
+    b.visited_status = &I.visited_status;
     b.states = I.states.data();
     b.rows = I.N;
     b.words = I.W;
@@ -501,6 +515,24 @@ bool CpuEnvPool::goals() const noexcept { return m_impl->goals; }
 u32 CpuEnvPool::words() const noexcept { return m_impl->fixed_words; }
 u32 CpuEnvPool::numeric_words() const noexcept { return m_impl->NN; }
 u32 CpuEnvPool::label_width() const noexcept { return m_impl->L; }
+
+u32 CpuEnvPool::visited_capacity() const noexcept { return m_impl->batch.visited_capacity; }
+i32 CpuEnvPool::visited_status() const noexcept
+{
+    return std::atomic_ref<i32>(m_impl->visited_status).load(std::memory_order_relaxed);
+}
+
+void CpuEnvPool::clear_visited(const u32* env_ids, u64 n)
+{
+    Impl& I = *m_impl;
+    const std::vector<u32> ids = I.env_list(env_ids, n);
+    std::lock_guard lock(I.mu);
+    I.check_envs(ids, env_ids == nullptr, "clear_visited");
+    std::vector<u8> mask(I.N, 0);
+    for (u32 e : ids)
+        mask[e] = 1;
+    I.env.clear_visited(I.batch, mask.data());
+}
 
 PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos, const u64* goal_neg,
                             u32 goal_words)
@@ -613,7 +645,7 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
         PoolBatch& o = job->out;
         job->so = StepOutputs{o.reward.data(), o.terminated.data(), o.truncated.data(), o.count.data(),
                               o.final_states.data(), o.schema.data(), o.binding.data(), I.L, o.invalid.data(),
-                              o.goal.data(), W};
+                              o.goal.data(), W, o.revisited.data()};
         job->ticket = I.next_ticket++;
         if (job->all)
             std::fill(I.busy.begin(), I.busy.end(), u8{1});

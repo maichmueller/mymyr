@@ -76,6 +76,7 @@ using PoolArray = std::vector<T, NoInitAllocator<T>>;
 
 struct PoolOptions
 {
+    u32 visited_capacity = 0;  // 0: disabled; power of two in [2, 2^20]
     u32 threads = 0;     // worker threads (0: the hardware's)
     bool goals = false;  // per-env goal masks
     /// Atom words of every batch's rows (at least the suite's words()); 0: each batch is as wide as the widest instance
@@ -100,7 +101,7 @@ struct PoolBatch
     PoolArray<i32> steps;         // [B]: the episodes' step counts
     PoolArray<u64> goal_pos, goal_neg;  // [B, words] with per-env goals, else empty
     PoolArray<f32> reward;         // [B]
-    PoolArray<u8> terminated, truncated, invalid, goal;  // [B]; terminated and goal also report reset states
+    PoolArray<u8> terminated, truncated, invalid, goal, revisited;  // [B]; terminated and goal also report reset states
     PoolArray<u8> at_goal;         // [B]: the observed states are goals (after the step: the autoresets' states)
     PoolArray<u64> final_states;   // [B, words + numeric_words]: the reached states (before the autoreset)
     PoolArray<i32> schema;         // [B]: the actions' labels (-1: no move)
@@ -130,6 +131,11 @@ public:
     [[nodiscard]] u32 words() const noexcept;
     [[nodiscard]] u32 numeric_words() const noexcept;
     [[nodiscard]] u32 label_width() const noexcept;
+    [[nodiscard]] u32 visited_capacity() const noexcept;
+    /// Sticky overflow status (bit 0), safely readable while steps run.
+    [[nodiscard]] i32 visited_status() const noexcept;
+    /// Clears selected idle environments and inserts their current states.
+    void clear_visited(const u32* env_ids = nullptr, u64 n = 0);
 
     /// Resets envs `env_ids` [n] (null: every env, n ignored) into instances `task_ids` [n] (null: sampled ones with
     /// PoolOptions::sampling, else their current ones) with goal masks `goal_pos` / `goal_neg` [n, goal_words] (null:

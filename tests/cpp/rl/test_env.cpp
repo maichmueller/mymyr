@@ -11,6 +11,7 @@
 #include "mymyr/rl/env.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/task/task.hpp"
 
@@ -540,4 +541,43 @@ TEST(HostEnv, InvalidLabelsDoNotMove)
     EXPECT_THROW(env.step(x.b, x.out, rl::Labels{nullptr, binding.data(), x.L}), std::invalid_argument);
     rl::HostEnv indexed(table, {});
     EXPECT_THROW(indexed.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), x.L}), std::invalid_argument);
+}
+
+TEST(Visited, ReservedKeyAndWraparound)
+{
+    constexpr u32 H = 8;
+    std::array<u64, H> table{};
+    i32 count = 0;
+    EXPECT_FALSE(rl::visited_insert(table.data(), H, count, 0));
+    EXPECT_TRUE(rl::visited_contains(table.data(), H, count, rl::k_visited_zero));
+    EXPECT_TRUE(rl::visited_insert(table.data(), H, count, rl::k_visited_zero));
+    EXPECT_EQ(count, 1);
+    for (u64 key : {7, 15, 23, 31, 39})
+        EXPECT_FALSE(rl::visited_insert(table.data(), H, count, key));
+    EXPECT_EQ(table[7], 7);
+    EXPECT_EQ(table[0], 15);
+    EXPECT_EQ(table[1], 23);
+    EXPECT_EQ(count, 6);
+    EXPECT_FALSE(rl::visited_insert(table.data(), H, count, 47));
+    EXPECT_EQ(count, 8);
+    EXPECT_FALSE(rl::visited_contains(table.data(), H, count, 47));
+    EXPECT_TRUE(rl::visited_contains(table.data(), H, count, 39));
+    EXPECT_TRUE(rl::visited_insert(table.data(), H, count, 15));
+    rl::visited_clear(table.data(), H, count);
+    EXPECT_EQ(count, 0);
+    EXPECT_EQ(table, (std::array<u64, H>{}));
+}
+
+TEST(Visited, TinyTableAndPadding)
+{
+    std::array<u64, 2> table{};
+    i32 count = 0;
+    EXPECT_FALSE(rl::visited_insert(table.data(), 2, count, 1));
+    EXPECT_FALSE(rl::visited_insert(table.data(), 2, count, 3));
+    EXPECT_EQ(count, 2);
+    std::array<u64, 3> hashes{1, 3, 1};
+    std::array<i32, 3> parent{0, 0, -1};
+    std::array<u8, 3> mask{};
+    rl::visited_mask(table.data(), &count, 2, hashes.data(), parent.data(), nullptr, 3, mask.data());
+    EXPECT_EQ(mask, (std::array<u8, 3>{1, 0, 0}));
 }
