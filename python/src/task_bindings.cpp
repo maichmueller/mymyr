@@ -2103,7 +2103,7 @@ nb::object frozen_task(nb::handle source, std::string_view atoms)
     if (twin.get() == owner.core->task.get())
         return nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
     nb::object original = nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
-    std::lock_guard lock(owner.core->frozen_mutex);
+    nb::ft_lock_guard lock(owner.core->frozen_mutex);
     auto& cached = owner.core->frozen_cores[twin->uid()];
     if (cached.wrapper.is_valid())
     {

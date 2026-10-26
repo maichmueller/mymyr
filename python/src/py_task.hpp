@@ -55,7 +55,7 @@ public:
     u32 label_width = 0;
     /// Expected successors per state (rounded up, with headroom), for sizing rl.expand outputs (see expand()).
     std::atomic<u32> branching{8};
-    std::mutex frozen_mutex;
+    nb::ft_mutex frozen_mutex;
     struct FrozenCore
     {
         std::shared_ptr<PyTaskCore> core;

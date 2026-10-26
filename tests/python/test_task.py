@@ -265,6 +265,40 @@ def test_frozen_wrapper_can_be_collected_and_recreated():
     assert source_reference() is None
 
 
+def test_frozen_cache_with_concurrent_collection():
+    import gc
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    lazy = text_task("gripper__prob05", atoms="lazy")
+    barrier = threading.Barrier(9)
+    stop = threading.Event()
+
+    def freeze(worker):
+        local = lazy.local()
+        mode = ("auto", "reachable", "dense")[worker % 3]
+        barrier.wait()
+        for _ in range(100):
+            twin = local.frozen(mode)
+            assert twin is lazy.frozen(mode)
+            del twin
+
+    def collect():
+        barrier.wait()
+        while not stop.is_set():
+            gc.collect()
+
+    with ThreadPoolExecutor(9) as pool:
+        collecting = pool.submit(collect)
+        pending = [pool.submit(freeze, worker) for worker in range(8)]
+        try:
+            for result in pending:
+                result.result()
+        finally:
+            stop.set()
+            collecting.result()
+
+
 def test_frozen_uses_the_source_reachability_budget():
     lazy = text_task("gripper__prob05", atoms="lazy", reachability_budget=1)
     assert lazy.frozen().atom_mode == "dense"
