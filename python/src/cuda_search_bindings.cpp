@@ -351,6 +351,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                           "rollouts, the reached fluent atoms.")
         .def("__len__", [](const PyIwBatch& x) { return x.b.n; })
         .def_prop_ro("status", [](const PyIwBatch& x) { return x.b.status; }, "per search")
+        .def_prop_ro("message", [](const PyIwBatch& x) { return x.b.message; },
+                     "Why the searches with status FAILED could not run (empty when none failed).")
         .def_prop_ro("solved",
                      [](const PyIwBatch& x) {
                          std::vector<bool> out(x.b.n);
@@ -558,7 +560,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
         "max_seconds spans the call.\n\n"
         "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it raises ValueError when a search reaches it.\n\n"
+        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
+        "IwBatch.message).\n\n"
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
@@ -612,7 +615,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "numeric constraints, or (positive slots, negative slots). Not reported: "
         "derived atoms, landing states, co-occurrence. "
         "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it raises ValueError when a search reaches it.");
+        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
+        "IwBatch.message).");
 
     m.def(
         "batched_iw1",
@@ -736,7 +740,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "search i runs on instance task_ids[i] (host ints, or an int32 CUDA array read after the work on `stream`); "
         "device starts are rows of at most the table's width. "
         "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it raises ValueError when a search reaches it.");
+        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
+        "IwBatch.message).");
 #undef MYMYR_MULTI_IW_COMMON_ARGS
 }
 }  // namespace mymyr::python

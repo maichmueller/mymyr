@@ -51,13 +51,20 @@ struct Regroup
 /// Bytes of one search's novelty table of `arity` over rows of `words` atom words.
 u64 table_bytes_per_search(u32 arity, u32 words) { return arity ? 8 * miw::table_words(arity, std::max(words, 1u)) : 8; }
 
+/// The refusal of a pass whose single novelty table exceeds table_bytes: the searches that reach the pass end there
+/// with status Failed and the refusal as the batch's message (run_group); the others keep their results.
+struct TableRefusal : std::invalid_argument
+{
+    using std::invalid_argument::invalid_argument;
+};
+
 /// Searches per group whose novelty tables of `arity` fit `budget`; refuses a pass whose single table does not fit
 /// (it is called when that pass starts, or grows its table).
 u32 table_group(u32 arity, u32 words, u64 budget)
 {
     const u64 per = table_bytes_per_search(arity, words);
     if (arity && per > budget)
-        throw std::invalid_argument("mymyr: device IW(" + std::to_string(arity) + "): the novelty table requires " +
+        throw TableRefusal("mymyr: device IW(" + std::to_string(arity) + "): the novelty table requires " +
                                     std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * std::max(words, 1u)) +
                                     " atom slots, and table_bytes is " + std::to_string(budget) +
                                     " (raise table_bytes=, or lower max_width)");
@@ -502,6 +509,26 @@ struct DeviceMultiIw::Impl
     void refuse_unless_room() const;
     /// Refuses a state whose successors need `need` bytes (0: a one-row chunk's allocation failed).
     [[noreturn]] void refuse_room(u64 need) const;
+    /// What the searches hold of the context's memory (refusals), and the refusal of an allocation they did not size
+    /// against the context's room (`phase`: what they were allocating).
+    [[nodiscard]] std::string held() const;
+    [[noreturn]] void refuse_memory_failure() const;
+    const char* phase = "the task's device tables and the successor generator";
+    /// f(), with an allocation failure turned into refuse_memory_failure().
+    template<class F>
+    auto guarded(F&& f)
+    {
+        try
+        {
+            return f();
+        }
+        catch (const CudaError& e)
+        {
+            if (!out_of_memory(e))
+                throw;
+            refuse_memory_failure();
+        }
+    }
     /// The estimated bytes of a one-row chunk's candidates, and of the candidate buffers a chunk reuses.
     [[nodiscard]] u64 row_candidate_bytes() const;
     [[nodiscard]] u64 candidate_buffer_bytes() const;
@@ -542,7 +569,7 @@ DeviceMultiIw::DeviceMultiIw(ContextPtr ctx, TaskPtr task, const MultiIwOptions&
         throw std::invalid_argument("mymyr: DeviceMultiIw: chunk_states must be at least 1");
     if (m->o.max_next_layer_states == 0)
         throw std::invalid_argument("mymyr: DeviceMultiIw: max_next_layer_states must be positive");
-    m->setup();
+    m->guarded([&] { m->setup(); });
 }
 
 DeviceMultiIw::~DeviceMultiIw()
@@ -715,8 +742,7 @@ MultiIwBatch DeviceMultiIw::run(DeviceStarts starts, std::span<const search::Goa
     DeviceGuard guard(m->ctx->device());
     if (stream && stream != m->s)
         stream_wait(m->s, stream);  // the starts were written on `stream`
-    MultiIwBatch out = m->run(starts, goals, seeds);
-    return out;
+    return m->guarded([&] { return m->run(starts, goals, seeds); });
 }
 
 MultiIwBatch DeviceMultiIw::run(std::span<const State> starts, std::span<const search::GoalSpec::AtomGoal> goals, std::span<const u64> seeds)
@@ -733,17 +759,21 @@ MultiIwBatch DeviceMultiIw::run(std::span<const State> starts, std::span<const s
     std::vector<u64> rows(starts.size() * static_cast<u64>(w), 0);
     for (usize i = 0; i < starts.size(); ++i)
         numeric::encode(*m->task, starts[i].view(), rows.data() + i * w, w);
-    DevArray<u64> dev;
-    dev.ensure(m->ctx, std::max<u64>(rows.size(), 1), m->s);
-    to_device(dev.data(), rows.data(), rows.size(), m->s);
-    MultiIwBatch out = m->run(DeviceStarts{dev.data(), w, w, static_cast<u32>(starts.size())}, goals, seeds);
-    return out;
+    return m->guarded(
+        [&]
+        {
+            DevArray<u64> dev;
+            dev.ensure(m->ctx, std::max<u64>(rows.size(), 1), m->s);
+            to_device(dev.data(), rows.data(), rows.size(), m->s);
+            return m->run(DeviceStarts{dev.data(), w, w, static_cast<u32>(starts.size())}, goals, seeds);
+        });
 }
 
 
 MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const search::GoalSpec::AtomGoal> goals, std::span<const u64> seeds)
 {
     const auto t0 = Clock::now();
+    phase = "the searches' nodes, novelty tables and candidate buffers";
     st = MultiIwStats{};
     st.host_schemas = gen->placement(o.witness_pruning).host_count;
     const u32 n = starts.rows;
@@ -976,7 +1006,24 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
             sv.reached = reached.ensure(ctx, u64{count} * W, s);
             sv.reached_words = W - task->numeric_slots();
         }
-        run_pass(starts, k, rule, pending, k == first);
+        try
+        {
+            run_pass(starts, k, rule, pending, k == first);
+        }
+        catch (const TableRefusal& e)
+        {
+            // (what the pass computed is dropped: the refused searches report the pass with status Failed)
+            search::IwPassStatistics p;
+            p.width = k;
+            p.status = search::SearchStatus::Failed;
+            push_all(p);
+            for (u32 id : pending)
+                out.status[g0 + id] = search::SearchStatus::Failed;
+            if (out.message.find(e.what()) == std::string::npos)
+                out.message += (out.message.empty() ? "" : "; ") + std::string(e.what());
+            pending.clear();
+            break;
+        }
         to_host(counters, sv.expanded, 4 * u64{count}, s);
         to_host(codes, sv.status, count, s);
         to_host(depth, sv.goal_depth, count, s);
@@ -1146,7 +1193,22 @@ void DeviceMultiIw::Impl::refuse_unless_room() const
 void DeviceMultiIw::Impl::refuse_room(u64 need) const
 {
     refuse_successors(*ctx, "device IW", "a state", most_successors, need, device_room(*ctx) + candidate_buffer_bytes(),
-                      "Raise the Context's max_bytes, or use the CPU search.");
+                      "Raise the Context's max_bytes, or use the CPU search.",
+                      static_cast<u64>(W) * 8 + 4 * static_cast<u64>(L) + 40, held());
+}
+
+std::string DeviceMultiIw::Impl::held() const
+{
+    const u64 nodes = n_rows.bytes() + n_parent.bytes() + n_search.bytes() + n_label.bytes() + n_flags.bytes();
+    return held_text(*ctx, {{"search nodes", nodes},
+                            {"novelty tables", table.bytes()},
+                            {"dedup table", d_table.bytes() + d_owner.bytes() + d_rank.bytes() + d_map.bytes() + d_flags.bytes()},
+                            {"candidate buffers", candidate_buffer_bytes()}});
+}
+
+void DeviceMultiIw::Impl::refuse_memory_failure() const
+{
+    refuse_memory(*ctx, "device IW", phase, held(), "Raise the Context's max_bytes, or use the CPU search.");
 }
 
 bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)

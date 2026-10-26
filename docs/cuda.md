@@ -70,8 +70,9 @@ A*/GBFS expand a state's successors at once and raise `ValueError` naming the su
 what the context has left (raise the Context's `max_bytes`, or use the CPU search).
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
 into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
-`batched_iw1` and `rollouts`); a pass whose table cannot fit even one search raises `ValueError` with its required
-byte size and the budget when a search reaches that pass, so that searches solved at a lower width run. Wide exact novelty uses
+`batched_iw1` and `rollouts`); a pass whose table cannot fit even one search ends the searches that reach it with
+status `FAILED`, and the batch's `message` gives its required byte size and the budget; the searches solved at a lower
+width keep their results. Wide exact novelty uses
 full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
 host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only

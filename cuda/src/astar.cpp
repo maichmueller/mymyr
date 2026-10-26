@@ -212,6 +212,8 @@ struct Driver
     Clock::time_point t0, deadline;
     bool timed = false;
     u64 states_at_goal = 0;  // the states stored when the goal's parent was expanded (0: count)
+    /// What the search was allocating (refusals of an allocation that failed).
+    const char* phase = "the task's device tables, the heuristic and the successor generator";
 
     Driver(ContextPtr c, TaskPtr t, const DeviceBestFirstOptions& opt, bool gr) : ctx(std::move(c)), task(std::move(t)), o(opt), greedy(gr) {}
 
@@ -412,10 +414,29 @@ struct Driver
         const u64 room = device_room(*ctx) + chunk_scratch_bytes();
         const std::string search = greedy ? "device GBFS" : "device A*";
         if (ns == 1)
-            refuse_successors(*ctx, search, "a state", M, need, room,
-                              "Raise the Context's max_bytes, or use the CPU search.");
+            refuse_successors(*ctx, search, "a state", M, need, room, "Raise the Context's max_bytes, or use the CPU search.",
+                              candidate_bytes(), held());
         refuse_successors(*ctx, search, "a chunk of " + std::to_string(ns) + " states", M, need, room,
-                          "Lower chunk_states, raise the Context's max_bytes, or use the CPU search.");
+                          "Lower chunk_states, raise the Context's max_bytes, or use the CPU search.", candidate_bytes(), held());
+    }
+    /// What the search holds of the context's memory (refusals).
+    [[nodiscard]] std::string held() const
+    {
+        const u64 node_bytes = g.bytes() + h.bytes() + parent.bytes() + sidx.bytes() + depth.bytes() + flags.bytes() + best.bytes();
+        const u64 open_bytes = open.bytes() + run_key.bytes() + run_begin.bytes() + run_key2.bytes() + run_begin2.bytes() +
+                               run_count.bytes() + run_count2.bytes();
+        const u64 step_bytes = wprefix.bytes() + pos.bytes() + batch_id.bytes() + batch_g.bytes() + batch_depth.bytes() +
+                               wbegin.bytes() + batch_rows.bytes() + pop_flags.bytes() + pop_temp.size() + chunk_scratch_bytes();
+        return held_text(*ctx, {{"state rows", rows.bytes()},
+                                {"search nodes", node_bytes},
+                                {"state table", table.size()},
+                                {"open list", open_bytes},
+                                {"step and chunk buffers", step_bytes}});
+    }
+    [[noreturn]] void refuse_memory_failure() const
+    {
+        refuse_memory(*ctx, greedy ? "device GBFS" : "device A*", phase, held(),
+                      "Raise the Context's max_bytes, or use the CPU search.");
     }
     /// The step's scratch (batch, pop window, the batch's rows).
     void size_step()
@@ -1175,6 +1196,7 @@ DeviceBestFirstResult Driver::run()
     graphs = o.graphs && GraphExec::enabled() && async_h && !host_goal && gen->capturable(witness) && K <= k_max_graph_chunks;
     loops = graphs && GraphExec::loops_enabled() && !timed;
     r.setup_seconds = s_since(t_setup);
+    phase = "the search's nodes, open list and step buffers";
     t0 = Clock::now();
 
     auto finish = [&]
@@ -1298,7 +1320,17 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
     try
     {
         Driver d(std::move(ctx), std::move(task), options, greedy);
-        return d.run();
+        try
+        {
+            return d.run();
+        }
+        catch (const CudaError& e)
+        {
+            // (an allocation the search did not size against the context's room: its phase and what it holds)
+            if (!out_of_memory(e))
+                throw;
+            d.refuse_memory_failure();
+        }
     }
     catch (const NegativeCost& e)
     {
