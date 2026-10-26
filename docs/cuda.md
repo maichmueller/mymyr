@@ -31,9 +31,9 @@ that knows the toolkit's PTX version (newer than the minimum for SASS), so build
 run on and keep PTX only as the forward-compatible fallback for GPUs newer than the build. A GPU that has neither
 matching SASS nor loadable PTX fails at the first device call.
 
-Device operations include task upload and smoke kernels, BrFS, multi-IW, LIW(1) and rollouts; batched grounded h-max, h-add,
-h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for `mymyr.rl.expand`. Device arrays can exchange
-data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
+Device operations include task upload and smoke kernels, BrFS, multi-IW, LIW(1) and rollouts; batched grounded
+h-max, h-add, h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for
+`mymyr.rl.expand`. Device arrays can exchange data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
 cap it. Arrays and device tasks keep their context alive.
 
 CUDA upload, expansion, BrFS, multi-IW, rollouts, state spaces, RL environments and A*/GBFS support numeric fluent
@@ -57,16 +57,16 @@ fallback. Numeric goal expressions use at most 64 stack values. Callable goals a
 search require CPU search; device A*/GBFS use the task goal. See [Formula values](formulas.md) for goal construction.
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
-`cuda.liw(task_or_table, starts, landmarks=graph, ...)` runs width zero then LIW(1), with the status,
-plan, goal state and per-pass counts of `search.liw(..., max_width=1)`. `landmarks` is one
-`search.FactLandmarkGraph` shared by the searches or a sequence with one graph per start; `None` uses BOT throughout.
-`disjunctive`, `all_private` and `unshared_atoms` select the same landmark grouping as on the CPU. A TaskTable uses
-`task_ids` to select each search's instance. `cuda.rollouts(..., landmarks=graph)` runs randomized LIW(1), one graph
-shared across the seeds or one per seed; its seeded layer ordering equals CPU LIW. LIW(2) requires CPU search;
-LIW does not support numeric fluents. Exact rank-aware novelty preserves CPU admission order for every group and chunk size, including wide
-rows, and chunk shapes capture and replay as CUDA graphs. Each rank needs one bit per slot and an empty-tuple word;
-`table_bytes` bounds the tables per group. A table that cannot fit raises `ValueError` with its required size and the
-option to raise.
+`cuda.liw(task_or_table, starts, landmarks=graph, ...)` runs the width-0 pass and then LIW(1) from every start:
+search i has the status, plan, goal state and per-pass counts of `search.liw(task, start=starts[i], max_width=1, ...)`
+whatever the group and chunk sizes. `landmarks` is one `search.FactLandmarkGraph` shared by every search or a sequence
+with one graph per start (`None`: every state has the BOT coordinate); `disjunctive`, `all_private` and
+`unshared_atoms` group the landmarks into ranks as in `search.liw`. Over a TaskTable, `task_ids` selects each search's
+instance. `cuda.rollouts(..., landmarks=...)` runs randomized LIW(1) with one graph for every seed or one per seed;
+rollout k equals `search.liw(..., max_width=1, layer_order="randomized", seed=k)`. LIW(2) and tasks with numeric
+fluents run on the host (`search.liw`). A search's novelty table holds, per landmark rank (BOT included), one bit per
+atom slot and one word for the empty tuple; groups shrink to `table_bytes`, and a table that cannot fit raises
+`ValueError` naming the option to raise.
 
 ```python skip-if-no-cuda
 from pathlib import Path

@@ -60,10 +60,12 @@ u32 table_group(u32 arity, u32 words, u64 budget, u32 ranks = 0)
 {
     const u64 per = table_bytes_per_search(arity, words, ranks);
     if (arity && per > budget)
-        throw std::invalid_argument("mymyr: device " + std::string(ranks ? "LIW(" : "IW(") + std::to_string(arity) + "): the novelty table requires " +
-                                    std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * std::max(words, 1u)) +
-                                    " atom slots, and table_bytes is " + std::to_string(budget) +
-                                    " (raise table_bytes=, or lower max_width)");
+        throw std::invalid_argument("mymyr: device " + std::string(ranks ? "LIW(" : "IW(") + std::to_string(arity) +
+                                    "): the novelty table requires " + std::to_string(per) + " bytes per search for " +
+                                    std::to_string(u64{64} * std::max(words, 1u)) + " atom slots" +
+                                    (ranks ? " and " + std::to_string(ranks) + " landmark ranks" : std::string()) +
+                                    ", and table_bytes is " + std::to_string(budget) +
+                                    (ranks ? " (raise table_bytes=)" : " (raise table_bytes=, or lower max_width)"));
     return static_cast<u32>(std::clamp<u64>(budget / per, 1, u64{1} << 24));
 }
 

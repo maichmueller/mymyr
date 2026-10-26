@@ -30,7 +30,7 @@ namespace mymyr::cuda
 {
 struct DeviceRolloutOptions
 {
-    MultiIwOptions iw;         // the ladder of every rollout (iw.track_reached is forced on); iw.landmarks selects LIW(1)
+    MultiIwOptions iw;         // the ladder of every rollout (iw.track_reached is forced on; iw.landmarks: LIW(1))
     std::vector<u64> seeds;    // one rollout per seed
     std::optional<State> start;  // default: the task's initial state
     /// Empty (the task's goal) or one per rollout.
@@ -55,7 +55,8 @@ struct DeviceRolloutsResult
 class DeviceRollouts
 {
 public:
-    /// iw.track_reached is forced on. iw.landmarks selects LIW(1), with a shared grouping or one per seed. Throws std::invalid_argument for tasks the device does not run.
+    /// iw.track_reached is forced on. iw.landmarks selects LIW(1), with one grouping shared by every rollout or one
+    /// per seed. Throws std::invalid_argument for tasks the device does not run.
     DeviceRollouts(ContextPtr ctx, TaskPtr task, const MultiIwOptions& iw = {});
     /// One rollout per seed from `start` (null: the task's initial state); goals: empty or one per seed.
     MultiIwBatch run(std::span<const u64> seeds, const State* start = nullptr,
