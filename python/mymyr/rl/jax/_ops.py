@@ -16,7 +16,7 @@ from mymyr.rl._ops import HerBatch
 from . import rng
 from ._env import FlatExpansion, PaddedExpansion, key_seed
 
-__all__ = ["HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks"]
+__all__ = ["HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
 
 _STRATEGIES = {"future": 0, "final": 1, "episode": 2}
 
@@ -75,6 +75,81 @@ def _scatter_or(n: int, m: int, rows: Any, cols: Any, flags: Any) -> Any:
     if n == 0 or m == 0 or rows.shape[0] == 0:
         return mask.astype(jnp.bool_)
     return mask.at[rows, cols].max(flags.astype(jnp.uint8), mode="promise_in_bounds").astype(jnp.bool_)
+
+
+# ------------------------------------------------------------------------------------------------ visit membership
+
+
+def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: Any = None) -> Any:
+    """Bool [M] membership in the per-episode tables, equal to :func:`mymyr.rl.visited_mask`.
+
+    ``table`` uint32 [N, 2H] and ``succ_hash`` uint32 [M, 2] hold low/high halves of 64-bit hashes, as in
+    :class:`EnvState`. With JAX x64 enabled, (u)int64 [N, H] and [M] are accepted too. ``count`` int32 [N] is the
+    number of stored hashes (H denotes overflow); H must be a power of two in [2, 2^20]. ``parent`` int32 [M]
+    indexes environment rows, or ``rows`` int32 [P] when supplied. Negative and out-of-range indices return False.
+    Zero hashes map to 0x9E3779B97F4A7C15; equal hashes share an entry. Overflow can cause false negatives.
+    The inputs are read only, and the operation works under jit and vmap without enabling x64.
+    """
+    table = jnp.asarray(table)
+    hashes = jnp.asarray(succ_hash)
+    if table.ndim != 2:
+        raise ValueError("mymyr: visited table must have shape [N, 2H] uint32 or [N, H] (u)int64")
+
+    def halves(x):
+        if x.dtype == jnp.uint32:
+            if x.shape[-1] % 2:
+                raise ValueError("mymyr: visited hashes need an even number of uint32 halves")
+            return x[..., 0::2], x[..., 1::2]
+        if x.dtype.itemsize == 8 and jnp.issubdtype(x.dtype, jnp.integer):
+            return x.astype(jnp.uint32), (x >> 32).astype(jnp.uint32)
+        raise TypeError("mymyr: visited hashes must be uint32 low/high halves or (u)int64 with x64 enabled")
+
+    lo, hi = halves(table)
+    if (hashes.dtype == jnp.uint32 and (hashes.ndim != 2 or hashes.shape[-1] != 2)) or (
+        hashes.dtype != jnp.uint32 and hashes.ndim != 1
+    ):
+        raise ValueError("mymyr: succ_hash must have shape [M, 2] uint32 or [M] (u)int64")
+    key_lo, key_hi = halves(hashes)
+    key_lo, key_hi = key_lo.reshape(-1), key_hi.reshape(-1)
+    n, h = lo.shape
+    if h < 2 or h > 1 << 20 or h & (h - 1):
+        raise ValueError("mymyr: visited capacity must be a power of two in [2, 2^20]")
+    count = jnp.asarray(count, jnp.int32)
+    parent = jnp.asarray(parent, jnp.int32)
+    if count.shape != (n,) or parent.shape != key_lo.shape:
+        raise ValueError("mymyr: count must have shape [N] and parent must have shape [M]")
+    valid = (parent >= 0) & (parent < n)
+    row = parent
+    if rows is not None:
+        rows = jnp.asarray(rows, jnp.int32)
+        if rows.ndim != 1:
+            raise ValueError("mymyr: rows must have shape [P]")
+        if rows.shape[0] == 0:
+            return jnp.zeros(parent.shape, jnp.bool_)
+        valid = (parent >= 0) & (parent < rows.shape[0])
+        row = rows[jnp.clip(parent, 0, rows.shape[0] - 1)]
+        valid &= (row >= 0) & (row < n)
+    if n == 0 or parent.shape[0] == 0:
+        return jnp.zeros(parent.shape, jnp.bool_)
+    row = jnp.clip(row, 0, n - 1)
+    zero = (key_lo == 0) & (key_hi == 0)
+    key_lo = jnp.where(zero, jnp.uint32(0x7F4A7C15), key_lo)
+    key_hi = jnp.where(zero, jnp.uint32(0x9E3779B9), key_hi)
+    at = (key_lo & jnp.uint32(h - 1)).astype(jnp.int32)
+    active = valid & (count[row] != 0)
+
+    def probe(carry):
+        step, at, active, found = carry
+        low, high = lo[row, at], hi[row, at]
+        match = (low == key_lo) & (high == key_hi)
+        found |= active & match
+        active &= ~match & ((low != 0) | (high != 0))
+        return step + 1, (at + 1) & (h - 1), active, found
+
+    return jax.lax.while_loop(
+        lambda c: (c[0] < h) & jnp.any(c[2]), probe,
+        (jnp.int32(0), at, active, jnp.zeros(parent.shape, jnp.bool_)),
+    )[3]
 
 
 # ------------------------------------------------------------------------------------------------ novelty
