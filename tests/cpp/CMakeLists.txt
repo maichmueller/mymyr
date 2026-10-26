@@ -24,6 +24,7 @@ add_executable(mymyr_tests
     core/test_version.cpp
     formalism/test_text_format.cpp
     task/test_task.cpp
+    task/test_slot_map.cpp
     successor/test_successors.cpp
     successor/test_bindings.cpp
     successor/test_condition_numbers.cpp
@@ -112,6 +113,7 @@ if(TARGET mymyr_cuda)
     # engine on the suite; the device BrFS and the device expand against the CPU; multi-search IW and device
     # rollouts against search::iw() and find_rollouts_parallel. Runs on GPU 0 only; skips when no device is visible.
     add_executable(mymyr_cuda_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_cuda.cpp
+                                    ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_translate.cpp
                                     ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_brfs.cpp
                                     ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_iw.cpp
                                     ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_deep_matchers.cpp)

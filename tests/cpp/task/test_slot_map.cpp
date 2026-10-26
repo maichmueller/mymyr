@@ -13,7 +13,8 @@ TaskPtr task(bool fixed, bool fact, TaskOptions::Atoms mode = TaskOptions::Atoms
 {
     std::istringstream text(std::string("O 2\nP 1\n") + (fixed ? "S" : "F") +
                             " 1 p\nSI " + (fixed && fact ? "1\n0 0\n" : "0\n") +
-                            "FI " + (!fixed && fact ? "1\n0 0\n" : "0\n") + "G 0\n" + (fixed ? "A 0\n" : "A 1\nset 1\nL 0\nE 1\n0\nL 0\nF 1\n0 1 0\n"));
+                            "FI " + (!fixed && fact ? "1\n0 0\n" : "0\n") + "G 0\n" +
+                            (fixed ? "A 0\n" : "A 1\nset 1\nL 0\nE 1\n0\nL 0\nF 1\n0 1 0\n"));
     TaskOptions options;
     options.atoms = mode;
     return Task::create(formalism::read_task_text(text), options);
@@ -45,6 +46,19 @@ TEST(SlotMap, LazyDestinationInternsConstantFacts)
     const auto source = task(true, true), target = task(false, false, TaskOptions::Atoms::Lazy);
     const auto map = SlotMap::between(*source, *target);
     EXPECT_EQ(target->format_atoms(map->translate(source->initial_state())), (std::vector<std::string>{"(p o0)"}));
+}
+
+TEST(SlotMap, StaticFactsWithoutAFluentDestinationAreLossy)
+{
+    const auto source = task(true, true);
+    std::istringstream text("O 2\nP 1\nF 1 p\nSI 0\nFI 0\nG 0\nA 0\n");
+    const auto target = Task::create(formalism::read_task_text(text));
+    const auto map = SlotMap::between(*source, *target);
+    ASSERT_EQ(map->missing_constants(), (std::vector<std::string>{"(p o0)"}));
+    EXPECT_THROW((void)map->translate(State{}), std::invalid_argument);
+    bool lossless = true;
+    (void)map->translate(State{}, true, &lossless);
+    EXPECT_FALSE(lossless);
 }
 
 TEST(SlotMap, SnapshotsRemainValidWhileLazySlotsGrow)

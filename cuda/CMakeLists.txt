@@ -22,6 +22,7 @@ add_library(mymyr_cuda STATIC
     src/expand.cpp
     src/multi_iw.cu
     src/multi_iw.cpp
+    src/translate.cu
     src/rollouts.cpp
 )
 add_library(mymyr::cuda ALIAS mymyr_cuda)

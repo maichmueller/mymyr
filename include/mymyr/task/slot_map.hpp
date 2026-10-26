@@ -35,6 +35,7 @@ public:
     [[nodiscard]] const Task& target() const noexcept { return m_target; }
     [[nodiscard]] const std::vector<u32>& numeric_slots() const noexcept { return m_numeric; }
     [[nodiscard]] const std::vector<u64>& constant_words() const noexcept { return m_constant; }
+    [[nodiscard]] const std::vector<std::string>& missing_constants() const noexcept { return m_missing_constants; }
     /// Unmatched source predicate signatures and object names, available without translating a row.
     [[nodiscard]] const std::vector<std::string>& unmatched() const noexcept { return m_unmatched; }
     /// Maps one row in O(source words + true atoms + numeric slots + target words).
@@ -50,7 +51,7 @@ private:
     [[nodiscard]] u32 match_atom(u32 predicate, std::span<const u32> arguments) const;
     std::vector<u32> m_predicates, m_objects, m_numeric;
     std::vector<u64> m_constant;
-    std::vector<std::string> m_unmatched;
+    std::vector<std::string> m_unmatched, m_missing_constants;
     mutable std::mutex m_mutex;
     mutable std::shared_ptr<const std::vector<u32>> m_slots;
 };

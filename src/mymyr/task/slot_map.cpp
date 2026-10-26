@@ -1,13 +1,13 @@
 #include "mymyr/task/slot_map.hpp"
 
 #include "mymyr/task/task.hpp"
+#include "mymyr/task/numeric.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include "mymyr/task/numeric.hpp"
 
 namespace mymyr
 {
@@ -62,6 +62,14 @@ SlotMap::SlotMap(const Task& source, const Task& target) : m_source(source), m_t
             if (slot / 64 >= m_constant.size())
                 m_constant.resize(slot / 64 + 1, 0);
             m_constant[slot / 64] |= u64{1} << (slot % 64);
+        }
+        else if (slot == missing && m_predicates[atom.pred.v] != missing &&
+                 dst.predicates[m_predicates[atom.pred.v]].kind == formalism::PredKind::Fluent)
+        {
+            std::string name = "(" + std::string(src.str(src.predicates[atom.pred.v].name));
+            for (const auto o : src.objects_of(atom))
+                name += " " + source.object_name(o);
+            m_missing_constants.push_back(name + ")");
         }
     }
 }
@@ -177,6 +185,8 @@ bool SlotMap::translate_row(std::span<const u32> slots, StateView source, std::s
         }
         plan::store(m_target.numeric(), numeric.data(), mapped, v);
     }
+    for (const auto& name : m_missing_constants)
+        absent(name);
     return lossless;
 }
 

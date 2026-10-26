@@ -209,8 +209,8 @@ reachable, so `'auto'` stores a state in 7 words instead of 170.
 
 **Determinism.** Except under `'lazy'`, the encoding is a function of the task and its options. The same PDDL and
 options give the same slots, words and rows in every run, thread count and process, and after pickling.
-`task.encoding_fingerprint` hashes the encoding: the slot of every fluent and derived atom, plus the numeric slots and
-their storage. Two tasks with equal fingerprints read and write rows alike. A task pickle carries the fingerprint, and
+`task.encoding_fingerprint` hashes the encoding: the predicate name, arity and ordered object names of every fluent and derived slot, plus numeric function
+and argument names and their storage. Two tasks with equal fingerprints read and write rows alike. A task pickle carries the fingerprint, and
 loading it raises `ValueError` if the rebuilt task encodes states differently.
 
 **Lazy slots.** Under `'lazy'`, the numbering depends on the order in which searches meet atoms, including their
@@ -230,6 +230,44 @@ numbers its atoms as the pickled one did.
 constructed with that mode returns the task itself. The cache is thread-safe, and a frozen twin pickles as its source
 plus the selected mode. `FlatRelationEncoder(task)` and `SimpleEncoder(task)` create the auto twin when the source
 is lazy and accept its States, including while another thread searches that source. Other row APIs require fixed rows.
+
+**Moving states between parses.** A state belongs to the task that created it. To move values between independently
+parsed domains and problems, match their atom and numeric function names:
+
+```python
+translated = source.translate(states, target)
+rows = source.translate(source.encode(states), target)
+mapping = mymyr.SlotMap(source, target)
+translated, lossless = mapping.translate(states, missing='drop')
+```
+
+A State returns a State owned by `target`; a list returns a list. NumPy, torch and JAX row arrays return rows in the
+same framework and on the same device, with the target width and numeric storage. `missing='raise'` is the default:
+a true atom or numeric value without a representation raises `ValueError` with its name and row. `'drop'` returns
+`(translated, lossless)`, with a bool `[N]` mask. Numeric conversion must preserve the value; dropped numeric values
+leave the target's initial value. Additional target numeric slots also retain their initial values. Missing source
+predicate signatures, object names and numeric slots can be inspected in `mapping.unmatched` when the map is built.
+Predicates match by name and arity; arguments match by ordered object names. Translation preserves values, without
+checking that a row is reachable or that the two tasks have equivalent actions.
+
+A source fluent that is static in the target is accepted when the target holds that fact. A source static fact that
+is fluent in the target is added to every row. Derived atoms are evaluated by the target. Host translation supports
+lazy sources and targets: maps extend as source slots appear, and target slots are interned under the task's normal
+thread safety rules. Raw lazy rows refer to the source task's current numbering. `pool=rl.ThreadPool(...)` splits
+host batches across workers; the native loop releases the GIL. A reusable map avoids rebuilding name lookups.
+
+CUDA translation requires fixed target slots. It runs on `stream=` (or the task's context stream) and normally checks
+for errors after waiting. Passing a CUDA int32 `status` array of shape `[3]` leaves the check to the caller and permits
+graph capture. Its entries are flags, first offending row, first offending source slot; success is `[0, -1, -1]`.
+Flags are 1 for a missing value, 2 for invalid source slots or task ids, and 4 for unrepresentable numeric values.
+Numeric slots follow the instance's fluent slots in an error report, followed by unrepresentable static facts. Warm the map on the same context before capture,
+pass both `status=` and `stream=`, and keep inputs, outputs, status and tasks alive through every replay. Each replay
+resets status. `missing='drop'` still supplies the per-row mask; with explicit status, callers must check invalid-row
+flags themselves. Host rows with equal encoding fingerprints and widths are returned directly.
+
+`source_table.translate(rows, task_ids, target_table)` maps instance i into instance i of an equally sized table.
+`mymyr.SlotMap(source_table, target_table).translate(rows, task_ids=...)` reuses those per-instance maps. Rows use each
+table's padded width and put numeric values after that table's atom words.
 
 **Numeric storage.** `'auto'` stores values as `'i32'` (two per word) when the task is statically integral and no
 quantum is set. A task is statically integral when its initial values, constants and static values in fluent effects

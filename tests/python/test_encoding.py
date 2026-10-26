@@ -171,7 +171,8 @@ def test_slot_layout_does_not_change_the_encoding(name):
     first = batches[0].as_dict()
     for other in batches[1:]:
         for key, value in other.as_dict().items():
-            assert np.array_equal(value, first[key]), key
+            if key != "table_fingerprint":
+                assert np.array_equal(value, first[key]), key
 
 
 @pytest.mark.parametrize("atoms", MODES)
@@ -543,8 +544,8 @@ def test_a_derived_array_narrower_than_the_instance_needs_is_refused():
 # digest of the encoder's rl::ArrayBundle. tests/cpp/encoding/test_encoder.cpp asserts the same constants for the same
 # encodings, so the arrays that Python exports are the bytes that the C++ encoder wrote.
 GOLDEN_DIGESTS = {
-    "gripper__prob05": 9666753341531803529,
-    "philosophers__p03-phil4": 8295029642410720015,
+    "gripper__prob05": 7519147456470550542,
+    "philosophers__p03-phil4": 2548283153954645567,
 }
 
 

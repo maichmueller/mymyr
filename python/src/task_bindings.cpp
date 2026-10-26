@@ -12,6 +12,8 @@
 #include "py_domain.hpp"
 #include "py_formula.hpp"
 #include "py_task.hpp"
+#include "translate_bindings.hpp"
+#include "py_pool.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/formalism/pddl_writer.hpp"
@@ -1596,7 +1598,13 @@ void bind_task_api(nb::class_<C>& cls)
 {
     using Self = nb::pointer_and_handle<C>;
     auto owner = [](const Self& self) { return Owner{self.p->core.get(), nb::borrow(self.h)}; };
-    cls.def_prop_ro(
+    cls.def("translate", [](Self self, StatesLike states, Arg<std::variant<PyTask, PyHandle>> other, std::string_view missing,
+                            Arg<PyPool> pool, Arg<ann::ArrayLike> status, StreamArg stream, Arg<ann::Any> ctx) {
+               return Arg<ann::Any>(translate_task(self.h, states, other, missing, pool, status, stream, ctx));
+           }, "states"_a, "other"_a, nb::kw_only(), "missing"_a = "raise", "pool"_a = nb::none(),
+              "status"_a = nb::none(), "stream"_a = nb::none(), "ctx"_a = nb::none(),
+              "Translate States or rows into another task by atom and function names. missing='drop' also returns a bool [N] mask.")
+        .def_prop_ro(
            "initial_state", [owner](Self self) { return make_state(owner(self), State(self.p->core->task->initial_state())); },
            "The initial state.")
         .def(
