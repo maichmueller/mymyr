@@ -473,10 +473,17 @@ history = encoding.history_masks(layered, [[(-1, ["(at-robby o1)"]), (0, ["(at-r
 layered_batch = layered.encode([state], subgoals=subgoals, history=history)
 
 names = layered.entity_names(layered_batch, 0)
-assert [n for n in names if n.endswith("[sg]")] == ["[+](carry o2 o14)[sg]", "[-](at-robby o0)[sg]"]  # (at o2 o1): goal
+assert [n for n in names if n.endswith("[sg]")] == ["[+](at o2 o1)[sg]", "[+](carry o2 o14)[sg]", "[-](at-robby o0)[sg]"]
 assert names[-4:] == ["history:-1#0", "history:0#1", "history:-1#0:[+](at-robby o1)", "history:0#1:[+](at-robby o0)"]
-assert layered_batch.history_dt.tolist() == [-1, 0] and layered_batch.target_group.tolist() == [1, 1, 3, 3]
+assert layered_batch.history_dt.tolist() == [-1, 0] and layered_batch.target_group.tolist() == [1, 1, 1, 3, 3]
+
+lowest = encoding.FlatRelationEncoder(task, max_goal_level=1, repeated_literals="lowest", target_sources=("subgoal",))
+lowest_batch = lowest.encode([state], subgoals=encoding.subgoal_masks(lowest, [[["(carry o2 o14)", "(at o2 o1)"]]]))
+assert [n for n in lowest.entity_names(lowest_batch, 0) if n.endswith("[sg]")] == ["[+](carry o2 o14)[sg]"]
 ```
+
+`(at o2 o1)` is also a literal of the task's goal. Under the default `repeated_literals="every"` it is in the goal
+relations and in level 1, so it has a subgoal entity; under `"lowest"` it stays in the goal relations alone.
 
 ## Horizons and transitions
 
