@@ -103,6 +103,10 @@ std::vector<search::LandmarkNovelty> landmark_options(const PyIwBatch& x, nb::ha
         if (nb::len(sequence) != count)
             throw nb::value_error("mymyr: landmarks must be one graph or one per search");
     }
+    nb::list unshared_values;
+    if (!unshared.is_none())
+        for (nb::handle atom : unshared)
+            unshared_values.append(atom);
     std::vector<search::LandmarkNovelty> out;
     for (u32 i = 0; i < count; ++i)
     {
@@ -117,10 +121,9 @@ std::vector<search::LandmarkNovelty> landmark_options(const PyIwBatch& x, nb::ha
             same_task(owner, g.o, "the landmark graph");
             lm.graph = g.g;
         }
-        if (!unshared.is_none())
-            for (nb::handle atom : unshared)
-                if (auto c = canonical_atom(owner, atom, false))
-                    lm.unshared_atoms.push_back(*c);
+        for (nb::handle atom : unshared_values)
+            if (auto c = canonical_atom(owner, atom, false))
+                lm.unshared_atoms.push_back(*c);
         out.push_back(std::move(lm));
     }
     return out;

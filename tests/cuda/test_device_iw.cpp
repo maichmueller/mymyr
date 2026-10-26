@@ -1108,5 +1108,7 @@ TEST(DeviceLiw, SeededRolloutsReplayCapturedChunks)
         }
     }
     if (cuda::GraphExec::enabled())
+    {
         EXPECT_GT(replays, 0u);
+    }
 }

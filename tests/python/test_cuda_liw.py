@@ -5,7 +5,7 @@ import pytest
 
 import mymyr
 import mymyr.search as search
-from conftest import SMALL_TASKS, text_task, walk, wide_task
+from conftest import ROOT, SMALL_TASKS, text_task, walk, wide_task
 from test_cuda_iw import assert_equal, ctx, walk_goals  # noqa: F401
 
 mc = pytest.importorskip("mymyr.cuda")
@@ -99,7 +99,11 @@ def test_liw_rollout_seeds(ctx, truncation):
 def test_liw_task_table(ctx):
     import mymyr.rl as rl
 
-    tasks = [text_task("blocks__probBLOCKS-8-0"), text_task("blocks__probBLOCKS-8-0")]
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    domain = ROOT / "tests/data/benchmarks/small/gripper/domain.pddl"
+    tasks = [mymyr.Task.from_pddl(domain, ROOT / f"tests/data/table_instances/gripper/gripper-{n}.pddl", atoms="dense")
+             for n in (4, 20)]
     table = rl.TaskTable(tasks)
     ids = [1, 0, 1, 0]
     starts = [tasks[i].initial_state for i in ids]
@@ -152,3 +156,76 @@ def test_liw_refusals(ctx, tmp_path):
                all_private=True, unshared_atoms=atoms)
     assert len(mc.liw(task, [], ctx=ctx, landmarks=graph)) == 0
     assert len(mc.rollouts(task, [], ctx=ctx, landmarks=graph)) == 0
+
+
+def test_liw_childsnack_ipc(ctx):
+    from conftest import ROOT
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    data = ROOT / "tests/data/ipc/childsnack-ipc/test"
+    task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01-medium.pddl", atoms="dense")
+    graph = search.approximate_fact_landmarks(task)
+    batch = mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graph, max_states=10000, max_depth=1, chunk_states=1)
+    expected = search.liw(task, landmarks=graph, max_width=1, max_states=10000, max_depth=1)
+    assert len(expected.passes) == 2
+    for i in range(2):
+        assert_equal(batch, i, expected)
+
+
+def test_liw_context_table_refusal(tmp_path):
+    task = wide_task(tmp_path, objects=192, initial_atoms=4093)
+    graph = search.FactLandmarkGraph(task, list(task.initial_state.atoms()))
+    small = mc.Context(0, max_bytes=16 << 20)
+    with pytest.raises(ValueError, match=r"LIW\(1\).*novelty tables.*raise Context max_bytes"):
+        mc.liw(task, [task.initial_state], ctx=small, landmarks=graph)
+    small.synchronize()
+
+
+def test_liw_refuses_numeric_tasks(ctx):
+    task = mymyr.Task.from_text(ROOT / "tests/data/numeric_tasks/cs-counters.txt")
+    with pytest.raises(ValueError, match="LIW does not support.*numeric"):
+        mc.liw(task, [task.initial_state], ctx=ctx, landmarks=None)
+    graph = search.FactLandmarkGraph(task, [])
+    with pytest.raises(ValueError, match="LIW does not support.*numeric"):
+        mc.rollouts(task, [0], ctx=ctx, landmarks=graph)
+
+
+def test_liw_empty_successor_marks_bot_empty_tuple(ctx, tmp_path):
+    source = """O 1
+P 2
+F 0 p
+F 0 q
+SI 0
+FI 1
+0
+G 1
+1 1
+A 2
+clear 0
+L 1
+0 1
+E 1
+0
+L 0
+F 1
+0 0
+finish 0
+L 1
+0 0
+E 1
+0
+L 0
+F 1
+1 1
+"""
+    path = tmp_path / "empty-transition.txt"
+    path.write_text(source)
+    task = mymyr.Task.from_text(path)
+    graph = search.FactLandmarkGraph(task, list(task.initial_state.atoms()))
+    expected = search.liw(task, landmarks=graph, max_width=1)
+    assert expected.solved and len(expected.plan) == 2 and expected.effective_width == 1
+    for chunk in (1, 3):
+        batch = mc.liw(task, [task.initial_state] * 3, ctx=ctx, landmarks=graph, chunk_states=chunk)
+        for i in range(3):
+            assert_equal(batch, i, expected)

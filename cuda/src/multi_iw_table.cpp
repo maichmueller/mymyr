@@ -16,15 +16,18 @@ struct DeviceTableIw::Impl
     rl::TaskTablePtr table;
     MultiIwOptions o;
     std::vector<std::unique_ptr<DeviceMultiIw>> iw;  // per instance, made on first use
+    std::vector<std::vector<u32>> iw_indices;  // input search indices of each cached landmark driver
     DeviceBuffer order, rows;
 
     DeviceMultiIw& of(u32 i, const std::vector<u32>& idx)
     {
-        if (o.landmarks && o.landmarks->size() > 1)
+        if (o.landmarks && o.landmarks->size() > 1 && (!iw[i] || iw_indices[i] != idx))
         {
+            iw[i].reset();
             MultiIwOptions local = o;
             local.landmarks = pick<search::LandmarkNovelty>(*o.landmarks, idx);
             iw[i] = std::make_unique<DeviceMultiIw>(ctx, table->task(i), local);
+            iw_indices[i] = idx;
         }
         if (!iw[i])
             iw[i] = std::make_unique<DeviceMultiIw>(ctx, table->task(i), o);
@@ -193,6 +196,7 @@ DeviceTableIw::DeviceTableIw(ContextPtr ctx, rl::TaskTablePtr table, const Multi
     m->table = std::move(table);
     m->o = options;
     m->iw.resize(m->table->size());
+    m->iw_indices.resize(m->table->size());
 }
 
 DeviceTableIw::~DeviceTableIw() = default;
