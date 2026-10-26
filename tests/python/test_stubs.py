@@ -153,7 +153,8 @@ def test_stubs_parse_and_are_typed():
     # the XLA FFI environments, the RL helpers and the random policy's actions
     assert "def random_actions(self, draws: mymyr._typing.SupportsDLPack, count: mymyr._typing.SupportsDLPack," in env
     jx = (d / "_rl_jax.pyi").read_text()
-    assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto') -> None" in jx
+    assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto', track_visited: bool | int = False) -> None" in jx
+    assert "def visited_capacity(self) -> int" in jx
     assert "def ffi_targets() -> list[tuple[str, str, dict[str, types.CapsuleType], bool]]" in jx
     assert "def initial_states(self) -> list[int]" in jx and "def initial_counts(self) -> list[int]" in jx
     ejx = (d / "_encoding_jax.pyi").read_text()
