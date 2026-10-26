@@ -291,6 +291,7 @@ void count_range(const Pass& p, u32 t)
                 const WorkspaceLease workspace = task.workspace();
                 auto& engine = workspace->engine();
                 engine.set_state(row, v.words);
+                engine.set_numeric(input.numeric);
                 engine.build_view();
                 workspace->axioms().evaluate();
                 std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), dst);
