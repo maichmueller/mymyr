@@ -208,6 +208,9 @@ def test_cuda_stubs_are_typed():
     if not (d / "_cuda.pyi").is_file():
         pytest.skip("a CPU build: no mymyr._core._cuda")
     cuda = (d / "_cuda.pyi").read_text()
+    encoding = (d / "_encoding.pyi").read_text()
+    assert "def literal_slots(self, stream: int, count: int, width: int, inputs: Sequence[int], outputs: Sequence[int]) -> None" in encoding
+    assert "def literal_masks(self, stream: int, count: int, width: int, rows: int, layers: int, inputs: Sequence[int], outputs: Sequence[int]) -> None" in encoding
     stream = "stream: int | mymyr._typing.SupportsCudaStream | None = None"
     assert "def brfs(task: mymyr._core.Task | mymyr._core.TaskHandle, *, ctx: Context | None = None," in cuda
     assert f"def validate(self, {stream}) -> tuple[int, int]" in cuda

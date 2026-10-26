@@ -64,6 +64,8 @@ from ._ops import (
     expand_flat,
     expand_flat_derived,
     lookup,
+    literal_masks,
+    literal_slots,
     random_actions,
     refresh,
     refresh_sync,
@@ -75,6 +77,8 @@ from ._ops import (
 )
 
 __all__ = [
+    "literal_masks",
+    "literal_slots",
     "BatchedEnv",
     "CapturedRollout",
     "Env",

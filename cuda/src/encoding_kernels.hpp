@@ -24,6 +24,12 @@
 
 namespace mymyr::cuda::detail
 {
+cudaError_t launch_literal_slots(const encoding::detail::ContextView& context, const DeviceLiteralInput& input,
+                                u8* kinds, i32* slots, u64* status, cudaStream_t stream);
+cudaError_t launch_literal_masks(const encoding::detail::ContextView& context, const DeviceLiteralInput& input,
+                                const DeviceLiteralPlacement& placement, const DeviceLiteralMasks& output,
+                                cudaStream_t stream);
+
 u64 space_horizon_builder_scratch_bytes(u32 states, u64 edges, u32 graphs);
 cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
                                 cudaStream_t stream);

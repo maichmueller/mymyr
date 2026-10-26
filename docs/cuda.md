@@ -36,6 +36,11 @@ h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device 
 data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
 cap it. Arrays and device tasks keep their context alive.
 
+The encoding helpers `literal_slots` and `literal_masks` resolve CUDA torch arrays of table predicate ids and
+instance-local object ids into slots and goal or subgoal masks. They support both frozen atom layouts and CUDA graph
+capture after warming the encoder on the capture stream; invalid inputs report value 4 in a device status scalar.
+See [Encoding on the device](encoding.md#encoding-on-the-device) for shapes and the torch custom ops.
+
 CUDA upload, expansion, BrFS, multi-IW, rollouts, state spaces, RL environments and A*/GBFS support numeric fluent
 values, preconditions, effects, goals and metric costs. Public state rows preserve CPU I32/F64 encoding; internal
 numeric rows hold one canonical double per fluent slot. TaskTable/TaskSuite numeric batches use per-instance kernels
