@@ -257,3 +257,34 @@ def test_fluent_words_without_derived_slots_include_the_high_bit():
         assert_masks(expected, encoding.GoalMasks(op[0], op[1], None, None, op[4], op[5]))
     finally:
         rt.unregister(handle)
+
+
+def test_public_helpers_capture_with_uint32_halves(case):
+    _, encoder, p, o, signs, rows, task_ids, layers = case
+    dp, do, ds, dr, dt, dl = [tensor(x) for x in (p, o, signs, rows, task_ids, layers)]
+    stream = torch.cuda.Stream(device=0)
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = None
+    try:
+        def run():
+            slots = encoding.literal_slots(encoder, dp, do, dt[dr.long()])
+            masks = encoding.literal_masks(encoder, dp, do, ds, dr, 3, dt, layers=dl, num_layers=2,
+                                            word_dtype=torch.uint32)
+            return slots, masks
+        with torch.cuda.stream(stream):
+            run()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                slots, result = run()
+            ds.logical_not_()
+            graph.replay()
+        stream.synchronize()
+        expected = encoding.literal_masks(encoder, p, o, ~signs, rows, 3, task_ids, layers=layers, num_layers=2)
+        assert_masks(expected, result)
+        for host, device in zip(encoding.literal_slots(encoder, p, o, task_ids[rows]), slots[:2], strict=True):
+            np.testing.assert_array_equal(host, device.cpu().numpy())
+        assert slots[2].item() == 0
+    finally:
+        stream.synchronize()
+        del graph
+        encoder.release_device(stream=stream)
