@@ -1128,3 +1128,27 @@ TEST(DeviceTableWide, LabelOnlySuccessorWindowsKeepTheirDigests)
         }
     }
 }
+
+TEST(DeviceTableExpand, PaddingReportsCapacityOverflowBeforeDropping)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto task = lights(20, 0);
+    const u32 W = task->words();
+    std::vector<u64> row(W, 0);
+    const State initial = task->initial_state();
+    std::copy(initial.words().begin(), initial.words().end(), row.begin());
+    const auto states = to_device(ctx, row, ctx->stream());
+    cuda::DeviceBuffer offsets(ctx, 2 * sizeof(i32), ctx->stream());
+    cuda::DeviceExpander ex(ctx, rl::TaskTable::single(task));
+    rl::Expansion flat;
+    flat.words = W;
+    flat.offsets = static_cast<i32*>(offsets.data());
+    ex.expand({static_cast<const u64*>(states.data()), 1, W, 0}, nullptr, flat, {.drop_noops = true});
+    ASSERT_GT(flat.generated, 0u);
+    EXPECT_TRUE(flat.overflow());
+    rl::PaddedExpansion padded;
+    padded.k = 1;
+    ex.pad(flat, 1, padded);
+    EXPECT_TRUE(padded.overflow);
+}
