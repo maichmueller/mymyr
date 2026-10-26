@@ -347,45 +347,48 @@ TEST(ApproximateLandmarks, AchieverIndexRebuildEqualsTheGenerators)
     using landmarks::FirstAchievers;
     for (const char* name : k_tasks)
         for (const FirstAchievers rule : {FirstAchievers::HMax, FirstAchievers::PossiblyBefore})
-        {
-            SCOPED_TRACE(std::string(name) + (rule == FirstAchievers::HMax ? " hmax" : " possibly_before"));
-            const auto task = load(name);
-            landmarks::ApproximateFactLandmarkOptions o;
-            o.max_disjunctive_landmark_size = 4;
-            o.first_achievers = rule;
-            const auto g = landmarks::approximate_fact_landmarks(*task, o);
-            EXPECT_NO_THROW(landmarks::check(*task, g));
-            const landmarks::AchieverIndex& want = g.achievers();
-            const landmarks::AchieverIndex got = landmarks::build_achiever_index(*task, g.landmarks(), g.disjunctive(), rule);
-            ASSERT_EQ(got.actions.size(), want.actions.size());
-            for (usize i = 0; i < got.actions.size(); ++i)
+            for (bool derived : {false, true})
             {
-                EXPECT_EQ(got.actions[i].schema, want.actions[i].schema);
-                EXPECT_EQ(got.actions[i].binding, want.actions[i].binding);
+                SCOPED_TRACE(std::string(name) + (rule == FirstAchievers::HMax ? " hmax" : " possibly_before"));
+                SCOPED_TRACE(derived);
+                const auto task = load(name);
+                landmarks::ApproximateFactLandmarkOptions o;
+                o.max_disjunctive_landmark_size = 4;
+                o.first_achievers = rule;
+                o.include_derived_atoms = derived;
+                const auto g = landmarks::approximate_fact_landmarks(*task, o);
+                EXPECT_NO_THROW(landmarks::check(*task, g));
+                const landmarks::AchieverIndex& want = g.achievers();
+                const landmarks::AchieverIndex got = landmarks::build_achiever_index(*task, g.landmarks(), g.disjunctive(), rule);
+                ASSERT_EQ(got.actions.size(), want.actions.size());
+                for (usize i = 0; i < got.actions.size(); ++i)
+                {
+                    EXPECT_EQ(got.actions[i].schema, want.actions[i].schema);
+                    EXPECT_EQ(got.actions[i].binding, want.actions[i].binding);
+                }
+                EXPECT_EQ(got.atoms, want.atoms);
+                EXPECT_EQ(got.achievers_begin, want.achievers_begin);
+                EXPECT_EQ(got.achievers, want.achievers);
+                EXPECT_EQ(got.achieved_begin, want.achieved_begin);
+                EXPECT_EQ(got.achieved, want.achieved);
+                EXPECT_EQ(got.uniquely_achieved_begin, want.uniquely_achieved_begin);
+                EXPECT_EQ(got.uniquely_achieved, want.uniquely_achieved);
+                EXPECT_EQ(got.first_achieved_begin, want.first_achieved_begin);
+                EXPECT_EQ(got.first_achieved, want.first_achieved);
+                for (CanonicalAtom c : g.landmarks())
+                {
+                    const auto a = got.first_achievers_of(c), b = want.first_achievers_of(c);
+                    EXPECT_TRUE(std::equal(a.begin(), a.end(), b.begin(), b.end())) << format_atom(*task, c);
+                }
+                if (rule == FirstAchievers::HMax)
+                {
+                    EXPECT_EQ(got.first_achievers_begin, want.first_achievers_begin);
+                    EXPECT_EQ(got.first_achievers, want.first_achievers);
+                }
+                const auto rebuilt = landmarks::FactLandmarkGraph::create({g.landmarks().begin(), g.landmarks().end()}, g.disjunctive(),
+                                                                          {g.orderings().begin(), g.orderings().end()}, {}, got);
+                EXPECT_NO_THROW(landmarks::check(*task, rebuilt));
             }
-            EXPECT_EQ(got.atoms, want.atoms);
-            EXPECT_EQ(got.achievers_begin, want.achievers_begin);
-            EXPECT_EQ(got.achievers, want.achievers);
-            EXPECT_EQ(got.achieved_begin, want.achieved_begin);
-            EXPECT_EQ(got.achieved, want.achieved);
-            EXPECT_EQ(got.uniquely_achieved_begin, want.uniquely_achieved_begin);
-            EXPECT_EQ(got.uniquely_achieved, want.uniquely_achieved);
-            EXPECT_EQ(got.first_achieved_begin, want.first_achieved_begin);
-            EXPECT_EQ(got.first_achieved, want.first_achieved);
-            for (CanonicalAtom c : g.landmarks())
-            {
-                const auto a = got.first_achievers_of(c), b = want.first_achievers_of(c);
-                EXPECT_TRUE(std::equal(a.begin(), a.end(), b.begin(), b.end())) << format_atom(*task, c);
-            }
-            if (rule == FirstAchievers::HMax)
-            {
-                EXPECT_EQ(got.first_achievers_begin, want.first_achievers_begin);
-                EXPECT_EQ(got.first_achievers, want.first_achievers);
-            }
-            const auto rebuilt = landmarks::FactLandmarkGraph::create({g.landmarks().begin(), g.landmarks().end()}, g.disjunctive(),
-                                                                      {g.orderings().begin(), g.orderings().end()}, {}, got);
-            EXPECT_NO_THROW(landmarks::check(*task, rebuilt));
-        }
 }
 
 TEST(ApproximateLandmarks, CheckRejectsGraphsOfAnotherShape)

@@ -80,6 +80,8 @@ struct ApproximateFactLandmarkOptions
 /// With PossiblyBefore the generator lists first achievers for the atoms it expanded (the fact landmarks and the
 /// disjunctive members of every layer it expanded, including those of sets it then dropped), this function for the
 /// fact landmarks and the members of `disjunctive`, so first_achievers_of() of another atom can differ.
+/// First achievers are computed from the task's initial state, including for subgoals taken from later states.
+/// Fluent and derived landmark atoms are accepted; derived atoms have no ground action achievers.
 [[nodiscard]] AchieverIndex build_achiever_index(const heuristics::RelaxedTask& relaxed, std::span<const CanonicalAtom> landmarks,
                                                  const std::vector<std::vector<CanonicalAtom>>& disjunctive = {},
                                                  FirstAchievers first_achievers = FirstAchievers::HMax);

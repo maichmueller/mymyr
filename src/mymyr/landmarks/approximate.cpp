@@ -498,7 +498,7 @@ std::shared_ptr<const RelaxedTask> ground(const Task& task, const heuristics::Gr
     ro.keep_unreachable_operators = true;
     auto R = RelaxedTask::build(task, budget, &stats, ro);
     if (!R)
-        throw std::runtime_error("mymyr: approximate fact landmarks need a grounding: " + stats.reason);
+        throw std::runtime_error("mymyr: landmark grounding failed: " + stats.reason);
     return R;
 }
 }  // namespace

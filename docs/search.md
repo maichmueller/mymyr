@@ -335,14 +335,20 @@ The achiever index dominates the size: a row of 4 (W + 1) bytes per ground actio
 schema) plus the achiever lists.
 
 A graph made from given atoms has no achiever index unless `achiever_index=True`: then the task is grounded as
-`approximate_fact_landmarks` grounds it (`max_ground_actions=` bounds the ground actions, which the index lists) and
-the index is computed for the given landmarks, with first achievers by `first_achievers=` (`"hmax"` or
-`"possibly_before"`):
+`approximate_fact_landmarks` grounds it. Both accept `max_operators=5_000_000`, `max_bindings=100_000_000`,
+`max_seconds=60.0` (`None`: unlimited), and `max_ground_actions=None` (unlimited; bounds the ground actions the index
+lists); exceeding any limit raises `RuntimeError`. The index is computed for the given landmarks, with first
+achievers by `first_achievers=` (`"hmax"` or `"possibly_before"`):
 
 ```python
 subgoals = search.FactLandmarkGraph(task, ["(at ball1 roomb)", "(free left)"], achiever_index=True)
 subgoals.unique_achiever("(at ball1 roomb)")
 ```
+
+First achievers are computed from the task's initial state, including for hand-made subgoal sets taken from later
+states. The constructor accepts fluent and derived atoms in landmarks, disjunctive sets and orderings. Derived atoms
+have no action achievers because axioms derive them; the graph's `achieved` / `unachieved` queries see fluent atoms
+only.
 
 On the landmarks of `approximate_fact_landmarks` with the same `first_achievers`, the rebuilt index equals the
 generator's, with one exception: with `"possibly_before"` the generator lists first achievers only for the atoms it

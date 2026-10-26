@@ -354,6 +354,79 @@ def test_rebuild_for_a_hand_made_subgoal_set():
     assert r2.has_achiever_index and snapshot(r2) == snapshot(r)
 
 
+@pytest.mark.parametrize("name", ["philosophers__p03-phil4", "features"])
+@pytest.mark.parametrize("rule", ["hmax", "possibly_before"])
+def test_rebuilt_index_with_derived_landmarks(name, rule):
+    if name == "features":
+        if not hasattr(mymyr, "Domain"):
+            pytest.skip("built without the loki front end")
+        d = ROOT / "tests/data/pddl/features"
+        task = mymyr.Task.from_pddl(d / "domain.pddl", d / "p01.pddl")
+    else:
+        task = text_task(name)
+    g = search.approximate_fact_landmarks(task, include_derived_atoms=True, first_achievers=rule,
+                                         max_disjunctive_landmark_size=4)
+    derived = [a for a in g.landmarks if a.kind == "derived"]
+    assert derived
+    r = search.FactLandmarkGraph(task, g.landmarks, g.disjunctive, g.orderings,
+                                 achiever_index=True, first_achievers=rule)
+    a, b = r.to_arrays(), g.to_arrays()
+    if rule == "possibly_before":
+        for key in ("first_achievers_offsets", "first_achievers"):
+            del a[key], b[key]
+    same_arrays(a, b)
+    assert snapshot(r) == snapshot(g)
+    for atom in derived:
+        assert r.is_landmark(atom)
+        assert r.predecessors(atom) == g.predecessors(atom)
+        assert r.successors(atom) == g.successors(atom)
+        assert r.achievers(atom) == r.first_achievers(atom) == []
+        assert r.unique_achiever(atom) is None
+    assert snapshot(pickle.loads(pickle.dumps(r))) == snapshot(r)
+    plain = search.FactLandmarkGraph(task, g.landmarks, g.disjunctive, g.orderings)
+    assert plain.landmarks == g.landmarks and not plain.has_achiever_index
+    member = derived[0]
+    other = next(atom for atom in task.initial_state.atoms() if atom.kind == "fluent")
+    mixed = search.FactLandmarkGraph(task, [], [[member, other]], [(member, other)],
+                                     achiever_index=True, first_achievers=rule)
+    assert len(mixed.disjunctive) == 1 and set(mixed.disjunctive[0]) == {member, other}
+    assert mixed.predecessors(other) == [member]
+    assert mixed.successors(member) == [other]
+    assert mixed.achievers(member) == mixed.first_achievers(member) == []
+
+
+@pytest.mark.parametrize("limit,reason", [("max_operators", "relaxed operators"), ("max_bindings", "relaxed bindings")])
+def test_rebuild_grounding_limits(limit, reason):
+    task = load("depot")
+    for build in (lambda **kw: search.FactLandmarkGraph(task, [], achiever_index=True, **kw),
+                  lambda **kw: search.approximate_fact_landmarks(task, **kw)):
+        with pytest.raises(RuntimeError, match=f"landmark grounding failed:.*{reason}"):
+            build(**{limit: 0})
+        assert build(**{limit: 100_000_000}, max_seconds=None).has_achiever_index
+
+
+def test_rebuild_grounding_deadline():
+    task = text_task("freecell__p02")
+    with pytest.raises(RuntimeError, match="landmark grounding failed: grounding took more than"):
+        search.FactLandmarkGraph(task, [], achiever_index=True, max_seconds=0)
+    with pytest.raises(RuntimeError, match="landmark grounding failed: grounding took more than"):
+        search.approximate_fact_landmarks(task, max_seconds=0)
+
+
+@pytest.mark.parametrize("limits,exc,name", [
+    ({"max_operators": -1}, ValueError, "max_operators"),
+    ({"max_bindings": -1}, ValueError, "max_bindings"),
+    ({"max_seconds": -1}, ValueError, "max_seconds"),
+    ({"max_operators": 1.5}, TypeError, "max_operators"),
+    ({"max_bindings": 1.5}, TypeError, "max_bindings"),
+    ({"max_ground_actions": -1}, ValueError, "max_ground_actions"),
+    ({"max_ground_actions": 1.5}, TypeError, "max_ground_actions"),
+])
+def test_rebuild_rejects_invalid_grounding_limits(limits, exc, name):
+    with pytest.raises(exc, match=name):
+        search.FactLandmarkGraph(load("depot"), [], achiever_index=True, **limits)
+
+
 def test_ground_action_budget():
     task = load("depot")
     n = len(graph(task, "hmax").to_arrays()["actions_schema"])
