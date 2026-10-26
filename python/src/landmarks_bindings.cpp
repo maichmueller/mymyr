@@ -192,7 +192,7 @@ u32 achiever_id(const PyFactLandmarkGraph& g, nb::handle action)
     return g.g->achievers().find(a.label());
 }
 
-std::optional<CanonicalAtom> graph_atom(const PyFactLandmarkGraph& g, nb::handle atom) { return canonical_atom(g.o, atom, false); }
+std::optional<CanonicalAtom> graph_atom(const PyFactLandmarkGraph& g, nb::handle atom) { return canonical_atom(g.o, atom, true); }
 
 ActionList action_ids(const PyFactLandmarkGraph& g, std::span<const u32> ids)
 {
@@ -208,6 +208,16 @@ std::string graph_repr(const PyFactLandmarkGraph& g)
            std::to_string(g.g->disjunctive().size()) + ", orderings=" + std::to_string(g.g->orderings().size()) +
            ", lifted=" + std::to_string(g.g->lifted().size()) + ", achiever_index=" +
            (g.g->has_achiever_index() ? "True" : "False") + ")";
+}
+
+heuristics::GroundingBudget grounding_budget(IntArg max_operators, IntArg max_bindings, FloatArg max_seconds, IntArg max_ground_actions)
+{
+    heuristics::GroundingBudget budget;
+    budget.max_operators = int_arg<u64>(max_operators, "max_operators");
+    budget.max_bindings = int_arg<u64>(max_bindings, "max_bindings");
+    budget.max_seconds = opt_float_arg(max_seconds, "max_seconds", 0).value_or(std::numeric_limits<double>::infinity());
+    budget.max_ground_actions = opt_int_arg<u64>(max_ground_actions, "max_ground_actions").value_or(~u64{0});
+    return budget;
 }
 
 Arg<PyReachabilityTable> make_table(const Owner& o, std::shared_ptr<const rr::Table> t)
@@ -327,6 +337,7 @@ void put_index_csr(ArrayDict& d, const char* offsets_key, const char* values_key
 ArrayDict graph_arrays(const lm::FactLandmarkGraph& g, const Task& t)
 {
     ArrayDict d{nb::dict()};
+    d["fingerprint"] = fresh(std::vector<u64>{t.fingerprint()});
     d["landmarks"] = fresh(std::vector<u64>(g.landmarks().begin(), g.landmarks().end()));
     put_csr<u64>(d, "disjunctive_offsets", "disjunctive_atoms", g.disjunctive(), [](const auto& s) -> const auto& { return s; });
     std::vector<u64> orderings;
@@ -439,7 +450,7 @@ bool group_arg(nb::handle arrays, std::span<const std::string_view> keys, const 
 /// The graph of `task` from the arrays of to_arrays (validated: landmarks::check).
 lm::FactLandmarkGraph graph_from_arrays(const Task& t, nb::handle arrays)
 {
-    std::vector<std::string_view> known = {"landmarks", "disjunctive_offsets", "disjunctive_atoms", "orderings"};
+    std::vector<std::string_view> known = {"fingerprint", "landmarks", "disjunctive_offsets", "disjunctive_atoms", "orderings"};
     known.insert(known.end(), std::begin(k_lifted_keys), std::end(k_lifted_keys));
     known.insert(known.end(), std::begin(k_index_keys), std::end(k_index_keys));
     if (!nb::isinstance<nb::dict>(arrays) && (!PyMapping_Check(arrays.ptr()) || !nb::hasattr(arrays, "keys")))
@@ -451,6 +462,13 @@ lm::FactLandmarkGraph graph_from_arrays(const Task& t, nb::handle arrays)
         for (nb::handle k : keys)
             if (!nb::isinstance<nb::str>(k) || std::ranges::find(known, nb::cast<std::string_view>(k)) == known.end())
                 throw nb::value_error(("mymyr: unknown landmark graph array " + nb::cast<std::string>(nb::repr(k))).c_str());
+    }
+    if (auto fingerprint = take<u64>(arrays, "fingerprint", 1, false, k_graph))
+    {
+        if (fingerprint->first.size() != 1)
+            corrupt("'fingerprint' must have shape [1]");
+        if (fingerprint->first[0] != t.fingerprint())
+            throw nb::value_error("mymyr: the landmark graph arrays are of another task (content fingerprint mismatch)");
     }
     std::vector<CanonicalAtom> landmarks = take_required<u64>(arrays, "landmarks", 1, k_graph);
     std::vector<std::vector<CanonicalAtom>> disjunctive;
@@ -624,18 +642,17 @@ void bind_landmarks(nb::module_& m)
             "__init__",
             [](PyFactLandmarkGraph* self, TaskArg task, AtomsArg landmarks, AtomSetsArg disjunctive,
                OrderingsArg orderings, bool achiever_index, Arg<std::variant<lm::FirstAchievers, std::string>> first_achievers,
-               IntArg max_ground_actions_in) {
+               IntArg max_operators_in, IntArg max_bindings_in, FloatArg max_seconds_in, IntArg max_ground_actions_in) {
                 Owner o = owner_of(task);
                 const lm::FirstAchievers rule = enum_arg<lm::FirstAchievers>(
                     first_achievers, {{"hmax", lm::FirstAchievers::HMax}, {"possibly_before", lm::FirstAchievers::PossiblyBefore}},
                     "first_achievers");
-                heuristics::GroundingBudget budget;
-                budget.max_ground_actions = opt_int_arg<u64>(max_ground_actions_in, "max_ground_actions").value_or(~u64{0});
-                std::vector<CanonicalAtom> facts = canonical_atoms(o, landmarks, false);
+                const auto budget = grounding_budget(max_operators_in, max_bindings_in, max_seconds_in, max_ground_actions_in);
+                std::vector<CanonicalAtom> facts = canonical_atoms(o, landmarks, true);
                 std::vector<std::vector<CanonicalAtom>> sets;
                 if (!disjunctive.is_none())
                     for (nb::handle s : disjunctive)
-                        sets.push_back(canonical_atoms(o, s, false));
+                        sets.push_back(canonical_atoms(o, s, true));
                 std::vector<std::pair<CanonicalAtom, CanonicalAtom>> order;
                 if (!orderings.is_none())
                     for (nb::handle p : orderings)
@@ -643,7 +660,7 @@ void bind_landmarks(nb::module_& m)
                         nb::sequence s = nb::borrow<nb::sequence>(p);
                         if (nb::len(s) != 2)
                             throw nb::value_error("mymyr: an ordering is a pair (before, after)");
-                        const auto a = canonical_atom(o, s[0], false), b = canonical_atom(o, s[1], false);
+                        const auto a = canonical_atom(o, s[0], true), b = canonical_atom(o, s[1], true);
                         if (a && b)
                             order.emplace_back(*a, *b);
                     }
@@ -661,20 +678,23 @@ void bind_landmarks(nb::module_& m)
                 new (self) PyFactLandmarkGraph{std::make_shared<const lm::FactLandmarkGraph>(std::move(g)), std::move(o)};
             },
             "task"_a, "landmarks"_a, "disjunctive"_a = nb::none(), "orderings"_a = nb::none(), nb::kw_only(),
-            "achiever_index"_a = false, "first_achievers"_a = lm::FirstAchievers::HMax, "max_ground_actions"_a = nb::none(),
-            "A graph from given fluent atoms: fact landmarks, disjunctive sets and (before, after) orderings, "
+            "achiever_index"_a = false, "first_achievers"_a = lm::FirstAchievers::HMax, "max_operators"_a = 5'000'000,
+            "max_bindings"_a = 100'000'000, "max_seconds"_a.none() = 60.0, "max_ground_actions"_a = nb::none(),
+            "A graph from given fluent or derived atoms: fact landmarks, disjunctive sets and (before, after) orderings, "
             "normalized (duplicates dropped, sets holding a fact landmark dropped). Atoms outside the task's reachable "
             "domains are dropped (they can never hold).\n\n"
-            "achiever_index=True grounds the task as approximate_fact_landmarks does (RuntimeError beyond the budget: "
-            "its default max_operators, max_bindings and max_seconds, and at most max_ground_actions ground actions, "
-            "None: unbounded) and builds the achiever index for these landmarks: the achievers of every atom, the "
+            "achiever_index=True grounds the task as approximate_fact_landmarks does: max_operators, max_bindings, "
+            "max_seconds (None: unlimited) and max_ground_actions (None: unlimited) bound the grounding "
+            "(RuntimeError beyond). It builds the achiever index for these landmarks: the achievers of every atom, the "
             "first achievers by first_achievers (a FirstAchievers or 'hmax' / 'possibly_before'; HMAX: of every atom, "
             "POSSIBLY_BEFORE: of every fact landmark and disjunctive member) and per action the fact landmarks it "
-            "achieves, first-achieves and uniquely achieves. On the landmarks of approximate_fact_landmarks with the "
+            "achieves, first-achieves and uniquely achieves. First achievers are computed from the task's initial "
+            "state, including for subgoals taken from later states. Derived atoms have no action achievers because "
+            "axioms derive them; achieved / unachieved see fluent atoms only. On the landmarks of approximate_fact_landmarks with the "
             "same first_achievers the index equals the generator's, except that with POSSIBLY_BEFORE the generator "
             "lists first achievers only for the atoms it expanded, so first_achievers() of an atom that is not a fact "
             "landmark can differ. To keep a computed index, pickle the graph or use to_arrays / from_arrays. Without "
-            "achiever_index the graph has no index (first_achievers and max_ground_actions are not used).")
+            "achiever_index the graph has no index (first_achievers and the grounding budgets are not used).")
         .def_prop_ro("task", [](const PyFactLandmarkGraph& g) -> Arg<std::variant<PyTask, PyHandle>> { return g.o.obj; },
                      "The Task (or TaskHandle) the graph was computed for.")
         .def_prop_ro("landmarks", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->landmarks()); },
@@ -743,7 +763,8 @@ void bind_landmarks(nb::module_& m)
             },
             "atom"_a,
             "The first achievers of `atom` by the FirstAchievers rule the index was built with (HMAX: the "
-            "ground actions adding it at its h_max cost; achiever index only).")
+            "ground actions adding it at its h_max cost; achiever index only). Computed from the task's initial "
+            "state, including for subgoals taken from later states; empty for derived atoms, which axioms derive.")
         .def(
             "unique_achiever",
             [](const PyFactLandmarkGraph& g, AtomLike atom) -> Arg<std::optional<PyAction>> {
@@ -843,6 +864,7 @@ void bind_landmarks(nb::module_& m)
             "The graph as NumPy arrays (fresh copies), the form from_arrays and pickling take. Atoms are canonical "
             "ids (uint64) of the task's canonical atom layout, the same in every process and under lazy atom slots; lists are CSR: "
             "*_offsets (uint64, one entry per list and the total) and the concatenation.\n\n"
+            "- fingerprint [1] (uint64): the task's content fingerprint.\n"
             "- landmarks [L]: the fact landmarks in discovery order; disjunctive_offsets, disjunctive_atoms: the "
             "disjunctive landmarks; orderings [E, 2]: (before, after).\n"
             "- lifted landmarks (K of them; empty for other graphs): lifted_predicate [K] (uint32), lifted_binding "
@@ -867,8 +889,9 @@ void bind_landmarks(nb::module_& m)
             "lifted landmark arrays and the achiever index arrays are optional, each group all or nothing. Validated: "
             "dtypes and shapes, unknown names, CSR offsets, atoms inside the task's canonical space, lifted "
             "landmarks against their predicates and bindings, actions of the task's schemas and objects in canonical "
-            "order, and the per-action lists against the achievers (ValueError or TypeError otherwise). The arrays do "
-            "not name their task: a task with the same predicates and objects passes. Runs with the thread state "
+            "order, and the per-action lists against the achievers (ValueError or TypeError otherwise). If present, "
+            "fingerprint [1] (uint64) must match the task's content fingerprint (ValueError otherwise). Without it, "
+            "task identity is not checked. Runs with the thread state "
             "detached once the arrays are copied.")
         .def("__reduce__",
              [](const PyFactLandmarkGraph& g) {
@@ -899,9 +922,6 @@ void bind_landmarks(nb::module_& m)
             const u64 max_disjunctive_landmark_size = int_arg<u64>(max_disjunctive_landmark_size_in, "max_disjunctive_landmark_size");
             const u64 max_disjunctive_landmark_depth =
                 opt_int_arg<u64>(max_disjunctive_landmark_depth_in, "max_disjunctive_landmark_depth").value_or(~u64{0});
-            const double max_seconds = opt_float_arg(max_seconds_in, "max_seconds", 0).value_or(std::numeric_limits<double>::infinity());
-            const u64 max_operators = int_arg<u64>(max_operators_in, "max_operators");
-            const u64 max_bindings = int_arg<u64>(max_bindings_in, "max_bindings");
             const Owner o = owner_of(task);
             lm::ApproximateFactLandmarkOptions opts;
             opts.first_achievers = enum_arg<lm::FirstAchievers>(
@@ -912,10 +932,7 @@ void bind_landmarks(nb::module_& m)
             opts.compute_greedy_necessary_orderings = compute_greedy_necessary_orderings;
             opts.max_disjunctive_landmark_size = max_disjunctive_landmark_size;
             opts.max_disjunctive_landmark_depth = max_disjunctive_landmark_depth;
-            opts.budget.max_operators = max_operators;
-            opts.budget.max_bindings = max_bindings;
-            opts.budget.max_seconds = max_seconds;
-            opts.budget.max_ground_actions = opt_int_arg<u64>(max_ground_actions_in, "max_ground_actions").value_or(~u64{0});
+            opts.budget = grounding_budget(max_operators_in, max_bindings_in, max_seconds_in, max_ground_actions_in);
             const Task& t = *o.core->task;
             std::optional<lm::FactLandmarkGraph> g;
             {

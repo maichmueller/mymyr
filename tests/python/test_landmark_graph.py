@@ -114,6 +114,8 @@ def test_arrays_layout():
     task = load("depot")
     g = graph(task, "disjunctive")
     a = g.to_arrays()
+    assert a["fingerprint"].dtype == np.uint64 and a["fingerprint"].shape == (1,)
+    assert int(a["fingerprint"][0]) == task.fingerprint
     assert a["landmarks"].dtype == np.uint64 and a["landmarks"].shape == (len(g),)
     assert a["orderings"].shape == (len(g.orderings), 2)
     assert a["disjunctive_offsets"].shape == (len(g.disjunctive) + 1,)
@@ -179,6 +181,48 @@ def test_restoring_onto_another_task_raises():
         _pickle._restore_landmark_graph(other, other.fingerprint, g.to_arrays())
     restored = _pickle._restore_landmark_graph(g.task, g.task.fingerprint, g.to_arrays())
     assert snapshot(restored) == snapshot(g)
+
+
+@needs_frontend
+@pytest.mark.parametrize("source", ["hmax", "lifted"])
+def test_from_arrays_checks_task_fingerprint(source):
+    task = load("childsnack")
+    d = IPC / "childsnack-ipc/train"
+    other = mymyr.Task.from_pddl(d / "domain.pddl", d / "p01.pddl")
+    assert task.num_objects == other.num_objects
+    assert task.fingerprint != other.fingerprint
+    g = graph(task, source)
+    arrays = g.to_arrays()
+    with pytest.raises(ValueError, match="another task.*fingerprint mismatch"):
+        search.FactLandmarkGraph.from_arrays(other, arrays)
+    with pytest.raises(ValueError, match="another task.*fingerprint mismatch"):
+        _pickle._restore_landmark_graph(other, other.fingerprint, arrays)
+    same = load("childsnack")
+    restored = search.FactLandmarkGraph.from_arrays(same, arrays)
+    assert snapshot(restored) == snapshot(g)
+
+
+def test_from_arrays_without_fingerprint():
+    task = load("depot")
+    g = graph(task, "disjunctive")
+    arrays = g.to_arrays()
+    del arrays["fingerprint"]
+    assert snapshot(search.FactLandmarkGraph.from_arrays(task, arrays)) == snapshot(g)
+
+
+@pytest.mark.parametrize("fingerprint,exc", [
+    (np.array([], dtype=np.uint64), ValueError),
+    (np.array([0, 0], dtype=np.uint64), ValueError),
+    (np.array([[0]], dtype=np.uint64), TypeError),
+    (np.array([0], dtype=np.int64), TypeError),
+    (np.array([0], dtype=np.uint64), ValueError),
+])
+def test_from_arrays_rejects_invalid_fingerprint(fingerprint, exc):
+    task = load("depot")
+    assert task.fingerprint != 0
+    arrays = dict(graph(task, "hmax").to_arrays(), fingerprint=fingerprint)
+    with pytest.raises(exc, match="fingerprint"):
+        search.FactLandmarkGraph.from_arrays(task, arrays)
 
 
 def corrupt_cases(a):

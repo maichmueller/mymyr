@@ -327,6 +327,10 @@ g = pickle.loads(blob)
 g.achievers(g.landmarks[0])               # the achiever index travels with the graph
 ```
 
+The arrays include `fingerprint`, a `uint64[1]` array containing the task's content fingerprint. Loading into a task
+with a different fingerprint raises `ValueError`, even when its objects and predicates match. Arrays without this
+entry are accepted with structural validation only; their task identity cannot be checked.
+
 The achiever index dominates the size: a row of 4 (W + 1) bytes per ground action of the grounding (W: the widest
 schema) plus the achiever lists.
 
@@ -336,8 +340,8 @@ the index is computed for the given landmarks, with first achievers by `first_ac
 `"possibly_before"`):
 
 ```python
-subgoals = search.FactLandmarkGraph(task, ["(on a b)", "(clear c)"], achiever_index=True)
-subgoals.unique_achiever("(on a b)")
+subgoals = search.FactLandmarkGraph(task, ["(at ball1 roomb)", "(free left)"], achiever_index=True)
+subgoals.unique_achiever("(at ball1 roomb)")
 ```
 
 On the landmarks of `approximate_fact_landmarks` with the same `first_achievers`, the rebuilt index equals the
