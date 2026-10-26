@@ -119,10 +119,11 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
             {
                 const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
                 const auto& src = *map.sources[i];
-                if (input.view.words < src.words() || input.view.numeric_words < src.numeric_words())
+                const u32 source_words = bits::words_for(static_cast<u32>(slots[i]->size()));
+                if (input.view.words < source_words || input.view.numeric_words < src.numeric_words())
                     throw std::invalid_argument("mymyr: translate: source row is too narrow");
                 const u64* row = input.view.row(r);
-                const StateView view{row, std::min(input.view.words, src.words()),
+                const StateView view{row, std::min(input.view.words, source_words),
                                      sn ? row + input.view.words : nullptr, input.view.numeric_words};
                 lossless[r] = map.maps[i]->translate_row(*slots[i], view, {data + r * rw, tw},
                                                         {data + r * rw + tw, tn}, drop || workers != nullptr, r);
@@ -141,7 +142,7 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
                 {
                     const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
                     const u64* row = input.view.row(r);
-                    const StateView view{row, std::min(input.view.words, map.sources[i]->words()),
+                    const StateView view{row, std::min(input.view.words, bits::words_for(static_cast<u32>(slots[i]->size()))),
                                          sn ? row + input.view.words : nullptr, input.view.numeric_words};
                     map.maps[i]->translate_row(*slots[i], view, {data + r * rw, tw}, {data + r * rw + tw, tn}, false, r);
                 }

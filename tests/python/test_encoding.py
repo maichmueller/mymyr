@@ -164,12 +164,14 @@ def test_walks_equal_the_reconstruction_from_the_atoms(name, atoms):
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
 def test_slot_layout_does_not_change_the_encoding(name):
-    batches = []
+    batches, layouts = [], []
     for atoms in MODES:
         task = text_task(name, atoms=atoms)
+        layouts.append(task.encoding_fingerprint)
         batches.append(encoder_of(task).encode(walk(task, steps=6, seed=3)))
     first = batches[0].as_dict()
-    for other in batches[1:]:
+    for index, other in enumerate(batches[1:], 1):
+        assert (other.as_dict()["table_fingerprint"] == first["table_fingerprint"]) == (layouts[index] == layouts[0])
         for key, value in other.as_dict().items():
             if key != "table_fingerprint":
                 assert np.array_equal(value, first[key]), key

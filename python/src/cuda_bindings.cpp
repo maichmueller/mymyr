@@ -1346,7 +1346,7 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
                 inst.target_slots = dst.atoms().fluent_slots();
                 inst.target_numeric_slots = dst.numeric_slots();
                 inst.missing_constants = static_cast<u32>(map.maps[i]->missing_constants().size());
-                inst.source_words = src.words();
+                inst.source_words = bits::words_for(inst.slots);
                 inst.target_words = dst.words();
                 inst.source_i32 = src.numeric_storage() == NumericStorage::I32;
                 inst.target_i32 = dst.numeric_storage() == NumericStorage::I32;
@@ -1364,9 +1364,10 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
             }
             const auto copy = [&](const auto& data) -> const void* {
                 const u64 bytes = data.size() * sizeof(typename std::decay_t<decltype(data)>::value_type);
-                auto buffer = device_output(*c, bytes, os);
+                auto buffer = std::make_shared<cuda::DeviceBuffer>(c->ctx, std::max<u64>(bytes, 1));
                 if (bytes)
-                    cuda::check(cudaMemcpyAsync(buffer->data(), data.data(), bytes, cudaMemcpyHostToDevice, os.s), "translate map upload");
+                    cuda::check(cudaMemcpyAsync(buffer->data(), data.data(), bytes, cudaMemcpyHostToDevice, c->ctx->stream()),
+                                "translate map upload");
                 const void* ptr = buffer->data();
                 upload->buffers.push_back(std::move(buffer));
                 return ptr;
@@ -1377,16 +1378,26 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
             upload->view.constants = static_cast<const u64*>(copy(constants));
             upload->view.initial = static_cast<const u64*>(copy(initial));
             upload->view.count = static_cast<u32>(instances.size());
-            upload->ready.record(os.s);
+            upload->ready.record(c->ctx->stream());
             upload->ready.synchronize();
+            // Outputs retain older uploads while captured graphs still reference them.
+            for (auto prior = cache.begin(); prior != cache.end();)
+            {
+                bool same_pair = prior->first.size() == key.size() && prior->first[0] == key[0];
+                for (usize k = 1; same_pair && k < key.size(); k += 2)
+                    same_pair = prior->first[k] == key[k];
+                if (same_pair)
+                    prior = cache.erase(prior);
+                else
+                    ++prior;
+            }
             cache.emplace(key, upload);
         }
     }
-    cuda::check(cudaStreamWaitEvent(os.s, upload->ready.get(), 0), "translate map wait");
     DeviceInput in = import_device(rows, *c, os, "states");
     const WordsLayout w = device_words(in);
     const u32 sn = table ? map.source_numeric : map.sources[0]->numeric_words();
-    const u32 sw = table ? map.source_words : map.sources[0]->words();
+    const u32 sw = table ? map.source_words : bits::words_for(static_cast<u32>(snapshots[0]->size()));
     if (w.words < sn || w.words - sn < sw || w.rows > 0x7fffffff)
         throw nb::value_error("mymyr: translate: source rows have the wrong width or too many rows");
     if (map.maps.size() > 1 && task_ids.is_none())
@@ -1438,12 +1449,13 @@ nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids
             {
                 const auto& src = *map.sources[static_cast<usize>(id)];
                 const u32 slot_id = static_cast<u32>(flags[2]);
-                if (slot_id < src.atoms().fluent_slots())
+                const u32 fluent_slots = static_cast<u32>(snapshots[static_cast<usize>(id)]->size());
+                if (slot_id < fluent_slots)
                     name = src.format(SlotId{slot_id});
-                else if (slot_id - src.atoms().fluent_slots() < src.numeric_slots())
-                    name = src.numeric_name(slot_id - src.atoms().fluent_slots());
-                else if (slot_id - src.atoms().fluent_slots() - src.numeric_slots() < map.maps[static_cast<usize>(id)]->missing_constants().size())
-                    name = map.maps[static_cast<usize>(id)]->missing_constants()[slot_id - src.atoms().fluent_slots() - src.numeric_slots()];
+                else if (slot_id - fluent_slots < src.numeric_slots())
+                    name = src.numeric_name(slot_id - fluent_slots);
+                else if (slot_id - fluent_slots - src.numeric_slots() < map.maps[static_cast<usize>(id)]->missing_constants().size())
+                    name = map.maps[static_cast<usize>(id)]->missing_constants()[slot_id - fluent_slots - src.numeric_slots()];
             }
             throw nb::value_error(("mymyr: translate: row " + std::to_string(flags[1]) + ": " + name +
                                     " has no representable value in the target").c_str());

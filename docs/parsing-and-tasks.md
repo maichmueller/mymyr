@@ -262,7 +262,9 @@ graph capture. Its entries are flags, first offending row, first offending sourc
 Flags are 1 for a missing value, 2 for invalid source slots or task ids, and 4 for unrepresentable numeric values.
 Numeric slots follow the instance's fluent slots in an error report, followed by unrepresentable static facts. Warm the map on the same context before capture,
 pass both `status=` and `stream=`, and keep inputs, outputs, status and tasks alive through every replay. Each replay
-resets status. `missing='drop'` still supplies the per-row mask; with explicit status, callers must check invalid-row
+resets status. Outputs are stream-ordered graph allocations: a native wrapper that retains them between replays must
+instantiate with `cudaGraphInstantiateFlagAutoFreeOnLaunch` ([CUDA graph memory](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__GRAPH.html));
+`torch.cuda.CUDAGraph` supplies this flag. `missing='drop'` still supplies the per-row mask; with explicit status, callers must check invalid-row
 flags themselves. Host rows with equal encoding fingerprints and widths are returned directly.
 
 `source_table.translate(rows, task_ids, target_table)` maps instance i into instance i of an equally sized table.

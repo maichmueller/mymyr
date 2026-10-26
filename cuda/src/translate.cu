@@ -55,15 +55,18 @@ __global__ void init_status(i32* status)
     status[2] = -1;
 }
 
-// One thread owns a whole row, including packed pairs of numeric values.
+// A warp owns a row; lane zero writes packed numeric pairs without competing stores.
 __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 stride, u32 sw,
                           const i32* ids, u64* target, u32 tw, u32 rw, u8* lossless, i32* status)
 {
-    for (u64 row = u64{blockIdx.x} * blockDim.x + threadIdx.x; row < rows; row += u64{blockDim.x} * gridDim.x)
+    const u32 lane = threadIdx.x % 32;
+    const u64 first = (u64{blockIdx.x} * blockDim.x + threadIdx.x) / 32;
+    for (u64 row = first; row < rows; row += u64{blockDim.x} * gridDim.x / 32)
     {
         u64* out = target + row * rw;
-        for (u32 w = 0; w < rw; ++w)
+        for (u32 w = lane; w < rw; w += 32)
             out[w] = 0;
+        __syncwarp();
         const i32 id = ids ? ids[row] : 0;
         u32 flags = 0;
         if (id < 0 || static_cast<u32>(id) >= map.count)
@@ -72,13 +75,14 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
         {
             const auto inst = map.instances[id];
             flags |= inst.missing_constants ? 1u : 0u;
-            for (u32 w = 0; w < inst.target_words; ++w)
+            for (u32 w = lane; w < inst.target_words; w += 32)
                 out[w] = map.constants[inst.constant_begin + w];
             const u32 nn = inst.target_i32 ? (inst.target_numeric_slots + 1) / 2 : inst.target_numeric_slots;
-            for (u32 w = 0; w < nn; ++w)
+            for (u32 w = lane; w < nn; w += 32)
                 out[tw + w] = map.initial[inst.initial_begin + w];
+            __syncwarp();
             const u64* in = source + row * stride;
-            for (u32 w = 0; w < inst.source_words; ++w)
+            for (u32 w = lane; w < inst.source_words; w += 32)
                 for (u64 bits = in[w]; bits; bits &= bits - 1)
                 {
                     const u32 slot = w * 64 + static_cast<u32>(__ffsll(static_cast<long long>(bits)) - 1);
@@ -94,11 +98,12 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
                             if (mapped >= inst.target_slots)
                                 flags |= 2;
                             else
-                                out[mapped / 64] |= u64{1} << (mapped % 64);
+                                atomicOr(reinterpret_cast<unsigned long long*>(out + mapped / 64),
+                                         static_cast<unsigned long long>(u64{1} << (mapped % 64)));
                         }
                     }
                 }
-            for (u32 n = 0; n < inst.numeric_slots; ++n)
+            for (u32 n = 0; lane == 0 && n < inst.numeric_slots; ++n)
             {
                 const u32 mapped = map.numeric[inst.numeric_begin + n];
                 f64 value = 0;
@@ -110,11 +115,16 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
                     store(out + tw, mapped, inst.target_i32, value);
             }
         }
-        lossless[row] = flags == 0;
-        if (flags)
+        for (u32 offset = 16; offset; offset /= 2)
+            flags |= __shfl_xor_sync(0xffffffff, flags, offset);
+        if (lane == 0)
         {
-            atomicOr(status, static_cast<i32>(flags));
-            atomicMin(status + 1, static_cast<i32>(row));
+            lossless[row] = flags == 0;
+            if (flags)
+            {
+                atomicOr(status, static_cast<i32>(flags));
+                atomicMin(status + 1, static_cast<i32>(row));
+            }
         }
     }
 }
@@ -164,7 +174,7 @@ cudaError_t translate_rows(TranslateView map, const u64* source, u64 rows, u64 s
         return cudaErrorInvalidValue;
     init_status<<<1, 1, 0, stream>>>(status);
     if (rows)
-        translate<<<static_cast<u32>(rows / 128 + (rows % 128 != 0)), 128, 0, stream>>>(
+        translate<<<static_cast<u32>(rows / 4 + (rows % 4 != 0)), 128, 0, stream>>>(
             map, source, rows, stride, source_words, task_ids, target, target_words, target_row_words, lossless, status);
     finish_status<<<1, 1, 0, stream>>>(map, source, stride, source_words, task_ids, status);
     return cudaGetLastError();

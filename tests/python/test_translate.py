@@ -177,6 +177,9 @@ def test_numeric_reorder_storage_and_loss():
     source, target = numeric_pair()
     states = [source.initial_state, source.successor_states(source.initial_state)[0]]
     translated = source.translate(states, target)
+    for original, moved in zip(states, translated, strict=True):
+        assert dict(zip(source.numeric_names, original.numeric_values(), strict=True)) == dict(
+            zip(target.numeric_names, moved.numeric_values(), strict=True))
     assert target.translate(translated, source) == states
     rows = source.translate(source.encode(states), target)
     assert target.decode(rows) == translated
@@ -238,6 +241,9 @@ def test_device_rows_and_capture(tmp_path, numeric):
     graph.replay()
     torch.cuda.synchronize()
     assert np.array_equal(output.cpu().numpy().view(np.uint64), expected)
+    graph.reset()
+    del output
+    stream.synchronize()
     a, b = rl.TaskTable([source, source]), rl.TaskTable([target, target])
     ids = torch.tensor([1, 0, 1, 0], dtype=torch.int32, device="cuda")
     assert np.array_equal(a.translate(rows, ids, b).cpu().numpy().view(np.uint64), expected)
