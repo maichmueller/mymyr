@@ -54,6 +54,9 @@ public:
         m_out = &out;
         m_set.clear();
         m_bits.assign(m_w, 0);
+        // joinable recurses at most k deep; sized up front, so that references into them stay valid
+        m_level_nb.resize(std::max<usize>(m_level_nb.size(), k + 1));
+        m_level_cand.resize(std::max<usize>(m_level_cand.size(), k + 1));
         rec(0);
     }
 
@@ -125,6 +128,42 @@ private:
         m_bits[v / 64] &= ~(u64{1} << (v % 64));
     }
 
+    /// A family of parts no two of which share a neighbour (nbs: t rows from parts()), chosen greedily by increasing
+    /// neighbourhood size so that it tends to be large: each of its parts needs a joining vertex of its own. Returns
+    /// its size (~0u if a part has no neighbour) and leaves the union of its neighbourhoods in m_seen.
+    u32 independent_parts(const std::vector<u64>& nbs, u32 t)
+    {
+        m_order.resize(t);
+        m_count.resize(t);
+        for (u32 p = 0; p < t; ++p)
+        {
+            const u64* nb = nbs.data() + static_cast<usize>(p) * m_w;
+            u32 count = 0;
+            for (u32 u = 0; u < m_w; ++u)
+                count += static_cast<u32>(std::popcount(nb[u]));
+            if (count == 0)
+                return ~0u;
+            m_order[p] = p;
+            m_count[p] = count;
+        }
+        std::ranges::sort(m_order, [&](u32 a, u32 b) { return m_count[a] < m_count[b] || (m_count[a] == m_count[b] && a < b); });
+        std::fill(m_seen.begin(), m_seen.end(), 0);
+        u32 independent = 0;
+        for (u32 p : m_order)
+        {
+            const u64* nb = nbs.data() + static_cast<usize>(p) * m_w;
+            bool shared = false;
+            for (u32 u = 0; u < m_w && !shared; ++u)
+                shared = (nb[u] & m_seen[u]) != 0;
+            if (shared)
+                continue;
+            ++independent;
+            for (u32 u = 0; u < m_w; ++u)
+                m_seen[u] |= nb[u];
+        }
+        return independent;
+    }
+
     /// Whether at most r vertices of m_after may join m_set into one connected set: false only if none do. Every
     /// joining set holds a neighbour of each part (parts are not adjacent to each other), so the search branches over
     /// the neighbours of the part with the fewest; a vertex adjacent to every part settles it at once, and a set of parts
@@ -135,8 +174,6 @@ private:
         if (m_budget == 0)
             return true;
         --m_budget;
-        if (m_level_nb.size() <= depth)
-            m_level_nb.resize(depth + 1);
         std::vector<u64>& nbs = m_level_nb[depth];
         const u32 t = parts(nbs);
         if (t == 1)
@@ -144,51 +181,52 @@ private:
         if (r == 0)
             return false;
         // a vertex adjacent to every part; the attachment bound; the part with the fewest neighbours
-        u32 independent = 0, best = 0, best_count = ~0u;
+        const u32 independent = independent_parts(nbs, t);
+        if (independent == ~0u)
+            return false;
+        const u32 best = m_order[0];
         bool joiner = false;
         std::fill(m_cand.begin(), m_cand.end(), ~u64{0});
-        std::fill(m_seen.begin(), m_seen.end(), 0);  // the neighbourhoods of the independent parts so far
         for (u32 p = 0; p < t; ++p)
-        {
-            const u64* nb = nbs.data() + static_cast<usize>(p) * m_w;
-            u32 count = 0;
-            bool shared = false;
             for (u32 u = 0; u < m_w; ++u)
-            {
-                count += static_cast<u32>(std::popcount(nb[u]));
-                shared |= (nb[u] & m_seen[u]) != 0;
-                m_cand[u] &= nb[u];
-            }
-            if (count == 0)
-                return false;
-            if (!shared)
-            {
-                ++independent;
-                for (u32 u = 0; u < m_w; ++u)
-                    m_seen[u] |= nb[u];
-            }
-            if (count < best_count)
-                best = p, best_count = count;
-        }
+                m_cand[u] &= nbs[static_cast<usize>(p) * m_w + u];
         for (u32 u = 0; u < m_w && !joiner; ++u)
             joiner = m_cand[u] != 0;
         if (joiner)
             return true;
         if (independent > r || r == 1)
             return false;
-        // branch: the neighbours of part `best` (copied: deeper levels reuse the scratch)
-        u64* branch = scratch(m_level_branch, depth + 1) + static_cast<usize>(depth) * m_w;
-        std::copy(nbs.data() + static_cast<usize>(best) * m_w, nbs.data() + static_cast<usize>(best + 1) * m_w, branch);
+        // branch over the neighbours of part `best`, those adjacent to more of the other parts first (they join
+        // several parts at once, so a joining set is found early when there is one)
+        std::vector<std::pair<u32, u32>>& cand = m_level_cand[depth];  // (parts adjacent, vertex)
+        cand.clear();
+        const u64* nb_best = nbs.data() + static_cast<usize>(best) * m_w;
         for (u32 w = 0; w < m_w; ++w)
-            for (u64 x = branch[w]; x; x &= x - 1)
+            for (u64 x = nb_best[w]; x; x &= x - 1)
             {
-                add(w * 64 + static_cast<u32>(std::countr_zero(x)));
-                const bool ok = joinable(r - 1, depth + 1);
-                remove_last();
-                if (ok)
-                    return true;
+                const u32 v = w * 64 + static_cast<u32>(std::countr_zero(x));
+                u32 adjacent = 0;
+                for (u32 p = 0; p < t; ++p)
+                    adjacent += static_cast<u32>(nbs[static_cast<usize>(p) * m_w + v / 64] >> (v % 64) & 1);
+                cand.emplace_back(adjacent, v);
             }
-        return false;
+        std::ranges::sort(cand, [](const auto& a, const auto& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); });
+        // as many independent parts as picks: every pick is a neighbour of one of them, so the deeper levels choose
+        // among the union of their neighbourhoods only
+        u64* saved = scratch(m_level_after, depth + 1) + static_cast<usize>(depth) * m_w;
+        std::copy(m_after.begin(), m_after.end(), saved);
+        if (independent == r)
+            for (u32 u = 0; u < m_w; ++u)
+                m_after[u] &= m_seen[u];
+        bool ok = false;
+        for (usize i = 0; i < cand.size() && !ok; ++i)
+        {
+            add(cand[i].second);
+            ok = joinable(r - 1, depth + 1);
+            remove_last();
+        }
+        std::copy(saved, saved + m_w, m_after.begin());
+        return ok;
     }
 
     /// Whether the component of m_set[0] among m_set and m_after holds at least k vertices.
@@ -227,10 +265,14 @@ private:
     /// holds k vertices (a connected set of at most k vertices then grows to exactly k inside it).
     bool feasible(u32 last) { return extends_from(last + 1); }
 
-    /// Whether the prefix m_set may extend to a connected k-subset with vertices >= start (false only if it does not).
-    bool extends_from(u32 start)
+    /// Whether the prefix m_set may extend to a connected k-subset with vertices >= start, and in `within` if given
+    /// (false only if it does not).
+    bool extends_from(u32 start, const u64* within = nullptr)
     {
         set_after(start);
+        if (within)
+            for (u32 u = 0; u < m_w; ++u)
+                m_after[u] &= within[u];
         m_budget = k_budget;
         return joinable(m_k - static_cast<u32>(m_set.size()), 0) && component_holds_k();
     }
@@ -243,8 +285,6 @@ private:
             // the last vertex: those adjacent to every part of the prefix (any vertex for k = 1)
             set_after(start);
             m_cand = m_after;
-            if (m_level_nb.empty())
-                m_level_nb.resize(1);
             const u32 t = m_set.empty() ? 0 : parts(m_level_nb[0]);
             for (u32 p = 0; p < t; ++p)
                 for (u32 u = 0; u < m_w; ++u)
@@ -260,10 +300,23 @@ private:
                 }
             return;
         }
-        // completions using vertices >= s exist for s up to some last value (fewer vertices, fewer completions), and a
-        // child j needs one with vertices >= j: the children stop there
+        // when as many parts of the prefix need a vertex of their own as there are picks left, every pick is a
+        // neighbour of one of them: the children lie in the union of their neighbourhoods
+        const bool cut = !m_set.empty();
+        bool tight = false;
+        const usize depth = m_set.size();
+        if (cut)
+        {
+            set_after(start);
+            const u32 t = parts(m_level_nb[0]);
+            tight = t > 1 && independent_parts(m_level_nb[0], t) == need;
+            if (tight)
+                std::copy(m_seen.begin(), m_seen.end(), scratch(m_children, depth + 1) + depth * m_w);
+        }
+        // otherwise completions using vertices >= s exist for s up to some last value (fewer vertices, fewer
+        // completions), and a child j needs one with vertices >= j: the children stop there
         u32 end = m_m - need;
-        if (!m_set.empty())
+        if (cut && !tight)
         {
             u32 lo = start;  // a completion with vertices >= start exists (the parent's check)
             while (lo < end)
@@ -276,18 +329,22 @@ private:
             }
         }
         // below the cutoff, the component of the prefix among the vertices >= j holds k vertices (it only grows as j
-        // falls), so a child needs only the joining check
-        const bool cut = !m_set.empty();
+        // falls), so a child needs only the joining check; a child of a tight prefix gets the whole check, its picks
+        // within the same union
         for (u32 j = start; j <= end; ++j)
         {
+            if (tight && !(m_children[depth * m_w + j / 64] >> (j % 64) & 1))
+                continue;
             add(j);
             bool ok = false;
-            if (cut)
+            if (cut && !tight)
             {
                 set_after(j + 1);
                 m_budget = k_budget;
                 ok = joinable(need - 1, 0);
             }
+            else if (tight)
+                ok = extends_from(j + 1, m_children.data() + depth * m_w);
             else
                 ok = feasible(j);
             if (ok)
@@ -300,9 +357,12 @@ private:
 
     u32 m_m, m_w;
     const std::vector<u64>& m_adj;
-    std::vector<u64> m_after, m_cand, m_seen, m_frontier, m_nb, m_bits, m_level_branch;
+    std::vector<u64> m_after, m_cand, m_seen, m_frontier, m_nb, m_bits;
     std::vector<std::vector<u64>> m_level_nb;  // per depth of joinable: the parts' neighbourhoods
-    std::vector<u32> m_set, m_stack;
+    std::vector<std::vector<std::pair<u32, u32>>> m_level_cand;  // per depth of joinable: the branching candidates
+    std::vector<u64> m_children;     // per prefix size: the children a tight prefix allows
+    std::vector<u64> m_level_after;  // per depth of joinable: m_after before a tight level narrowed it
+    std::vector<u32> m_set, m_stack, m_order, m_count;
     std::vector<u8> m_part;
     u32 m_k = 0, m_limit = 0, m_found = 0, m_budget = 0;
     std::vector<std::vector<u32>>* m_out = nullptr;
