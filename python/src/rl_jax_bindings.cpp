@@ -158,7 +158,8 @@ public:
         e->path = path;
         e->H = H;
         if (H && !device.is_none())
-            throw nb::value_error("mymyr: JAX track_visited on CUDA requires device visited tables; use device=None (the CPU)");
+            throw nb::value_error("mymyr: JAX track_visited on CUDA requires device visited tables; "
+                                  "use mymyr.rl.jax.Env(..., device='cpu')");
         e->NN = e->suite->numeric_words();
         {
             nb::gil_scoped_release release;

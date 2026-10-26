@@ -785,7 +785,7 @@ def test_jax_visited_default_capacity_and_cuda_error():
         rj.Env(task, device="cpu", track_visited=True)
     assert rj.Env(task, device="cpu", track_visited=True, max_steps=7).visited_capacity == 16
     # The native constructor checks this before creating a device context, including CPU-only builds.
-    with pytest.raises(ValueError, match="CUDA requires device visited tables"):
+    with pytest.raises(ValueError, match="CUDA requires device visited tables.*device='cpu'"):
         _rl_jax.Env(task, device=0, track_visited=8)
 
 
