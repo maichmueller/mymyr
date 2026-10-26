@@ -69,7 +69,7 @@ public:
         m_staged.clear();
     }
 
-    /// Interns `state` now. Staged rows must be flushed first, or ids no longer follow the order of insertion.
+    /// Interns `state` immediately. Staged rows are flushed first by the caller, so that ids keep the insertion order.
     std::pair<u32, bool> insert(StateView state)
     {
         const u32 n = bits::trimmed_size(state.w, state.nw);
