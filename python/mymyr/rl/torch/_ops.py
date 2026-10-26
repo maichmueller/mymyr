@@ -50,6 +50,8 @@ the states again; required on a device).
   ``action_succ``.
 - ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
   seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
+- ``mymyr::literal_slots`` / ``mymyr::literal_masks``: CUDA lookup of table predicate ids and instance-local objects
+  on a registered encoder; kinds and slots, or goal/subgoal masks, with a device status scalar for invalid input.
 """
 
 import itertools
@@ -64,6 +66,8 @@ from mymyr.encoding import _device
 
 __all__ = [
     "encode_flat",
+    "literal_masks",
+    "literal_slots",
     "expand",
     "expand_derived",
     "expand_flat",
@@ -99,7 +103,7 @@ _ids = itertools.count(1)
 
 
 def register(obj: Any) -> int:
-    """The op handle of a TaskTable, Task, TaskHandle or native Env (the same handle for the same object). The
+    """The op handle of a TaskTable, Task, TaskHandle, encoder or native Env (the same handle for the same object). The
     registry holds a reference until :func:`unregister`."""
     with _lock:
         h = _by_id.get(id(obj))
@@ -788,3 +792,48 @@ def _(
         states = states[:node_offsets.shape[0] - 1]
     return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history, numeric, static_instances,
                                 static_args)
+
+
+@torch.library.custom_op("mymyr::literal_slots", mutates_args=())
+def literal_slots(encoder: int, predicates: Tensor, objects: Tensor,
+                  task_ids: Optional[Tensor] = None) -> list[Tensor]:
+    """CUDA literal lookup on a registered encoder: kinds uint8 [N], slots int32 [N], status int64 scalar.
+
+    Predicate ids are table domain predicate ids; objects [N, k] are instance-local with -1 padding. task_ids is
+    int32 [N] or None over one instance. Status value 4 reports invalid literals. Warm on the capture stream and
+    retain the registered encoder and buffers through the last replay; no host synchronization occurs.
+    """
+    from mymyr.encoding._device_literals import slots
+    return list(slots(lookup(encoder), predicates, objects, task_ids))
+
+
+@literal_slots.register_fake
+def _(encoder, predicates, objects, task_ids=None):
+    return [predicates.new_empty(predicates.shape, dtype=torch.uint8),
+            predicates.new_empty(predicates.shape, dtype=torch.int32),
+            predicates.new_empty((), dtype=torch.int64)]
+
+
+@torch.library.custom_op("mymyr::literal_masks", mutates_args=())
+def literal_masks(encoder: int, predicates: Tensor, objects: Tensor, positive: Tensor, rows: Tensor,
+                  num_rows: int, task_ids: Optional[Tensor] = None, layers: Optional[Tensor] = None,
+                  num_layers: int = 1) -> list[Tensor]:
+    """CUDA literal masks: pos, neg, derived_pos, derived_neg, unsatisfiable, status.
+
+    The four masks are int64 [num_rows, W/D], or [num_rows, num_layers, W/D] with layers. Derived masks have width
+    zero without derived slots. Signs are bool [N]; ids, rows and layers are contiguous int32 on the same device.
+    task_ids is per output row. Fixed false literals set unsatisfiable (bool); invalid entries are skipped and set
+    status (int64 scalar) to 4. Outputs have fixed shapes and allocate on torch's current stream. Warm on the capture
+    stream and retain the registered encoder and buffers through the last replay.
+    """
+    from mymyr.encoding._device_literals import masks
+    return masks(lookup(encoder), predicates, objects, positive, rows, num_rows, task_ids, layers, num_layers)
+
+
+@literal_masks.register_fake
+def _(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, layers=None, num_layers=1):
+    table = mymyr.rl.as_table(lookup(int(encoder)).table)
+    shape = (num_rows,) if layers is None else (num_rows, num_layers)
+    return [*(predicates.new_empty((*shape, words), dtype=torch.int64)
+              for words in (table.words, table.words, table.derived_words, table.derived_words)),
+            predicates.new_empty(shape, dtype=torch.bool), predicates.new_empty((), dtype=torch.int64)]

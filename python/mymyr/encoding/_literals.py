@@ -27,10 +27,11 @@ from mymyr._core._encoding import LiteralKind, _literal_masks, _literal_slots, _
 
 
 class _Masks(tuple):
-    def __new__(cls, pos, neg, derived_pos, derived_neg, unsatisfiable):
+    def __new__(cls, pos, neg, derived_pos, derived_neg, unsatisfiable, status=None):
         masks = (pos, neg) if derived_pos is None else (pos, neg, derived_pos, derived_neg)
         result = super().__new__(cls, masks)
         result._unsatisfiable = unsatisfiable.view(np.bool_) if isinstance(unsatisfiable, np.ndarray) else unsatisfiable
+        result._status = status
         return result
 
     @property
@@ -53,19 +54,30 @@ class _Masks(tuple):
     def unsatisfiable(self):
         return self._unsatisfiable
 
+    @property
+    def status(self):
+        """CUDA int64 scalar: value 4 flags invalid input; None for host masks."""
+        return self._status
+
     def __getnewargs__(self):
-        return self.pos, self.neg, self.derived_pos, self.derived_neg, self.unsatisfiable
+        return self.pos, self.neg, self.derived_pos, self.derived_neg, self.unsatisfiable, self.status
 
     def tree_flatten(self):
-        return (*self, self.unsatisfiable), None
+        return (*self, self.unsatisfiable, *((self.status,) if self.status is not None else ())), self.status is not None
 
     @classmethod
     def tree_unflatten(cls, aux, children):
+        if aux:
+            children, status = children[:-1], children[-1]
+        else:
+            status = None
         pos, neg, *derived, unsatisfiable = children
-        return cls(pos, neg, *(derived or (None, None)), unsatisfiable)
+        return cls(pos, neg, *(derived or (None, None)), unsatisfiable, status)
 
     def __repr__(self):
         derived = "" if self.derived_pos is None else f", derived {self.derived_pos.shape}"
+        if self.status is not None:
+            return f"{type(self).__name__}(pos {self.pos.shape}{derived}, status {self.status.shape})"
         return (f"{type(self).__name__}(pos {self.pos.shape}{derived}, "
                 f"{int(self.unsatisfiable.sum())} unsatisfiable)")
 
@@ -77,6 +89,9 @@ class GoalMasks(_Masks):
     fails (``fixed='decide'``). It is a tuple ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)`` with read-only
     attributes. Importing ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``.
 
+    CUDA ``literal_masks`` returns int64 torch words (or uint32 halves) and a ``status`` int64 scalar: value 4 flags
+    invalid entries, which were skipped. Host masks have ``status=None``.
+
     A row goal has no constant part: a literal of fixed truth is in none of the masks, and ``goal_complete`` of a row
     goal is 1, as for the instance's goal, whose static literals are fixed too. The goal relations of such a row list
     its slotted literals only, where the instance's goal also lists its static literals as constant tuples."""
@@ -87,7 +102,8 @@ class LayerMasks(_Masks):
     ``[N, L, W]``, ``derived_pos`` and ``derived_neg`` ``[N, L, D]`` (None for a table without derived words), and
     ``unsatisfiable`` bool ``[N, L]``: the layers with a literal of fixed truth that fails (``fixed='decide'``). It is
     a tuple ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)`` with read-only attributes. Importing
-    ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``."""
+    ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``. CUDA masks carry torch words
+    and a ``status`` scalar, as in ``GoalMasks``."""
 
 
 def _check_sequence(value, what):
@@ -197,18 +213,47 @@ def literal_slots(source, predicates, objects, task_ids=None):
     instance-local object ids, each row the predicate's arity in objects followed by -1, and ``task_ids`` [N] the
     instance of each literal (required for a table of several instances). Returns ``(kind, slot)``: ``kind`` uint8
     [N] a ``LiteralKind`` for each literal (``INVALID`` for ids out of range, which raise nowhere here) and ``slot``
-    int32 [N] its fluent or derived slot (-1 for the other kinds)."""
+    int32 [N] its fluent or derived slot (-1 for the other kinds). With CUDA torch tensors, source must be an
+    encoder and the result is ``(kind, slot, status)``: status is an int64 scalar with value 4 for invalid input.
+    Arrays must be contiguous int32 on one device. Warm on the capture stream before CUDA graph capture and keep
+    the encoder, inputs and outputs alive through the last replay; no host synchronization occurs."""
+    if getattr(predicates, "is_cuda", False):
+        from ._device_literals import slots
+        return slots(source, predicates, objects, task_ids)
     predicates, objects = _literal_arrays(predicates, objects)
     return _literal_slots(source, predicates, objects, _task_ids(task_ids))
 
 
 def literal_masks(source, predicates, objects, positive, rows, num_rows, task_ids=None, *, layers=None,
-                  num_layers=None, fixed="decide"):
+                  num_layers=None, fixed="decide", word_dtype=None):
     """The masks of N literals given as arrays (``predicates`` and ``objects`` as in ``literal_slots``): literal ``i``
     has the sign ``positive[i]`` and goes to the row ``rows[i]`` of ``num_rows``, whose instance is ``task_ids[row]``
     (``task_ids`` [num_rows], required for a table of several instances). Returns ``GoalMasks``; with ``layers`` [N]
     (the layer of each literal, of ``num_layers``, by default one more than the largest) ``LayerMasks`` for
-    ``encode(subgoals=...)``. ``fixed`` as in ``goal_masks``. Raises ValueError for an invalid literal, row or layer."""
+    ``encode(subgoals=...)``. ``fixed`` as in ``goal_masks``. Raises ValueError for an invalid literal, row or layer.
+
+    CUDA torch arrays require an encoder, contiguous int32 ids, bool signs, explicit ``num_layers`` with layers,
+    and ``fixed='decide'``. Results are torch tensors, int64 words (or ``word_dtype=torch.uint32`` for low/high
+    halves), bool unsatisfiable, and ``status`` an int64 scalar (value 4 for invalid input, which is skipped).
+    Warm on the capture stream and retain the encoder and buffers through the last replay. No host read occurs."""
+    if getattr(predicates, "is_cuda", False):
+        import torch
+        from ._device_literals import masks
+        if _fixed(fixed) != "decide":
+            raise ValueError("mymyr: encoding: CUDA literal masks require fixed='decide'")
+        if (layers is None) != (num_layers is None):
+            raise ValueError("mymyr: encoding: CUDA layers require explicit num_layers, and num_layers requires layers")
+        if word_dtype not in (None, torch.int64, torch.uint32):
+            raise ValueError("mymyr: encoding: word_dtype must be torch.int64 or torch.uint32")
+        pos, neg, dp, dn, unsatisfiable, status = masks(
+            source, predicates, objects, positive, rows, num_rows, task_ids, layers,
+            1 if num_layers is None else num_layers)
+        if word_dtype == torch.uint32:
+            pos, neg, dp, dn = (a.view(torch.uint32) for a in (pos, neg, dp, dn))
+        return (GoalMasks if layers is None else LayerMasks)(
+            pos, neg, dp if dp.shape[-1] else None, dn if dn.shape[-1] else None, unsatisfiable, status)
+    if word_dtype is not None:
+        raise ValueError("mymyr: encoding: word_dtype is available for CUDA tensors")
     predicates, objects = _literal_arrays(predicates, objects)
     count = predicates.shape[0]
     positive = np.asarray(positive)

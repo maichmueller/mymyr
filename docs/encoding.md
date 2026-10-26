@@ -1263,6 +1263,47 @@ values, for both layouts and index widths. Inputs must share one device. State w
 DLPack and CUDA array interface inputs are imported in place. `framework` is `None` or `"torch"`; `pool` and `into`
 are refused for device rows, and `threads` has no effect.
 
+`literal_slots` and `literal_masks` also accept CUDA torch tensors, with an encoder as their source. They resolve
+table domain predicate ids (`table.predicate_names`; `schema.relation_predicates` maps decoded relation ids to
+predicates) and instance-local objects with the same semantics as the host helpers, under both `reachable` and
+`dense` atom layouts. They allocate through torch on the current stream and perform no host synchronization.
+
+| Argument or result | CUDA tensor |
+| --- | --- |
+| `predicates`, `objects` | contiguous int32 `[K]`, `[K, k]`, objects padded with -1 |
+| `positive`, `rows`, optional `layers` | bool `[K]`, int32 `[K]`, int32 `[K]` |
+| `task_ids` | int32 `[K]` for slots, `[num_rows]` for masks; required for several instances |
+| slots result | `(kinds, slots, status)`: uint8 `[K]`, int32 `[K]` (-1 without a slot), int64 scalar |
+| mask result | `GoalMasks` or `LayerMasks`, int64 words, bool `unsatisfiable`, int64 scalar `status` |
+
+Mask shapes come from the host integer `num_rows`, the table's word counts, and an explicit host integer
+`num_layers` when `layers` is supplied.
+`word_dtype=torch.uint32` returns low/high halves of each word. CUDA masks require `fixed="decide"`: static and
+unreachable literals that fail set `unsatisfiable`; those that hold contribute no bit. Invalid literals, task ids,
+rows or layers are skipped and OR value 4 into `status`; reading that scalar is the caller's choice. Host masks
+raise for invalid inputs and have `status=None`.
+
+```python needs-torch skip-if-no-cuda
+import torch
+from mymyr import rl
+
+predicate = task.atom(0)
+predicates = torch.tensor([rl.as_table(task).predicate_names.index(predicate.predicate.name)],
+                          dtype=torch.int32, device="cuda:0")
+objects = torch.tensor([list(predicate.object_indices)], dtype=torch.int32, device="cuda:0")
+encoder = encoding.FlatRelationEncoder(task)
+kinds, slots, status = encoding.literal_slots(encoder, predicates, objects)
+goals = encoding.literal_masks(encoder, predicates, objects,
+                               torch.ones(1, dtype=torch.bool, device="cuda:0"),
+                               torch.zeros(1, dtype=torch.int32, device="cuda:0"), num_rows=1)
+```
+
+Warm the helper on the capture stream before CUDA graph capture to upload and acquire its context. Keep the
+encoder, input buffers and outputs alive through the last replay. Importing `mymyr.rl.torch` also registers
+`torch.ops.mymyr.literal_slots` and `literal_masks`, with fake implementations for `torch.compile(fullgraph=True)`.
+Their first argument is a registered encoder handle. The mask op returns six tensors: positive and negative fluent
+masks, positive and negative derived masks (width zero without derived slots), `unsatisfiable`, and `status`.
+
 ```python needs-torch skip-if-no-cuda
 import torch
 

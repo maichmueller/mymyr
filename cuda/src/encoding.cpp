@@ -17,6 +17,20 @@
 
 namespace mymyr::cuda
 {
+void literal_slots(const EncodingAcquisition& context, const DeviceLiteralInput& input, u8* kinds, i32* slots,
+                   u64* status)
+{
+    check(detail::launch_literal_slots(context.view, input, kinds, slots, status, context.stream()),
+          "literal slot lookup");
+}
+
+void literal_masks(const EncodingAcquisition& context, const DeviceLiteralInput& input,
+                   const DeviceLiteralPlacement& placement, const DeviceLiteralMasks& output)
+{
+    check(detail::launch_literal_masks(context.view, input, placement, output, context.stream()),
+          "literal masks");
+}
+
 namespace
 {
 u64 add(u64 a, u64 b)
