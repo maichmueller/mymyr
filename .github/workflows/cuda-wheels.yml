@@ -1,0 +1,121 @@
+name: CUDA wheels
+
+# CUDA wheels for Linux x86_64 (manylinux_2_34, version <version>+cu13), one job per CPython ABI. ci/cuda_wheel.sh
+# builds each in the manylinux image of the CPU wheels and tests it with the CPU suite; hosted runners have no GPU,
+# so the wheels stay workflow artifacts named cuda-wheel-<abi> (never dist-*: the PyPI jobs do not see them) until
+# ci/attach_cuda_wheels.sh tests them on a GPU and attaches them to the GitHub Release. The release workflow calls
+# this workflow for every v* tag; a manual run builds a tag or the branch it is started on.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (empty for the branch of the run)
+        type: string
+        default: ""
+      python:
+        description: CPython ABIs, space-separated
+        type: string
+        default: cp314t cp315t
+      archs:
+        description: CUDA architectures (CMAKE_CUDA_ARCHITECTURES)
+        type: string
+        default: 89-real;90-real
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build
+        type: string
+        required: true
+      python:
+        description: CPython ABIs, space-separated
+        type: string
+        default: cp314t cp315t
+      archs:
+        description: CUDA architectures (CMAKE_CUDA_ARCHITECTURES)
+        type: string
+        default: 89-real;90-real
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  abis:
+    name: ABI matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.abis.outputs.python }}
+    steps:
+      - name: List the ABIs
+        id: abis
+        env:
+          PYTHON_ABIS: ${{ inputs.python }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+          abis = os.environ["PYTHON_ABIS"].split()
+          if not abis or not all(re.fullmatch(r"cp3[0-9]{2}t?", abi) for abi in abis):
+              sys.exit(f"error: expected CPython ABIs such as cp314t, got {abis}")
+          print(f"python={json.dumps(abis)}")
+          EOF
+
+  wheel:
+    name: CUDA wheel, ${{ matrix.python }}
+    needs: abis
+    runs-on: ubuntu-24.04
+    # each architecture compiles every device unit once: about 1.5 hours per architecture on a hosted runner
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.abis.outputs.python) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Check the tag against the package version
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: python3 ci/check_release_version.py "$TAG"
+      # the build tree of one architecture takes several GB; the runner image's Android SDK, .NET and GHC are unused
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+      # GCC 16, the dependency superbuild (ci/wheel_toolchain.sh) and the CUDA compiler components
+      # (ci/cuda_redist.json), installed by ci/cuda_wheel.sh inside the build container and mounted into it from
+      # this cache.
+      - name: Restore the toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-toolchain
+          key: cuda-wheel-toolchain-linux-${{ hashFiles('ci/wheel_toolchain.sh', 'dependencies/CMakeLists.txt', 'ci/cuda_redist.json', 'ci/install_cuda_redist.py') }}
+      - name: Build and test the wheel
+        env:
+          PYTHON_ABI: ${{ matrix.python }}
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: |
+          image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+          mkdir -p .ci-toolchain "$RUNNER_TEMP/cuda-wheel"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
+            --volume "$RUNNER_TEMP/cuda-wheel:/work" \
+            "$image" \
+            bash /src/ci/cuda_wheel.sh --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse \
+              --work /work --jobs 4 --cuda-jobs 2
+          ls -l wheelhouse
+          df -h /
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-wheel-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          # a wheel is already compressed
+          compression-level: 0

@@ -1,6 +1,6 @@
 name: Release
 
-# Tags create a GitHub Release and publish to TestPyPI, then PyPI.
+# Tags create a GitHub Release and publish to TestPyPI, then PyPI, and build the CUDA wheels (cuda-wheels.yml).
 # A manual run builds a unique development version and publishes only to TestPyPI.
 on:
   push:
@@ -90,6 +90,18 @@ jobs:
           files: dist/*
           prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
           generate_release_notes: true
+
+  # CUDA wheels for the release, as workflow artifacts that ci/attach_cuda_wheels.sh tests on a GPU and attaches to
+  # the GitHub Release. The publishing jobs do not wait for them, so a failure here does not hold back the release.
+  cuda-wheels:
+    name: CUDA wheels
+    needs: github-release
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/cuda-wheels.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: read
 
   publish-testpypi:
     name: Publish to TestPyPI
