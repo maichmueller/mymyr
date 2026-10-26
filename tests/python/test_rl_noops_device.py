@@ -81,7 +81,7 @@ def test_ipc_host_device_digests(domain, multi):
         compare(first, np.asarray(first.encode(walk(first, steps=6, walks=1))))
 
 
-@pytest.mark.parametrize("name", ["miconic-simpleadl__s2-0", "openstacks-opt08-adl__p03", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("name", ["miconic-simpleadl__s10-2", "openstacks-opt08-adl__p03", "philosophers__p03-phil4"])
 def test_conditional_and_axiom_digests(name):
     task = text_task(name, atoms="dense")
     compare(task, np.asarray(task.encode(walk(task, steps=4, walks=1))))
@@ -104,17 +104,18 @@ def test_suite_digests_and_global_order():
     compare(suite, rows, ids)
 
 
-@pytest.mark.parametrize("words", [1, 4, 16, 65, 129])
-def test_wide_label_only_digests_and_narrow_destinations(words):
-    n = int(np.ceil(np.sqrt(words * 64)))
+@pytest.mark.parametrize("objects", [7, 15, 31, 63, 64, 91])
+def test_wide_label_only_digests_and_narrow_destinations(objects):
+    n = objects
     task = pddl_task("""(define (domain bits) (:requirements :strips :conditional-effects)
       (:predicates (p ?x ?y) (q))
       (:action idle :parameters (?x ?y) :precondition (and) :effect (and))
       (:action set :parameters (?x ?y) :precondition (and) :effect (p ?x ?y))
-      (:action conditional :parameters (?x ?y) :precondition (and) :effect (when (q) (p ?x ?y))))""",
+      (:action conditional :parameters (?x ?y) :precondition (and) :effect (when (q) (p ?x ?y)))
+      (:action clear :parameters () :precondition (q) :effect (not (q))))""",
       """(define (problem bits) (:domain bits) (:objects """ + " ".join(f"o{i}" for i in range(n)) +
       ") (:init (q)) (:goal (p o0 o0)))", atoms="dense")
-    rows = np.asarray(task.encode([task.initial_state]))
+    rows = np.vstack((task.encode([task.initial_state]), np.zeros((1, task.words), np.uint64)))
     compare(task, rows, derived=False)
     narrow = rl.expand(task, torch.as_tensor(rows.view(np.int64), device="cuda"), words=1, hashes=True, noops=True)
     full = rl.expand(task, rows, hashes=True, noops=True)
@@ -152,7 +153,10 @@ def test_capture_replay_drops_noops_and_preserves_canonical_positions(multi):
         with torch.cuda.graph(graph, stream=stream):
             run()
     torch.cuda.current_stream().wait_stream(stream)
-    for row in (rows, np.zeros_like(rows), rows):
+    goal_state = next(state for _, state in task.successors(task.initial_state) if state.is_goal())
+    effective = np.asarray(task.encode([goal_state] * 3))
+    mixed = np.stack((rows[0], effective[0], np.zeros_like(rows[0])))
+    for row in (rows, effective, mixed, np.zeros_like(rows), rows):
         source.copy_(torch.as_tensor(row.view(np.int64), device="cuda"))
         graph.replay()
         expected = rl.expand(table, row, None if ids is None else array(ids), hashes=True, drop_noops=True)
