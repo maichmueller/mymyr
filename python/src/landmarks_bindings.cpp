@@ -455,15 +455,19 @@ lm::FactLandmarkGraph graph_from_arrays(const Task& t, nb::handle arrays)
     known.insert(known.end(), std::begin(k_index_keys), std::end(k_index_keys));
     if (!nb::isinstance<nb::dict>(arrays) && (!PyMapping_Check(arrays.ptr()) || !nb::hasattr(arrays, "keys")))
         throw nb::type_error("mymyr: landmark graph arrays must be a mapping of names to arrays (as to_arrays() gives them)");
+    bool has_fingerprint = false;
     {
         nb::object keys = nb::steal(PyMapping_Keys(arrays.ptr()));
         if (!keys.is_valid())
             throw nb::python_error();
         for (nb::handle k : keys)
+        {
             if (!nb::isinstance<nb::str>(k) || std::ranges::find(known, nb::cast<std::string_view>(k)) == known.end())
                 throw nb::value_error(("mymyr: unknown landmark graph array " + nb::cast<std::string>(nb::repr(k))).c_str());
+            has_fingerprint |= nb::cast<std::string_view>(k) == "fingerprint";
+        }
     }
-    if (auto fingerprint = take<u64>(arrays, "fingerprint", 1, false, k_graph))
+    if (auto fingerprint = take<u64>(arrays, "fingerprint", 1, has_fingerprint, k_graph))
     {
         if (fingerprint->first.size() != 1)
             corrupt("'fingerprint' must have shape [1]");

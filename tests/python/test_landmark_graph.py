@@ -211,6 +211,7 @@ def test_from_arrays_without_fingerprint():
 
 
 @pytest.mark.parametrize("fingerprint,exc", [
+    (None, ValueError),
     (np.array([], dtype=np.uint64), ValueError),
     (np.array([0, 0], dtype=np.uint64), ValueError),
     (np.array([[0]], dtype=np.uint64), TypeError),
