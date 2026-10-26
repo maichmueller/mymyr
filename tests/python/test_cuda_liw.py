@@ -229,3 +229,16 @@ F 1
         batch = mc.liw(task, [task.initial_state] * 3, ctx=ctx, landmarks=graph, chunk_states=chunk)
         for i in range(3):
             assert_equal(batch, i, expected)
+
+
+def test_liw_table_budget_changes_only_grouping(ctx):
+    task = text_task("blocks__probBLOCKS-8-0")
+    atoms = list(task.initial_state.atoms())[:3]
+    graph = search.FactLandmarkGraph(task, atoms)
+    per_search = 8 * (len(atoms) + 1) * (task.words + 1)
+    starts = [task.initial_state] * 3
+    batch = mc.liw(task, starts, ctx=ctx, landmarks=graph, table_bytes=per_search, max_states=60)
+    assert batch.counters["groups"] == 3
+    expected = search.liw(task, landmarks=graph, max_width=1, max_states=60)
+    for i in range(3):
+        assert_equal(batch, i, expected)

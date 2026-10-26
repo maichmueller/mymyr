@@ -124,7 +124,8 @@ std::vector<search::LandmarkNovelty> landmark_options(const PyIwBatch& x, nb::ha
         for (nb::handle atom : unshared_values)
             if (auto c = canonical_atom(owner, atom, false))
                 lm.unshared_atoms.push_back(*c);
-        out.push_back(std::move(lm));
+        if (!shared || out.empty())
+            out.push_back(std::move(lm));
     }
     return out;
 }
