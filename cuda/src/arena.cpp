@@ -43,13 +43,26 @@ Event DeviceArena::take_event()
     return e;
 }
 
-void DeviceArena::reserve(u64 more)
+u64 DeviceArena::grown_capacity(u64 more, u64 most) const
 {
     const u64 need = checked_add(m_device_size, more, "DeviceArena (records)");
     if (need <= m_capacity)
-        return;
+        return m_capacity;
+    return std::max(need, std::min(m_capacity <= ~u64{0} / 2 ? 2 * m_capacity : need, most));
+}
+
+u64 DeviceArena::growth_bytes(u64 more, u64 most) const
+{
+    const u64 cap = grown_capacity(more, most);
+    return cap == m_capacity ? 0 : checked_mul({cap, m_rb}, "DeviceArena (capacity x record bytes)");
+}
+
+void DeviceArena::reserve(u64 more, u64 most)
+{
     // the new generation's size is checked before anything changes: an impossible size leaves the arena as it is
-    const u64 cap = std::max(need, m_capacity <= ~u64{0} / 2 ? 2 * m_capacity : need);
+    const u64 cap = grown_capacity(more, most);
+    if (cap == m_capacity)
+        return;
     const u64 bytes = checked_mul({cap, m_rb}, "DeviceArena (capacity x record bytes)");
     DeviceGuard g(m_ctx->device());
     wait();  // pending copies read the old generation and write the old mirror

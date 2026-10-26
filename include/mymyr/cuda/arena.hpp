@@ -57,9 +57,13 @@ public:
     /// The mirror generation (exports of host_data() hold it: growth allocates a new mirror).
     [[nodiscard]] const std::shared_ptr<PinnedBuffer>& mirror() const noexcept { return m_mirror; }
 
-    /// Makes room for `more` records past device_size() (a new generation when full; capacity at least doubles).
-    /// Throws std::length_error, leaving the arena unchanged, when the records or their bytes exceed 2^64 - 1.
-    void reserve(u64 more);
+    /// Makes room for `more` records past device_size() (a new generation when full; capacity at least doubles, but
+    /// stays at or below `most` records when that holds device_size() + more). The new generation is allocated while
+    /// the old one is still held. Throws std::length_error, leaving the arena unchanged, when the records or their
+    /// bytes exceed 2^64 - 1 (and the context's error, leaving it unchanged, when the allocation fails).
+    void reserve(u64 more, u64 most = ~u64{0});
+    /// The bytes reserve(more, most) allocates (0: the records fit).
+    [[nodiscard]] u64 growth_bytes(u64 more, u64 most = ~u64{0}) const;
     /// Pointer to records [device_size(), device_size() + n) for a kernel on stream() to fill; then commit(n).
     [[nodiscard]] std::byte* tail(u64 n);
     void commit(u64 n);
@@ -85,6 +89,7 @@ private:
         u64 upto;
     };
     Event take_event();
+    [[nodiscard]] u64 grown_capacity(u64 more, u64 most) const;
 
     ContextPtr m_ctx;
     u32 m_rb;

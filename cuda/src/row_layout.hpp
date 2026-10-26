@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <initializer_list>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -64,13 +65,92 @@ inline u64 device_room(const DeviceContext& ctx)
     return limit > u.used ? limit - u.used : 0;
 }
 
-/// Refuses a state (or a chunk of states) whose successors need more device memory than the context has left: the
-/// count, the bytes (0: more than `room`, an allocation for them failed) and the options that change it.
-[[noreturn]] inline void refuse_successors(const DeviceContext& ctx, const std::string& search, const std::string& what,
-                                           u64 successors, u64 bytes, u64 room, const std::string& advice)
+/// True when `e` is the pool's allocation failure (the error is then cleared).
+inline bool out_of_memory(const CudaError& e)
+{
+    if (e.code() != cudaErrorMemoryAllocation)
+        return false;
+    (void)cudaGetLastError();
+    return true;
+}
+
+/// Runs `allocate(attempt)`, which must leave what it changes consistent when an allocation fails. After a failure
+/// the pool's unused memory is returned to the driver (free blocks of other sizes need not fit the request) and it
+/// runs again with attempt 1 (at exact sizes, say). False when that attempt fails too.
+template<class F>
+bool try_allocate(DeviceContext& ctx, F&& allocate)
+{
+    for (int attempt = 0;; ++attempt)
+    {
+        try
+        {
+            allocate(attempt);
+            return true;
+        }
+        catch (const CudaError& e)
+        {
+            if (!out_of_memory(e))
+                throw;
+            if (attempt == 1)
+                return false;
+        }
+        ctx.trim(0);
+    }
+}
+
+/// A device buffer a search holds (refusals name what took the context's memory).
+struct HeldBytes
+{
+    const char* what;
+    u64 bytes;
+};
+/// "N bytes are in use: <what> <bytes>, ..., and R of the task's device tables, the generator and the context's other
+/// buffers".
+inline std::string held_text(const DeviceContext& ctx, std::initializer_list<HeldBytes> held)
+{
+    const u64 used = ctx.usage().used;
+    u64 named = 0;
+    std::string s;
+    for (const HeldBytes& h : held)
+    {
+        s += std::string(h.what) + " " + std::to_string(h.bytes) + ", ";
+        named += h.bytes;
+    }
+    return std::to_string(used) + " bytes are in use: " + s + "and " + std::to_string(used > named ? used - named : 0) +
+           " of the task's device tables, the generator and the context's other buffers";
+}
+
+/// " (max_bytes=N)" when the context has a limit.
+inline std::string max_bytes_text(const DeviceContext& ctx)
 {
     const u64 max_bytes = ctx.options().max_bytes;
-    const std::string limit = max_bytes ? " (max_bytes=" + std::to_string(max_bytes) + ")" : std::string();
+    return max_bytes ? " (max_bytes=" + std::to_string(max_bytes) + ")" : std::string();
+}
+
+/// Refuses a search whose device memory (`held`: held_text) leaves the context too little for `need` (what it was
+/// about to allocate, a phrase).
+[[noreturn]] inline void refuse_memory(const DeviceContext& ctx, const std::string& search, const std::string& need,
+                                       const std::string& held, const std::string& advice)
+{
+    throw std::length_error("mymyr: " + search + ": the CUDA context has too little device memory left for " + need +
+                            ": it can still allocate " + std::to_string(device_room(ctx)) + " bytes" + max_bytes_text(ctx) +
+                            ", and " + held + ". " + advice);
+}
+
+/// Refuses a state (or a chunk of states) whose successors need more device memory than the context has left: the
+/// count, the bytes (0: more than `room`, an allocation for them failed) and the options that change it. When `room`
+/// is below `row_bytes` (what one successor takes), the search's own buffers took the memory: the refusal names them
+/// (`held`: held_text) instead.
+[[noreturn]] inline void refuse_successors(const DeviceContext& ctx, const std::string& search, const std::string& what,
+                                           u64 successors, u64 bytes, u64 room, const std::string& advice, u64 row_bytes = 0,
+                                           const std::string& held = {})
+{
+    const std::string limit = max_bytes_text(ctx);
+    if (!held.empty() && room < row_bytes)
+        throw std::length_error("mymyr: " + search + ": the search's own device memory leaves the CUDA context " +
+                                std::to_string(room) + " bytes" + limit + ", less than one successor needs (" +
+                                std::to_string(row_bytes) + " bytes; " + what + " has " + std::to_string(successors) +
+                                " successors); " + held + ". " + advice);
     const std::string need = bytes ? std::to_string(bytes) + " bytes of device memory; the CUDA context can still allocate " +
                                          std::to_string(room) + " bytes" + limit
                                    : "more device memory than the CUDA context can still allocate (" + std::to_string(room) +
