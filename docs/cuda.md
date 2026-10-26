@@ -57,6 +57,14 @@ fallback. Numeric goal expressions use at most 64 stack values. Callable goals a
 search require CPU search; device A*/GBFS use the task goal. See [Formula values](formulas.md) for goal construction.
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
+Exact device IW reproduces each CPU search's status, plan, goal state and per-pass counts with matching options,
+including `max_states`, `max_expanded` and `max_depth`. The C++ `MultiIwOptions::max_next_layer_states` corresponds
+to CPU `IwOptions::layers` with `Kind::InOrder` and the same limit (or `Kind::Randomized` and the same seed for
+rollouts). Filling the next layer stops generation and discards the rest of the current layer; it can change the
+tree even when `max_states` is identical. An unlimited CPU queue is therefore a different search from a device
+search with a finite next-layer limit. Positive `max_seconds` limits depend on elapsed wall time and do not
+guarantee equal trees or counts between backends or launch configurations.
+
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks.
 Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
