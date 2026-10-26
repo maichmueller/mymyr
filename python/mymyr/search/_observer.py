@@ -74,7 +74,8 @@ class Observer:
     def on_transition(
         self, parent: int, action: Action, child: int | None, state: State, outcome: TransitionOutcome
     ) -> None:
-        """What became of a successor (the IW family variants, astar_iw); ``child`` is None when it got no id."""
+        """What became of a successor (``iw``, ``iw_pass``, ``siw``, the IW family variants, ``astar_iw``,
+        ``rollout_iw``, ``find_rollouts_parallel``, ``atomic_goal_portfolio``); ``child`` is None when it got no id."""
 
     @_default_event
     def on_pass(self, width: int, stats: Statistics) -> None:
