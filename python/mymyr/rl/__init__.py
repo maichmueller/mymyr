@@ -32,14 +32,27 @@ The primitive is :func:`expand`: a batch of states ``[N, W]`` in, the flat CSR e
     exp.offsets   # [N + 1] int32: state i's successors are rows offsets[i]:offsets[i+1]
     exp.goal      # [M] bool, with expand(..., goal=True)
     exp.derived   # [M, D] derived-atom words of the successors, with expand(..., derived=True) (D = table.derived_words)
+    exp.succ_hash # [M] native state hashes, with hashes=True (uint32 pairs for JAX)
+    exp.noop      # [M] bitwise parent equality, with noops=True or drop_noops=True
+    exp.index     # [M] positions in each parent's full successor order, with drop_noops=True
+    exp.generated # pre-drop successor count; capacity bounds this count
     exp.pad(k)    # the padded [N, k] view: succ [N, k, W], schema, binding, index, mask, count (count > k = overflow);
                   #   exp.pad() sizes k to the next power of two at or above the largest count; expand(..., k=k)
 
 Per state, successors come in canonical order (schema, then binding); witness pruning is off, so every applicable
 ground action is one row. Outputs are sized automatically (``capacity=`` fixes the size, at most 2**31 - 1 rows: rows
-past it are counted in ``total`` and ``overflow`` is set; a batch holds at most 2**31 - 1 states and successors).
+past it are counted in ``generated`` and ``overflow`` is set; a batch holds at most 2**31 - 1 states and successors).
 ``pool=ThreadPool(T)`` splits one batch over T threads; any number of Python threads may call ``expand`` on one shared
 table at once.
+
+``hashes=True`` computes the trimmed atom/numeric state hash, matching ``hash_rows`` with the table's numeric
+width. ``noops=True`` compares atom and numeric words bit for bit with the parent (signed zeros and NaN payloads
+count as changes). ``drop_noops=True`` stably removes no-ops per parent unless all successors are no-ops, in which
+case it keeps them all. ``index`` maps kept rows to positions in the full parent expansion; every requested array is
+compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; outputs are undefined on capacity
+overflow. ``expand_into`` accepts ``succ_hash=``, ``noop=`` and ``index=``; digests need no ``succ=`` destination,
+and dropping requires ``index=``. The padded hashes/no-ops have zero padding; with dropping its ``index`` holds the
+canonical positions (-1 padding), otherwise flat row indices.
 
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read

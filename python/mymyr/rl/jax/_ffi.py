@@ -178,9 +178,17 @@ def env_step(
     )  # fmt: skip
 
 
-def expand(handle: int, states, task_ids, k: int, label_width: int, derived_words: Optional[int] = None) -> tuple[Any, ...]:
+def expand(handle: int, states, task_ids, k: int, label_width: int, derived_words: Optional[int] = None, *, hashes=False, noops=False, drop_noops=False) -> tuple[Any, ...]:
     n = states.shape[:-1]
     extra = () if derived_words is None else (_u32((*n, k, 2 * derived_words)),)
+    if hashes or noops or drop_noops:
+        extra = (
+            _u32((*n, k, 2 * (derived_words or 0))),
+            _u32((*n, k, 2) if hashes else (0, 2)),
+            _bool((*n, k) if noops or drop_noops else (0,)),
+            _i32((*n, k) if drop_noops else (0,)),
+            _i32((1,)),
+        )
     call = jax.ffi.ffi_call(
         "mymyr_expand",
         (
@@ -194,14 +202,22 @@ def expand(handle: int, states, task_ids, k: int, label_width: int, derived_word
         ),
         vmap_method="broadcast_all",
     )
-    return call(states, task_ids, handle=np.int64(handle))
+    return call(states, task_ids, handle=np.int64(handle), hashes=bool(hashes), noops=bool(noops), drop_noops=bool(drop_noops))
 
 
 def expand_flat(
-    handle: int, states, task_ids, capacity: int, label_width: int, derived_words: Optional[int] = None
+    handle: int, states, task_ids, capacity: int, label_width: int, derived_words: Optional[int] = None, *, hashes=False, noops=False, drop_noops=False
 ) -> tuple[Any, ...]:
     n = states.shape[0]
     extra = () if derived_words is None else (_u32((capacity, 2 * derived_words)),)
+    if hashes or noops or drop_noops:
+        extra = (
+            _u32((capacity, 2 * (derived_words or 0))),
+            _u32((capacity, 2) if hashes else (0, 2)),
+            _bool((capacity,) if noops or drop_noops else (0,)),
+            _i32((capacity,) if drop_noops else (0,)),
+            _i32((1,)),
+        )
     call = jax.ffi.ffi_call(
         "mymyr_expand_flat",
         (
@@ -215,4 +231,4 @@ def expand_flat(
         ),
         vmap_method="sequential",
     )
-    return call(states, task_ids, handle=np.int64(handle))
+    return call(states, task_ids, handle=np.int64(handle), hashes=bool(hashes), noops=bool(noops), drop_noops=bool(drop_noops))

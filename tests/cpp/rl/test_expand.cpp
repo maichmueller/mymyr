@@ -185,6 +185,78 @@ TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
     }
 }
 
+TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
+{
+    const auto task = load("rovers__p02", TaskOptions::Atoms::Reachable);
+    const auto table = rl::TaskTable::single(task);
+    const auto states = walk_states(*task, 2, 30, 19);
+    const auto ref = reference(*task, states);
+    const u32 W = task->words(), L = rl::max_label_width(*task);
+    const auto rows = pack(states, W);
+    const rl::StateBatchView in{rows.data(), states.size(), W};
+    Buffers full(states.size(), ref.succ.size(), W, L);
+    std::vector<u64> hashes(ref.succ.size());
+    std::vector<u8> noops(ref.succ.size());
+    full.x.succ_hash = hashes.data();
+    full.x.noop = noops.data();
+    rl::expand(*table, in, nullptr, full.x);
+    ASSERT_EQ(full.x.generated, ref.succ.size());
+    u64 noop_count = 0;
+    for (usize j = 0; j < ref.succ.size(); ++j)
+    {
+        EXPECT_EQ(hashes[j], ref.succ[j].hash());
+        EXPECT_EQ(noops[j], ref.succ[j] == states[static_cast<usize>(ref.parent[j])]);
+        noop_count += noops[j];
+    }
+    ASSERT_GT(noop_count, 0);
+    for (bool pooled : {false, true})
+    {
+        Buffers kept(states.size(), ref.succ.size(), W, L);
+        std::vector<i32> indices(ref.succ.size());
+        std::vector<u64> kh(ref.succ.size());
+        std::vector<u8> kn(ref.succ.size());
+        kept.x.index = indices.data();
+        kept.x.succ_hash = kh.data();
+        kept.x.noop = kn.data();
+        rl::ExpandOptions opt;
+        opt.drop_noops = true;
+        ThreadPool pool(3);
+        rl::ExpandScratch scratch;
+        auto run = [&]
+        {
+            if (pooled)
+                rl::expand(*table, in, nullptr, kept.x, opt, pool, scratch);
+            else
+                rl::expand(*table, in, nullptr, kept.x, opt);
+        };
+        run();
+        EXPECT_EQ(kept.x.generated, full.x.total);
+        EXPECT_LT(kept.x.total, full.x.total);
+        for (usize p = 0; p < states.size(); ++p)
+        {
+            const i32 b = full.offsets[p], e = full.offsets[p + 1];
+            const bool all_noop = std::all_of(noops.begin() + b, noops.begin() + e, [](u8 v) { return v != 0; });
+            i32 next = kept.offsets[p];
+            for (i32 j = b; j < e; ++j)
+                if (all_noop || !noops[j])
+                {
+                    ASSERT_LT(next, kept.offsets[p + 1]);
+                    EXPECT_EQ(indices[next], j - b);
+                    EXPECT_EQ(kh[next], hashes[j]);
+                    EXPECT_EQ(kn[next], noops[j]);
+                    EXPECT_TRUE(std::equal(full.succ.data() + j * W, full.succ.data() + (j + 1) * W,
+                                           kept.succ.data() + next * W));
+                    ++next;
+                }
+            EXPECT_EQ(next, kept.offsets[p + 1]);
+        }
+        kept.x.capacity = kept.x.total;
+        run();
+        EXPECT_TRUE(kept.x.overflow());
+        EXPECT_GT(kept.x.generated, kept.x.capacity);
+    }
+}
+
 TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 {
     const auto& [name, frozen] = GetParam();

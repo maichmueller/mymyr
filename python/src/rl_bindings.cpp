@@ -26,6 +26,7 @@
 #include "rl_imports.hpp"
 #include "rl_typing.hpp"
 
+#include "mymyr/core/bitset.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/core/threads.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
@@ -204,12 +205,14 @@ namespace
 struct FlatResult
 {
     std::shared_ptr<Block> block;
-    u64 rows = 0, capacity = 0, total = 0;
+    u64 rows = 0, capacity = 0, total = 0, generated = 0;
     u32 words = 0, label_width = 0, words_needed = 0;
     u32 numeric_words = 0;  // numeric tables: rows are [words | numeric_words]
     u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0, off_offsets = 0;
     u32 derived_words = 0;  // words per row of the derived array
     bool has_goal = false, has_derived = false;
+    bool has_hashes = false, has_noops = false, has_index = false;
+    u64 off_hashes = 0, off_noops = 0, off_canonical = 0;
 
     [[nodiscard]] u64 valid() const noexcept { return std::min(total, capacity); }
     template<class T>
@@ -232,6 +235,10 @@ struct FlatResult
         x.derived_words = derived_words;
         x.offsets = at<i32>(off_offsets);
         x.total = total;
+        x.generated = generated;
+        x.succ_hash = has_hashes ? at<u64>(off_hashes) : nullptr;
+        x.noop = has_noops ? at<u8>(off_noops) : nullptr;
+        x.index = has_index ? at<i32>(off_canonical) : nullptr;
         x.words_needed = words_needed;
         x.numeric_words = numeric_words;
         return x;
@@ -239,7 +246,7 @@ struct FlatResult
     [[nodiscard]] i64 row_words() const noexcept { return static_cast<i64>(words) + numeric_words; }
 };
 
-FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal, std::optional<u32> derived)
+FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal, std::optional<u32> derived, bool hashes, bool noops, bool drop)
 {
     FlatResult r;
     BlockLayout lay;
@@ -249,6 +256,12 @@ FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal, std
     r.numeric_words = NN;
     r.label_width = L;
     r.has_goal = goal;
+    r.has_hashes = hashes;
+    r.has_noops = noops || drop;
+    r.has_index = drop;
+    r.off_hashes = lay.add(hashes ? cap : 0, sizeof(u64));
+    r.off_noops = lay.add(r.has_noops ? cap : 0, 1);
+    r.off_canonical = lay.add(drop ? cap : 0, sizeof(i32));
     r.has_derived = derived.has_value();
     r.derived_words = derived.value_or(0);
     r.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
@@ -270,6 +283,8 @@ struct PaddedResult
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
     bool has_goal = false, has_derived = false, overflow = false;
+    bool has_hashes = false, has_noops = false;
+    u64 off_hashes = 0, off_noops = 0;
     Framework fw = Framework::Numpy;
     WordEncoding enc;
 };
@@ -284,11 +299,15 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     p.numeric_words = f.numeric_words;
     p.label_width = f.label_width;
     p.has_goal = f.has_goal;
+    p.has_hashes = f.has_hashes;
+    p.has_noops = f.has_noops;
     p.has_derived = f.has_derived;
     p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
     const u64 NK = checked_mul({f.rows, k}, "a padded expansion (rows x k)");
+    p.off_hashes = lay.add(f.has_hashes ? NK : 0, sizeof(u64));
+    p.off_noops = lay.add(f.has_noops ? NK : 0, 1);
     p.off_index = lay.add(NK, sizeof(i32));
     p.off_mask = lay.add(NK, 1);
     p.off_count = lay.add(f.rows, sizeof(i32));
@@ -301,6 +320,8 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
     out.k = k;
+    out.succ_hash = f.has_hashes ? reinterpret_cast<u64*>(b + p.off_hashes) : nullptr;
+    out.noop = f.has_noops ? reinterpret_cast<u8*>(b + p.off_noops) : nullptr;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
@@ -365,12 +386,13 @@ nb::object padded_array(const PaddedResult& p, u64 off, rl::DType dt, std::vecto
     return export_array(std::move(s), p.fw, p.enc);
 }
 
-rl::ExpandOptions expand_options(bool canonical, bool witness, bool validate)
+rl::ExpandOptions expand_options(bool canonical, bool witness, bool validate, bool drop = false)
 {
     rl::ExpandOptions o;
     o.canonical_order = canonical;
     o.witness_pruning = witness;
     o.validate = validate;
+    o.drop_noops = drop;
     return o;
 }
 
@@ -390,7 +412,8 @@ std::pair<Framework, WordEncoding> output_kind(const StateBatch& in, nb::handle 
     return {in.fw, in.enc};
 }
 
-void run_expand(const rl::TaskSuite& table, const rl::StateBatchView& in, const i32* ids, rl::Expansion& x,
+template<class Table>
+void run_expand(const Table& table, const rl::StateBatchView& in, const i32* ids, rl::Expansion& x,
                 const rl::ExpandOptions& o, PyPool* pool, u32 threads)
 {
     nb::gil_scoped_release release;
@@ -409,8 +432,61 @@ void run_expand(const rl::TaskSuite& table, const rl::StateBatchView& in, const 
         rl::expand(table, in, ids, x, o);
 }
 
+/// The host expansion source: immutable suite metadata, or the live layout of a single lazy task.
+struct ExpansionSource
+{
+    SuiteRef ref;
+    const Task* local = nullptr;
+    explicit ExpansionSource(nb::handle obj)
+    {
+        if (nb::isinstance<PyTask>(obj) || nb::isinstance<PyHandle>(obj))
+        {
+            const Owner o = owner_of(obj);
+            if (!o.core->task->atoms().frozen())
+            {
+                local = o.core->task.get();
+                ref.core = o.core;
+                ref.obj = o.obj;
+                return;
+            }
+        }
+        ref = suite_of(obj);
+    }
+    [[nodiscard]] u32 size() const noexcept { return local ? 1 : ref.suite->size(); }
+    [[nodiscard]] const char* noun() const noexcept { return local ? "task" : ref.suite->noun(); }
+    [[nodiscard]] const Task* task(u32 i) const { return local ? local : ref.suite->task(i).get(); }
+    [[nodiscard]] u32 numeric_words() const noexcept { return local ? local->numeric_words() : ref.suite->numeric_words(); }
+    [[nodiscard]] u32 derived_words() const noexcept
+    {
+        return local ? bits::words_for(local->atoms().derived_slots()) : ref.suite->derived_words();
+    }
+    [[nodiscard]] u32 label_width() const noexcept { return local ? rl::max_label_width(*local) : ref.suite->label_width(); }
+    [[nodiscard]] u32 batch_words(const i32* ids, u64 rows) const noexcept
+    {
+        return local ? std::max<u32>(local->words(), 1) : ref.suite->batch_words(ids, rows);
+    }
+    void check_task_ids(const i32* ids, u64 rows) const
+    {
+        if (!local)
+            ref.suite->check_task_ids(ids, rows);
+        else
+            for (u64 i = 0; ids && i < rows; ++i)
+                if (ids[i] != 0)
+                    throw nb::value_error("mymyr: expand: a single task requires task id zero");
+    }
+    void run(const rl::StateBatchView& in, const i32* ids, rl::Expansion& x, const rl::ExpandOptions& opt,
+             PyPool* pool, u32 threads) const
+    {
+        if (local)
+            run_expand(*local, in, ids, x, opt, pool, threads);
+        else
+            run_expand(*ref.suite, in, ids, x, opt, pool, threads);
+    }
+};
+
 /// The rows of a batch over a suite: [N, W + NN] (States packed at the widest of their tasks' words).
-StateBatch import_table_states(nb::handle states, const rl::TaskSuite& t)
+template<class Table>
+StateBatch import_table_states(nb::handle states, const Table& t)
 {
     return import_rows(states, packed_words(states), t.numeric_words());
 }
@@ -421,13 +497,15 @@ struct TaskIds
     const i32* ptr = nullptr;
     std::vector<i32> copy;
     std::shared_ptr<void> keep;
-    TaskIds(nb::handle obj, u64 rows, const rl::TaskSuite& t)
+    template<class Table>
+    TaskIds(nb::handle obj, u64 rows, const Table& t)
     {
         ptr = import_task_ids(obj, rows, t.size(), copy, keep, "task_ids", t.noun());
     }
     /// The ids of `batch` (read in place or converted), checked against the suite, and its States against the
     /// instance of their row: ValueError for a State of another task.
-    TaskIds(nb::handle obj, const StateBatch& batch, const rl::TaskSuite& t) : TaskIds(obj, batch.view.rows, t)
+    template<class Table>
+    TaskIds(nb::handle obj, const StateBatch& batch, const Table& t) : TaskIds(obj, batch.view.rows, t)
     {
         if (batch.owners.empty() || (!ptr && t.size() > 1))
             return;  // arrays: the caller's encoding; no ids for a suite of several: the expansion reports it
@@ -464,19 +542,21 @@ using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 
 ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg k,
                     bool goal, bool derived, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
-                    bool validate, StreamArg stream, ContextArg ctx)
+                    bool validate, StreamArg stream, ContextArg ctx, bool hashes, bool noops, bool drop)
 {
+    if (is_cuda_array(states) && (hashes || noops || drop))
+        throw nb::type_error("mymyr: successor digests and drop_noops require host states in this build");
     if (device_hooks().expand && is_cuda_array(states))
         return device_hooks().expand(
             {table, states, task_ids, capacity, words, k, goal, derived, canonical, witness, framework, validate, stream, ctx});
     const u32 threads = threads_arg(threads_in);
-    SuiteRef ref = suite_of(table);
-    const rl::TaskSuite& tt = *ref.suite;
+    ExpansionSource tt(table);
+    SuiteRef& ref = tt.ref;
     StateBatch in = import_table_states(states, tt);
     const bool from_array = !in.packed;
     const auto [fw, enc] = output_kind(in, framework, from_array);
     PyPool* p = pool_arg(pool);
-    const rl::ExpandOptions opt = expand_options(canonical, witness, validate);
+    const rl::ExpandOptions opt = expand_options(canonical, witness, validate, drop);
     const u64 N = in.view.rows;
     const TaskIds ids(task_ids, in, tt);
     const u32 L = tt.label_width();
@@ -496,16 +576,17 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     for (int attempt = 0;; ++attempt)
     {
         f = allocate_flat(N, cap, W, tt.numeric_words(), L, goal,
-                          derived ? std::optional<u32>(tt.derived_words()) : std::nullopt);
+                          derived ? std::optional<u32>(tt.derived_words()) : std::nullopt, hashes, noops, drop);
         rl::Expansion x = f.view();
-        run_expand(tt, in.view, ids.ptr, x, opt, p, threads);
+        tt.run(in.view, ids.ptr, x, opt, p, threads);
         f.total = x.total;
+        f.generated = x.generated;
         f.words_needed = x.words_needed;
-        const bool short_rows = x.total > cap && !fixed_cap;
+        const bool short_rows = x.generated > cap && !fixed_cap;
         const bool narrow = x.words_needed > W && !fixed_words;
         if ((!short_rows && !narrow) || attempt >= 3)
             break;
-        cap = std::max(cap, std::min(x.total, rl::k_max_rows));
+        cap = std::max(cap, std::min(x.generated, rl::k_max_rows));
         W = std::max(W, x.words_needed);
     }
     if (N > 0 && !fixed_cap)
@@ -514,7 +595,7 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
         // once (a short estimate costs a rerun) and shrinks with hysteresis after batches of 16 or more states (an
         // oversized block costs cache: 5-10% of bulk_expand at 32 threads). It is stored only when it changes, so
         // steady calls from many threads do not write the shared line; a lost race only affects sizing.
-        const u32 est = static_cast<u32>(std::min<u64>((f.total * 5 + 4 * N - 1) / (4 * N) + 1, 1u << 20));
+        const u32 est = static_cast<u32>(std::min<u64>((f.generated * 5 + 4 * N - 1) / (4 * N) + 1, 1u << 20));
         const u32 cur = branching.load(std::memory_order_relaxed);
         if (est > cur || (N >= 16 && cur > est + 1))
             branching.store(est, std::memory_order_relaxed);
@@ -523,9 +604,9 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     e.flat = std::move(f);
     e.fw = fw;
     e.enc = enc;
-    e.ref = std::move(ref);
     if (ids.ptr && tt.size() > 1)
         e.task_ids.assign(ids.ptr, ids.ptr + N);
+    e.ref = std::move(ref);
     e.single = in.single;
     if (fixed_k)
         e.padded = make_padded(e.flat, *fixed_k, fw, enc);
@@ -554,8 +635,14 @@ T* dest_ptr(const Dest& d, const char* name, rl::DType want, rl::DType also, usi
 
 ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, ArrayArg succ, ArrayArg parent,
                        ArrayArg schema, ArrayArg binding, ArrayArg goal, ArrayArg derived, ArrayArg offsets, bool canonical, bool witness,
-                       PoolArg pool, bool validate, StreamArg stream, ContextArg ctx, ArrayArg status, ArrayArg row_count)
+                       PoolArg pool, bool validate, StreamArg stream, ContextArg ctx, ArrayArg status, ArrayArg row_count,
+                       ArrayArg succ_hash, ArrayArg noop, ArrayArg index, bool drop)
 {
+    if ((is_cuda_array(states) || is_cuda_array(succ_hash) || is_cuda_array(noop) || is_cuda_array(index)) &&
+        (!succ_hash.is_none() || !noop.is_none() || !index.is_none() || drop))
+        throw nb::type_error("mymyr: successor digests and drop_noops require host arrays in this build");
+    if (drop && index.is_none())
+        throw nb::value_error("mymyr: expand_into: drop_noops requires index");
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
                                        is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status)))
@@ -566,8 +653,7 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
     if (!status.is_none())
         throw nb::type_error("mymyr: expand_into: 'status' is a device array of an expansion on the device (CUDA "
                              "states and destinations)");
-    SuiteRef ref = suite_of(table);
-    const rl::TaskSuite& tt = *ref.suite;
+    ExpansionSource tt(table);
     StateBatch in = import_table_states(states, tt);
     const TaskIds ids(task_ids, in, tt);
     const u32 NN = tt.numeric_words();
@@ -653,6 +739,29 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
         take_cap(d.shape[0]);
         keep.push_back(std::move(d));
     }
+    if (!succ_hash.is_none())
+    {
+        Dest d = import_dest(succ_hash, "succ_hash");
+        x.succ_hash = dest_ptr<u64>(d, "succ_hash", rl::DType::U64, rl::DType::I64, 1);
+        take_cap(d.shape[0]);
+        keep.push_back(std::move(d));
+    }
+    if (!noop.is_none())
+    {
+        Dest d = import_dest(noop, "noop");
+        x.noop = dest_ptr<u8>(d, "noop", rl::DType::Bool, rl::DType::U8, 1);
+        take_cap(d.shape[0]);
+        keep.push_back(std::move(d));
+    }
+    if (!index.is_none())
+    {
+        Dest d = import_dest(index, "index");
+        x.index = dest_ptr<i32>(d, "index", rl::DType::I32, rl::DType::I32, 1);
+        take_cap(d.shape[0]);
+        keep.push_back(std::move(d));
+    }
+    if (succ.is_none())
+        x.words = std::max<u32>(tt.batch_words(ids.ptr, in.view.rows), 1);
     if (!offsets.is_none())
     {
         Dest d = import_dest(offsets, "offsets");
@@ -662,9 +771,10 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
         keep.push_back(std::move(d));
     }
     x.capacity = cap.value_or(0);
-    run_expand(tt, in.view, ids.ptr, x, expand_options(canonical, witness, validate), pool_arg(pool), 1);
+    tt.run(in.view, ids.ptr, x, expand_options(canonical, witness, validate, drop), pool_arg(pool), 1);
     nb::dict r;
     r["total"] = x.total;
+    r["generated"] = x.generated;
     r["words_needed"] = x.words_needed;
     r["overflow"] = x.overflow();
     r["capacity"] = x.capacity;
@@ -684,7 +794,7 @@ nb::object bool_array(std::shared_ptr<Block> block, u64 n, Framework fw)
 std::string words_repr(const PyExpansion& e)
 {
     return "Expansion(states=" + std::to_string(e.flat.rows) + ", successors=" + std::to_string(e.flat.total) +
-           ", words=" + std::to_string(e.flat.words) + (e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words ? ", overflow" : "") +
+           ", words=" + std::to_string(e.flat.words) + (e.flat.generated > e.flat.capacity || e.flat.words_needed > e.flat.words ? ", overflow" : "") +
            ", framework=" + framework_name(e.fw) + ")";
 }
 
@@ -1314,6 +1424,8 @@ ExpansionBuffers expansion_buffers(nb::handle obj)
                               nb::cast<std::string>(nb::type_name(obj.type())))
                                  .c_str());
     const PyExpansion& e = nb::cast<const PyExpansion&>(obj);
+    if (!e.ref.suite)
+        throw nb::value_error("mymyr: action encoding requires fixed atom slots; expand a frozen task");
     if (!e.ref.suite->single_domain())
         throw nb::value_error("mymyr: the expansion was made over a suite of several domains");
     ExpansionBuffers out;
@@ -1683,7 +1795,7 @@ void bind_rl(nb::module_& parent)
                      "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k}));
-        }, "[N, K] int32: row of the flat arrays, -1 = none")
+        }, "[N, K] int32: canonical successor position with drop_noops, else flat row; -1 padding")
         .def_prop_ro("mask", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] bool")
@@ -1711,6 +1823,18 @@ void bind_rl(nb::module_& parent)
             return padded_array(p, p.off_derived, rl::DType::U64,
                                 {static_cast<i64>(p.rows), p.k, static_cast<i64>(p.derived_words)}, true);
         }, "[N, K, D] derived words of the successors (zero padding), if requested")
+        .def_prop_ro("succ_hash", [](const PaddedResult& p) -> ArrayOut {
+            if (!p.has_hashes)
+                return nb::none();
+            if (p.fw == Framework::Jax)
+                return padded_array(p, p.off_hashes, rl::DType::U64, {static_cast<i64>(p.rows), p.k, 1}, true);
+            return padded_array(p, p.off_hashes, p.fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] successor succ_hash, zero padding; None if absent")
+        .def_prop_ro("noop", [](const PaddedResult& p) -> ArrayOut {
+            if (!p.has_noops)
+                return nb::none();
+            return padded_array(p, p.off_noops, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] successor noop, zero padding; None if absent")
         .def("__repr__", [](const PaddedResult& p) {
             return "PaddedExpansion(states=" + std::to_string(p.rows) + ", k=" + std::to_string(p.k) +
                    (p.overflow ? ", overflow" : "") + ")";
@@ -1747,6 +1871,23 @@ void bind_rl(nb::module_& parent)
             return e.array(e.flat.off_derived, rl::DType::U64, {static_cast<i64>(e.flat.valid()), e.flat.derived_words}, true);
         }, "[M, D] derived words of the successors (expand(..., derived=True)): the bitset of each successor's derived "
            "atoms in derived-slot order, from one axiom evaluation of the row; D = table.derived_words")
+        .def_prop_ro("succ_hash", [](const PyExpansion& e) -> ArrayOut {
+            if (!e.flat.has_hashes)
+                return nb::none();
+            if (e.fw == Framework::Jax)
+                return e.array(e.flat.off_hashes, rl::DType::U64, {static_cast<i64>(e.flat.valid()), 1}, true);
+            return e.array(e.flat.off_hashes, e.fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64, {static_cast<i64>(e.flat.valid())});
+        }, "State::hash() of each successor; None if absent")
+        .def_prop_ro("noop", [](const PyExpansion& e) -> ArrayOut {
+            if (!e.flat.has_noops)
+                return nb::none();
+            return e.array(e.flat.off_noops, rl::DType::Bool, {static_cast<i64>(e.flat.valid())});
+        }, "Bitwise equality with the parent, including numeric words; None if absent")
+        .def_prop_ro("index", [](const PyExpansion& e) -> ArrayOut {
+            if (!e.flat.has_index)
+                return nb::none();
+            return e.array(e.flat.off_canonical, rl::DType::I32, {static_cast<i64>(e.flat.valid())});
+        }, "Position in the parent's full successor order; None if absent")
         .def_prop_ro("derived_words", [](const PyExpansion& e) { return e.flat.derived_words; },
                      "Derived words per row (D) of the derived array (0 if not requested).")
         .def_prop_ro("counts", [](const PyExpansion& e) {
@@ -1758,10 +1899,12 @@ void bind_rl(nb::module_& parent)
             ArraySpec s{block, c, rl::DType::I32, {static_cast<i64>(e.flat.rows)}, {}, false, false};
             return ArrayOut(export_array(std::move(s), e.fw, e.enc));
         }, "[N] int32 successors per state (a fresh array)")
+        .def_prop_ro("generated", [](const PyExpansion& e) { return e.flat.generated; },
+                     "Successors before drop_noops; generated > capacity is an overflow.")
         .def_prop_ro("total", [](const PyExpansion& e) { return e.flat.total; },
                      "The successor rows of the batch, those beyond the capacity included.")
         .def_prop_ro("capacity", [](const PyExpansion& e) { return e.flat.capacity; },
-                     "The successor rows the outputs hold; total > capacity is an overflow.")
+                     "The pre-drop successor rows the outputs hold; generated > capacity is an overflow.")
         .def_prop_ro("num_states", [](const PyExpansion& e) { return e.flat.rows; },
                      "The number of expanded states (the batch size).")
         .def_prop_ro("words", [](const PyExpansion& e) { return e.flat.words; }, "Atom words per row (W).")
@@ -1772,9 +1915,9 @@ void bind_rl(nb::module_& parent)
                      "lazy slots).")
         .def_prop_ro("label_width", [](const PyExpansion& e) { return e.flat.label_width; },
                      "Binding objects per successor (the largest schema arity).")
-        .def_prop_ro("num_objects", [](const PyExpansion& e) { return e.ref.suite->max_objects(); },
+        .def_prop_ro("num_objects", [](const PyExpansion& e) { return e.ref.suite ? e.ref.suite->max_objects() : e.ref.core->task->num_objects(); },
                      "The most objects of an instance of the table or suite (the columns of rl.prefix_masks).")
-        .def_prop_ro("num_schemas", [](const PyExpansion& e) { return e.ref.suite->max_schemas(); },
+        .def_prop_ro("num_schemas", [](const PyExpansion& e) { return e.ref.suite ? e.ref.suite->max_schemas() : e.ref.core->task->num_schemas(); },
                      "Action schemas of the table, the most of any domain of a suite (the columns of rl.schema_masks).")
         .def_prop_ro("table", [](const PyExpansion& e) { return SuiteArg(e.ref.obj); },
                      "The suite, table or Task the expansion was made over.")
@@ -1785,9 +1928,9 @@ void bind_rl(nb::module_& parent)
             return ids;
         }, "Owned source instance IDs, one per expanded state, including rows without actions.")
         .def_prop_ro("overflow", [](const PyExpansion& e) {
-            return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
+            return e.flat.generated > e.flat.capacity || e.flat.words_needed > e.flat.words;
         },
-                     "Whether some successor was not written: total > capacity or words_needed > words. Expand "
+                     "Whether some successor was not written: generated > capacity or words_needed > words. Expand "
                      "again with a larger capacity or wider rows.")
         .def_prop_ro("framework", [](const PyExpansion& e) { return framework_name(e.fw); },
                      "The framework of the arrays: 'numpy', 'torch' or 'jax'.")
@@ -1833,12 +1976,12 @@ void bind_rl(nb::module_& parent)
     m.def("expand", &expand, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "capacity"_a = nb::none(),
           "words"_a = nb::none(), "k"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "threads"_a = 1, "framework"_a = nb::none(), "validate"_a = true,
-          "stream"_a = nb::none(), "ctx"_a = nb::none(), "Expands a batch of states [N, W] (see mymyr.rl.expand).");
+          "stream"_a = nb::none(), "ctx"_a = nb::none(), "hashes"_a = false, "noops"_a = false, "drop_noops"_a = false, "Expands a batch of states [N, W] (see mymyr.rl.expand).");
     m.def("expand_into", &expand_into, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
           "succ"_a = nb::none(), "parent"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(),
           "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
-          "status"_a = nb::none(), "row_count"_a = nb::none(), "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
+          "status"_a = nb::none(), "row_count"_a = nb::none(), "succ_hash"_a = nb::none(), "noop"_a = nb::none(), "index"_a = nb::none(), "drop_noops"_a = false, "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
     m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
