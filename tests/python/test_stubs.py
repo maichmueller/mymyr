@@ -138,6 +138,10 @@ def test_stubs_parse_and_are_typed():
     # CUDA streams (typing.hpp StreamArg); contexts are typing.Any here, since CPU builds have no mymyr.cuda
     rl = (d / "_rl.pyi").read_text()
     assert "stream: int | mymyr._typing.SupportsCudaStream | None = None, ctx: Any | None = None" in rl
+    assert "def applicable_schemas(table: TaskSuite | TaskTable | mymyr._core.Task | mymyr._core.TaskHandle," in rl
+    assert "schema: int | mymyr._typing.SupportsDLPack, prefix: mymyr._typing.SupportsDLPack | None, depth: int," in rl
+    assert "schema: int | mymyr._typing.SupportsDLPack, binding: mymyr._typing.SupportsDLPack," in rl
+    assert "*, num_objects: int | None = None, pool: ThreadPool | None = None) -> Any" in rl
     # the environments of mymyr.rl.torch
     env = (d / "_rl_torch.pyi").read_text()
     table = "table: mymyr._core._rl.TaskSuite | mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle"

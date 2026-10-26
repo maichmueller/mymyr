@@ -99,12 +99,19 @@ public:
     /// Points the engine at a state (not copied: it must stay valid and unchanged while the engine uses it).
     void set_state(const u64* w, u32 nw) noexcept
     {
+        ++m_state_revision;
         m_state = w;
         m_nw = nw;
     }
     [[nodiscard]] const u64* state() const noexcept { return m_state; }
+    /// Changes whenever state pointers, numeric pointers or the view are reset, invalidating prepared-row caches.
+    [[nodiscard]] u64 state_revision() const noexcept { return m_state_revision; }
     /// Points the engine at the numeric words of the current state (numeric tasks).
-    void set_numeric(const u64* num) noexcept { m_num = num; }
+    void set_numeric(const u64* num) noexcept
+    {
+        ++m_state_revision;
+        m_num = num;
+    }
     [[nodiscard]] const u64* numeric() const noexcept { return m_num; }
     [[nodiscard]] const plan::Numeric& numerics() const noexcept { return *m_numc; }
     /// Value of a numeric program under the current binding and state.
@@ -121,6 +128,7 @@ public:
     /// Rebuilds the view tables (and the driver predicates' atom lists) from the current state's set bits.
     void build_view()
     {
+        ++m_state_revision;
         if (m_drivers) [[unlikely]]
             build_view_impl<true>();
         else
@@ -538,6 +546,7 @@ private:
     u32 m_ntouched = 0;
     LineVector<ObjectId> m_bind;
     const u64* m_state = nullptr;
+    u64 m_state_revision = 0;
     u32 m_nw = 0;
     LineVector<u64> m_derived;
     u32 m_dnw = 0;

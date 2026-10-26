@@ -7,8 +7,8 @@
 //
 // A task holds the normalized TaskData, the static relations (unary bitsets, binary row tables, k-ary sets and
 // projections), the two-level atom index, the compiled schemas, axioms and goal, and the initial state. The only
-// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp; TaskOptions::Atoms::
-// Lazy only).
+// mutations after construction are guarded caches and the CAS-guarded append of lazily assigned slots
+// (atom_index.hpp; TaskOptions::Atoms::Lazy only).
 //
 // Mutable scratch (the matching engine, the axiom evaluator, the successor generator) lives in Workspaces, which the
 // task lends out: every search, enumeration or evaluation holds a WorkspaceLease while it runs, and every live lease

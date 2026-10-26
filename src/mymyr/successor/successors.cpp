@@ -1,6 +1,7 @@
 #include "mymyr/successor/successors.hpp"
 
 #include "mymyr/task/task.hpp"
+#include "../task/compile.hpp"
 
 #include <cmath>
 
@@ -270,10 +271,89 @@ bool Successors::applicable_bound(u32 schema) const
 
 bool Successors::is_applicable(StateView s, const ActionLabel& a)
 {
-    prepare(s);  // the axioms use the binding array: bind the label afterwards
+    if (!m_ax.empty() || (a.schema.v < m_schemas.size() && m_schemas[a.schema.v].numeric))
+        prepare_masks(s);  // axiom evaluation uses the binding array
+    else
+    {
+        m_e.set_state(s.w, s.nw);
+        m_e.set_numeric(s.num);
+    }
     if (!bind_label(a) || !applicable_bound(a.schema.v))
         return false;
     return !m_schemas[a.schema.v].numeric || collect(m_schemas[a.schema.v]);
+}
+
+void Successors::prepare_masks(StateView s)
+{
+    if (m_mask_revision != m_e.state_revision() || !(m_mask_state.view() == s))
+    {
+        prepare(s);
+        m_mask_state = State{s};
+    }
+    else
+    {
+        m_e.set_state(s.w, s.nw);
+        m_e.set_numeric(s.num);
+    }
+    m_mask_revision = m_e.state_revision();
+}
+
+detail::ExecMatcher& Successors::mask_matcher(u32 schema, u32 depth)
+{
+    SchemaExec& se = m_schemas[schema];
+    const u32 entry = depth == se.plan->arity ? 0 : depth + 1;
+    plan::MaskMatcher& cached = se.plan->masks[entry];
+    cached.once.call([&] { cached.matcher = std::make_unique<plan::Matcher>(detail::compile_mask(m_e.compiled(), schema, depth)); });
+    if (se.masks.empty())
+        se.masks.resize(se.plan->arity + 1);
+    if (!se.masks[entry])
+    {
+        auto x = std::make_unique<detail::ExecMatcher>();
+        m_e.instantiate(*x, *cached.matcher);
+        se.masks[entry] = std::move(x);
+    }
+    return *se.masks[entry];
+}
+
+bool Successors::schema_applicable(u32 schema)
+{
+    if (schema >= m_schemas.size())
+        return false;
+    SchemaExec& se = m_schemas[schema];
+    detail::ExecMatcher& x = mask_matcher(schema, se.plan->arity);
+    m_e.clear_stop();
+    auto emit = [&]() -> bool { return se.numeric && !collect(se); };
+    m_e.run<true>(x, emit);
+    const bool found = m_e.stopped();
+    m_e.clear_stop();
+    return found;
+}
+
+void Successors::parameter_mask(u32 schema, std::span<const ObjectId> prefix, u32 depth, u64* out)
+{
+    const u32 n = m_e.compiled().num_objects;
+    std::fill_n(out, bits::words_for(n), u64{0});
+    if (schema >= m_schemas.size() || depth >= m_arity[schema] || prefix.size() < depth)
+        return;
+    SchemaExec& se = m_schemas[schema];
+    const plan::Matcher& full = se.plan->pre[1];
+    for (u32 v = 0; v < depth; ++v)
+    {
+        const u32 o = prefix[v].v;
+        if (o >= n || !bits::test(full.dom0.data() + usize{v} * m_e.ow(), m_e.ow(), o))
+            return;
+        m_e.bind()[v] = prefix[v];
+    }
+    detail::ExecMatcher& x = mask_matcher(schema, depth);
+    m_e.clear_stop();
+    auto emit = [&]() -> bool
+    {
+        const u32 o = m_e.bind()[depth].v;
+        if (!bits::test(out, bits::words_for(n), o) && (!se.numeric || collect(se)))
+            bits::set(out, o);
+        return true;
+    };
+    m_e.run<false>(x, emit);
 }
 
 Delta Successors::apply_with_delta(StateView s, const ActionLabel& a, StateBuilder& out)

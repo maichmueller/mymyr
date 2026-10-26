@@ -25,6 +25,7 @@ add_executable(mymyr_tests
     formalism/test_text_format.cpp
     task/test_task.cpp
     successor/test_successors.cpp
+    successor/test_masks.cpp
     successor/test_bindings.cpp
     successor/test_condition_numbers.cpp
     state/test_stores.cpp

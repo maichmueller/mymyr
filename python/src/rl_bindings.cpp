@@ -30,6 +30,7 @@
 #include "mymyr/core/threads.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/masks.hpp"
 #include "mymyr/rl/pool.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -679,6 +680,38 @@ nb::object bool_array(std::shared_ptr<Block> block, u64 n, Framework fw)
     s.dtype = rl::DType::Bool;
     s.shape = {static_cast<i64>(n)};
     return export_array(std::move(s), fw, default_words(fw));
+}
+
+void mask_host_arrays(std::initializer_list<nb::handle> arrays)
+{
+    for (nb::handle a : arrays)
+        if (is_cuda_array(a))
+            throw nb::value_error("mymyr: action masking runs on the CPU; pass host rows");
+}
+
+struct MaskSchema
+{
+    std::vector<i32> scalar;
+    const i32* data;
+    MaskSchema(nb::handle obj, u64 rows, rlimp::Imports& imports) : data(nullptr)
+    {
+        if (PyIndex_Check(obj.ptr()) && dl::dlpack_device(obj).device_type < 0)
+        {
+            scalar.assign(rows, int_arg<i32>(obj, "schema"));
+            data = scalar.data();
+        }
+        else
+            data = imports.get<const i32>(obj, "schema", {rlimp::i32t}, {static_cast<i64>(rows)}, false);
+        if (obj.is_none())
+            throw nb::type_error("mymyr: schema must be an int or an int32 array [N]");
+    }
+};
+
+ArrayOut mask_output(std::shared_ptr<Block> block, std::vector<i64> shape, const StateBatch& in)
+{
+    const Framework fw = in.packed ? Framework::Numpy : in.fw;
+    ArraySpec s{block, block->data(), rl::DType::Bool, std::move(shape), {}, false, false};
+    return ArrayOut(export_array(std::move(s), fw, default_words(fw)));
 }
 
 std::string words_repr(const PyExpansion& e)
@@ -1839,6 +1872,92 @@ void bind_rl(nb::module_& parent)
           "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
           "status"_a = nb::none(), "row_count"_a = nb::none(), "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
+    m.def(
+        "applicable_schemas",
+        [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, PoolArg pool) {
+            mask_host_arrays({states, task_ids});
+            const SuiteRef ref = suite_of(table);
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            PyPool* p = pool_arg(pool);
+            const u32 S = ref.suite->max_schemas();
+            auto block = Block::make(std::max<u64>(1, in.view.rows * S));
+            {
+                nb::gil_scoped_release release;
+                rl::schema_masks(*ref.suite, in.view, ids.ptr, reinterpret_cast<u8*>(block->data()), p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows), S}, in);
+        },
+        "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
+        "Applicable schemas [N, S] bool without an expansion. A schema is true iff an applicable full binding exists; "
+        "S is the table's maximum schema count, with zero padding for smaller domains. CPU inputs only.");
+    m.def(
+        "applicable_objects",
+        [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema,
+           ArrayArg prefix, IntArg depth_in, TaskIdsArg task_ids, SizeArg num_objects, PoolArg pool) {
+            mask_host_arrays({states, task_ids, schema, prefix});
+            const SuiteRef ref = suite_of(table);
+            const u32 depth = int_arg<u32>(depth_in, "depth");
+            const u32 O = opt_int_arg<u32>(num_objects, "num_objects").value_or(ref.suite->max_objects());
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            rlimp::Imports imports(-1, dl::k_stream_default, false);
+            const MaskSchema sch(schema, in.view.rows, imports);
+            for (u64 i = 0; i < in.view.rows; ++i)
+            {
+                const auto& plans = ref.suite->task_of(ids.ptr, i).compiled().schemas;
+                if (sch.data[i] >= 0 && static_cast<u32>(sch.data[i]) < plans.size() &&
+                    depth >= plans[sch.data[i]].arity)
+                    throw nb::value_error("mymyr: depth must be below the schema arity");
+            }
+            std::vector<i64> shape;
+            const i32* pre = imports.get<const i32>(prefix, "prefix", {rlimp::i32t},
+                                                   {static_cast<i64>(in.view.rows), -1}, false, &shape);
+            const u32 stride = shape.empty() ? 0 : static_cast<u32>(shape[1]);
+            PyPool* p = pool_arg(pool);
+            auto block = Block::make(std::max<u64>(1, in.view.rows * O));
+            {
+                nb::gil_scoped_release release;
+                rl::parameter_masks(*ref.suite, in.view, ids.ptr, sch.data, pre, stride, depth,
+                                    reinterpret_cast<u8*>(block->data()), O, p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows), O}, in);
+        },
+        "table"_a, "states"_a, "schema"_a, "prefix"_a.none(), "depth"_a, "task_ids"_a = nb::none(), nb::kw_only(),
+        "num_objects"_a = nb::none(), "pool"_a = nb::none(),
+        "Objects extending prefix at depth to an applicable full binding, [N, O] bool without an expansion. "
+        "schema is an int or int32 [N]; prefix is int32 [N, >= depth] (None at depth 0). Objects are instance-local; "
+        "O defaults to the table's maximum object count. Invalid labels give zero rows; the scalar depth "
+        "must be below its arity. CPU inputs only.");
+    m.def(
+        "is_applicable",
+        [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema, ArrayArg binding,
+           TaskIdsArg task_ids, PoolArg pool) {
+            mask_host_arrays({states, task_ids, schema, binding});
+            const SuiteRef ref = suite_of(table);
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            rlimp::Imports imports(-1, dl::k_stream_default, false);
+            const MaskSchema sch(schema, in.view.rows, imports);
+            std::vector<i64> shape;
+            const i32* bind = imports.get<const i32>(binding, "binding", {rlimp::i32t},
+                                                    {static_cast<i64>(in.view.rows), -1}, false, &shape);
+            if (binding.is_none())
+                throw nb::type_error("mymyr: binding must be an int32 array [N, L]");
+            PyPool* p = pool_arg(pool);
+            auto block = Block::make(std::max<u64>(1, in.view.rows));
+            {
+                nb::gil_scoped_release release;
+                rl::is_applicable(*ref.suite, in.view, ids.ptr, sch.data, bind, static_cast<u32>(shape[1]),
+                                  reinterpret_cast<u8*>(block->data()), p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows)}, in);
+        },
+        "table"_a, "states"_a, "schema"_a, "binding"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
+        "Full-label applicability [N] bool without an expansion, including numeric effect applicability. "
+        "schema is an int or int32 [N]; binding is int32 [N, L], with instance-local objects and ignored padding "
+        "past the schema's arity. L below a valid selected schema's arity raises ValueError. "
+        "Invalid labels are false. CPU inputs only.");
     m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
