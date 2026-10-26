@@ -259,11 +259,13 @@ struct Driver
         check(cudaMemsetAsync(&dctl->abort, 0, sizeof(u32), s), "cudaMemsetAsync");
     }
 
+    /// A table of `n` slots (the search is unchanged when the allocation fails: a device round then runs as a host step).
     void alloc_table(u64 n)
     {
+        DeviceBuffer t(ctx, n * sizeof(u64), s);
+        check(cudaMemsetAsync(t.data(), 0, n * sizeof(u64), s), "cudaMemsetAsync (state table)");
+        table = std::move(t);
         slots = n;
-        table = DeviceBuffer(ctx, slots * sizeof(u64), s);
-        check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
     }
     [[nodiscard]] u64 table_limit() const { return slots / 4 * 3; }
     /// Room in the table for `more` states beyond `count` (rehashed when it grows).
@@ -991,7 +993,11 @@ bool Driver::start(const State& s0)
     std::copy_n(s0.data(), s0.size_words(), row.begin());
     to_device(rows.data(), row.data(), W, s);
     hc->count = 1;
-    alloc_table(o.expected_states ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * o.expected_states + 2)) : u64{1} << 20);
+    // the table starts within a quarter of what the context can still allocate (it grows as the states need)
+    u64 slots0 = o.expected_states ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * o.expected_states + 2)) : u64{1} << 20;
+    while (slots0 > 1024 && slots0 * sizeof(u64) > device_room(*ctx) / 4)
+        slots0 /= 2;
+    alloc_table(slots0);
     check(state_set::launch_rehash(tab(), arena(), 1, s), "launch_rehash");
     const u32 root[5] = {0, 0, bfk::k_none, 0, 0};  // g, h, parent, sidx, depth
     to_device(g.data(), root + 0, 1, s);
