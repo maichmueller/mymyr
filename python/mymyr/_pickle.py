@@ -13,6 +13,7 @@ can store by reference (native nanobind functions cannot be pickled).
   its arrays (rows included); loading validates the arrays against the task (mymyr.datasets.StateSpace.from_arrays).
 - A TupleGraph pickles as its state space, root, options and arrays; a GeneralizedStateSpace as its state spaces; a
   KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
+- A SearchTree pickles as its task, fingerprint and flat arrays, with the task's lazy slot numbering preserved.
 - A search result pickles as its task, the fingerprint and its fields: the plan as action labels (schema, objects),
   states as States, statistics and statuses as numbers; loading checks the labels and atoms against the task.
 - A mymyr.encoding encoder (FlatRelationEncoder, SimpleEncoder, FlatHorizonEncoder, FlatRootedHorizonEncoder,

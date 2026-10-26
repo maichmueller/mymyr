@@ -604,6 +604,7 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);
     env.witness = o.witness_pruning;
+    env.tree = o.tree;
     env.canonical = o.canonical_order;
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;
@@ -628,7 +629,7 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     const State root = o.start ? *o.start : task.initial_state();
     if (env.root)
         env.root->on_start(root);
-    IwResult r = detail::novelty_ladder(env, o.width, o.width, false,
+    IwResult r = detail::novelty_ladder(env, root, o.width, o.width, false,
                                         [&](u32 k, detail::PassOut& po)
                                         {
                                             detail::AbstractedPruner p(task, cfg, coords ? &*coords : nullptr);

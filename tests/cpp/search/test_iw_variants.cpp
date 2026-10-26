@@ -6,6 +6,7 @@
 
 #include "../../../src/mymyr/search/novelty_brfs.hpp"
 #include "../support/suite.hpp"
+#include "../support/search_tree.hpp"
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/landmarks/fact_landmark_graph.hpp"
 #include "mymyr/novelty/landmark_table.hpp"
@@ -969,4 +970,34 @@ TEST(AbstractedIw, PairLayoutsAgree)
         }
     }
     EXPECT_GT(switched, 10u) << "most cases should grow past the small dense budget";
+}
+
+TEST(IwVariantSearchTree, MatchesObserverForLandmarkAndAbstractedNovelty)
+{
+    const auto task = Task::from_text_file(task_path("philosophers__p03-phil4"));
+    for (bool abstracted : {false, true})
+    {
+        TreeObserver obs;
+        IwResult r;
+        if (abstracted)
+        {
+            AbstractedIwOptions o;
+            o.tree = TreeRecord::Transitions;
+            o.control.observer = &obs;
+            o.control.budget.max_states = 100;
+            r = abstracted_iw(*task, o);
+        }
+        else
+        {
+            LiwOptions o;
+            o.max_width = 1;
+            o.tree = TreeRecord::Transitions;
+            o.control.observer = &obs;
+            o.control.budget.max_states = 100;
+            r = liw(*task, o);
+        }
+        ASSERT_EQ(r.passes.size(), obs.passes.size());
+        for (usize i = 0; i < r.passes.size(); ++i)
+            expect_tree_events(*task, r.passes[i], obs.passes[i]);
+    }
 }

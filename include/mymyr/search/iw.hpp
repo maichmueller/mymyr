@@ -40,11 +40,14 @@
 //
 // Observer events (search/control.hpp): on_start once; per pass on_expand for every counted expansion, on_generate
 // for every transition (child id = the new node id if admitted, else ~0; the child state is materialized only when
-// an observer is set) and on_prune for every transition not admitted, then on_pass(arity, pass statistics);
-// on_solution and on_end once. Ids are node indices of the pass (the root is 0).
+// an observer is set) and on_prune for every transition not admitted, then on_transition with its TransitionOutcome
+// (Opened, Duplicate for a width-0 duplicate entry or a state already in the tree, Blocked, SelfLoop or Pruned), and
+// on_pass(arity, pass statistics) after the pass; on_solution and on_end once. Ids are node indices of the pass (the
+// root is 0).
 
 #include "mymyr/novelty/novelty_table.hpp"
 #include "mymyr/search/control.hpp"
+#include "mymyr/search/search_tree.hpp"
 #include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
@@ -94,6 +97,10 @@ struct IwOptions
     /// The order in which every pass expands a layer (search/layer_ordering.hpp; default: the queued BrFS). An
     /// ordered kind cannot be combined with transition_ordering.
     LayerOrdering layers{};
+    /// What each pass retains as a SearchTree in IwPassStatistics::tree (search/search_tree.hpp). Recording
+    /// transitions materializes every successor, as an observer does, and like one cannot be combined with
+    /// BeamNovelty::RelaxedSurvivorsOnly. A recorded beam runs its layer step on one thread.
+    TreeRecord tree = TreeRecord::None;
     /// Threads of a beam's layer step (search/layer_ordering.hpp, "Threads"; 0: std::thread::hardware_concurrency()).
     /// More than one needs a beam (layers.beam_width).
     u32 threads = 1;
@@ -110,6 +117,8 @@ struct IwPassStatistics
     u64 blocked = 0;            // successors rejected because they are blocked
     double seconds = 0;
     bool placeholder = false;   // the empty width-0 entry of an optimized IW(1) ladder
+
+    std::shared_ptr<const SearchTree> tree;  // null unless this pass was recorded
 
     [[nodiscard]] SearchStatistics stats() const
     {

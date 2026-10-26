@@ -34,6 +34,8 @@ public:
     /// The SIW subproblem goal: count(state) < threshold, over the task's goal literals (each once).
     static GoalTest counter(const Task& task, u32 threshold);
 
+    [[nodiscard]] bool task_goal() const noexcept { return m_kind == Kind::Task; }
+
     /// Whether the test reads derived atoms: the caller prepares the state (axioms) first.
     [[nodiscard]] bool needs_view() const noexcept { return m_view; }
     /// Whether test() may run on several threads at once (each with its own Successors): every kind but Custom,
@@ -129,6 +131,9 @@ struct Context
 IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_width, int only_arity = -1);
 
 void add_pass(SearchStatistics& total, const IwPassStatistics& p);
+
+/// Zero-extend completed pass rows to the task's final lazy-slot width.
+void normalize_trees(std::span<IwPassStatistics> passes, u32 words);
 
 /// The width-1 pass under IwOptions::transition_ordering, layer by layer (iw_ordered.cpp; search/transition_ordering.hpp).
 struct OrderedPassOut

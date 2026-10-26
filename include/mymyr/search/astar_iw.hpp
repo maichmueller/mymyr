@@ -52,7 +52,8 @@ struct AStarIwResult : BestFirstResult
 /// Requires unit-cost actions and no numeric fluents. Generation lowers tuple labels; a popped state must still
 /// own a label at its g. Root successors are admitted without novelty when allow_non_novel_root_goal is set, but
 /// only goals bypass the pop test. The initial state is always exempt. Novelty pruning does not imply optimality.
-/// Budget, blocked states, goals, cancellation and observers follow best_first.hpp, with on_transition as well.
+/// Budget, blocked states, goals, cancellation and observers follow best_first.hpp, with on_transition as well
+/// (Opened, Reopened, Duplicate, SelfLoop, Blocked, DeadEnd, or Pruned when not novel or cut by max_states).
 /// Invalid widths, weights or landmark groupings return Failed with a message; unsupported tasks throw
 /// std::invalid_argument. The queue is a heap; the heuristic is evaluated per admitted successor, even on reopening.
 [[nodiscard]] AStarIwResult astar_iw(const Task& task, const AStarIwOptions& options = {});

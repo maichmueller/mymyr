@@ -380,7 +380,71 @@ print(broken.error, broken.step, broken.message)
 
 `mymyr validate DOMAIN PROBLEM PLAN` runs the same check from the [command line](cli.md#validating-a-plan).
 
+## Search trees
+
+Pass `tree="nodes"` or `tree="transitions"` to `iw`, `iw_pass`, `siw`, `liw`, `abstracted_iw`,
+`projective_iw` or `find_rollouts_parallel`. The default is `None`; booleans are not accepted. Each recorded
+`IwPass.tree` is a `search.SearchTree`. The optimized IW(1) placeholder pass has `tree is None`.
+For SIW the passes are in `result.subproblems[i].passes`; for parallel rollouts they are in
+`result[i].passes`. Trees use the pass's node ids, which are also the observer ids.
+
+```python
+result = search.iw(task, max_width=2, tree="transitions", max_states=10000)
+tree = result.passes[-1].tree
+print(tree.num_nodes, tree.num_transitions)
+print(tree.parent, tree.depth, tree.row_goal)
+for node in range(tree.num_nodes):
+    begin, end = tree.offsets[node:node + 2]
+    successors = tree.rows[tree.t_row[begin:end]]
+```
+
+All array attributes are read-only, zero-copy NumPy views. Each view retains the native storage after the result
+or tree is deleted. `tree.task` owns the task that interprets the labels and rows. The scalar attributes are
+`width`, `words`, `numeric_words`, `label_width`, `num_nodes` and `num_transitions`.
+
+| Arrays | Shape and meaning |
+| --- | --- |
+| `rows` | uint64 `[R, words + numeric_words]`: distinct state rows, with numeric words last |
+| `parent`, `depth`, `schema` | int32 `[N]`: parent node, depth and incoming action schema; root parent/schema are -1 |
+| `binding` | int32 `[N, label_width]`: incoming full action bindings, padded with -1; root binding is all -1 |
+| `node_flags` | uint8 `[N]`: bit 0 enumerated successors, bit 1 goal, bit 2 skipped expansion, bit 3 dropped by layer selection, bit 4 repeated queue entry |
+| `offsets` | int64 `[N + 1]`: transition CSR offsets; empty for node recording |
+| `t_schema`, `t_binding` | int32 `[T]`, `[T, label_width]`: transition action labels with -1 padding |
+| `t_row`, `t_child` | int32 `[T]`: successor row and admitted node id (-1 when rejected) |
+| `t_outcome` | uint8 `[T]`: numeric `TransitionOutcome` values as [observers](#observers) get them: `OPENED`, `DUPLICATE`, `BLOCKED`, `SELF_LOOP` or `PRUNED` |
+| `row_goal` | uint8 `[R]`: the pass's goal test for every row |
+
+Node `i` occupies row `i`. In transition recording, additional distinct successors follow the nodes in
+first-generation order. Transitions of each node occupy `offsets[i]:offsets[i + 1]` in generation order.
+A width-0 duplicate queue entry refers to the existing node and sets its repeated-entry flag; it does not add
+a second row or node. Thus `generated_in_tree + 1` equals the node count for ordinary untruncated passes without
+duplicate entries, while beams retain admitted candidates even when selection later drops them.
+
+`tree.states()` returns all rows as `State` objects. `tree.labels()` returns incoming node `Action` objects,
+with `None` for the root. Following `parent` and these labels reconstructs the path to any node. These convenience
+methods allocate Python objects; array access does not. Trees, passes and results support pickling with the task,
+its fingerprint, its lazy slot numbering and the arrays. Lazy rows are zero-padded to the task's word width at the
+end of the search; the task's slot numbering interprets them.
+
+Node recording keeps the fast novelty path and moves the retained node storage into the result. Transition
+recording materializes every successor and interns distinct rows in native code. Its transition arrays require
+`T * (17 + 4 * label_width)` bytes, in addition to distinct rows at `R * 8 * (words + numeric_words)` bytes and
+node metadata. Numeric rows retain at least one fluent word, matching the task's numeric row encoding. Existing state and expansion budgets bound exploration; transitions and distinct rejected rows
+can still greatly outnumber admitted nodes, so size those budgets for the task's branching factor.
+
+Goal flags always use the search's goal: task, alternatives, a custom callable, or the current SIW subproblem's
+goal. A callable is also invoked once for each recorded row whose goal was not tested by the search. Errors in
+these calls propagate like other callback errors. Skipped nodes are counted expansions without successor generation;
+goal nodes are not expansions. Budget, time and cancellation stops retain each pass's partial tree.
+
+Parallel rollouts record independently on their workers and return trees in seed order, identical at every thread
+count for a fixed seed on tasks with fixed atom slots. Array wrappers are created on the calling thread after the
+workers join. A recorded IW beam runs its serial step even if `threads > 1` is requested. Transition recording has
+the same restrictions as observers for `beam_novelty="relaxed_survivors_only"`.
+
 ## Observers
+
+For harvesting IW training data, [search trees](#search-trees) retain native arrays without per-event Python callbacks.
 
 `search.Observer` is the base class of search observers: subclass it, override the events you need and pass an instance
 as `observer=` to `brfs`, `iw`, `siw`, `astar`, `gbfs`, `beam`, `ehc`, `anytime_astar`, `astar_iw` or the IW family
@@ -388,10 +452,27 @@ variants. The events are `on_start(state)`, `on_expand(id, state)`, `on_generate
 `on_prune(parent, action, state)`, `on_pass(width, stats)` (after an IW pass, a BrFS layer with its depth, an EHC
 lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
-with status `CANCELLED`) and `on_end(status, stats)`; the IW family variants also send
-`on_transition(parent, action, child, state, outcome)`. A search never calls an event the subclass does not override,
+with status `CANCELLED`) and `on_end(status, stats)`. A search never calls an event the subclass does not override,
 and an observer that overrides none is not installed. `on_expand` and `on_generate` are called once per expanded and
 generated state, so their counts equal the result's statistics.
+
+`iw`, `iw_pass`, `siw`, the IW family variants, `astar_iw`, `rollout_iw`, `find_rollouts_parallel` and
+`atomic_goal_portfolio` also send `on_transition(parent, action, child, state, outcome)` for every generated
+transition, after its `on_generate` and `on_prune`; `child` is None when the successor got no id. The outcome is the
+most specific `TransitionOutcome`, the same in all of them:
+
+| Outcome | The successor |
+| --- | --- |
+| `OPENED` | entered the search as a new node or open state |
+| `REOPENED` | was reached on a cheaper path and re-entered the open list (`astar_iw`) |
+| `DUPLICATE` | is already known and nothing changed: a width-0 duplicate queue entry, a state already in the tree or among the next layer's candidates, a stored state not reached on a cheaper path |
+| `BLOCKED` | is one of `blocked_states` (checked first) |
+| `SELF_LOOP` | equals the state it was generated from |
+| `DEAD_END` | has an infinite heuristic value (`astar_iw`) |
+| `GOAL` | is a goal found on generation (`rollout_iw`) |
+| `PRUNED` | was rejected for any other reason: not novel, beyond a depth or incumbent bound, or cut by a budget |
+
+The other searches (`brfs`, `astar`, `gbfs`, `beam`, `ehc`, `anytime_astar`) do not send `on_transition`.
 
 ```python
 from pathlib import Path
