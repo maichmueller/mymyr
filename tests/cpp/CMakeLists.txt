@@ -47,6 +47,8 @@ add_executable(mymyr_tests
     rl/test_env.cpp
     # novelty rewards, prefix masks, hindsight relabels
     rl/test_ops.cpp
+    # lifted goal templates
+    rl/test_goal_templates.cpp
     # IW family variants
     search/test_iw_variants.cpp
     search/test_rollouts.cpp

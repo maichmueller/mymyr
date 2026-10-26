@@ -27,9 +27,11 @@
 // d + below(bits, #components - d) at step d, sorted. Templates therefore depend on (task, g, options) only: the other
 // instances of the suite do not change them.
 //
-// Cost: subsets above max_size are never enumerated; the connected subsets come from a depth-first search over index
-// tuples that extends a prefix only while its literals can still be joined within the remaining picks (a breadth-first
-// bound over object-sharing literals of larger index), so a component of hundreds of literals costs milliseconds.
+// Cost: subsets above max_size are never enumerated. The connected subsets come from a depth-first search over index
+// tuples that extends a prefix only while the remaining picks, among literals of larger index, can still join its
+// connected parts into one (a bounded search that never rules out a prefix that extends) and its component among them
+// holds enough literals; the last pick is any literal adjacent to every part. A goal of hundreds of literals costs
+// milliseconds.
 //
 // Packed form (arrays(), one aligned block, the layout a device upload copies): K templates of I instances, L literals
 //   instance_offsets [I + 1]  instance g's templates are [instance_offsets[g], instance_offsets[g + 1]), largest first
