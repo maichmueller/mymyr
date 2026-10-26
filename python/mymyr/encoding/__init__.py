@@ -66,6 +66,7 @@ from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatSt
 from mymyr.encoding._hgraph import DeviceHGraphView, hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
+from mymyr.encoding._metadata import entity_counts, entity_graph, entity_roles, object_entities, object_mask, tuple_counts
 from mymyr.encoding._names import GraphDescription
 from mymyr.encoding._record import schema_from_dict, schema_to_dict
 from mymyr.encoding._suite import SuiteBatch, SuiteEncoder
@@ -94,13 +95,19 @@ __all__ = [
     "action_indices",
     "action_rows",
     "collate",
+    "entity_counts",
+    "entity_graph",
+    "entity_roles",
     "hgraph",
     "history_masks",
     "horizon",
     "horizon_of_space",
+    "object_entities",
+    "object_mask",
     "schema_from_dict",
     "schema_to_dict",
     "subgoal_masks",
+    "tuple_counts",
 ]
 
 

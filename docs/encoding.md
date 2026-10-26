@@ -227,6 +227,41 @@ cannot enforce that flag. The batch owns its memory and stays valid after the en
 gone. `batch.schema` is its `EncodingSchema`, and `batch.sizes` is `None` unless the batch was encoded with
 [capacities](#capacities-and-buffer-reuse).
 
+The metadata helpers in `mymyr.encoding` work in the batch's NumPy, torch or JAX framework, including batches from
+streams and suites. Passing a `SuiteBatch` returns a dict of results by domain; entity and graph ids are local to
+each domain's batch. They compute arrays on request and add nothing to `as_dict()` or `nbytes`.
+
+| Function | Shape, dtype | Meaning |
+|---|---|---|
+| `entity_counts(batch)` | `[G]`, I | entities per graph |
+| `tuple_counts(batch)` | `[G]`, I | tuples per graph, in either layout, including with `emit_counts=False`; shared static blocks are separate |
+| `entity_graph(batch)` | `[E]`, I | the graph of each entity, for pooling |
+| `entity_roles(batch)` | `[E]`, uint8 | stored roles, or the implicit object and auxiliary roles |
+| `object_mask(batch)` | `[E]`, bool | whether each entity is an object |
+| `object_entities(batch)` | `[sum(num_objects)]`, I | batch-global object entity ids, graph after graph |
+
+```python
+from mymyr.encoding import entity_counts, entity_graph, object_entities, object_mask
+
+sizes = entity_counts(batch)
+pooling_index = entity_graph(batch)
+objects = object_entities(batch)  # graph g contributes num_objects[g] ids
+is_object = object_mask(batch)
+```
+
+The first five helpers support `jax.jit` and CUDA graph capture without reading device values on the host. Their
+shapes include capacity: per-graph entries past the live graph count are zero; unused entity entries have graph
+`G - 1` (the last live graph, or -1 with no live graphs), role 0 and object mask False. `E` is the stored entity
+extent, or the scalar entity capacity retained by a device/JAX batch with implicit arrays. Host batches with
+implicit arrays have no entity capacity storage, so their per-entity results cover only the live entities.
+When wrapping the raw torch op's outputs with `DeviceFlatBatch.from_arrays`, supply `entity_capacity=` if entity
+arrays are implicit and per-entity helpers will be used. `object_entities` has a data-dependent result length:
+it cannot run under `jax.jit` or CUDA graph capture, and selecting objects on CUDA waits to allocate the result.
+Use `object_mask` inside compiled or captured computations.
+
+Per-graph object sizes are already `batch.num_objects`; the source of each relation is `batch.schema.relation_lanes`
+([Lanes](#lanes)).
+
 ### Observation bytes
 
 `batch.nbytes` is the total payload bytes; `batch.nbytes_by_array` is a fresh dictionary of array names to bytes.

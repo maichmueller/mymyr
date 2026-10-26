@@ -221,7 +221,7 @@ class Observer:
             None, None, None, *self._op_capacities[k],
             expand_actions=self.actions,
         )  # fmt: skip
-        return _device.DeviceFlatBatch._of(self._templates[k], outs)
+        return _device.DeviceFlatBatch._of(self._templates[k], outs, self._op_capacities[k][1])
 
     def _suite_ids(self, task_ids: Tensor) -> tuple[Tensor, Tensor]:
         ids = task_ids.to(torch.int64)
