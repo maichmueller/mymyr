@@ -1381,12 +1381,17 @@ u32 template_instance(const PyGoalTemplates& t, nb::handle h)
     return static_cast<u32>(i);
 }
 
-std::optional<nb::dict> template_options(const rl::GoalTemplates& t)
+/// The generator options of templates (None for templates from conditions), by keyword.
+using TemplateOptionsDict = nb::typed<nb::dict, std::string, std::variant<u64, bool, std::string>>;
+/// The pickled arrays of templates: bytes per array and the max_arity scalar.
+using TemplateStateDict = nb::typed<nb::dict, std::string, std::variant<nb::bytes, u32>>;
+
+std::optional<TemplateOptionsDict> template_options(const rl::GoalTemplates& t)
 {
     const rl::TemplateOptions* o = t.options();
     if (!o)
         return std::nullopt;
-    nb::dict d;
+    TemplateOptionsDict d{nb::dict()};
     d["max_subgoals_per_size"] = o->max_subgoals_per_size;
     d["max_size"] = o->max_size;
     d["max_subsets_per_size"] = o->max_subsets_per_size;
@@ -2313,7 +2318,7 @@ void bind_rl(nb::module_& parent)
             "a condition). Terms may be objects.")
         .def_static(
             "_restore",
-            [](SuiteArg source, nb::object options, nb::dict state) {
+            [](SuiteArg source, std::optional<TemplateOptionsDict> options, TemplateStateDict state) {
                 const SuiteRef r = suite_of(source);
                 rl::GoalTemplates::Arrays a;
                 a.instance_offsets = bytes_array<i32>(state, "instance_offsets");
@@ -2329,10 +2334,12 @@ void bind_rl(nb::module_& parent)
                 a.goal_literal = bytes_array<i32>(state, "goal_literal");
                 a.max_arity = int_arg<u32>(state["max_arity"], "max_arity");
                 std::optional<rl::TemplateOptions> o;
-                if (!options.is_none())
-                    o = options_of(options["max_subgoals_per_size"], options["max_size"], options["max_subsets_per_size"],
-                                   options["max_component_samples"], options["max_products"], options["distinct"],
-                                   options["seed"]);
+                if (options)
+                {
+                    const nb::dict& d = *options;
+                    o = options_of(d["max_subgoals_per_size"], d["max_size"], d["max_subsets_per_size"],
+                                   d["max_component_samples"], d["max_products"], d["distinct"], d["seed"]);
+                }
                 rl::GoalTemplates t = [&]
                 {
                     nb::gil_scoped_release release;
@@ -2404,11 +2411,11 @@ void bind_rl(nb::module_& parent)
              [](nb::handle self) {
                  const PyGoalTemplates& t = *nb::inst_ptr<PyGoalTemplates>(self);
                  const rl::ArrayBundle& b = t.t->arrays();
-                 nb::dict state;
+                 TemplateStateDict state{nb::dict()};
                  for (const char* name : k_template_arrays)
                      state[name] = array_bytes(b, name);
                  state["max_arity"] = t.t->max_arity();
-                 const std::optional<nb::dict> options = template_options(*t.t);
+                 const std::optional<TemplateOptionsDict> options = template_options(*t.t);
                  return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_goal_templates"),
                                        nb::make_tuple(t.source, options ? nb::object(*options) : nb::none(), state));
              })
