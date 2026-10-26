@@ -114,10 +114,10 @@ def test_ctest_log_fails_above_sanitized_skip_count(tmp_path: Path) -> None:
 
 
 def version_tree(tmp_path: Path) -> Path:
-    """A copy of the version script next to a copy of pyproject.toml, which the script edits."""
+    """A copy of the version script next to a pyproject.toml of version 1.2.3, which the script edits."""
     (tmp_path / "ci").mkdir()
     shutil.copy2(ROOT / "ci" / "set_rehearsal_version.py", tmp_path / "ci")
-    shutil.copy2(ROOT / "pyproject.toml", tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "mymyr"\nversion = "1.2.3"\n')
     return tmp_path
 
 
@@ -135,7 +135,7 @@ def project_version(tree: Path) -> str:
 
 def test_local_label_gives_a_local_version(tmp_path: Path) -> None:
     tree = version_tree(tmp_path)
-    base = project_version(tree)
+    base = "1.2.3"
     result = set_version(tree, "--local", "cu13")
 
     assert result.returncode == 0, result.stderr
@@ -146,7 +146,7 @@ def test_local_label_gives_a_local_version(tmp_path: Path) -> None:
 
 def test_local_label_takes_dot_separated_parts(tmp_path: Path) -> None:
     tree = version_tree(tmp_path)
-    base = project_version(tree)
+    base = "1.2.3"
     result = set_version(tree, "--local", "cu13.sm89")
 
     assert result.returncode == 0, result.stderr
@@ -165,7 +165,7 @@ def test_invalid_local_labels_leave_the_version(tmp_path: Path) -> None:
 
 def test_rehearsal_version_from_the_run(tmp_path: Path) -> None:
     tree = version_tree(tmp_path)
-    base = project_version(tree)
+    base = "1.2.3"
     result = set_version(tree, "123", "2")
 
     assert result.returncode == 0, result.stderr
