@@ -319,6 +319,8 @@ nothing is computed again. `to_arrays()` gives the same arrays (NumPy, documente
 `FactLandmarkGraph.from_arrays(task, arrays)` reads them back, validated against the task, for a cache of your own:
 
 ```python
+import pickle
+
 g = search.approximate_fact_landmarks(task, first_achievers="possibly_before")
 blob = pickle.dumps(g)                    # with the task; or np.savez(path, **g.to_arrays())
 g = pickle.loads(blob)
