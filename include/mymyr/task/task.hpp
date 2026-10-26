@@ -39,6 +39,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace mymyr
 {
@@ -183,6 +184,10 @@ public:
     [[nodiscard]] std::shared_ptr<const Task> frozen(TaskOptions::Atoms atoms = TaskOptions::Atoms::Auto) const;
     /// The cached same-parse map to a frozen twin, or null when target is not one of this task's twins.
     [[nodiscard]] std::shared_ptr<SlotMap> slot_map_to(const Task& target) const;
+    /// Cached name-based map. The target must outlive every use of the returned map.
+    [[nodiscard]] std::shared_ptr<SlotMap> translation_map_to(const Task& target) const;
+    /// Translate a state into target's slot and numeric layout. Missing true atoms/values raise unless drop is true.
+    [[nodiscard]] State translate(StateView state, const Task& target, bool drop = false, bool* lossless = nullptr) const;
 
     [[nodiscard]] u32 num_objects() const noexcept { return m_compiled.num_objects; }
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_compiled.schemas.size()); }
@@ -192,9 +197,9 @@ public:
     [[nodiscard]] u32 words() const noexcept { return bits::words_for(m_atoms.fluent_slots()); }
     /// Largest width any state of this task can have (words() for frozen slots).
     [[nodiscard]] u32 max_words() const noexcept { return bits::words_for(m_atoms.max_fluent_slots()); }
-    /// Hash of the state encoding: the atom mode, the fluent and derived slots' canonical ids in slot order, and the
-    /// numeric storage. Equal encodings give equal values in every process; rows of a task decode correctly with
-    /// another task exactly when both have the same fingerprint() and encoding_fingerprint(). Lazy slots: the hash of
+    /// Hash of the state encoding: fluent and derived atoms' predicate and ordered object names in slot order,
+    /// numeric function and argument names, and numeric storage. Equal hashes identify equal row layouts across
+    /// parses (subject to hash collisions). Lazy slots have a distinct tag and hash
     /// the slots assigned so far.
     [[nodiscard]] u64 encoding_fingerprint() const;
 
@@ -268,6 +273,7 @@ private:
     mutable std::mutex m_frozen_mutex;
     mutable std::array<std::shared_ptr<const Task>, 3> m_frozen;
     mutable std::array<std::shared_ptr<SlotMap>, 3> m_slot_maps;
+    mutable std::unordered_map<u64, std::shared_ptr<SlotMap>> m_translations;
     friend class WorkspaceLease;
     void give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept;
 

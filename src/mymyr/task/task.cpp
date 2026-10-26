@@ -135,6 +135,22 @@ void Task::choose_atom_mode()
     build_initial_state();
 }
 
+std::shared_ptr<SlotMap> Task::translation_map_to(const Task& target) const
+{
+    if (auto twin = slot_map_to(target))
+        return twin;
+    std::lock_guard lock(m_frozen_mutex);
+    auto& map = m_translations[target.uid()];
+    if (!map)
+        map = SlotMap::between(*this, target);
+    return map;
+}
+
+State Task::translate(StateView state, const Task& target, bool drop, bool* lossless) const
+{
+    return translation_map_to(target)->translate(state, drop, lossless);
+}
+
 u64 Task::encoding_fingerprint() const
 {
     if (m_atoms.frozen())
@@ -147,19 +163,34 @@ u64 Task::encoding_fingerprint() const
 
 u64 Task::compute_encoding_fingerprint() const
 {
-    // the slot -> canonical id maps themselves: reachable and dense slots of a task whose every atom is reachable
-    // encode alike, and hash alike
+    // Slot meanings are names; canonical ids depend on declaration order.
+    // Dense and reachable layouts hash alike when they assign the same atoms to the same slots.
     u64 h = hash::mix64(0x656e636f64696e67ULL ^ (m_atoms.frozen() ? 0 : 1));
+    const auto name = [](u64 seed, std::string_view text) {
+        u64 value = hash::combine(seed, text.size());
+        for (const unsigned char c : text)
+            value = hash::combine(value, c);
+        return value;
+    };
     for (u32 k = 0; k < 2; ++k)
     {
         const AtomKind kind = k == 0 ? AtomKind::Fluent : AtomKind::Derived;
         const u32 n = k == 0 ? m_atoms.fluent_slots() : m_atoms.derived_slots();
         h = hash::mix64(h ^ (u64{n} + k));
         for (u32 s = 0; s < n; ++s)
-            h = hash::mix64(h ^ m_atoms.canonical(kind, s));
+        {
+            const u32* record = m_atoms.record(kind, s);
+            const auto& pred = m_data.predicates[record[0]];
+            h = name(h, m_data.str(pred.name));
+            h = hash::combine(h, pred.arity);
+            for (u32 a = 0; a < pred.arity; ++a)
+                h = name(h, m_data.str(m_data.objects[record[a + 1]].name));
+        }
     }
     const plan::Numeric& N = m_compiled.num;
     h = hash::mix64(h ^ (u64{N.slots} << 8) ^ (u64{N.words} << 40) ^ static_cast<u64>(N.storage));
+    for (u32 slot = 0; slot < N.slots; ++slot)
+        h = name(h, numeric_name(slot));
     return h;
 }
 
