@@ -10,7 +10,8 @@
 //      representation is "successor slots"), or, without actions, a uniform index from the counter-
 //      based RNG (rl/rng.hpp: seed, env id = first_env + i, the draw counter, purpose k_successor; per-row seeds and
 //      env ids replace the config's seed and first_env + i where the batch has them, e.g. the JAX env's keys). The
-//      draw counter advances by one in every step, used or not;
+//      draw counter advances by one in every step, used or not. In Label mode the caller supplies a schema and
+//      binding directly; the random policy is unavailable;
 //   2. move to that successor s' (rows byte-equal to rl::expand's; the label (schema, binding) is reported, with
 //      the schema ids of t's domain and instance t's object ids);
 //   3. goal: s' is a goal state by instance t's goal test (derived literals included) or, when the batch carries goal
@@ -20,7 +21,7 @@
 //   5. rewards and termination: reward = step_reward, plus goal_reward at a goal, plus dead_end_reward
 //      at a dead end; terminated = goal, or dead end when dead_end_terminal; truncated = not terminated and
 //      max_steps > 0 and the episode's step count reaches max_steps;
-//   6. count: the successors of s' (the observation's successor count / action mask);
+//   6. count: the successors of s' in Index mode; in Label mode 0/1 (whether an applicable action exists);
 //   7. autoreset (SAME_STEP): a terminated or truncated environment restarts in the same
 //      step from the initial state of its instance, or of next_task_ids[i] when the step is given next_task_ids (the
 //      caller's curriculum; over a suite the next instance may be of another domain); the row's task id and goal
@@ -31,7 +32,8 @@
 // advance; draw counters still advance. Whether the current state is a goal (the start of an absorbing step) is the
 // batch's at_goal flag where it has one: reset, step and refresh keep it (a reset into a goal state, a relabelled goal
 // mask that already holds), so a step reads it instead of testing the state again. With goal masks the goal test is
-// the masks' test throughout (resets included). An action outside [0, count) in a nonterminal state does not move
+// the masks' test throughout (resets included). An index outside [0, count) or an inapplicable label in a
+// nonterminal state with applicable actions does not move
 // (s' = s, reward step_reward, not a goal, not a dead end; flagged in `invalid`); a stuck environment does not move
 // either.
 //
@@ -60,8 +62,16 @@ enum class DeadEnd : u8
     None,          // nothing: such states are not terminal and get no dead-end reward; episodes end by truncation
 };
 
+/// How a caller identifies the action to apply.
+enum class ActionSpace : u8
+{
+    Index,  // an index into the successor order; count is the number of successors
+    Label,  // a schema and binding; count is 0/1 (whether an applicable action exists)
+};
+
 struct EnvConfig
 {
+    ActionSpace actions = ActionSpace::Index;
     u64 seed = 0;              // key of the successor draws (rl/rng.hpp)
     u32 max_steps = 0;         // truncation after this many steps of an episode (0: never)
     f32 step_reward = 0.0f;
@@ -112,12 +122,12 @@ struct StepOutputs
     f32* reward = nullptr;      // [rows]
     u8* terminated = nullptr;   // [rows]: goal reached, or a dead end (dead_end_terminal)
     u8* truncated = nullptr;    // [rows]: max_steps reached (not terminated)
-    i32* count = nullptr;       // [rows]: successors of the environment's state after the step (and the autoreset)
+    i32* count = nullptr;       // [rows]: successor count (Label: 0/1) after the step and autoreset
     u64* final_states = nullptr;  // [rows, words + numeric_words]: the state the step reached (before the autoreset)
     i32* schema = nullptr;      // [rows]: the label of the step's action (-1: no move)
     i32* binding = nullptr;     // [rows, label_width]: its objects, -1 past the arity (and for no move)
     u32 label_width = 0;        // columns of `binding` (>= the suite's label_width() when set)
-    u8* invalid = nullptr;      // [rows]: the given action was outside [0, count)
+    u8* invalid = nullptr;      // [rows]: an out-of-range index or inapplicable label in a nonterminal, non-stuck row
     u8* goal = nullptr;         // [rows]: the reached state is a goal state
     u32 words = 0;  // atom words of a final_states row (0: the batch's; at least each stepped row's instance width)
 };
@@ -131,6 +141,17 @@ struct Actions
 
     [[nodiscard]] bool given() const noexcept { return v64 || v32; }
     [[nodiscard]] i64 at(u64 row) const noexcept { return v64 ? v64[row] : v32[row]; }
+};
+
+/// Explicit action labels: schema [rows], binding [rows, stride], in each row's domain and instance.
+/// stride is at least the suite's largest schema arity; padding past an action's arity is ignored.
+struct Labels
+{
+    const i32* schema;
+    const i32* binding;
+    u32 stride;
+
+    Labels(const i32* schema, const i32* binding, u32 stride) : schema(schema), binding(binding), stride(stride) {}
 };
 
 /// Throws std::invalid_argument when the configuration or the arrays' shapes do not fit the suite. Reads no array (the
@@ -153,22 +174,26 @@ public:
     /// Row width in atom words (TaskSuite::words()).
     [[nodiscard]] u32 words() const noexcept { return m_suite->words(); }
     [[nodiscard]] u32 numeric_words() const noexcept { return m_suite->numeric_words(); }
-    /// Successors of an instance's initial state.
+    /// Successors of an instance's initial state (Label mode: 0/1, whether an applicable action exists).
     [[nodiscard]] u32 initial_count(u32 instance) const { return m_init_count.at(instance); }
     /// Whether an instance's initial state passes its goal test.
     [[nodiscard]] bool initial_goal(u32 instance) const { return m_init_goal.at(instance) != 0; }
 
     /// Resets the rows with mask[i] != 0 (every row if mask is null) to the initial states of their instances
     /// (task_ids, which the caller sets first): steps 0, goal masks (if the batch has them and keep_goals is false)
-    /// the instances' goals, count (if set) the initial states' successors, at_goal (if set) their goal tests (kept
+    /// the instances' goals, count (if set) the initial states' successor counts (Label: 0/1), at_goal (if set) their goal tests (kept
     /// goal masks included). Draw counters are kept (set_seed and the caller decide when streams restart).
     void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false) const;
     /// One step of every row (see the file comment); `action` [rows] indexes the canonical successor order (none: the
     /// random policy); `next_task_ids` [rows] (optional) names the instance an autoresetting row restarts in.
     void step(EnvBatch& b, const StepOutputs& out, Actions action = {}, const i32* next_task_ids = nullptr,
               ThreadPool* pool = nullptr);
+    /// Label-mode step: applies each applicable label directly; an inapplicable label does not move and sets invalid.
+    /// A goal or terminal dead end absorbs the step regardless of the label. No random policy is available.
+    void step(EnvBatch& b, const StepOutputs& out, Labels labels, const i32* next_task_ids = nullptr,
+              ThreadPool* pool = nullptr);
 
-    /// Successors of rows (count[i] for i < b.rows).
+    /// Successors of rows (Label mode: 0/1, whether an applicable action exists).
     void count(const EnvBatch& b, i32* count, ThreadPool* pool = nullptr);
     /// The goal tests of the rows' states (goal[i] for i < b.rows); at_goal is not read.
     void goal(const EnvBatch& b, u8* goal) const;
@@ -180,6 +205,8 @@ public:
     {
         std::vector<u64> succ;
         std::vector<i32> schema, binding;
+        std::vector<ObjectId> label;
+        StateBuilder next;
     };
     /// One step of row `row` of b, its outputs at row `out_row` of `out` (the unit step() and the CPU pool run;
     /// the batch must have passed check_env and step()'s argument checks). `random` draws from the row's RNG stream,
@@ -188,10 +215,10 @@ public:
     void step_row(EnvBatch& b, u64 row, const StepOutputs& out, u64 out_row, i64 action, bool random,
                   i32 next_instance, Scratch& scratch) const;
     /// Resets row `row` into instance `instance` (steps 0, goal masks unless keep_goals, the task id); returns the
-    /// initial state's successor count. `dirty`: how many of the row's atom words (and goal mask words) may be nonzero,
+    /// initial state's successor count (Label: 0/1). `dirty`: how many of the row's atom words (and goal mask words) may be nonzero,
     /// the words of the instance it held (the rest is zero padding); the reset writes max(dirty, the instance's words).
     u32 reset_row(EnvBatch& b, u64 row, u32 instance, bool keep_goals, u32 dirty) const;
-    /// Successors of one row.
+    /// Successors of one row (Label: 0/1).
     [[nodiscard]] u32 count_row(const EnvBatch& b, u64 row) const;
     [[nodiscard]] bool goal_row(const EnvBatch& b, u64 row) const;
     /// goal_row of a row that reset_row just put into `instance`: its goal masks' test (with masks), else the
@@ -200,6 +227,10 @@ public:
 
 private:
     void check_step(const EnvBatch& b, const StepOutputs& out, Actions action, const i32* next_task_ids) const;
+    void step_impl(EnvBatch& b, const StepOutputs& out, Actions action, const Labels* labels,
+                   const i32* next_task_ids, ThreadPool* pool);
+    void step_row_impl(EnvBatch& b, u64 row, const StepOutputs& out, u64 out_row, i64 action, bool random,
+                       i32 next_instance, Scratch& scratch, const Labels* labels) const;
 
     TaskSuitePtr m_suite;
     EnvConfig m_config;

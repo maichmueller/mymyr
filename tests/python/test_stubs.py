@@ -150,6 +150,8 @@ def test_stubs_parse_and_are_typed():
     ids = "task_ids: mymyr._typing.SupportsDLPack | None = None"
     assert f"def step(self, states: mymyr._typing.SupportsDLPack, {ids}, steps: mymyr._typing.SupportsDLPack | None = None," in env
     assert "dead_end: Literal['no_successors', 'none'] = 'no_successors'" in env
+    assert "actions: Literal['index', 'label'] = 'index'" in env
+    assert "action: mymyr._typing.SupportsDLPack | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | None" in env
     assert "def _step_ptrs(self, rows: int, ptrs: Sequence[int], label_width: int, first_env: int = 0," in env
     assert "def successor_indices(seed: int, envs: mymyr._typing.SupportsDLPack" in env
     assert ": object" not in env and "-> object" not in env

@@ -75,6 +75,27 @@ This supports parameter-by-parameter decoding with one-row calls.
 The witness search can backtrack exponentially in the number of remaining parameters; it avoids storing or
 visiting the full applicable set when a witness can be found early.
 
+### Stepping by label
+
+`mymyr.rl.torch.BatchedEnv(table, N, actions="label")` accepts
+`env.step((schema, binding))`: `schema` is int32 `[N]` and `binding` is int32 `[N, L]`, with at least the suite's
+largest schema arity. Schema ids belong to each row's domain and object ids to its instance; columns past an
+action's arity are ignored. The result's `schema` and `binding` report the applied action, with `-1` padding and
+all `-1` for a row that did not move. An inapplicable or malformed label in a nonterminal state with applicable
+actions leaves the state unchanged, sets `invalid`, and earns `step_reward`.
+
+Label mode checks and applies the chosen action directly. Its `count` is int32 0/1: whether the observation has
+any applicable action, found with witness pruning. This also applies to reset, refresh, and `core.initial_counts`.
+Dead ends, absorbing goals, rewards, truncation, goal masks, `next_task_ids`, same-step autoreset, and
+`final_states` have the same semantics as `actions="index"` (the default). Labels include every applicable binding,
+regardless of `witness_pruning` and `canonical_order`. `step(None)` and `random_actions()` raise `ValueError` in
+label mode, since a uniform random action requires enumerating the action space.
+
+Label stepping runs on the host and torch CPU, including `torch.compile`. Requesting `actions="label"` with a
+CUDA device raises `ValueError`. The C++ API selects `EnvConfig::actions = rl::ActionSpace::Label` and passes
+`rl::Labels{schema, binding, stride}` to `HostEnv::step`; `stride` is the binding row width in int32 elements.
+Index mode uses `rl::ActionSpace::Index` and `rl::Actions`.
+
 ## Derived words
 
 Derived atoms are never stored in states. `rl.expand(..., derived=True)` also returns, for every successor, the bitset of

@@ -472,3 +472,72 @@ TEST(HostEnv, NumericTasks)
         check_random_step(env, x, before, draws, 0, 8);  // rows [bits | numeric slots]
     }
 }
+
+TEST(HostEnv, LabelsFollowIndexedTransitions)
+{
+    for (const char* name : {"gripper__prob05", "miconic-simpleadl__s10-2", "philosophers__p03-phil4",
+                             "pegsol-08-strips__p22"})
+    {
+        SCOPED_TRACE(name);
+        const auto table = rl::TaskTable::single(load(name));
+        rl::EnvConfig cfg;
+        cfg.seed = 17;
+        cfg.max_steps = 9;
+        cfg.step_reward = -1.0f;
+        rl::HostEnv index(table, cfg);
+        cfg.actions = rl::ActionSpace::Label;
+        cfg.witness_pruning = true;
+        rl::HostEnv label(table, cfg);
+        Batch x(index, 8), y(label, 8);
+        index.reset(x.b, nullptr, x.count.data());
+        label.reset(y.b, nullptr, y.count.data());
+        EXPECT_EQ(label.initial_count(0), index.initial_count(0) ? 1u : 0u);
+        ThreadPool pool(3);
+        for (int t = 0; t < 30; ++t)
+        {
+            index.step(x.b, x.out);
+            label.step(y.b, y.out, rl::Labels{x.schema.data(), x.binding.data(), x.L}, nullptr, &pool);
+            EXPECT_EQ(x.states, y.states);
+            EXPECT_EQ(x.final_states, y.final_states);
+            EXPECT_EQ(x.reward, y.reward);
+            EXPECT_EQ(x.terminated, y.terminated);
+            EXPECT_EQ(x.truncated, y.truncated);
+            EXPECT_EQ(x.goal, y.goal);
+            EXPECT_EQ(x.invalid, y.invalid);
+            EXPECT_EQ(x.schema, y.schema);
+            EXPECT_EQ(x.binding, y.binding);
+            EXPECT_EQ(x.steps, y.steps);
+            EXPECT_EQ(x.draws, y.draws);
+            for (usize i = 0; i < x.count.size(); ++i)
+                EXPECT_EQ(y.count[i], x.count[i] ? 1 : 0);
+        }
+    }
+}
+
+TEST(HostEnv, InvalidLabelsDoNotMove)
+{
+    const auto table = rl::TaskTable::single(load("blocks__probBLOCKS-8-0"));
+    rl::EnvConfig cfg;
+    cfg.actions = rl::ActionSpace::Label;
+    cfg.step_reward = -3.0f;
+    rl::HostEnv env(table, cfg);
+    Batch x(env, 3);
+    env.reset(x.b, nullptr, x.count.data());
+    const auto before = x.states;
+    const std::vector<i32> schemas{-1, 1000000, 0};
+    const std::vector<i32> binding(3 * x.L, -1);
+    env.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), x.L});
+    EXPECT_EQ(x.states, before);
+    for (usize i = 0; i < x.count.size(); ++i)
+    {
+        EXPECT_EQ(x.invalid[i], 1);
+        EXPECT_EQ(x.reward[i], -3.0f);
+        EXPECT_EQ(x.schema[i], -1);
+        EXPECT_EQ(x.count[i], 1);
+    }
+    EXPECT_THROW(env.step(x.b, x.out), std::invalid_argument);
+    EXPECT_THROW(env.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), 0}), std::invalid_argument);
+    EXPECT_THROW(env.step(x.b, x.out, rl::Labels{nullptr, binding.data(), x.L}), std::invalid_argument);
+    rl::HostEnv indexed(table, {});
+    EXPECT_THROW(indexed.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), x.L}), std::invalid_argument);
+}
