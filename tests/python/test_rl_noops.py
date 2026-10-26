@@ -121,13 +121,14 @@ def test_mixed_noops_all_noop_fallback_and_dead_end():
 
 
 def test_lazy_slots_hash_and_new_atoms():
-    domain = """(define (domain flags) (:requirements :strips)
-      (:predicates (flag ?x)) (:action set :parameters (?x) :precondition (and) :effect (flag ?x)))"""
+    domain = """(define (domain flags) (:requirements :strips :derived-predicates)
+      (:predicates (flag ?x) (available ?x)) (:derived (available ?x) (flag ?x))
+      (:action set :parameters (?x) :precondition (and) :effect (flag ?x)))"""
     problem = """(define (problem flags) (:domain flags)
-      (:objects """ + " ".join(f"o{i}" for i in range(140)) + """ ) (:init) (:goal (and)))"""
+      (:objects """ + " ".join(f"o{i}" for i in range(140)) + """ ) (:init) (:goal (available o139)))"""
     task = pddl_task(domain, problem, atoms="lazy")
     full = check_expansion(task, [task.initial_state])
-    assert not full.noop.any() and full.words > 1
+    assert not full.noop.any() and full.words > 1 and full.derived_words > 1
     short = rl.expand(task, [task.initial_state], hashes=True, noops=True, words=1)
     assert short.overflow and short.words_needed == full.words
     np.testing.assert_array_equal(short.succ_hash, full.succ_hash)
@@ -164,6 +165,10 @@ def test_jax_cpu_matches_numpy(drop, hashes, noops):
     env = Env(task, device="cpu")
     source = jnp.asarray(rows.view(np.uint32))
     actual = jax.jit(lambda s: env.expand_flat(s, expected.generated + 3, **opts))(source)
+    generic = rl.expand(task, source, **opts)
+    if hashes:
+        np.testing.assert_array_equal(np.asarray(generic.succ_hash).copy().view(np.uint64).ravel(), expected.succ_hash)
+        np.testing.assert_array_equal(np.asarray(mymyr.hash_rows(generic.succ)).copy().view(np.uint64).ravel(), expected.succ_hash)
     m = expected.total
     assert int(actual.generated) == expected.generated
     for name in ("parent", "schema", "binding", "goal", "offsets"):
@@ -246,3 +251,25 @@ def test_jax_cpu_numeric_and_derived_digests(name):
     np.testing.assert_array_equal(np.asarray(actual.succ_hash)[:m].copy().view(np.uint64).ravel(), expected.succ_hash)
     np.testing.assert_array_equal(np.asarray(actual.noop)[:m], expected.noop)
     np.testing.assert_array_equal(np.asarray(actual.index)[:m], expected.index)
+
+
+def test_numeric_table_hashes_exclude_instance_padding():
+    domain = """(define (domain amounts) (:requirements :strips :fluents)
+      (:predicates (p)) (:functions (x ?o))
+      (:action inc :parameters (?o) :precondition (and) :effect (increase (x ?o) 1)))"""
+    tasks = []
+    for objects in (("a", "b"), ("a", "b", "c")):
+        problem = ("(define (problem amounts) (:domain amounts) (:objects " + " ".join(objects) + ") (:init "
+                   + " ".join(f"(= (x {o}) 0)" for o in objects) + ") (:goal (and)))")
+        tasks.append(pddl_task(domain, problem, numeric_storage="f64"))
+    table = rl.TaskTable(tasks)
+    ids = np.array([0, 1], np.int32)
+    rows = np.asarray(table.initial_states())
+    exp = rl.expand(table, rows, ids, hashes=True)
+    for i, task in enumerate(tasks):
+        selected = exp.parent == i
+        own_rows = np.concatenate((exp.succ[selected, :exp.words],
+                                   exp.succ[selected, exp.words:exp.words + task.numeric_words]), axis=1)
+        np.testing.assert_array_equal(exp.succ_hash[selected], mymyr.hash_rows(own_rows, numeric_words=task.numeric_words))
+    pooled = rl.expand(table, rows, ids, hashes=True, pool=rl.ThreadPool(2))
+    np.testing.assert_array_equal(pooled.succ_hash, exp.succ_hash)

@@ -257,6 +257,37 @@ TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
     }
 }
 
+TEST(RlExpandDigests, NumericSuccessorsMatchNativeStateHashes)
+{
+    for (auto storage : {TaskOptions::NumericStorageMode::I32, TaskOptions::NumericStorageMode::F64})
+    {
+        TaskOptions options;
+        options.numeric_storage = storage;
+        const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt", options);
+        const State initial = task->initial_state();
+        const Reference ref = reference(*task, {initial});
+        const u32 W = std::max<u32>(task->words(), 1), NN = task->numeric_words(), RW = W + NN;
+        std::vector<u64> row(RW, 0), successors(ref.succ.size() * RW), hashes(ref.succ.size());
+        std::vector<u8> noops(ref.succ.size());
+        std::copy_n(initial.data(), initial.size_words(), row.data());
+        std::copy(initial.numeric().begin(), initial.numeric().end(), row.begin() + W);
+        rl::Expansion out;
+        out.capacity = ref.succ.size();
+        out.words = W;
+        out.numeric_words = NN;
+        out.succ = successors.data();
+        out.succ_hash = hashes.data();
+        out.noop = noops.data();
+        rl::expand(*task, rl::StateBatchView{row.data(), 1, W, 0, NN}, nullptr, out);
+        ASSERT_EQ(out.generated, ref.succ.size());
+        for (usize j = 0; j < ref.succ.size(); ++j)
+        {
+            EXPECT_EQ(hashes[j], ref.succ[j].hash());
+            EXPECT_EQ(noops[j], ref.succ[j] == initial);
+        }
+    }
+}
+
 TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 {
     const auto& [name, frozen] = GetParam();

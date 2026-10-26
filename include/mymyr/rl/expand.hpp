@@ -10,8 +10,9 @@
 //     the successors of row i are states of the same instance, labels carry its domain's schema ids and its
 //     instance-local object ids.
 //   - Destination-passing: the caller owns every output buffer and passes their capacity. expand() allocates
-//     nothing (the multi-threaded variant grows its caller-owned scratch, amortized) and synchronizes with nothing
-//     but its own pool. Rows beyond the capacity are counted, not written: `generated` > `capacity` is the overflow.
+//     no output buffers (the pool variant grows caller-owned scratch, amortized) and synchronizes with nothing
+//     but its own pool. Dropping buffers one parent's rows on the calling thread. Rows beyond the capacity are
+//     counted, not written: `generated` > `capacity` is the overflow.
 //   - Canonical order (on by default): per state, successors by schema, then lexicographically by binding (the
 //     schema's full parameter list). An action is its label (schema, binding), never a slot index.
 //   - Witness pruning is off by default: every applicable ground action is a transition.
@@ -131,6 +132,8 @@ void expand(const TaskSuite& suite, StateBatchView in, const i32* task_ids, Expa
 void expand(const TaskSuite& suite, StateBatchView in, const i32* task_ids, Expansion& out,
             const ExpandOptions& options, ThreadPool& pool, ExpandScratch& scratch);
 /// One task, including a task with lazy slots. The task's live slot layout is used; task_ids is null or all zero.
+/// Lazy derived outputs need bits::words_for(task.atoms().max_derived_slots()) columns to cover slots interned
+/// during axiom evaluation. Missing input atom words are zero; fixed-slot tasks still require their full width.
 void expand(const Task& task, StateBatchView in, const i32* task_ids, Expansion& out,
             const ExpandOptions& options = {});
 void expand(const Task& task, StateBatchView in, const i32* task_ids, Expansion& out,

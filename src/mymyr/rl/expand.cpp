@@ -27,7 +27,11 @@ struct SingleTask
     [[nodiscard]] const Task* task(u32) const noexcept { return &value; }
     [[nodiscard]] const Task& task_of(const i32*, u64) const noexcept { return value; }
     [[nodiscard]] u32 numeric_words() const noexcept { return value.numeric_words(); }
-    [[nodiscard]] u32 derived_words() const noexcept { return bits::words_for(value.atoms().derived_slots()); }
+    [[nodiscard]] u32 derived_words() const noexcept
+    {
+        const auto& atoms = value.atoms();
+        return bits::words_for(atoms.frozen() ? atoms.derived_slots() : atoms.max_derived_slots());
+    }
     [[nodiscard]] u32 label_width() const noexcept { return max_label_width(value); }
     void check_task_ids(const i32* ids, u64 rows) const
     {
@@ -37,9 +41,9 @@ struct SingleTask
     }
 };
 
-/// Throws unless every row is a state of its instance: at least the instance's width (a narrower row is a truncated
-/// state), and, with `content`, no bit at a slot the instance does not have (they share the last of its words). The
-/// words past the instance's own are padding and are not read, so a row costs its instance's width.
+/// Frozen instances require their full width; missing words of a lazy instance are zero. With `content`, reject
+/// bits at slots the instance does not have within its last word. Words past the instance's own are padding and
+/// are not read, so a row costs its instance's width.
 template<class Table>
 void check_rows(const Table& table, StateBatchView in, const i32* ids, bool content, const char* what)
 {
@@ -193,6 +197,88 @@ u64 expand_state(Successors& succ, const u64* row, u32 nw, const u64* num, u32 n
     return n;
 }
 
+template<u32 N>
+void hash_four(const u64* const* src, u64* h)
+{
+    for (u32 w = 0; w + 1 < N; w += 2)
+        for (u32 k = 0; k < 4; ++k)
+            h[k] = hash::mulfold(h[k] ^ src[k][w] ^ hash::k_p1, src[k][w + 1] ^ hash::k_p2);
+    if constexpr (N & 1)
+        for (u32 k = 0; k < 4; ++k)
+            h[k] = hash::mulfold(h[k] ^ src[k][N - 1] ^ hash::k_p1, hash::k_p2);
+}
+
+/// Interleave four independent state-hash chains so that their multiplies can execute concurrently.
+void hash_successors(const u64* rows, u64 count, u32 W, u32 NN, u32 nn, u64* out)
+{
+    const u32 RW = W + NN;
+    u64 j = 0;
+    for (; j + 4 <= count; j += 4)
+    {
+        const u64* src[4];
+        u32 size[4];
+        u64 h[4];
+        for (u32 k = 0; k < 4; ++k)
+        {
+            src[k] = rows + (j + k) * RW;
+            size[k] = bits::trimmed_size(src[k], W);
+        }
+        if (size[0] == size[1] && size[0] == size[2] && size[0] == size[3])
+        {
+            for (u32 k = 0; k < 4; ++k)
+            {
+                const u64 seed = nn ? hash::words(src[k] + W, nn) : hash::k_seed;
+                h[k] = seed ^ (static_cast<u64>(size[k]) * hash::k_p1);
+            }
+            // Fixed bounds on short rows expose the independent multiply chains to the compiler.
+            switch (size[0])
+            {
+                case 0: break;
+                case 1: hash_four<1>(src, h); break;
+                case 2: hash_four<2>(src, h); break;
+                case 3: hash_four<3>(src, h); break;
+                case 4: hash_four<4>(src, h); break;
+                case 5: hash_four<5>(src, h); break;
+                case 6: hash_four<6>(src, h); break;
+                case 7: hash_four<7>(src, h); break;
+                case 8: hash_four<8>(src, h); break;
+                case 9: hash_four<9>(src, h); break;
+                case 10: hash_four<10>(src, h); break;
+                case 11: hash_four<11>(src, h); break;
+                case 12: hash_four<12>(src, h); break;
+                case 13: hash_four<13>(src, h); break;
+                case 14: hash_four<14>(src, h); break;
+                case 15: hash_four<15>(src, h); break;
+                case 16: hash_four<16>(src, h); break;
+                default:
+                {
+                    u32 w = 0;
+                    for (; w + 1 < size[0]; w += 2)
+                        for (u32 k = 0; k < 4; ++k)
+                            h[k] = hash::mulfold(h[k] ^ src[k][w] ^ hash::k_p1, src[k][w + 1] ^ hash::k_p2);
+                    if (w < size[0])
+                        for (u32 k = 0; k < 4; ++k)
+                            h[k] = hash::mulfold(h[k] ^ src[k][w] ^ hash::k_p1, hash::k_p2);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            for (u32 k = 0; k < 4; ++k)
+                out[j + k] = hash::words(src[k], size[k], nn ? hash::words(src[k] + W, nn) : hash::k_seed);
+            continue;
+        }
+        for (u32 k = 0; k < 4; ++k)
+            out[j + k] = hash::mix64(h[k]);
+    }
+    for (; j < count; ++j)
+    {
+        const u64* row = rows + j * RW;
+        out[j] = hash::state(row, W, nn ? row + W : nullptr, nn);
+    }
+}
+
 /// Direct sink: writes into the caller's buffers, rows [0, capacity).
 struct DirectSink
 {
@@ -206,6 +292,7 @@ struct DirectSink
     const u64* num;
     u32 nn;
     u64 first;
+    bool defer_hash;
 
     void put(u32 schema, const ObjectId* b, u32 arity, const Delta& d)
     {
@@ -229,7 +316,7 @@ struct DirectSink
                 fits = false;
                 out.words_needed = std::max(out.words_needed, exact_width(cur, nw, d, tmp));
             }
-            if (out.succ_hash || out.noop)
+            if ((out.succ_hash && !defer_hash) || out.noop)
             {
                 const u64* dst = out.succ ? out.succ + j * RW : nullptr;
                 u32 size = W;
@@ -238,7 +325,7 @@ struct DirectSink
                     size = exact_width(cur, nw, d, tmp);
                     dst = tmp.data();
                 }
-                if (out.succ_hash)
+                if (out.succ_hash && !defer_hash)
                     out.succ_hash[j] = hash::state(dst, size, d.num, d.nnum);
                 if (out.noop)
                     out.noop[j] = static_cast<u8>(bits::equal(dst, size, cur, nw) && d.nnum == nn &&
@@ -401,10 +488,9 @@ inline u8 goal_of(const Task& task, const u64* s, u32 W, u32 NN)
 /// past the instance's own) is null when not wanted; `goal` likewise.
 inline void row_info(const Task& task, const u64* s, u32 W, u32 NN, u8* goal, u64* derived, u32 dw)
 {
-    const u32 own = derived ? bits::words_for(task.atoms().derived_slots()) : 0;
     if (derived)
         std::fill_n(derived, dw, u64{0});
-    if (!own)  // no derived atoms to write: the goal test alone
+    if (!derived || !task.atoms().max_derived_slots())  // no derived atoms to write: the goal test alone
     {
         if (goal)
             *goal = goal_of(task, s, W, NN);
@@ -414,6 +500,9 @@ inline void row_info(const Task& task, const u64* s, u32 W, u32 NN, u8* goal, u6
     const WorkspaceLease ws = task.workspace();
     Successors& succ = ws->successors();
     succ.prepare(view);
+    const u32 own = bits::words_for(task.atoms().derived_slots());
+    if (own > dw)
+        throw std::invalid_argument("mymyr: expand: derived output narrower than the successor's derived slots");
     std::copy_n(ws->engine().derived(), own, derived);
     if (goal)
         *goal = static_cast<u8>(succ.goal_holds());
@@ -481,8 +570,9 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
         const u32 nn = task.numeric_words();
         const u64* row = in.row(i);
         const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
+        const bool defer_hash = out.succ_hash && out.succ && task.atoms().frozen() && out.words >= task.words();
         DirectSink sink{out, row, nw, static_cast<i32>(i), next, L, tmp,
-                        nn ? row + in.words : nullptr, nn, next};
+                        nn ? row + in.words : nullptr, nn, next, defer_hash};
         if (opt.drop_noops)
         {
             m.succ.clear();
@@ -521,6 +611,9 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
         }
         else
             out.generated += expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
+        if (defer_hash && !opt.drop_noops && next < out.capacity)
+            hash_successors(out.succ + next * RW, std::min(sink.next, out.capacity) - next,
+                            out.words, out.numeric_words, nn, out.succ_hash + next);
         if (out.goal || out.derived)
             for (u64 j = next; j < sink.next && j < out.capacity; ++j)
                 row_info(task, out.succ + j * RW, out.words, NN, out.goal ? out.goal + j : nullptr,
@@ -594,13 +687,22 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
                     const u32 nn = task.numeric_words();
                     const u64* row = in.row(i);
                     const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
+                    const bool defer_hash = out.succ_hash && task.atoms().frozen() && W >= task.words();
                     ScratchSink sink{m.succ,       m.parent, m.schema, m.binding, true, true, out.schema != nullptr,
                                      out.binding != nullptr, row, nw, static_cast<i32>(i), W, out.numeric_words, L,
                                      m.words_needed, m.tmp, 0, m.hashes, m.noops, m.indices,
-                                     out.succ_hash != nullptr, out.noop != nullptr || opt.drop_noops,
+                                     out.succ_hash != nullptr && !defer_hash, out.noop != nullptr || opt.drop_noops,
                                      out.index != nullptr, nn ? row + in.words : nullptr, nn};
                     const u64 before = rows_before;
                     S.generated[i] = expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
+                    if (defer_hash)
+                    {
+                        const usize at = m.hashes.size();
+                        m.hashes.resize(at + sink.rows);
+                        hash_successors(m.succ.data() + (rec.first_row + before) * RW, sink.rows,
+                                        W, out.numeric_words, nn, m.hashes.data() + at);
+                        sink.want_hash = true;
+                    }
                     if (opt.drop_noops)
                         sink.drop_noops();
                     S.counts[i] = sink.rows;

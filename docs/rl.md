@@ -82,8 +82,10 @@ print(expansion.derived.shape)
 
 On the host, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
 and `noop` (bool), one per successor. The hash is the native state hash: trimmed atom words seeded by the numeric
-words, equal to `mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. It excludes derived atoms and differs
-from Python's task-aware `hash(state)`. No-op equality includes the numeric words bit for bit: changing the sign of
+words. For instances with the same numeric width it equals
+`mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. For mixed numeric widths, use each instance's numeric
+prefix, omitting its padding, when hashing rows separately. It excludes derived atoms and differs from Python's
+task-aware `hash(state)`. No-op equality includes the numeric words bit for bit: changing the sign of
 zero or a NaN payload is a change. Derived words do not enter equality.
 
 `drop_noops=True` removes no-op successors separately for each parent, keeping all successors when every one is a
@@ -109,7 +111,9 @@ assert np.array_equal(kept.pad().succ_hash[kept.pad().mask], kept.succ_hash)
 `generated` counts successors before filtering; `total` and `offsets` count kept successors. A fixed `capacity` bounds
 `generated`, so filtering cannot hide an overflow (`generated > capacity`); outputs on overflow are undefined.
 `expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations and `drop_noops=True` requires `index=`.
-Digests work with `succ=None`, without storing successor rows. Every requested array is filtered alike, including goal
+Digests work with `succ=None`, without storing successor rows. A single `Task` may use lazy atom slots: expansion
+uses its live slot layout, counts new atoms as changes, and grows output rows automatically unless `words=` fixes
+the width. Tables require fixed atom slots. Every requested array is filtered alike, including goal
 flags and derived words. The padded view adds zero-padded hashes and no-op flags; its `index` contains canonical
 successor positions when filtering, with -1 padding (without filtering it contains flat row indices).
 

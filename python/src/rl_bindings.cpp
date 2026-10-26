@@ -458,7 +458,7 @@ struct ExpansionSource
     [[nodiscard]] u32 numeric_words() const noexcept { return local ? local->numeric_words() : ref.suite->numeric_words(); }
     [[nodiscard]] u32 derived_words() const noexcept
     {
-        return local ? bits::words_for(local->atoms().derived_slots()) : ref.suite->derived_words();
+        return local ? bits::words_for(local->atoms().max_derived_slots()) : ref.suite->derived_words();
     }
     [[nodiscard]] u32 label_width() const noexcept { return local ? rl::max_label_width(*local) : ref.suite->label_width(); }
     [[nodiscard]] u32 batch_words(const i32* ids, u64 rows) const noexcept

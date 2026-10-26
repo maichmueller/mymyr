@@ -46,7 +46,8 @@ past it are counted in ``generated`` and ``overflow`` is set; a batch holds at m
 table at once.
 
 ``hashes=True`` computes the trimmed atom/numeric state hash, matching ``hash_rows`` with the table's numeric
-width. ``noops=True`` compares atom and numeric words bit for bit with the parent (signed zeros and NaN payloads
+width when all instances have that width; otherwise omit each instance's numeric padding before hashing its rows.
+``noops=True`` compares atom and numeric words bit for bit with the parent (signed zeros and NaN payloads
 count as changes). ``drop_noops=True`` stably removes no-ops per parent unless all successors are no-ops, in which
 case it keeps them all. ``index`` maps kept rows to positions in the full parent expansion; every requested array is
 compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; outputs are undefined on capacity

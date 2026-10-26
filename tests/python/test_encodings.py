@@ -221,8 +221,9 @@ def test_lazy_slots_stay_inside_their_task():
         lazy.state(np.asarray(rows)[0])
     with pytest.raises(ValueError, match="lazy atom slots"):
         rl.TaskTable([lazy])
-    with pytest.raises(ValueError, match="lazy atom slots"):
-        rl.expand(lazy, states)
+    expansion = rl.expand(lazy, states, hashes=True)
+    assert expansion.generated == sum(len(lazy.applicable_actions(s)) for s in states)
+    np.testing.assert_array_equal(expansion.succ_hash, mymyr.hash_rows(expansion.succ))
     assert lazy.applicable_actions(states[-1])  # States carry their task
     arrays = datasets.generate(lazy, threads=2).space.arrays()
     assert "state_words" not in arrays and "forward_offsets" in arrays
