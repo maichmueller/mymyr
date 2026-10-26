@@ -24,10 +24,22 @@ uv pip install --python .venv/bin/python mymyr
 CPU wheels support CPython 3.14 and 3.15, both GIL (`3.14`, `3.15`) and free-threaded (`3.14t`, `3.15t`), on Linux
 x86_64 with glibc 2.34 or newer and macOS arm64 with macOS 15 or newer. Change `--python` to select an interpreter.
 Wheels include the PDDL parser and C++ SDK. For Gymnasium environments, install `mymyr[gym]`; install JAX or PyTorch
-separately when using those integrations. CUDA requires a source build.
+separately when using those integrations.
+
+CUDA wheels for free-threaded CPython 3.14 and 3.15 on Linux x86_64 are attached to each
+[GitHub Release](https://github.com/maichmueller/mymyr/releases) with the version `<version>+cu13`; they need an
+NVIDIA driver 580 or newer and carry GPU code for compute capabilities 8.9 and 9.0:
+
+```bash
+uv pip install --python .venv/bin/python "mymyr==0.1.0+cu13" \
+    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v0.1.0
+```
+
+See [Installing a CUDA wheel](docs/cuda.md#installing-a-cuda-wheel) for other GPUs and source builds.
 
 Pushing a `v*` tag that matches the package version publishes to TestPyPI and PyPI; a manual release workflow run is
-a TestPyPI rehearsal with a unique `.devN` version.
+a TestPyPI rehearsal with a unique `.devN` version. The tag also builds the CUDA wheels as workflow artifacts;
+`ci/attach_cuda_wheels.sh` tests them on a GPU and attaches them to the GitHub Release.
 
 ## Try it
 

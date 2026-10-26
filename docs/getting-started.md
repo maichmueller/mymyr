@@ -1,8 +1,9 @@
 # Getting started
 
 mymyr is a lifted-first planning library with Python bindings. Python wheels support GIL and free-threaded CPython
-3.14 and 3.15 on Linux x86_64 (glibc 2.34 or newer) and macOS arm64 (macOS 15 or newer). The published wheels contain
-the CPU backend. A CUDA backend is built from source.
+3.14 and 3.15 on Linux x86_64 (glibc 2.34 or newer) and macOS arm64 (macOS 15 or newer). The wheels on PyPI contain
+the CPU backend. The CUDA backend comes in wheels for free-threaded CPython on Linux, attached to the GitHub Releases,
+or is built from source.
 
 ## Install a wheel
 
@@ -14,6 +15,16 @@ uv pip install --python .venv/bin/python mymyr
 ```
 
 Change the Python version passed to `uv venv` to `3.15t`, or to `3.14` or `3.15` for a GIL interpreter.
+
+For the CUDA backend, install the release's CUDA wheel (version `<version>+cu13`, free-threaded CPython 3.14 and 3.15
+on Linux x86_64, an NVIDIA driver 580 or newer) from the release's assets instead:
+
+```bash
+uv pip install --python .venv/bin/python "mymyr==0.1.0+cu13" \
+    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v0.1.0
+```
+
+[Installing a CUDA wheel](cuda.md#installing-a-cuda-wheel) lists the GPUs it supports and how to build one for others.
 
 ## Build from source
 

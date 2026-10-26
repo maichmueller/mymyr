@@ -1,9 +1,40 @@
 # CUDA
 
-The optional CUDA backend needs an NVIDIA GPU at runtime. Python wheels contain the CPU backend only. For a source
+The optional CUDA backend needs an NVIDIA GPU at runtime. The wheels on PyPI contain the CPU backend; CUDA wheels
+for Linux are attached to the GitHub Releases ([Installing a CUDA wheel](#installing-a-cuda-wheel)). For a source
 build, set `MYMYR_CUDA=ON` and `CMAKE_CUDA_COMPILER` during the CMake configure or Python package build. The device
 searches and generators take the options and return the result fields of the CPU ones
 ([API conventions](conventions.md)); a device result adds `counters`, a dict of device counts and times.
+
+## Installing a CUDA wheel
+
+Every [GitHub Release](https://github.com/maichmueller/mymyr/releases) carries CUDA wheels next to the CPU wheels,
+with the local version `<version>+cu13`, e.g. `mymyr-0.1.0+cu13-cp314-cp314t-manylinux_2_34_x86_64.whl`:
+
+- Linux x86_64 with glibc 2.34 or newer, free-threaded CPython 3.14 and 3.15 (`cp314t`, `cp315t`);
+- SASS for compute capabilities 8.9 (Ada: L4, L40S, RTX 40 series) and 9.0 (Hopper: H100, H200) and no PTX, so
+  other GPUs need a wheel built for them ([Building a CUDA wheel](#building-a-cuda-wheel));
+- an NVIDIA driver 580 or newer ([Driver](#driver)); the CUDA runtime is linked into the extension, so no CUDA
+  toolkit is needed;
+- the XLA FFI targets of `mymyr.rl.jax` and `mymyr.encoding.jax`; JAX and torch are installed separately.
+
+PyPI has no `+cu13` files: ask for the version and add the release's assets as a source of packages,
+
+```bash
+uv venv .venv --python 3.14t
+uv pip install --python .venv/bin/python "mymyr==0.1.0+cu13" \
+    --find-links https://github.com/maichmueller/mymyr/releases/expanded_assets/v0.1.0
+```
+
+or install a wheel by its URL, with the `+` written as `%2B`:
+
+```bash
+uv pip install --python .venv/bin/python \
+    https://github.com/maichmueller/mymyr/releases/download/v0.1.0/mymyr-0.1.0%2Bcu13-cp314-cp314t-manylinux_2_34_x86_64.whl
+```
+
+`pip install` takes the same arguments. `mymyr.build_info()` names the toolkit and the GPU code of the build, e.g.
+`mymyr 0.1.0+cu13 (Release, gcc 16.1.0, CUDA 13.4.92, sm_89 sm_90)`.
 
 ## Building
 
@@ -22,6 +53,45 @@ generations, list real architectures, and a virtual one only for the newest, e.g
 
 The test that checks the device Philox generator against cuRAND's is built when the toolkit provides cuRAND's headers
 (`libcurand-dev-13-4` on Debian and Ubuntu); without them it is not built, and the library does not need them.
+
+## Building a CUDA wheel
+
+`ci/cuda_wheel.sh` builds the release's CUDA wheels, and builds a wheel for other GPUs or Python ABIs the same way. It
+runs in the manylinux image of the release wheels (`manylinux-x86_64-image` under `[tool.cibuildwheel.linux]` in
+`pyproject.toml`): it installs GCC 16, the dependencies and the CUDA 13.4 compiler (checksums in `ci/cuda_redist.json`)
+into a toolchain directory that later builds reuse, builds the wheel with the version `<version>+cu13`, repairs it with
+auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and runs the CPU test suite on
+it. It needs network access, and its work directory takes about 7 GB for one architecture. One architecture compiled
+in 50 minutes with 8 build jobs and 4 parallel nvcc compiles; every further architecture compiles the device code
+again.
+
+From the repository root, with podman (`docker run` takes the same arguments):
+
+```bash
+image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+mkdir -p ~/.cache/mymyr-cuda-toolchain /scratch/mymyr-cuda-wheel
+podman run --rm -v "$PWD":/src -v ~/.cache/mymyr-cuda-toolchain:/opt/mymyr-toolchain \
+    -v /scratch/mymyr-cuda-wheel:/work "$image" \
+    bash /src/ci/cuda_wheel.sh --python cp314t --archs "80-real" --work /work --out /work/wheelhouse
+```
+
+With apptainer, convert the image once (set `APPTAINER_TMPDIR` to a local disk if unpacking fails on a network file
+system), then run the script in it:
+
+```bash
+apptainer build manylinux_2_34.sif "docker://$image"
+apptainer exec --containall --bind "$PWD":/src --bind ~/.cache/mymyr-cuda-toolchain:/opt/mymyr-toolchain \
+    --bind /scratch/mymyr-cuda-wheel:/work manylinux_2_34.sif \
+    bash /src/ci/cuda_wheel.sh --python cp314t --archs "80-real" --work /work --out /work/wheelhouse
+```
+
+`--archs` takes `CMAKE_CUDA_ARCHITECTURES` (SASS for the GPUs you run on: `80-real` for A100, `90-real` for H100,
+`100-real` for B200), `--python` a CPython ABI of the image (`cp314t`, `cp315t`, `cp314`, `cp315`), and
+`--jobs` and `--cuda-jobs` bound the parallel compiles (nvcc needs up to 3 GB per compile, 7 GB for the largest
+kernels); `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
+`ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheel/wheelhouse --python <python3.14t> --archs 80 v<version>`
+from a checkout of the same version on a GPU node: it installs the wheel into a fresh environment (seeing the
+interpreter's torch and JAX) and runs the CUDA tests on GPU 0.
 
 ## Driver
 
