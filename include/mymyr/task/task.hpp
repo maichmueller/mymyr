@@ -182,7 +182,8 @@ public:
     [[nodiscard]] const AtomIndex& atoms() const noexcept { return m_atoms; }
     /// Cached task over the same normalized problem and options with fixed atom slots. Lazy is not a frozen mode.
     [[nodiscard]] std::shared_ptr<const Task> frozen(TaskOptions::Atoms atoms = TaskOptions::Atoms::Auto) const;
-    /// The cached same-parse map to a frozen twin, or null when target is not one of this task's twins.
+    /// Cached map to a fixed-slot task with the same problem fingerprint and numeric layout, or null if incompatible.
+    /// The target must outlive every use of the returned map.
     [[nodiscard]] std::shared_ptr<SlotMap> slot_map_to(const Task& target) const;
     /// Cached name-based map. The target must outlive every use of the returned map.
     [[nodiscard]] std::shared_ptr<SlotMap> translation_map_to(const Task& target) const;

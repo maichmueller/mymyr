@@ -217,12 +217,14 @@ def test_frozen_task_cache_and_pickle(mode):
     lazy = text_task("gripper__prob05", atoms="lazy", matching="fc", reachability_budget=1 << 24)
     frozen = lazy.frozen(mode)
     assert frozen.atom_mode != "lazy"
-    assert frozen.uid == lazy.frozen(mode).uid
+    assert frozen is lazy.frozen(mode)
+    assert frozen is lazy.local().frozen(mode)
     assert frozen.frozen(mode) is frozen
+    assert frozen.local().frozen(mode) is frozen
     assert frozen.fingerprint == lazy.fingerprint
     assert frozen.options == {**lazy.options, "atoms": mode}
     source, twin = pickle.loads(pickle.dumps((lazy, frozen)))
-    assert source.frozen(mode).uid == twin.uid
+    assert source.frozen(mode) is twin
     assert twin.encoding_fingerprint == frozen.encoding_fingerprint
     with pytest.raises(ValueError, match="frozen atoms"):
         lazy.frozen("lazy")
@@ -237,6 +239,30 @@ def test_frozen_cache_is_shared_across_threads():
     with ThreadPoolExecutor(4) as pool:
         tasks = list(pool.map(lambda _: lazy.frozen(), range(16)))
     assert len({t.uid for t in tasks}) == 1
+    assert all(t is tasks[0] for t in tasks)
+
+
+def test_frozen_wrapper_can_be_collected_and_recreated():
+    import gc
+    import weakref
+
+    lazy = text_task("gripper__prob05", atoms="lazy")
+    twin = lazy.frozen()
+    uid = twin.uid
+    reference = weakref.ref(twin)
+    del twin
+    gc.collect()
+    assert reference() is None
+    twin = lazy.local().frozen()
+    assert twin.uid == uid
+    assert twin is lazy.frozen()
+    source_reference = weakref.ref(lazy)
+    del lazy
+    gc.collect()
+    assert source_reference() is not None
+    del twin
+    gc.collect()
+    assert source_reference() is None
 
 
 def test_frozen_uses_the_source_reachability_budget():

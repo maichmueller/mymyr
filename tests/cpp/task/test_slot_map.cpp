@@ -3,6 +3,7 @@
 #include "mymyr/task/task.hpp"
 
 #include <gtest/gtest.h>
+#include <array>
 #include <atomic>
 #include <sstream>
 #include <thread>
@@ -77,6 +78,44 @@ TEST(SlotMap, SnapshotsRemainValidWhileLazySlotsGrow)
         worker.join();
     EXPECT_EQ(before->size(), 1);
     EXPECT_EQ(map->snapshot()->size(), 2);
+}
+
+TEST(SlotMap, EncodingMapsCacheIndependentTasksWithTheSameFingerprint)
+{
+    const auto source = task(false, true, TaskOptions::Atoms::Lazy), target = task(false, true);
+    const auto unrelated = task(false, false), lazy_target = task(false, true, TaskOptions::Atoms::Lazy);
+    const auto map = source->slot_map_to(*target);
+    ASSERT_TRUE(map);
+    EXPECT_EQ(map, source->slot_map_to(*target));
+    EXPECT_EQ(map, source->translation_map_to(*target));
+    EXPECT_EQ(map->translate(source->initial_state()), target->initial_state());
+    (void)source->translation_map_to(*unrelated);
+    EXPECT_FALSE(source->slot_map_to(*unrelated));
+    EXPECT_FALSE(source->slot_map_to(*lazy_target));
+}
+
+TEST(SlotMap, ConcurrentFrozenModesPublishMatchingTasksAndMaps)
+{
+    const auto source = task(false, true, TaskOptions::Atoms::Lazy);
+    std::array<std::array<TaskPtr, 3>, 8> twins;
+    std::vector<std::thread> workers;
+    for (u32 worker = 0; worker < twins.size(); ++worker)
+        workers.emplace_back([&, worker] {
+            for (u32 step = 0; step < 3; ++step)
+            {
+                const u32 mode = (worker + step) % 3;
+                const auto twin = source->frozen(static_cast<TaskOptions::Atoms>(mode));
+                twins[worker][mode] = twin;
+                const auto map = source->slot_map_to(*twin);
+                ASSERT_TRUE(map);
+                EXPECT_EQ(&map->target(), twin.get());
+                EXPECT_EQ(map->translate(source->initial_state()), twin->initial_state());
+            }
+        });
+    for (auto& worker : workers)
+        worker.join();
+    for (const auto& row : twins)
+        EXPECT_EQ(row, twins.front());
 }
 
 TEST(SlotMap, SnapshotsAndFingerprintsWaitForConcurrentPublication)

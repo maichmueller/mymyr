@@ -112,6 +112,55 @@ def test_pickle_keeps_the_source_and_twin_link():
     same(restored.encode(restored_states), encoder.encode(states))
     simple, restored_states = pickle.loads(pickle.dumps((encoding.SimpleEncoder(lazy), states)))
     same(simple.encode(restored_states), encoding.SimpleEncoder(lazy).encode(states))
+    for original in (encoder, encoding.SimpleEncoder(lazy)):
+        restored = pickle.loads(pickle.dumps(original))
+        restored_states = pickle.loads(pickle.dumps(states))
+        expected = original.encode(states)
+        same(restored.encode(restored_states), expected)
+        same(original.encode(restored_states), expected)
+        same(restored.encode(states), expected)
+
+
+@pytest.mark.parametrize("mode", ["auto", "reachable", "dense"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_states_from_an_independent_lazy_parse(mode, layout):
+    owner = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
+    source = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
+    twin = owner.frozen(mode)
+    encoder = encoding.FlatRelationEncoder(twin, layout=layout)
+    for seed in (17, 39):
+        states = walk(source, steps=12, seed=seed)
+        same(encoder.encode(states * 4, threads=2), encoder.encode(translate_states(states, twin) * 4))
+        stream = encoder.stream()
+        stream.append(states)
+        same(stream.flush(), encoder.encode(translate_states(states, twin)))
+
+
+@pytest.mark.parametrize("storage", ["auto", "f64"])
+def test_numeric_states_from_an_independent_lazy_parse(storage):
+    path = ROOT / "tests/data/numeric_tasks/m-refuel.txt"
+    owner = mymyr.Task.from_text(path, atoms="lazy", numeric_storage=storage)
+    source = mymyr.Task.from_text(path, atoms="lazy", numeric_storage=storage)
+    states = walk(source, steps=8)
+    encoder = encoding.FlatRelationEncoder(owner)
+    same(encoder.encode(states), encoder.encode(translate_states(states, encoder.table)))
+
+
+def test_independent_lazy_parse_with_different_numeric_storage_is_refused():
+    path = ROOT / "tests/data/numeric_tasks/m-refuel.txt"
+    owner = mymyr.Task.from_text(path, numeric_storage="i32")
+    source = mymyr.Task.from_text(path, atoms="lazy", numeric_storage="f64")
+    with pytest.raises(ValueError, match="not a state of instance"):
+        encoding.FlatRelationEncoder(owner).encode(source.initial_state)
+
+
+@pytest.mark.parametrize("handle", [False, True])
+def test_lazy_schema_matches_the_encoder(handle):
+    lazy = text_task("gripper__prob05", atoms="lazy")
+    source = lazy.local() if handle else lazy
+    schema = encoding.EncodingSchema(source)
+    assert schema.schema_fingerprint == encoding.FlatRelationEncoder(source).schema.schema_fingerprint
+    assert schema.schema_fingerprint == encoding.EncodingSchema(lazy.frozen()).schema_fingerprint
 
 
 def test_threads_and_searching_source():
@@ -134,6 +183,8 @@ def test_threads_and_searching_source():
         assert active.wait(10)
         try:
             for _ in range(6):
+                restored, restored_task = pickle.loads(pickle.dumps((encoder, lazy)))
+                same(restored.encode(restored_task.initial_state), encoder.encode(lazy.initial_state))
                 same(encoder.encode(states * 120, threads=4), expected)
                 gathered = walk(lazy, steps=8, walks=1)
                 fixed = [encoder.table.state([str(a) for a in s.atoms()]) for s in gathered]
@@ -146,7 +197,7 @@ def test_threads_and_searching_source():
 def test_unrelated_source_is_refused():
     lazy = text_task("gripper__prob05", atoms="lazy")
     encoder = encoding.FlatRelationEncoder(lazy)
-    other = text_task("gripper__prob05", atoms="lazy")
+    other = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
     with pytest.raises(ValueError, match="not a state of instance"):
         encoder.encode(other.initial_state)
 

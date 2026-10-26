@@ -56,7 +56,12 @@ public:
     /// Expected successors per state (rounded up, with headroom), for sizing rl.expand outputs (see expand()).
     std::atomic<u32> branching{8};
     std::mutex frozen_mutex;
-    std::unordered_map<u64, std::shared_ptr<PyTaskCore>> frozen_cores;
+    struct FrozenCore
+    {
+        std::shared_ptr<PyTaskCore> core;
+        nb::object wrapper;  // weak reference: the twin's wrapper owns its source
+    };
+    std::unordered_map<u64, FrozenCore> frozen_cores;
 
     [[nodiscard]] const NameIndex& names();
     /// Cached snapshots (rebuilt when lazy slots were added since).

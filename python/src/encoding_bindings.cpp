@@ -539,7 +539,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                             nb::handle history_max_steps)
     {
         nb::object source = nb::borrow(table);
-        if constexpr (H == HorizonArgs::Absent || H == HorizonArgs::Simple)
+        if constexpr (H == HorizonArgs::Absent || H == HorizonArgs::Simple || H == HorizonArgs::Optional)
             if ((nb::isinstance<PyTask>(source) || nb::isinstance<PyHandle>(source)) &&
                 !owner_of(source).core->task->atoms().frozen())
                 source = frozen_task(source);
@@ -1091,13 +1091,18 @@ const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, Sta
     if (states.view.rows && table.size() > 1 && !ids)
         throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
     table.check_task_ids(ids, states.view.rows);
+    std::map<std::pair<u64, u32>, std::shared_ptr<SlotMap>> maps;
     for (u64 row = 0; row < states.owner_tasks.size(); ++row)
     {
         const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
         const Task& expected = *table.task(instance);
         const Task& given = *states.owner_tasks[row];
         if (allow_maps && !given.atoms().frozen())
-            if (const auto map = given.slot_map_to(expected))
+        {
+            auto [entry, inserted] = maps.try_emplace({given.uid(), instance});
+            if (inserted)
+                entry->second = given.slot_map_to(expected);
+            if (const auto& map = entry->second)
             {
                 auto [cached, fresh] = rows.map_snapshots.try_emplace(map.get());
                 if (fresh)
@@ -1120,6 +1125,7 @@ const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, Sta
                                                " has no slot in the frozen task").c_str());
                 continue;
             }
+        }
         if (given.uid() == expected.uid() ||
             (given.fingerprint() == expected.fingerprint() && given.encoding_fingerprint() == expected.encoding_fingerprint()))
             continue;

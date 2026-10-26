@@ -48,13 +48,18 @@ std::shared_ptr<const Task> Task::frozen(TaskOptions::Atoms atoms) const
     if (m_options.atoms == atoms)
         return shared_from_this();
     const usize mode = static_cast<usize>(atoms);
+    {
+        std::lock_guard lock(m_frozen_mutex);
+        if (m_frozen[mode])
+            return m_frozen[mode];
+    }
+    TaskOptions options = m_options;
+    options.atoms = atoms;
+    auto twin = create(m_data, options);
+    auto map = std::make_shared<SlotMap>(*this, *twin);
     std::lock_guard lock(m_frozen_mutex);
     if (!m_frozen[mode])
     {
-        TaskOptions options = m_options;
-        options.atoms = atoms;
-        auto twin = create(m_data, options);
-        auto map = std::make_shared<SlotMap>(*this, *twin);
         m_slot_maps[mode] = std::move(map);
         m_frozen[mode] = std::move(twin);
     }
@@ -63,11 +68,14 @@ std::shared_ptr<const Task> Task::frozen(TaskOptions::Atoms atoms) const
 
 std::shared_ptr<SlotMap> Task::slot_map_to(const Task& target) const
 {
-    std::lock_guard lock(m_frozen_mutex);
-    for (usize mode = 0; mode < m_frozen.size(); ++mode)
-        if (m_frozen[mode].get() == &target)
-            return m_slot_maps[mode];
-    return {};
+    if (!target.atoms().frozen() || fingerprint() != target.fingerprint() ||
+        numeric_storage() != target.numeric_storage() || numeric_slots() != target.numeric_slots())
+        return {};
+    // Encoding maps only the fluent words; numeric values must already have the destination layout.
+    for (u32 slot = 0; slot < numeric_slots(); ++slot)
+        if (numeric_name(slot) != target.numeric_name(slot))
+            return {};
+    return translation_map_to(target);
 }
 
 u64 Task::fingerprint() const
@@ -137,13 +145,17 @@ void Task::choose_atom_mode()
 
 std::shared_ptr<SlotMap> Task::translation_map_to(const Task& target) const
 {
-    if (auto twin = slot_map_to(target))
-        return twin;
+    {
+        std::lock_guard lock(m_frozen_mutex);
+        for (usize mode = 0; mode < m_frozen.size(); ++mode)
+            if (m_frozen[mode].get() == &target)
+                return m_slot_maps[mode];
+        if (const auto it = m_translations.find(target.uid()); it != m_translations.end())
+            return it->second;
+    }
+    auto map = SlotMap::between(*this, target);
     std::lock_guard lock(m_frozen_mutex);
-    auto& map = m_translations[target.uid()];
-    if (!map)
-        map = SlotMap::between(*this, target);
-    return map;
+    return m_translations.try_emplace(target.uid(), std::move(map)).first->second;
 }
 
 State Task::translate(StateView state, const Task& target, bool drop, bool* lossless) const

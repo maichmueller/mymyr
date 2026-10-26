@@ -1604,6 +1604,11 @@ void bind_task_api(nb::class_<C>& cls)
            }, "states"_a, "other"_a, nb::kw_only(), "missing"_a = "raise", "pool"_a = nb::none(),
               "status"_a = nb::none(), "stream"_a = nb::none(), "ctx"_a = nb::none(),
               "Translate States or rows into another task by atom and function names. missing='drop' also returns a bool [N] mask.")
+        .def("frozen", [](nb::handle self, std::string_view atoms) {
+                 return Arg<PyTask>(frozen_task(self, atoms));
+             }, "atoms"_a = "auto",
+             "The cached task of this parse and options with fixed slots ('auto', 'reachable' or 'dense'). "
+             "Returns this task for its own mode. Auto uses this task's reachability_budget.")
         .def_prop_ro(
            "initial_state", [owner](Self self) { return make_state(owner(self), State(self.p->core->task->initial_state())); },
            "The initial state.")
@@ -1889,8 +1894,15 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
 /// numbers its atoms as the pickled one did when it was pickled.
 nb::tuple encoding_state(const Task& T)
 {
-    const std::vector<u64> lazy = lazy_slots(T);
-    return nb::make_tuple(T.encoding_fingerprint(),
+    std::vector<u64> lazy;
+    u64 fingerprint;
+    do
+    {
+        lazy = lazy_slots(T);
+        fingerprint = T.encoding_fingerprint();
+        // Append counts bracket the hash so that the numbering and fingerprint describe the same snapshot.
+    } while (!lazy.empty() && (lazy[0] != T.atoms().fluent_slots() || lazy[1] != T.atoms().derived_slots()));
+    return nb::make_tuple(fingerprint,
                           nb::bytes(reinterpret_cast<const char*>(lazy.data()), lazy.size() * sizeof(u64)));
 }
 
@@ -2084,23 +2096,26 @@ nb::object frozen_task(nb::handle source, std::string_view atoms)
         throw nb::value_error("mymyr: frozen atoms must be 'auto', 'reachable' or 'dense'");
     const Owner owner = owner_of(source);
     TaskPtr twin;
-    CorePtr core;
     {
         nb::gil_scoped_release release;
         twin = owner.core->task->frozen(mode);
-        if (twin.get() != owner.core->task.get())
-        {
-            std::lock_guard lock(owner.core->frozen_mutex);
-            auto& cached = owner.core->frozen_cores[twin->uid()];
-            if (!cached)
-                cached = std::make_shared<PyTaskCore>(twin, owner.core->data, owner.core->source);
-            core = cached;
-        }
     }
     if (twin.get() == owner.core->task.get())
         return nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
     nb::object original = nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
-    return nb::cast(PyTask{std::move(core), std::move(original)});
+    std::lock_guard lock(owner.core->frozen_mutex);
+    auto& cached = owner.core->frozen_cores[twin->uid()];
+    if (cached.wrapper.is_valid())
+    {
+        nb::object wrapper = cached.wrapper();
+        if (!wrapper.is_none())
+            return wrapper;
+    }
+    if (!cached.core)
+        cached.core = std::make_shared<PyTaskCore>(twin, owner.core->data, owner.core->source);
+    nb::object wrapper = nb::cast(PyTask{cached.core, std::move(original)});
+    cached.wrapper = nb::weakref(wrapper);
+    return wrapper;
 }
 
 std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
@@ -2181,7 +2196,7 @@ void bind_task(nb::module_& m)
         .def("__next__", [](PyGroundConjunctionsIter& it) { return ConjunctionItem(bindings_next(it)); });
 
     // --- Task
-    nb::class_<PyTask> task(m, "Task",
+    nb::class_<PyTask> task(m, "Task", nb::is_weak_referenceable(),
                             "An immutable compiled planning task, shared by any number of threads. Per-state methods "
                             "run on the calling thread's workspace; use task.local() for a per-thread handle in hot "
                             "loops.");
@@ -2433,11 +2448,6 @@ void bind_task(nb::module_& m)
             },
             "framework"_a = nb::none(),
             "(gpos, gneg): the goal's positive and negative fluent atoms as state words (zero-copy, read-only).")
-        .def("frozen", [](nb::handle self, std::string_view atoms) {
-                 return Arg<PyTask>(frozen_task(self, atoms));
-             }, "atoms"_a = "auto",
-             "The cached task of this parse and options with fixed slots ('auto', 'reachable' or 'dense'). "
-             "Returns this task for its own mode. Auto uses this task's reachability_budget.")
         .def("__reduce__", &task_reduce)
         .def("__repr__", [](const PyTask& t) {
             return "Task(" + t.core->data->domain_name + "/" + t.core->data->problem_name + ", " +
