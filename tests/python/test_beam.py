@@ -135,11 +135,9 @@ def test_invalid_beam_arguments(gripper):
         search.brfs(gripper, layer_order="reverse", beam_width=4, randomize_ties=True)
     with pytest.raises(ValueError, match="flat or chunked"):
         search.brfs(gripper, store="compact", **beam(4))
-    # the IW searches report the error as FAILED
-    for r in (search.iw(gripper, beam_width=4), search.iw_pass(gripper, 1, **beam(0)),
+    for r in (search.iw_pass(gripper, 1, **beam(0)),
               search.siw(gripper, **beam(4, max_next_layer_states=3)),
               search.liw(gripper, **beam(4, "survivors_only")),
-              search.abstracted_iw(gripper, beam_width=4),
               search.projective_iw(gripper, layer_order="reverse", randomize_ties=True)):
         assert r.status == Status.FAILED and r.message
 

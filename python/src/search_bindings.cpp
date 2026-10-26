@@ -1503,8 +1503,8 @@ search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle 
     if (auto v = opt_int_arg<u32>(beam_width, "beam_width", 0))
         l.beam_width = *v;  // checked by the search, as above
     if (l.beam() && l.kind == search::LayerOrdering::Kind::Queue)
-        throw nb::value_error("mymyr: beam_width requires an ordered layer_order ('in_order', 'reverse', "
-                              "'randomized' or 'goal_count')");
+        throw nb::value_error("mymyr: beam_width requires an ordered layer kind: set layer_order to 'in_order', "
+                              "'reverse', 'randomized' or 'goal_count'");
     const std::string bn = str_arg(beam_novelty, "beam_novelty");
     if (bn == "all_tested")
         l.beam_novelty = search::LayerOrdering::BeamNovelty::AllTested;
