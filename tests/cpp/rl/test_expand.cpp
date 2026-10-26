@@ -170,18 +170,33 @@ TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
     const rl::StateBatchView in{rows.data(), states.size(), W, 0};
 
     Buffers one(states.size(), ref.actions.size() + 5, W, L);
+    std::vector<u64> hashes(one.x.capacity);
+    std::vector<u8> noops(one.x.capacity);
+    one.x.succ_hash = hashes.data();
+    one.x.noop = noops.data();
     rl::expand(*rl::TaskTable::single(task), in, nullptr, one.x);
     expect_equal(*task, ref, one, states.size());
+    for (usize j = 0; j < ref.succ.size(); ++j)
+    {
+        EXPECT_EQ(hashes[j], ref.succ[j].hash());
+        EXPECT_EQ(noops[j], ref.succ[j] == states[static_cast<usize>(ref.parent[j])]);
+    }
 
     for (u32 T : {2u, 3u, 8u})
     {
         ThreadPool pool(T);
         rl::ExpandScratch scratch;
         Buffers many(states.size(), ref.actions.size() + 5, W, L);
+        std::vector<u64> pooled_hashes(many.x.capacity);
+        std::vector<u8> pooled_noops(many.x.capacity);
+        many.x.succ_hash = pooled_hashes.data();
+        many.x.noop = pooled_noops.data();
         rl::expand(*rl::TaskTable::single(task), in, nullptr, many.x, {}, pool, scratch);
         expect_equal(*task, ref, many, states.size());
         rl::expand(*rl::TaskTable::single(task), in, nullptr, many.x, {}, pool, scratch);  // scratch reuse
         expect_equal(*task, ref, many, states.size());
+        EXPECT_EQ(pooled_hashes, hashes);
+        EXPECT_EQ(pooled_noops, noops);
     }
 }
 

@@ -292,7 +292,7 @@ struct DirectSink
     const u64* num;
     u32 nn;
     u64 first;
-    bool defer_hash;
+    bool want_hash;
 
     void put(u32 schema, const ObjectId* b, u32 arity, const Delta& d)
     {
@@ -316,7 +316,7 @@ struct DirectSink
                 fits = false;
                 out.words_needed = std::max(out.words_needed, exact_width(cur, nw, d, tmp));
             }
-            if ((out.succ_hash && !defer_hash) || out.noop)
+            if (want_hash || out.noop)
             {
                 const u64* dst = out.succ ? out.succ + j * RW : nullptr;
                 u32 size = W;
@@ -325,7 +325,7 @@ struct DirectSink
                     size = exact_width(cur, nw, d, tmp);
                     dst = tmp.data();
                 }
-                if (out.succ_hash && !defer_hash)
+                if (want_hash)
                     out.succ_hash[j] = hash::state(dst, size, d.num, d.nnum);
                 if (out.noop)
                     out.noop[j] = static_cast<u8>(bits::equal(dst, size, cur, nw) && d.nnum == nn &&
@@ -572,7 +572,7 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
         const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
         const bool defer_hash = out.succ_hash && out.succ && task.atoms().frozen() && out.words >= task.words();
         DirectSink sink{out, row, nw, static_cast<i32>(i), next, L, tmp,
-                        nn ? row + in.words : nullptr, nn, next, defer_hash};
+                        nn ? row + in.words : nullptr, nn, next, out.succ_hash != nullptr && !defer_hash};
         if (opt.drop_noops)
         {
             m.succ.clear();

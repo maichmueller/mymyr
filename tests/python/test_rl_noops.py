@@ -73,6 +73,11 @@ def check_expansion(task, states):
         np.testing.assert_array_equal(n[:kept.total], kept.noop)
         np.testing.assert_array_equal(index[:kept.total], kept.index)
         np.testing.assert_array_equal(offsets, kept.offsets)
+        result = rl.expand_into(task, states, succ_hash=h, noop=n, offsets=offsets, **kw)
+        assert result["generated"] == result["total"] == full.total and not result["overflow"]
+        np.testing.assert_array_equal(h, full.succ_hash)
+        np.testing.assert_array_equal(n, full.noop)
+        np.testing.assert_array_equal(offsets, full.offsets)
     plain = rl.expand(task, states)
     assert plain.succ_hash is None and plain.noop is None and plain.index is None
     assert plain.pad().succ_hash is None and plain.pad().noop is None
