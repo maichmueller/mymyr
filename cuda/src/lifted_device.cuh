@@ -679,35 +679,37 @@ struct RowWriter
             }
     }
 
-    /// Row `pos`: written below the capacity; past it only its width and missing atoms count (rl::expand's rules).
+    /// Row `pos`: written inside the window [first, capacity), at pos - first; outside it only its width and missing
+    /// atoms count (rl::expand's rules).
     __device__ void put(u64 pos, const u32* b) const
     {
         const Labels& lab = a.lab;
-        const bool inside = pos < lab.capacity;
+        const bool inside = pos >= lab.first && pos < lab.capacity;
         if (inside)
         {
+            const u64 at = pos - lab.first;
             if (lab.binding)
             {
-                u32* r = lab.binding + pos * lab.label_width;
+                u32* r = lab.binding + at * lab.label_width;
                 for (u32 i = 0; i < arity; ++i)
                     r[i] = b[i];
                 for (u32 i = arity; i < lab.label_width; ++i)
                     r[i] = 0xFFFFFFFFu;
             }
             if (lab.schema)
-                lab.schema[pos] = schema;
+                lab.schema[at] = schema;
             if (lab.parent)
-                lab.parent[pos] = parent;
+                lab.parent[at] = parent;
             if (a.out.deferred)
                 return;  // the successor is launch_put's
         }
         successor(pos, b);
     }
 
-    /// Row `pos`'s successor words (below the capacity), its width and missing atoms.
+    /// Row `pos`'s successor words (inside the window), its width and missing atoms.
     __device__ void successor(u64 pos, const u32* b) const
     {
-        const bool inside = pos < a.lab.capacity;
+        const bool inside = pos >= a.lab.first && pos < a.lab.capacity;
         const SuccessorRows& out = a.out;
         if (!(out.words && inside) && !out.words_needed && !out.missing_flag)
             return;
@@ -828,7 +830,7 @@ struct RowWriter
         }
         if (out.words && inside)
         {
-            u64* r = out.words + pos * ow;
+            u64* r = out.words + (pos - a.lab.first) * ow;
             if (fits)
             {
                 const u32 lim = written_words(pos);
@@ -854,7 +856,7 @@ struct RowWriter
     {
         const SuccessorRows& out = a.out;
         const u32 ow = out.out_words;
-        u64* r = out.words && inside ? out.words + pos * ow : nullptr;
+        u64* r = out.words && inside ? out.words + (pos - a.lab.first) * ow : nullptr;
         bool missing = false, fits = true;
         u32 max_add = 0, ex = 0, end = 0;
         for (u32 c0 = 0; c0 == 0 || c0 < end; c0 += k_max_words)
@@ -931,7 +933,7 @@ __device__ __forceinline__ void gen_one(const GenArgs& a, const TaskView& t, u32
             return;
         const RowWriter<WB, CE ? OW : 0> w(a, t, sc, schema, li, row);
         const u32 arity = w.arity;
-        if (off >= a.lab.capacity)
+        if (off >= a.lab.capacity || off + cnt <= a.lab.first)
         {
             // past the capacity: nothing is written, but widths and missing atoms count (in any order)
             if (!a.out.words_needed && !a.out.missing_flag)
@@ -1030,13 +1032,14 @@ __device__ __forceinline__ void gen_one(const GenArgs& a, const TaskView& t, u32
         // otherwise the bindings are sorted in global memory (the label rows, or the scratch)
         const Labels& lab = a.lab;
         const u32 L = lab.label_width;
-        const bool straddle = off + cnt > lab.capacity;
+        const bool straddle = off < lab.first || off + cnt > lab.capacity;
         u32* dst = nullptr;
         if (lab.binding && !straddle)
-            dst = lab.binding + off * L;
-        else if (lab.scratch && lab.scratch_indexed && off + cnt <= lab.scratch_rows)
-            dst = lab.scratch + off * L;
-        else if (lab.scratch && !lab.scratch_indexed && cnt <= lab.scratch_rows)
+            dst = lab.binding + (off - lab.first) * L;
+        else if (lab.scratch && lab.scratch_indexed && off >= lab.scratch_first &&
+                 off + cnt - lab.scratch_first <= lab.scratch_rows)
+            dst = lab.scratch + (off - lab.scratch_first) * L;
+        else if (lab.scratch && !lab.scratch_indexed && lab.first == 0 && cnt <= lab.scratch_rows)
             dst = lab.scratch;  // the one segment that straddles the capacity
         if (!dst)
         {
@@ -1196,7 +1199,7 @@ __device__ __forceinline__ void gen_one_warp(const GenArgs& a, const TaskView& t
             return;
         const RowWriter<WB, CE ? OW : 0> w(a, t, sc, schema, li, row);
         const u32 arity = w.arity;
-        if (off >= a.lab.capacity)
+        if (off >= a.lab.capacity || off + cnt <= a.lab.first)
         {
             if (!a.out.words_needed && !a.out.missing_flag)
                 return;
@@ -1291,13 +1294,14 @@ __device__ __forceinline__ void gen_one_warp(const GenArgs& a, const TaskView& t
         }
         const Labels& lab = a.lab;
         const u32 L = lab.label_width;
-        const bool straddle = off + cnt > lab.capacity;
+        const bool straddle = off < lab.first || off + cnt > lab.capacity;
         u32* dst = nullptr;
         if (lab.binding && !straddle)
-            dst = lab.binding + off * L;
-        else if (lab.scratch && lab.scratch_indexed && off + cnt <= lab.scratch_rows)
-            dst = lab.scratch + off * L;
-        else if (lab.scratch && !lab.scratch_indexed && cnt <= lab.scratch_rows)
+            dst = lab.binding + (off - lab.first) * L;
+        else if (lab.scratch && lab.scratch_indexed && off >= lab.scratch_first &&
+                 off + cnt - lab.scratch_first <= lab.scratch_rows)
+            dst = lab.scratch + (off - lab.scratch_first) * L;
+        else if (lab.scratch && !lab.scratch_indexed && lab.first == 0 && cnt <= lab.scratch_rows)
             dst = lab.scratch;
         if (!dst)
         {
@@ -1477,15 +1481,16 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
     const Labels& lab = a.lab;
     const SuccessorRows& out = a.out;
     const u32* sc = t.schema + u64{schema} * k_sc_count;
-    const u32* b = lab.binding + j * lab.label_width;
+    const u32* b = lab.binding + (j - lab.first) * lab.label_width;
     const u32 arity = sc[k_sc_arity];
     for (u32 i = 0; i < arity; ++i)
         if (b[i] >= t.num_objects)
             return;
-    // the destination: row j, or (mapped) the state's successor j - offsets[its first segment] at its batch row's
+    // the destination: row j - first, or (mapped) the state's successor j - offsets[its first segment] at its batch
+    // row's
     const u32 at = lab.parent_base + li;
     const u64 pos = to.rows ? static_cast<u64>(to.batch_offsets[to.rows[at]]) + (j - a.offsets[u64{li} * a.set.num_schemas])
-                            : j;
+                            : j - lab.first;
     const bool inside = !to.rows || pos < to.capacity;
     // the parent's words (over several instances, its instance's: the words past them are zero)
     const u64* st = a.p.data + u64{li} * a.p.stride;
@@ -1621,7 +1626,7 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
     }
 }
 
-/// launch_put: the successor of every labeled row below min(total, capacity) whose schema is deferred (`deferred`
+/// launch_put: the successor of every labeled row in [first, min(total, capacity)) whose schema is deferred (`deferred`
 /// [S], null: every schema), a group of 2^shift lanes per row (put_row); over several instances, the rows of every
 /// instance (task ids outside [0, m.instances) have no rows). The groups stride over the rows; a row's segment comes
 /// from its parent and schema labels or the offsets.
@@ -1636,13 +1641,13 @@ __global__ void __launch_bounds__(k_put_block) k_put(GenArgs a, PutRows to, cons
     const u32 G = 1u << shift, lane = threadIdx.x & 31;
     const PutGroup g{G, lane & (G - 1), (G == 32 ? 0xFFFFFFFFu : (1u << G) - 1) << (lane & ~(G - 1))};
     const u64 step = (u64{gridDim.x} * blockDim.x) >> shift;
-    for (u64 j = (u64{blockIdx.x} * blockDim.x + threadIdx.x) >> shift; j < end; j += step)
+    for (u64 j = a.lab.first + ((u64{blockIdx.x} * blockDim.x + threadIdx.x) >> shift); j < end; j += step)
     {
         u32 li, schema;
         if (a.lab.parent && a.lab.schema)
         {
-            li = a.lab.parent[j] - a.lab.parent_base;
-            schema = a.lab.schema[j];
+            li = a.lab.parent[j - a.lab.first] - a.lab.parent_base;
+            schema = a.lab.schema[j - a.lab.first];
             // only labels that name row j's own segment: a row no device list wrote (a CPU-fallback row) may hold
             // another chunk's labels
             if (li >= live || schema >= S)
@@ -2224,7 +2229,7 @@ __device__ __forceinline__ bool deep_segment(const GenArgs& a, u32 si, u32 li, D
             return true;
         const RowWriter<WB> w(a, t, sc, schema, li, row);
         const u32 arity = w.arity;
-        if (off >= a.lab.capacity)
+        if (off >= a.lab.capacity || off + cnt <= a.lab.first)
         {
             // past the capacity: nothing is written, but widths and missing atoms count (in any order)
             if (!a.out.words_needed && !a.out.missing_flag)
@@ -2252,13 +2257,14 @@ __device__ __forceinline__ bool deep_segment(const GenArgs& a, u32 si, u32 li, D
         }
         const Labels& lab = a.lab;
         const u32 LW = lab.label_width;
-        const bool straddle = off + cnt > lab.capacity;
+        const bool straddle = off < lab.first || off + cnt > lab.capacity;
         u32* dst = nullptr;
         if (lab.binding && !straddle)
-            dst = lab.binding + off * LW;
-        else if (lab.scratch && lab.scratch_indexed && off + cnt <= lab.scratch_rows)
-            dst = lab.scratch + off * LW;
-        else if (lab.scratch && !lab.scratch_indexed && cnt <= lab.scratch_rows)
+            dst = lab.binding + (off - lab.first) * LW;
+        else if (lab.scratch && lab.scratch_indexed && off >= lab.scratch_first &&
+                 off + cnt - lab.scratch_first <= lab.scratch_rows)
+            dst = lab.scratch + (off - lab.scratch_first) * LW;
+        else if (lab.scratch && !lab.scratch_indexed && lab.first == 0 && cnt <= lab.scratch_rows)
             dst = lab.scratch;  // the one segment that straddles the capacity
         if (!dst)
         {

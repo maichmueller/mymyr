@@ -127,7 +127,7 @@ u32 bits_for(u64 n)
 }
 
 /// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
-u32 bucket(u32 words) { return search_row_words(words); }
+u32 bucket(const Task& task) { return search_row_words(task.words(), task.numeric_slots()); }
 
 u32 max_arity(const Task& task)
 {
@@ -888,7 +888,7 @@ private:
         {
             const Task& t = *m_tasks[first];
             w.W = t.atoms().frozen() ? std::max<u32>(1, t.words()) + t.numeric_slots()
-                                                      : bucket(t.words() + t.numeric_slots());
+                                                      : bucket(t);
             m_gen = std::make_unique<ChunkGenerator>(m_ctx, m_tasks[first], m_s);
         }
         const u64 expected = m_o.expected_states;
@@ -1024,10 +1024,10 @@ private:
             const u64 dw = m_gen->device_axioms() ? std::max<u32>(1, bits::words_for(t.atoms().max_derived_slots())) : 0;
             vw = m_gen->view_words() + dw;
         }
-        const u64 per = std::max<u64>(8, (vw + (words > 64 ? words : 0)) * 8);
+        const u64 per = std::max<u64>(8, (vw + (lifted::wide_row(words) ? words : 0)) * 8);
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         const u64 cap = m_o.view_bytes ? std::max<u64>(1, m_o.view_bytes / per)
-                                       : std::max<u64>({words > 64 ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
+                                       : std::max<u64>({lifted::wide_row(words) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
         return static_cast<u32>(std::min<u64>(cap, 0x7FFFFFFFull));
     }
 
@@ -1038,9 +1038,9 @@ private:
     {
         for (;;)  // one chunk (redone after a width growth, or cut)
         {
-            if (w.W > 64)
+            if (lifted::wide_row(w.W))
                 ns = std::min(ns, chunk_capacity(w.W));
-            const u64 budget = std::max<u64>(w.W > 64 ? 1 : u64{1} << 20,
+            const u64 budget = std::max<u64>(lifted::wide_row(w.W) ? 1 : u64{1} << 20,
                                               k_candidate_bytes / (u64{w.W} * 8 + 16 + 4 * u64{m_L}));
             u64 M = m_multi ? count_multi(w, b, ns) : count_single(w, b, ns);
             if (M > budget && ns > 1)
@@ -1155,9 +1155,9 @@ private:
         {
             if (!m_gen->resolve_missing())
                 return true;
-            if (bucket(task.words() + task.numeric_slots()) > w.W)
+            if (bucket(task) > w.W)
             {
-                widen(w, bucket(task.words() + task.numeric_slots()));
+                widen(w, bucket(task));
                 return false;
             }
             m_gen->write(lab, cand, w.W);

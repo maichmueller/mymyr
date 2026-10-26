@@ -65,7 +65,9 @@ struct MultiIwOptions
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
     // launch configuration: in exact mode no result depends on it
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
-    u64 table_bytes = u64{1} << 30;  // novelty tables of a group
+    // Novelty tables of a group. A pass whose one table exceeds it is refused (std::invalid_argument) when a search
+    // reaches that pass: the passes before it run, and searches they solve need no wider table.
+    u64 table_bytes = u64{1} << 30;
     u32 chunk_states = u32{1} << 20;  // layer entries per chunk at most
     u64 view_bytes = 0;            // per-chunk budget of the lifted views (0: half the device's L2 cache)
     u64 emit_budget = u64{1} << 24;  // unseen tuples per chunk (exact mode); larger chunks are split
@@ -86,6 +88,8 @@ struct MultiIwStats
     double seconds = 0;  // wall time of the call
     double host_ms = 0;  // CPU work: fallback schemas, axioms, lazy interning, uploads, host goal tests
     u64 groups = 0;
+    u64 regroups = 0;    // groups rerun with fewer searches after lazy growth outgrew their novelty tables; the other
+                         // counts exclude the discarded attempts
     u64 passes = 0;      // group passes
     u64 layers = 0;
     u64 chunks = 0;

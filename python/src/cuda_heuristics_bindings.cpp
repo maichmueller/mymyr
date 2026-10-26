@@ -364,6 +364,7 @@ StatsDict device_stats(const cuda::DeviceBestFirstStats& s)
     d["loops"] = s.loops;
     d["captures"] = s.captures;
     d["aborts"] = s.aborts;
+    d["host_rounds"] = s.host_rounds;
     d["widenings"] = u64{s.widenings};
     d["rehashes"] = u64{s.rehashes};
     d["uploads"] = u64{s.uploads};
@@ -498,7 +499,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         .def_prop_ro("message", [](const PyDeviceSearchResult& x) { return x.r.result.message; },
                      "Why the search stopped early or could not run (empty when it ran to its end).")
         .def_prop_ro("counters", [](const PyDeviceSearchResult& x) { return device_stats(x.r.device); },
-                     "A dict of device counters: steps (graph / host-driven), device loops, captures, aborts, chunks, popped / stale entries, the largest batch, "
+                     "A dict of device counters: steps (graph / host-driven), device loops, captures, aborts, host rounds, chunks, popped / stale entries, the largest batch, "
                      "device bytes, host and heuristic times")
         .def("__repr__", [](const PyDeviceSearchResult& x) {
             const search::BestFirstResult& r = x.r.result;

@@ -217,3 +217,35 @@ def rovers_task(request):
         pytest.skip("built without the loki front end")
     directory = ROOT / "tests/data/ipc/rovers-ipc/test"
     return mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{request.param}.pddl", atoms="dense")
+
+
+@pytest.fixture(scope="session")
+def blocksworld_wide():
+    """Blocksworld with 69 blocks: dense rows of more than 64 words."""
+    import mymyr
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/ipc/blocksworld-ipc/test"
+    return mymyr.Task.from_pddl(directory / "domain.pddl", directory / "p10-medium.pddl", atoms="dense")
+
+
+def successor_refusal(search, successors, max_bytes):
+    """The pattern of a device search's refusal of a state whose successors exceed the context's memory."""
+    room = rf"\d+ bytes \(max_bytes={max_bytes}\)"
+    return (rf"^mymyr: {search}: a state has {successors} successors, which need (\d+ bytes of device memory; the CUDA "
+            rf"context can still allocate {room}|more device memory than the CUDA context can still allocate \({room}\))\. "
+            r"Raise the Context's max_bytes, or use the CPU search\.$")
+
+
+def fan_task(tmp_path, objects):
+    """A task whose initial state has objects * objects successors, one per pair of objects, all dead ends; the goal
+    is the last pair's."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 3\nF 1 left\nF 1 right\nF 0 free\nSI 0\nFI 1\n2\nG 2\n0 1 {n - 1}\n1 1 {n - 1}\n"
+    text += "A 1\npick 2\nL 1\n2 1\nE 1\n0\nL 0\nF 3\n2 0\n0 1 0\n1 1 1\n"
+    path = tmp_path / "fan.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path)

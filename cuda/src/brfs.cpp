@@ -30,7 +30,7 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 
 /// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
-u32 bucket(u32 words) { return search_row_words(words); }
+u32 bucket(const Task& task) { return search_row_words(task.words(), task.numeric_slots()); }
 
 constexpr u32 k_no_parent = 0xFFFFFFFFu;
 
@@ -56,6 +56,7 @@ struct DeviceBrfs::Impl
     DeviceBuffer table;
     u64 slots = 0;
     Scratch sort, parent, cand, result, rank, scan, ctl;
+    Scratch window_row, window_total;  // a windowed state's own copy of its row, and a window's candidates (a u32)
     PinnedLease pin;  // the group's control block and records, read once per group
     bool ran = false;
     DeviceBrfsStats st;
@@ -240,11 +241,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     st.device_axioms = task->has_axioms() && gen->device_axioms();
     const u32 S = gen->num_schemas(), L = gen->label_width();
     const bool host = gen->needs_host(witness);
-    W = bucket(task->words() + task->numeric_slots());
+    W = bucket(*task);
     const u64 budget = std::clamp<u64>(o.max_states, 1, state_set::k_max_states);
     const u64 expected = o.expected_states ? o.expected_states : (o.max_states != ~u64{0} ? budget : 0);
     const u64 initial = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
-    const u64 cap0 = W <= 64 ? initial : std::min(initial, std::max<u64>(1, (u64{16} << 20) / (u64{W} * 8)));
+    const u64 cap0 = !lifted::wide_row(W) ? initial : std::min(initial, std::max<u64>(1, (u64{16} << 20) / (u64{W} * 8)));
     states = std::make_unique<DeviceArena>(ctx, W * 8, cap0, host);  // the mirror only when the CPU reads parents
     nodes = std::make_unique<DeviceArena>(ctx, 8, cap0, false);
     alloc_table(expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * expected + 2)) : u64{1} << 20);
@@ -269,13 +270,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
         const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
-        const u64 per = std::max<u64>(8, (gen->view_words() + dw + (W > 64 ? W : 0)) * 8);
+        const u64 per = std::max<u64>(8, (gen->view_words() + dw + (lifted::wide_row(W) ? W : 0)) * 8);
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per)
-                                 : std::max<u64>({W > 64 ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
+                                 : std::max<u64>({lifted::wide_row(W) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
     }
     u64 count = 1, lb = 0, le = 1;
     bool stop = false, budget_hit = false;
+    // the last windowed state and its transitions (the cut back to the budget need not enumerate them again)
+    u64 windowed_state = ~u64{0}, windowed_transitions = 0;
     u64 goal_id = 0;
     u64 first_goal = ~u64{0};  // the first goal state expanded (stop_at_goal stops before it instead)
     u64 b = 0;             // the layer [lb, le)'s next parent
@@ -306,7 +309,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     auto estimate = [&](u64 ns)
     {
         const u64 est = static_cast<u64>(std::ceil(*std::ranges::max_element(ratios) * 1.25 * static_cast<double>(ns))) + 256;
-        return std::min(est, std::max<u64>(W > 64 ? 1u : 256u, o.candidate_bytes / (u64{W} * sizeof(u64))));
+        return std::min(est, std::max<u64>(lifted::wide_row(W) ? 1u : 256u, o.candidate_bytes / (u64{W} * sizeof(u64))));
     };
     auto capacity = [&](const Chunk& k) { return k.known ? k.known : estimate(k.ns); };
     std::vector<Chunk> plan;
@@ -361,6 +364,227 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 goal_id = ck.b;
             }
         }
+    };
+
+    // Device memory per candidate row of a chunk: its row, parent, result and rank, and at most a new state of the
+    // arenas with its table slots (load 1/4 after growth); sort rows apart.
+    const bool sorting = canonical && gen->sorts(witness);
+    const u64 per_candidate = u64{W} * 16 + 4 * 3 + 8 + 32 + (sorting ? u64{L} * 4 : 0);
+    // What a chunk's candidates may take: what the context can still allocate, with the candidate buffers the chunk
+    // reuses; a chunk holds a quarter of it (the arenas and the table grow in steps, and a grown buffer is allocated
+    // before the one it replaces is freed).
+    auto reused_bytes = [&] { return parent.size() + cand.size() + sort.size() + result.size() + rank.size() + scan.size(); };
+    auto room_bytes = [&] { return device_room(*ctx) + reused_bytes(); };
+    auto room_rows = [&] { return room_bytes() / 4 / per_candidate; };
+    // A state whose successors exceed room_rows(): its successors a window at a time (lifted::Labels::first), each
+    // window deduplicated and committed before the next, so that ids, counts and the plan are the ones of a chunk
+    // that holds them all. The generator reads the state from a copy of its own (arena growth moves the arena).
+    // Returns false when the search stops (budget, goal).
+    auto run_windows = [&](const Chunk& ck, state_set::ChunkCtl* d_ctl, state_set::ChunkRecord* d_rec, state_set::ChunkCtl* h_ctl,
+                           state_set::ChunkRecord* h_rec)
+    {
+        const u64 b = ck.b;
+        std::vector<u32> off(u64{S} + 1);
+        std::vector<u64> host_row;
+        u64* prow = nullptr;
+        auto* d_total = static_cast<u32*>(window_total.ensure(ctx, sizeof(u32), s));
+        // the state's views and counts, and its goal count in the record, from its own row
+        auto begin_state = [&]
+        {
+            const auto th = Clock::now();
+            prow = static_cast<u64*>(window_row.ensure(ctx, u64{W} * sizeof(u64), s));
+            check(cudaMemcpyAsync(prow, states->device_data() + b * W * sizeof(u64), u64{W} * sizeof(u64),
+                                  cudaMemcpyDeviceToDevice, s), "cudaMemcpyAsync (window row)");
+            if (host)
+            {
+                if (states->host_size() < b + 1)
+                    states->wait();
+                const auto* h = reinterpret_cast<const u64*>(states->host_data()) + b * W;
+                host_row.assign(h, h + W);
+            }
+            *h_rec = state_set::ChunkRecord{};
+            check(cudaMemcpyAsync(d_rec, h_rec, sizeof(state_set::ChunkRecord), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
+            gen->begin(ChunkInput{prow, W, W, 1, host ? host_row.data() : nullptr, W, static_cast<u32>(b)}, witness, canonical);
+            st.host_ms += ms_since(th);
+            gen->views();
+            gen->goal_count(&d_rec->goals);
+            gen->count();
+            check(cudaMemcpyAsync(off.data(), gen->seg_offsets(), off.size() * sizeof(u32), cudaMemcpyDeviceToHost, s),
+                  "cudaMemcpyAsync (window offsets)");
+            check(cudaMemcpyAsync(h_rec, d_rec, sizeof(state_set::ChunkRecord), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        };
+        begin_state();
+        const u32 goals = h_rec->goals, first_goal_row = h_rec->first;
+        const u64 M = off[S];
+        windowed_state = b;
+        windowed_transitions = M;
+        if (M > 0x7FFFFFFFu)  // (the counts' prefixes saturate past the device's 31-bit row index)
+            throw std::length_error("mymyr: device BrFS: a state has more than 2^31 - 1 successors; use the CPU BrFS");
+        u64 window_cap = M;  // halved when a window's buffers do not fit after all
+        for (u64 f = 0; f < M;)
+        {
+            if (count >= budget)
+            {
+                // (the state's later windows count as generated, as a chunk's candidates do: the cut back to the
+                // budget recounts them)
+                if (f > 0)
+                    r.generated += M - f;
+                budget_hit = true;
+                stop = true;
+                return false;
+            }
+            const u64 room = room_bytes(), rows_fit = std::min(room / 4 / per_candidate, window_cap);
+            const SuccessorWindow w = successor_window(off, f, rows_fit);
+            const u64 sort_bytes = sorting ? w.scratch_rows * L * sizeof(u32) : 0;
+            // (numeric successor rows are written whole: a numeric state's successors fit at once or are refused)
+            const bool numeric = task->numeric_slots() != 0;
+            if (rows_fit == 0 || sort_bytes > room / 2 || (numeric && w.rows < M))
+                refuse_successors(*ctx, "device BrFS", "a state", M,
+                                  (numeric ? M : std::max<u64>(w.rows, 1)) * per_candidate + sort_bytes, room,
+                                  "Raise the Context's max_bytes, or use the CPU BrFS.");
+            if (count + w.rows > state_set::k_max_states)
+                throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states (with a chunk's candidates)");
+            try
+            {
+                ensure_table(count, w.rows);
+                d_parent = static_cast<u32*>(parent.ensure(ctx, w.rows * sizeof(u32), s));
+                d_cand = static_cast<u64*>(cand.ensure(ctx, w.rows * W * sizeof(u64), s));
+                d_sort = sorting ? static_cast<u32*>(sort.ensure(ctx, std::max<u64>(sort_bytes, 1), s)) : nullptr;
+                d_result = static_cast<u32*>(result.ensure(ctx, w.rows * sizeof(u32), s));
+                d_rank = static_cast<u32*>(rank.ensure(ctx, (w.rows + 1) * sizeof(u32), s));
+                tb = state_set::rank_temp_bytes(w.rows);
+                d_scan = scan.ensure(ctx, tb, s);
+                states->reserve(w.rows);
+                nodes->reserve(w.rows);
+            }
+            catch (const CudaError& e)
+            {
+                // (nothing of the window ran: a smaller one, down to a single successor)
+                if (e.code() != cudaErrorMemoryAllocation)
+                    throw;
+                (void)cudaGetLastError();
+                if (w.rows == 1)
+                    refuse_successors(*ctx, "device BrFS", "a state", M, 0, room_bytes(),
+                                      "Raise the Context's max_bytes, or use the CPU BrFS.");
+                window_cap = w.rows / 2;
+                continue;
+            }
+            // the window's control block and record (the state's goal count goes with its first window)
+            *h_ctl = state_set::ChunkCtl{static_cast<u32>(count), 0, 0, 0};
+            *h_rec = state_set::ChunkRecord{};
+            if (f == 0)
+            {
+                h_rec->goals = goals;
+                h_rec->first = first_goal_row;
+            }
+            const u32 n32 = static_cast<u32>(w.rows);
+            check(cudaMemcpyAsync(d_ctl, h_ctl, sizeof(state_set::ChunkCtl) + sizeof(state_set::ChunkRecord),
+                                  cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
+            check(cudaMemcpyAsync(d_total, &n32, sizeof(u32), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
+            check(state_set::launch_chunk_size(d_ctl, d_rec, d_total, {w.rows, table_limit(), budget, o.stop_at_goal}, s),
+                  "launch_chunk_size");
+            lifted::Labels labels;
+            labels.parent = d_parent;
+            labels.first = w.first;
+            labels.capacity = w.first + w.rows;
+            labels.label_width = L;
+            labels.parent_base = static_cast<u32>(b);
+            labels.scratch = d_sort;
+            labels.scratch_first = w.scratch_first;
+            labels.scratch_rows = d_sort ? w.scratch_rows : 0;
+            labels.scratch_indexed = d_sort ? 1 : 0;
+            labels.error = &d_rec->error;
+            labels.live = &d_ctl->live;
+            gen->write(labels, d_cand, W);
+            bool widened = false;
+            for (;;)
+            {
+                const auto tm = Clock::now();
+                const bool missing = gen->resolve_missing();
+                st.host_ms += ms_since(tm);
+                if (!missing)
+                    break;
+                if (bucket(*task) > W)
+                {
+                    widen(bucket(*task), count);
+                    widened = true;
+                    break;
+                }
+                gen->write(labels, d_cand, W);
+            }
+            if (widened)
+            {
+                // the window again at the new width, from the state's own row (nothing of it is committed yet)
+                if (host)
+                    states->sync_to_host();
+                begin_state();
+                continue;
+            }
+            const state_set::Live live{&d_ctl->live};
+            check(state_set::launch_insert(tab(), rows(), {d_cand, W}, w.rows, d_result, s, live), "launch_insert");
+            check(state_set::launch_rank(tab(), d_result, w.rows, d_rank, d_scan, tb, s, live), "launch_rank");
+            state_set::Compact cm;
+            cm.result = d_result;
+            cm.rank = d_rank;
+            cm.cand = d_cand;
+            cm.parent = d_parent;
+            cm.seg_offsets = gen->seg_offsets();
+            cm.num_schemas = S;
+            cm.parent_base = static_cast<u32>(b);
+            cm.arena_tail = reinterpret_cast<u64*>(states->device_data());
+            cm.nodes_tail = reinterpret_cast<u32*>(nodes->device_data());
+            cm.base = 0;
+            cm.words = W;
+            cm.offset = &d_ctl->count;
+            cm.first_row = static_cast<u32>(w.first);
+            check(state_set::launch_compact(tab(), cm, w.rows, s, live), "launch_compact");
+            check(state_set::launch_advance(d_rank, w.rows, &d_ctl->count, &d_rec->fresh, s), "launch_advance");
+            check(cudaMemcpyAsync(h_rec, d_rec, sizeof(state_set::ChunkRecord), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+            ++st.groups;
+            const state_set::ChunkRecord x = *h_rec;
+            if (x.error)
+                throw std::logic_error("mymyr: device BrFS: a sorted segment found no scratch (internal error)");
+            if (x.halt & state_set::k_halt_goal)
+            {
+                // a goal state, stopped at before its expansion (only the first window carries the goal count)
+                ++st.chunks;
+                r.num_goal_states += 1;
+                stop = true;
+                r.solved = true;
+                goal_id = b;
+                return false;
+            }
+            if (x.halt)
+                throw std::logic_error("mymyr: device BrFS: a successor window halted (internal error)");
+            count += x.fresh;
+            states->commit(x.fresh);
+            nodes->commit(x.fresh);
+            if (host)
+                states->sync_to_host();
+            r.generated += w.rows;
+            ++st.chunks;
+            ++st.windows;
+            if (f == 0)
+            {
+                r.expanded += 1;
+                r.num_goal_states += x.goals;
+                if (x.goals)
+                    first_goal = std::min<u64>(first_goal, b + x.first);
+            }
+            f += w.rows;
+        }
+        if (ck.before_goal)
+        {
+            // the parents before the first goal state are expanded: stop there (the CPU's order)
+            r.num_goal_states += 1;
+            stop = true;
+            r.solved = true;
+            goal_id = b + 1;
+            return false;
+        }
+        return true;
     };
 
     // A device loop over the chunks of the small layers. A WHILE graph replays a captured chunk of up to C
@@ -576,7 +800,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             // one chunk), so that the arena grows about as it would chunk by chunk; a chunk redone after it halted for
             // room (its candidates known; resumed at its rows when counted) runs alone, sized as with exact capacities
             const bool exact_group = exact || plan[i].known;
-            const u64 room_limit = W > 64 ? std::max<u64>(1, o.candidate_bytes / (u64{W} * 8))
+            const u64 room_limit = lifted::wide_row(W) ? std::max<u64>(1, o.candidate_bytes / (u64{W} * 8))
                                           : std::max<u64>(count / 4, u64{1} << 20);
             usize j = i;
             u64 room = 0, cap_max = 0;
@@ -621,7 +845,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                       "cudaMemcpyAsync");
             };
             init_ctl();
-            for (usize k = i; k < j; ++k)
+            bool resplit = false, windowed = false;  // (exact groups: one chunk)
+            for (usize k = i; k < j && !resplit && !windowed; ++k)
             {
                 Chunk& ck = plan[k];
                 const u64 b = ck.b;
@@ -681,6 +906,36 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                             check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
                             cap = std::max<u64>(*h_cand, 1);
                         }
+                        if (const u64 fit = cap * per_candidate > reused_bytes() ? room_rows() : cap; cap > fit)
+                        {
+                            // more candidates than the device has room for: fewer parents (the rest is the next
+                            // chunk), or one parent's successors a window at a time (run_windows)
+                            if (o.timings)
+                                next_event -= 4;
+                            if (ns == 1)
+                            {
+                                windowed = true;
+                                break;
+                            }
+                            std::vector<u32> firsts(u64{ns} + 1);
+                            check(cudaMemcpy2DAsync(firsts.data(), sizeof(u32), gen->seg_offsets(), u64{S} * sizeof(u32),
+                                                    sizeof(u32), u64{ns} + 1, cudaMemcpyDeviceToHost, s),
+                                  "cudaMemcpy2DAsync (parent offsets)");
+                            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+                            u32 n1 = 1;
+                            while (n1 < ns && firsts[n1 + 1] <= fit)
+                                ++n1;
+                            Chunk rest{b + n1, ns - n1};
+                            rest.before_goal = ck.before_goal;
+                            ck.ns = n1;
+                            ck.known = firsts[n1];
+                            ck.counted = false;
+                            ck.before_goal = false;
+                            plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(k) + 1, rest);
+                            ++st.redone;
+                            resplit = true;
+                            break;
+                        }
                         if (count + cap > state_set::k_max_states)
                             throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states");
                         ensure_table(count, cap);
@@ -709,9 +964,9 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         st.host_ms += ms_since(tm);
                         if (!missing)
                             break;
-                        if (bucket(task->words() + task->numeric_slots()) > W)
+                        if (bucket(*task) > W)
                         {
-                            widen(bucket(task->words() + task->numeric_slots()), count);
+                            widen(bucket(*task), count);
                             widened = true;
                             break;
                         }
@@ -763,6 +1018,14 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         ev[3]->record(s);
                     break;
                 }
+            }
+            if (resplit)
+                continue;  // the chunk again with fewer parents
+            if (windowed)
+            {
+                if (run_windows(plan[i], d_ctl, d_rec, h_ctl, h_rec))
+                    ++i;
+                continue;
             }
             // the group's records: commit the chunks up to the first halted one
             check(cudaMemcpyAsync(h_rec, d_rec, u64{G} * sizeof(state_set::ChunkRecord), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
@@ -839,11 +1102,16 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             Successors& succ = lease->successors();
             for (u64 id = p; id < E; ++id)
             {
-                const State state = numeric::decode(*task, rows.data() + (id - p) * W, W);
-                succ.prepare(state.view());
                 u64 transitions = 0;
-                succ.generate<true>([&](u32, const ObjectId*, const Delta&) { ++transitions; return true; }, witness,
-                                    canonical);
+                if (id == p && id == windowed_state)
+                    transitions = windowed_transitions;
+                else
+                {
+                    const State state = numeric::decode(*task, rows.data() + (id - p) * W, W);
+                    succ.prepare(state.view());
+                    succ.generate<true>([&](u32, const ObjectId*, const Delta&) { ++transitions; return true; }, witness,
+                                        canonical);
+                }
                 if (id == p)
                     r.generated -= transitions - (u64{rec[1]} + 1);
                 else

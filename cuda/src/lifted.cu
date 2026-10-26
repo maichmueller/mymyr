@@ -73,9 +73,10 @@ __global__ void k_place_host(HostRows h, const u32* offsets, u32 S, Labels lab, 
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < h.n; i += u64{gridDim.x} * blockDim.x)
     {
         const u32 seg = h.segment[i];
-        const u64 pos = u64{offsets[seg]} + h.rank[i];
-        if (pos >= lab.capacity)
+        const u64 row = u64{offsets[seg]} + h.rank[i];
+        if (row < lab.first || row >= lab.capacity)
             continue;
+        const u64 pos = row - lab.first;
         const u32 L = lab.label_width;
         if (lab.binding)
             for (u32 k = 0; k < L; ++k)

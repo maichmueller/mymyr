@@ -63,7 +63,9 @@ struct DeviceBestFirstOptions
     /// The device heuristic's launch configuration (variant, threads, ...); kind, costs, budget and the grounding come
     /// from search.heuristic.
     DeviceHeuristicOptions heuristic;
-    u64 chunk_states = 0;     // parents per generator chunk (0: as many as fit half of the L2 cache)
+    /// Parents per generator chunk (0: as many as fit half of the L2 cache; rows wider than 64 words at most 16 MiB of
+    /// parent rows). Chunks split the launches of a step, not its batch.
+    u64 chunk_states = 0;
     u64 expected_states = 0;  // pre-sizes the state set (0: grows)
     /// Steps replayed from captured CUDA graphs, looped on the device without a time budget (false, or
     /// MYMYR_CUDA_GRAPHS=0: every step is launched from the host; MYMYR_CUDA_DEVICE_LOOPS=0: graphs, no loops).
@@ -86,6 +88,7 @@ struct DeviceBestFirstStats
     u64 loops = 0;        // device loop launches
     u64 captures = 0;     // graphs captured
     u64 aborts = 0;       // steps the host finished: a pop window too small, a chunk past the capacities, new atoms
+    u64 host_rounds = 0;  // device rounds the host ran instead: the context could not hold their reservations
     u32 widenings = 0, rehashes = 0, uploads = 0;
     u64 table_slots = 0;
     u64 device_bytes = 0;  // peak device memory of the context

@@ -918,7 +918,7 @@ TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
     const auto task = wide_task(80);
     cuda::MultiIwOptions o;
     o.max_width = 2;
-    o.table_bytes = 1024;
+    o.table_bytes = 4096;  // the IW(1) table (800 bytes), not the IW(2) one
     cuda::DeviceMultiIw device(context(), task, o);
     const std::vector<State> starts{task->initial_state()};
     try
@@ -929,8 +929,9 @@ TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
     catch (const std::invalid_argument& error)
     {
         const std::string message = error.what();
+        EXPECT_NE(message.find("IW(2)"), std::string::npos);
         EXPECT_NE(message.find("2560400 bytes per search"), std::string::npos);
-        EXPECT_NE(message.find("table_bytes is 1024"), std::string::npos);
+        EXPECT_NE(message.find("table_bytes is 4096"), std::string::npos);
     }
 }
 
@@ -948,8 +949,17 @@ TEST(DeviceIw, LazyGrowthShrinksTableGroups)
     const auto batch = device.run(starts);
     EXPECT_GT(task->words(), 64u);
     EXPECT_EQ(batch.stats.groups, 2u);
+    EXPECT_EQ(batch.stats.regroups, 1u);
     for (u32 i = 0; i < starts.size(); ++i)
         expect_same(batch.result(i, *task, starts[i], true), search::iw(*task, cpu_options(o, starts[i])), "lazy table groups");
+    // the counts are those of the groups that ran to the end: a run over the widened rows, which never regroups
+    cuda::DeviceMultiIw again(context(), task, o);
+    const auto wide = again.run(starts);
+    EXPECT_EQ(wide.stats.regroups, 0u);
+    EXPECT_EQ(wide.stats.groups, 2u);
+    EXPECT_EQ(batch.stats.nodes, wide.stats.nodes);
+    EXPECT_EQ(batch.stats.candidates, wide.stats.candidates);
+    EXPECT_EQ(batch.stats.layers, wide.stats.layers);
 }
 
 TEST(DeviceIw, PairTableRelayoutAcrossChunkBoundary)

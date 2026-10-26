@@ -338,3 +338,47 @@ def test_lazy_astar_crosses_wide_boundary(ctx, tmp_path):
     assert dev.status == cpu.status and dev.plan == cpu.plan
     assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
     assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+@pytest.mark.parametrize("batch", [1, 64])
+def test_wide_ipc_best_first_equals_cpu(ctx, blocksworld_wide, batch):
+    task = blocksworld_wide
+    assert task.words > 64
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic="blind", max_expanded=300)
+        dev = device_search(task, ctx=ctx, heuristic="blind", batch=batch, max_expanded=300)
+        assert dev.status == cpu.status
+        if batch == 1:
+            assert dev.plan == cpu.plan and dev.goal_state == cpu.goal_state
+            assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+        elif device_search is mc.astar:
+            assert dev.cost == cpu.cost
+
+
+def test_wide_best_first_keeps_the_requested_batch(ctx, tmp_path):
+    """Rows of 18,924 words: a step still pops `batch` states (the rows are gathered a chunk at a time). The initial
+    state has 1100 successors; the goal follows the last of them."""
+    n = 1100
+    text = f"O {n}\nP 4\nF 1 picked\nF 0 free\nF 2 pad\nF 0 done\nSI 0\nFI 1\n1\nG 1\n3 1\n"
+    text += "A 2\npick 1\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n2 1 0 0\n"
+    text += f"finish 0\nL 1\n0 1 {-n}\nE 1\n0\nL 0\nF 1\n3 1\n"
+    path = tmp_path / "wide-fan.txt"
+    path.write_text(text)
+    task = mymyr.Task.from_text(path, atoms="dense")
+    assert task.words > 16 << 10
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic="blind")
+        dev = device_search(task, ctx=ctx, heuristic="blind", batch=512)
+        assert dev.status == cpu.status and len(dev.plan) == len(cpu.plan) == 2
+        assert dev.counters["max_batch"] == 512
+
+
+def test_best_first_refuses_successors_beyond_memory(tmp_path):
+    from conftest import fan_task, successor_refusal
+
+    task = fan_task(tmp_path, 400)
+    small = mc.Context(0, max_bytes=32 << 20)
+    for device_search, name in ((mc.astar, r"device A\*"), (mc.gbfs, "device GBFS")):
+        with pytest.raises(ValueError, match=successor_refusal(name, 160000, 32 << 20)):
+            device_search(task, ctx=small, heuristic="blind", batch=1)
+    small.synchronize()

@@ -48,18 +48,34 @@ struct Regroup
     u32 searches;
 };
 
+/// Bytes of one search's novelty table of `arity` over rows of `words` atom words.
+u64 table_bytes_per_search(u32 arity, u32 words) { return arity ? 8 * miw::table_words(arity, std::max(words, 1u)) : 8; }
+
+/// Searches per group whose novelty tables of `arity` fit `budget`; refuses a pass whose single table does not fit
+/// (it is called when that pass starts, or grows its table).
 u32 table_group(u32 arity, u32 words, u64 budget)
 {
-    const u64 per = arity ? 8 * miw::table_words(arity, std::max(words, 1u)) : 8;
+    const u64 per = table_bytes_per_search(arity, words);
     if (arity && per > budget)
-        throw std::invalid_argument("mymyr: device IW(" + std::to_string(arity) + "): novelty table requires " +
-                                    std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * words) +
-                                    " atom slots; table_bytes is " + std::to_string(budget));
+        throw std::invalid_argument("mymyr: device IW(" + std::to_string(arity) + "): the novelty table requires " +
+                                    std::to_string(per) + " bytes per search for " + std::to_string(u64{64} * std::max(words, 1u)) +
+                                    " atom slots, and table_bytes is " + std::to_string(budget) +
+                                    " (raise table_bytes=, or lower max_width)");
     return static_cast<u32>(std::clamp<u64>(budget / per, 1, u64{1} << 24));
 }
 
+/// Searches per group: the tables of the widest pass up to max_width whose single table fits `budget`. Wider passes
+/// are refused only when a search reaches them (table_group in run_pass), so that the passes before them still run.
+u32 group_size(u32 max_width, u32 words, u64 budget)
+{
+    u32 arity = max_width;
+    while (arity > 0 && table_bytes_per_search(arity, words) > budget)
+        --arity;
+    return table_group(arity, words, budget);
+}
+
 /// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
-u32 bucket(u32 words) { return search_row_words(words); }
+u32 bucket(u32 atom_words, u32 numeric_slots) { return search_row_words(atom_words, numeric_slots); }
 
 /// A grow-only typed device array; ensure(n, keep) preserves the first `keep` elements (growing by half at least:
 /// `exact` allocates n).
@@ -481,6 +497,15 @@ struct DeviceMultiIw::Impl
     /// After an aborted chunk of `rows` rows: the estimates, a smaller chunk when its unseen tuples exceeded emit_budget
     /// (rows lowered), lazy interning.
     void after_abort(const u32* hc, u32& rows, u32 arity);
+    /// Refuses a one-row chunk whose estimated candidates the context has no room for (a state's successors are
+    /// expanded in one chunk).
+    void refuse_unless_room() const;
+    /// Refuses a state whose successors need `need` bytes (0: a one-row chunk's allocation failed).
+    [[noreturn]] void refuse_room(u64 need) const;
+    /// The estimated bytes of a one-row chunk's candidates, and of the candidate buffers a chunk reuses.
+    [[nodiscard]] u64 row_candidate_bytes() const;
+    [[nodiscard]] u64 candidate_buffer_bytes() const;
+    u64 most_successors = 0;  // the most successors of a generating row seen (learn)
     u64 loop_rows = 0;  // the largest layer a device loop met (its captures' row capacity)
     u64 loop_room = 1;  // nodes and entries a device loop makes room for (a chunk's bound after a k_abort_space)
     /// Rows per chunk under chunk_bytes at the estimated capacities (`emits`: with exact novelty's tuples: a slot, and
@@ -488,8 +513,8 @@ struct DeviceMultiIw::Impl
     [[nodiscard]] u64 budget_rows(bool emits) const
     {
         const double cand = static_cast<double>(W) * 8 + 4.0 * L + 40, ucand = static_cast<double>(W) * 8 + 4.0 * L + 8;
-        const double per = (W > 64 ? static_cast<double>(W) * 8 : 0) + est_cand * cand +
-                           (o.dedup_parents ? est_ucand * ucand : 0) + (emits ? est_emit * (RW > 64 ? 96 : 4 + 4 * 12) : 0);
+        const double per = (lifted::wide_row(W) ? static_cast<double>(W) * 8 : 0) + est_cand * cand +
+                           (o.dedup_parents ? est_ucand * ucand : 0) + (emits ? est_emit * (lifted::wide_row(RW) ? 96 : 4 + 4 * 12) : 0);
         return std::max<u64>(1, static_cast<u64>(static_cast<double>(o.chunk_bytes) / std::max(per, 1.0)));
     }
     /// After a chunk (aborted or not): the estimates from its counts (those of the stages before an abort are exact).
@@ -551,7 +576,7 @@ void DeviceMultiIw::Impl::setup()
     check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
     const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
     const u64 per = std::max<u64>(8, (gen->view_words() + dw) * 8);
-    chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per) : std::max<u64>(task->words() > 64 ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
+    chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per) : std::max<u64>(lifted::wide_row(task->words()) ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
     row_cap = chunk_cap;
     est_cand = est_ucand = est_emit = std::max(o.capacity_per_row, 0.0);
     blk_dev.ensure(ctx, k_blk_device / sizeof(u64) + 1, s);
@@ -678,7 +703,7 @@ void DeviceMultiIw::Impl::grow_table(u32 arity)
     if (B > group)
         throw Regroup{group};
     DevArray<u64> t;
-    t.ensure(ctx, u64{B} * per, s, 0, tw > 64);
+    t.ensure(ctx, u64{B} * per, s, 0, lifted::wide_row(tw));
     check(miw::launch_table_relayout(table.data(), t.data(), arity, B, RW, tw, s), "launch_table_relayout");
     table = std::move(t);
     RW = tw;
@@ -757,10 +782,8 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     if (starts.words < (starts.numeric_words ? starts.numeric_words : slots))
         throw std::invalid_argument("mymyr: device IW: start rows have no numeric block");
     const u32 input_atoms = starts.words - (starts.numeric_words ? starts.numeric_words : slots);
-    W = bucket(std::max({task->words(), input_atoms, 1u}) + slots);
+    W = bucket(std::max({task->words(), input_atoms, 1u}), slots);
     DevArray<u64> numeric_starts;
-    if (slots && W > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device IW: numeric rows exceed 64 words");
     if (slots)
     {
         auto view = gen->view();
@@ -774,14 +797,15 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         starts = DeviceStarts{converted, W, W, n};
     }
     // group size: the novelty tables of a group fit table_bytes
-    u32 group = table_group(o.max_width, task->words(), o.table_bytes);
+    u32 group = group_size(o.max_width, task->words(), o.table_bytes);
     if (o.max_searches)
         group = std::min(group, o.max_searches);
     for (u32 g0 = 0; g0 < n;)
     {
-        group = std::min(group, table_group(o.max_width, task->words(), o.table_bytes));
+        group = std::min(group, group_size(o.max_width, task->words(), o.table_bytes));
         const u32 count = std::min(group, n - g0);
         const DeviceStarts gs{starts.data + static_cast<u64>(g0) * starts.stride, starts.stride, starts.words, count};
+        const MultiIwStats before = st;
         try
         {
             run_group(gs, g0, count, goals.empty() ? goals : goals.subspan(g0, count), seeds.empty() ? seeds : seeds.subspan(g0, count),
@@ -791,6 +815,8 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         }
         catch (const Regroup& retry)
         {
+            st = before;
+            ++st.regroups;
             group = std::min(group, retry.searches);
             for (u32 i = g0; i < g0 + count; ++i)
             {
@@ -1084,6 +1110,9 @@ void DeviceMultiIw::Impl::learn(const u32* hc, u64 rows)
 {
     const double r = static_cast<double>(std::max<u64>(rows, 1));
     const u32 ab = hc[miw::k_ctl_abort];
+    // a state's successors: the distinct rows' candidates with dedup_parents, else the rows'
+    const u64 rows_generating = o.dedup_parents ? std::max<u64>(hc[miw::k_ctl_distinct], 1) : std::max<u64>(rows, 1);
+    most_successors = std::max<u64>(most_successors, (o.dedup_parents ? hc[miw::k_ctl_ucand] : hc[miw::k_ctl_cand]) / rows_generating);
     est_ucand = std::max(est_ucand, 1.25 * hc[miw::k_ctl_ucand] / r);
     est_cand = std::max(est_cand, 1.25 * hc[miw::k_ctl_cand] / r);
     most_distinct = std::max<u64>(most_distinct, hc[miw::k_ctl_distinct]);
@@ -1091,6 +1120,33 @@ void DeviceMultiIw::Impl::learn(const u32* hc, u64 rows)
         est_distinct = std::max(est_distinct, 1.25 * hc[miw::k_ctl_distinct] / r);
     if ((ab & ~u32{miw::k_abort_emit | miw::k_abort_space}) == 0)  // the emission ran
         est_emit = std::max(est_emit, 1.25 * hc[miw::k_ctl_emit] / r);
+}
+
+u64 DeviceMultiIw::Impl::row_candidate_bytes() const
+{
+    // a chunk of one row at the estimated capacities (build_expansion): its candidates, and its distinct row's
+    const double cand = static_cast<double>(W) * 8 + 4.0 * L + 40, ucand = static_cast<double>(W) * 8 + 4.0 * L + 8;
+    return quantize(cap_for(est_cand, 1)) * static_cast<u64>(cand) +
+           (o.dedup_parents ? quantize(cap_for(est_ucand, 1)) * static_cast<u64>(ucand) : 0);
+}
+
+u64 DeviceMultiIw::Impl::candidate_buffer_bytes() const
+{
+    return c_rows.bytes() + c_binding.bytes() + c_schema.bytes() + c_parent.bytes() + c_src.bytes() + u_cand.bytes() + u_binding.bytes() +
+           u_schema.bytes();
+}
+
+void DeviceMultiIw::Impl::refuse_unless_room() const
+{
+    const u64 need = row_candidate_bytes(), reused = candidate_buffer_bytes();
+    if (need > reused && need > device_room(*ctx) + reused)
+        refuse_room(need);
+}
+
+void DeviceMultiIw::Impl::refuse_room(u64 need) const
+{
+    refuse_successors(*ctx, "device IW", "a state", most_successors, need, device_room(*ctx) + candidate_buffer_bytes(),
+                      "Raise the Context's max_bytes, or use the CPU search.");
 }
 
 bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)
@@ -1101,9 +1157,9 @@ bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)
     const auto tm = Clock::now();
     (void)gen->resolve_missing();
     st.host_ms += ms_since(tm);
-    if (bucket(task->words() + task->numeric_slots()) > W)
+    if (bucket(task->words(), task->numeric_slots()) > W)
     {
-        widen(bucket(task->words() + task->numeric_slots()), arity);
+        widen(bucket(task->words(), task->numeric_slots()), arity);
         return true;
     }
     grow_table(arity);
@@ -1253,9 +1309,9 @@ bool DeviceMultiIw::Impl::enqueue_expansion(Expansion& x, const miw::Gathered& g
         else
             gen->begin(in, o.witness_pruning, o.canonical_order);
         st.host_ms += ms_since(th);
-        if (bucket(task->words() + task->numeric_slots()) > W)
+        if (bucket(task->words(), task->numeric_slots()) > W)
         {
-            widen(bucket(task->words() + task->numeric_slots()), arity);  // the CPU fallback interned atoms beyond the rows' width
+            widen(bucket(task->words(), task->numeric_slots()), arity);  // the CPU fallback interned atoms beyond the rows' width
             return false;
         }
         grow_table(arity);
@@ -1345,8 +1401,8 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
         const u32 group = table_group(arity, RW, o.table_bytes);
         if (B > group)
             throw Regroup{group};
-        table.ensure(ctx, u64{B} * per, s, 0, RW > 64);
-        if (arity == 2 && RW > 64)
+        table.ensure(ctx, u64{B} * per, s, 0, lifted::wide_row(RW));
+        if (arity == 2 && lifted::wide_row(RW))
             check(cudaMemsetAsync(table.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
         check(miw::launch_table_init(table_view(arity), nodes(), R, s), "launch_table_init");
     }
@@ -1417,6 +1473,8 @@ bool DeviceMultiIw::Impl::loop_ok(u32 arity, u32 root_rule, u32 layer) const
 
 void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u32 rows, bool last, const Pos& p)
 {
+    if (rows == 1)
+        refuse_unless_room();
     u32* ctl = ctl_d();
     const u32 pcap = static_cast<u32>(quantize(rows));
     r.arity = arity;
@@ -1476,7 +1534,7 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
             r.x.b.emit_count = r.e.count;
         }
         const u64 slots = std::bit_ceil(std::max<u64>(2 * ecap, 1024));
-        if (RW > 64)
+        if (lifted::wide_row(RW))
         {
             r.map.wide = wide_keys.ensure(ctx, ecap, s);
             r.map.sorted = sorted_keys.ensure(ctx, ecap, s);
@@ -1710,7 +1768,17 @@ bool DeviceMultiIw::Impl::device_loop(u32 arity, Pos& p, bool& done)
     const u32 rows = static_cast<u32>(std::max<u64>(1, std::min(limit, loop_rows)));
     Run& r = run_;
     r.loop = true;
-    build_chunk(r, arity, rule, p.layer, rows, false, p);
+    try
+    {
+        build_chunk(r, arity, rule, p.layer, rows, false, p);
+    }
+    catch (const CudaError& e)
+    {
+        if (e.code() != cudaErrorMemoryAllocation)
+            throw;
+        (void)cudaGetLastError();
+        return false;  // (host chunks, sized row by row)
+    }
     Cached* hit = cached(r.key);
     if (!hit || hit->failed)
         return false;  // (its first occurrence runs as host chunks: one-off shapes are not captured)
@@ -1811,7 +1879,23 @@ bool DeviceMultiIw::Impl::chunk(u32 arity, u32 rule, u32 layer, u32 pb, u32& row
     const u32 P = rows;
     const bool last = u64{pb} + P >= n_entries;
     run_.loop = false;
-    build_chunk(run_, arity, rule, layer, P, last, Pos{layer, pb, n_entries, n_next});
+    try
+    {
+        build_chunk(run_, arity, rule, layer, P, last, Pos{layer, pb, n_entries, n_next});
+    }
+    catch (const CudaError& e)
+    {
+        // the chunk's buffers do not fit (nothing of it ran): half the rows, or a row alone refused
+        if (e.code() != cudaErrorMemoryAllocation)
+            throw;
+        (void)cudaGetLastError();
+        if (P == 1)
+            refuse_room(0);
+        rows = P / 2;
+        row_cap = rows;
+        ++st.splits;
+        return false;
+    }
     miw::Step* sp = step_host();
     *sp = miw::Step{};
     sp->begin = pb;

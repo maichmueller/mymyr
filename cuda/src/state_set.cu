@@ -262,7 +262,7 @@ __global__ void k_compact(Table t, Compact m, u64 n, Live live)
             const u32 parent = m.parent[c];
             const u32 first = m.seg_offsets[u64{parent - m.parent_base} * m.num_schemas];
             m.nodes_tail[r * 2] = parent + (m.parent_offset ? *m.parent_offset : 0u);
-            m.nodes_tail[r * 2 + 1] = static_cast<u32>(c) - first;
+            m.nodes_tail[r * 2 + 1] = static_cast<u32>(c) + m.first_row - first;
         }
         u64* slot = t.slots + m.result[c];
         *slot = (*slot & k_tag) | (id + 1);

@@ -120,6 +120,7 @@ struct DeviceTableIw::Impl
             s.seconds += b.stats.seconds;
             s.host_ms += b.stats.host_ms;
             s.groups += b.stats.groups;
+            s.regroups += b.stats.regroups;
             s.passes += b.stats.passes;
             s.layers += b.stats.layers;
             s.chunks += b.stats.chunks;

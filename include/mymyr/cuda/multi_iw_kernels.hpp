@@ -56,6 +56,7 @@
 //
 // Device-code subset: included by .cu files compiled by nvcc as C++23.
 
+#include "mymyr/cuda/lifted.hpp"
 #include "mymyr/rl/task_arrays_view.hpp"
 
 #include <cuda_runtime_api.h>
@@ -84,7 +85,7 @@ struct TupleKey
     if (arity < 2)
         return words;
     const u64 slots = u64{64} * words;
-    return words <= 64 ? slots * words : ((slots / 2) * (slots + 1) + 63) / 64;
+    return !lifted::wide_row(words) ? slots * words : ((slots / 2) * (slots + 1) + 63) / 64;
 }
 
 /// Search statuses on the device (the host maps them to search::SearchStatus).

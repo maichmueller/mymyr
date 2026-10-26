@@ -111,7 +111,8 @@ search::WidthZero width_zero_of(nb::handle v)
 /// The options shared by the three entry points.
 cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optimize_iw1, bool witness_pruning,
                                 bool canonical_order, bool exact, nb::handle max_states, nb::handle max_expanded,
-                                nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states)
+                                nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states,
+                                nb::handle table_bytes)
 {
     cuda::MultiIwOptions o;
     o.max_width = max_width;
@@ -135,6 +136,12 @@ cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optim
         o.chunk_states = int_arg<u32>(chunk_states, "chunk_states");
         if (o.chunk_states == 0)
             throw nb::value_error("mymyr: chunk_states must be positive");
+    }
+    if (!table_bytes.is_none())
+    {
+        o.table_bytes = int_arg<u64>(table_bytes, "table_bytes");
+        if (o.table_bytes == 0)
+            throw nb::value_error("mymyr: table_bytes must be positive");
     }
     return o;
 }
@@ -464,6 +471,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                          d["seconds"] = s.seconds;
                          d["host_ms"] = s.host_ms;
                          d["groups"] = s.groups;
+                         d["regroups"] = s.regroups;
                          d["passes"] = s.passes;
                          d["layers"] = s.layers;
                          d["chunks"] = s.chunks;
@@ -494,18 +502,18 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
     "max_width"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,        \
         "canonical_order"_a = true, "exact"_a = true, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(),       \
         "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(),                        \
-        "chunk_states"_a = nb::none()
+        "chunk_states"_a = nb::none(), "table_bytes"_a = nb::none()
 
     m.def(
         "multi_iw",
         [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
            bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
-           TaskIdsArg task_ids) {
+           IntArg table_bytes, TaskIdsArg task_ids) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                          exact, max_states, max_expanded, max_depth, max_seconds,
-                                                         max_searches, chunk_states);
+                                                         max_searches, chunk_states, table_bytes);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -549,6 +557,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
         "max_seconds spans the call.\n\n"
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
+        "whose one table exceeds it raises ValueError when a search reaches it.\n\n"
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
@@ -558,14 +568,14 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
            IntArg max_next_layer_states, IntArg max_width_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
-           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states) {
+           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
             const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
             cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                    exact, max_states, max_expanded, max_depth, max_seconds, max_searches,
-                                                   chunk_states);
+                                                   chunk_states, table_bytes);
             if (!max_next_layer_states.is_none())
             {
                 opts.max_next_layer_states = int_arg<u32>(max_next_layer_states, "max_next_layer_states");
@@ -600,15 +610,18 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
         "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Not reported: "
-        "derived atoms, landing states, co-occurrence.");
+        "derived atoms, landing states, co-occurrence. "
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
+        "whose one table exceeds it raises ValueError when a search reaches it.");
 
     m.def(
         "batched_iw1",
         [](TableArg task, StartsArg starts, ContextArg ctx, StreamArg stream, GoalsArg goals, bool exact,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches,
-           IntArg chunk_states, TaskIdsArg task_ids) {
+           IntArg chunk_states, IntArg table_bytes, TaskIdsArg task_ids) {
             cuda::MultiIwOptions opts = options_of(1, nb::str("expand_depth_one"), true, false, true, exact, max_states,
-                                                   max_expanded, max_depth, max_seconds, max_searches, chunk_states);
+                                                   max_expanded, max_depth, max_seconds, max_searches, chunk_states,
+                                                   table_bytes);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -715,13 +728,15 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "task"_a, "starts"_a, nb::kw_only(), "ctx"_a = nb::none(), "stream"_a = nb::none(), "goals"_a = nb::none(),
         "exact"_a = true, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(),
         "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(), "chunk_states"_a = nb::none(),
-        "task_ids"_a = nb::none(),
+        "table_bytes"_a = nb::none(), "task_ids"_a = nb::none(),
         "Exact batched IW(1): optimized IW(1) from each start state, all at once on the "
         "device. starts: host states, or a CUDA word array [N, W] uint64 / [N, 2W] uint32 (torch, JAX, DLPack) read in "
         "place after the work on `stream` (None: the context's stream). Per search: status, plan_length, goal_state "
         "(IwBatch); equal to mymyr.search.iw(task, max_width=1, start=...). Over a mymyr.rl.TaskTable: "
         "search i runs on instance task_ids[i] (host ints, or an int32 CUDA array read after the work on `stream`); "
-        "device starts are rows of at most the table's width.");
+        "device starts are rows of at most the table's width. "
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
+        "whose one table exceeds it raises ValueError when a search reaches it.");
 #undef MYMYR_MULTI_IW_COMMON_ARGS
 }
 }  // namespace mymyr::python

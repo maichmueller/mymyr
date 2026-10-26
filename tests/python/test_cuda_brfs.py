@@ -380,3 +380,33 @@ def test_ipc_brfs_equals_cpu(ctx, rovers_task):
     assert (dev.stats.states, dev.stats.generated, dev.stats.expanded, dev.fingerprint) == (
         cpu.stats.states, cpu.stats.generated, cpu.stats.expanded, cpu.fingerprint)
     assert dev.status == cpu.status and dev.plan == cpu.plan
+
+
+def brfs_matches(dev, cpu):
+    assert (dev.stats.states, dev.stats.generated, dev.stats.expanded, dev.fingerprint, dev.num_goal_states) == (
+        cpu.stats.states, cpu.stats.generated, cpu.stats.expanded, cpu.fingerprint, cpu.num_goal_states)
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_wide_ipc_brfs_equals_cpu(ctx, blocksworld_wide, stop):
+    task = blocksworld_wide
+    assert task.words > 64
+    cpu = mymyr.search.brfs(task, max_states=20000, stop_at_goal=stop, fingerprint=True, threads=1)
+    brfs_matches(mc.brfs(task, ctx=ctx, max_states=20000, stop_at_goal=stop, fingerprint=True), cpu)
+
+
+@pytest.mark.parametrize("kw", [{}, {"stop_at_goal": False}, {"max_states": 100_000}, {"max_states": 1000}])
+def test_successor_windows_equal_cpu(tmp_path, kw):
+    """A state with more successors than the context has room for at once: its successors a window at a time."""
+    from conftest import fan_task
+
+    task = fan_task(tmp_path, 400)
+    kw = {"max_states": 160_001} | kw  # (the arenas then hold the space without growing)
+    small = mc.Context(0, max_bytes=160 << 20)
+    cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
+    dev = mc.brfs(task, ctx=small, fingerprint=True, **kw)
+    brfs_matches(dev, cpu)
+    assert dev.counters["windows"] >= (2 if kw["max_states"] == 160_001 else 1)
+    small.synchronize()
+

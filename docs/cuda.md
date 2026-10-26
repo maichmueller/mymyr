@@ -62,10 +62,16 @@ than the environment fast path, because these paths synchronize for counts, lazy
 Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
 up to 32 words). Classical BrFS, IW, rollouts, A*/GBFS and state spaces accept rows of any width that fits memory.
 Arenas keep power-of-two widths through 64 words and round wider rows to 64-word chunks; successors are built
-one chunk at a time. Numeric kernels hold whole rows and take states of at most 64 words.
+one chunk at a time. Numeric kernels hold whole rows and take states of at most 64 words; a numeric search raises
+`ValueError` when its states reach more (also when a lazy task's rows grow there during the search).
+When a state's successors exceed what the context can still allocate, the device BrFS deduplicates and stores them
+a window at a time (the `windows` counter), with the ids, counts and plans of the CPU BrFS; device IW, rollouts and
+A*/GBFS expand a state's successors at once and raise `ValueError` naming the successor count, the bytes they need and
+what the context has left (raise the Context's `max_bytes`, or use the CPU search).
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
-into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes`; a table that cannot
-fit even one search raises `ValueError` with its required byte size and the budget. Wide exact novelty uses
+into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
+`batched_iw1` and `rollouts`); a pass whose table cannot fit even one search raises `ValueError` with its required
+byte size and the budget when a search reaches that pass, so that searches solved at a lower width run. Wide exact novelty uses
 full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
 host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only
