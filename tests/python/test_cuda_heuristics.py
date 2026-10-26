@@ -378,3 +378,26 @@ def test_best_first_refuses_successors_beyond_memory(tmp_path):
         with pytest.raises(ValueError, match=successor_refusal(name, 160000, 32 << 20)):
             device_search(task, ctx=small, heuristic="blind", batch=1)
     small.synchronize()
+
+
+def test_best_first_in_a_tiny_context_equals_cpu_or_names_its_bytes(tmp_path):
+    """A 256 KiB context: the search's tables and buffers start within it, so that a fan of 16 successors gives the
+    CPU's plan, and a fan of 400 is refused with the bytes they need beside the bytes the context can still allocate."""
+    import re
+
+    from conftest import fan_task, successor_refusal
+
+    tiny = mc.Context(0, max_bytes=256 << 10)
+    searches = ((mc.astar, mymyr.search.astar, r"device A\*"), (mc.gbfs, mymyr.search.gbfs, "device GBFS"))
+    task = fan_task(tmp_path, 4)
+    for device_search, cpu_search, _ in searches:
+        cpu = cpu_search(task, heuristic="blind")
+        dev = device_search(task, ctx=tiny, heuristic="blind", batch=1)
+        assert dev.status == cpu.status and dev.plan == cpu.plan
+    task = fan_task(tmp_path, 20)
+    for device_search, _, name in searches:
+        with pytest.raises(ValueError, match=successor_refusal(name, 400, 256 << 10)) as refused:
+            device_search(task, ctx=tiny, heuristic="blind", batch=1)
+        need, room = map(int, re.search(r"need (\d+) bytes.*allocate (\d+) bytes", str(refused.value)).groups())
+        assert 0 < room < need
+    tiny.synchronize()
