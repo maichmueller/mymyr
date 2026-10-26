@@ -1136,3 +1136,31 @@ TEST(DeviceLiw, LandmarkResolutionSizesLazyRowsBeforeSearch)
     for (u32 i = 0; i < starts.size(); ++i)
         expect_same(batch.result(i, *task, root, true), expected, "landmark slot resolution");
 }
+
+TEST(DeviceLiw, RankMaskViewsFollowNodeReservations)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    const State root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(facts));
+    o.budget.max_states = 60;
+    o.chunk_states = 256;
+    o.graphs = false;
+    const std::vector<State> starts(64, root);
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const auto batch = device.run(starts);
+    search::LiwOptions cpu;
+    cpu.max_width = 1;
+    cpu.landmarks = o.landmarks->front();
+    cpu.control.budget = o.budget;
+    const auto expected = search::liw(*task, cpu);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, root, true), expected, "node reservations");
+}

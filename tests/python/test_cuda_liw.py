@@ -175,8 +175,8 @@ def test_liw_childsnack_ipc(ctx):
 
 def test_liw_context_table_refusal(tmp_path):
     task = wide_task(tmp_path, objects=192)
-    graph = search.FactLandmarkGraph(task, [task.atom(slot) for slot in range(4093)])
-    small = mc.Context(0, max_bytes=16 << 20)
+    graph = search.FactLandmarkGraph(task, [task.atom(slot) for slot in range(8191)])
+    small = mc.Context(0, max_bytes=32 << 20)
     with pytest.raises(ValueError, match=r"LIW\(1\).*novelty tables.*raise Context max_bytes"):
         mc.liw(task, [task.initial_state], ctx=small, landmarks=graph)
     small.synchronize()

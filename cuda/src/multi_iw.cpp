@@ -635,17 +635,19 @@ void DeviceMultiIw::Impl::alloc_searches(u32 count)
 
 void DeviceMultiIw::Impl::ensure_nodes(u64 n)
 {
-    if (o.landmarks)
-        node_masks.ensure(ctx, std::max(n, n_cap) * mask_words, s, u64{n_tail} * mask_words);
     if (n <= n_cap && n_rows.capacity() >= n_cap * W)  // (a later run may have wider rows: lazy slots)
+    {
+        if (mask_words)
+            node_masks.ensure(ctx, n_cap * mask_words, s, u64{n_tail} * mask_words);
         return;
+    }
     const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, row_reserve_floor(W, 1024)});
     n_rows.ensure(ctx, cap * W, s, u64{n_tail} * W);
     n_parent.ensure(ctx, cap, s, n_tail);
     n_search.ensure(ctx, cap, s, n_tail);
     n_label.ensure(ctx, cap * LW, s, u64{n_tail} * LW);
     n_flags.ensure(ctx, cap, s, n_tail);
-    if (o.landmarks)
+    if (mask_words)
         node_masks.ensure(ctx, cap * mask_words, s, u64{n_tail} * mask_words);
     n_cap = cap;
 }
@@ -1715,6 +1717,10 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
         if (r.write || last)
             ensure_lists(std::max<u64>(u64{p.next} + M, 1), p.entries, p.next);
     }
+    // Node reservations may move the rank masks shared by novelty and parent broadcasting.
+    r.t = table_view(arity);
+    if (r.x.b.emit_count)
+        r.x.b.table = r.t;
     r.cm = miw::Compact{};
     r.cm.kept = r.kept;
     r.cm.root_owner = r.root_rule ? r.root.owner : nullptr;
@@ -1726,6 +1732,9 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
     r.cm.map = r.map;
     r.cm.emission = r.exact ? r.e : miw::Emission{};
     r.nxt_cap = static_cast<u32>(std::min<u64>(order_b.capacity(), k_none));
+    if (r.t.ranks && (r.t.node_masks != node_masks.data() || r.cm.table.node_masks != node_masks.data() ||
+                      (r.x.b.emit_count && r.x.b.table.node_masks != node_masks.data())))
+        throw std::logic_error("mymyr: device LIW: inconsistent node-mask views");
     // the key of a captured replay: every scalar and address the launches embed (the lists are the step's)
     Key k;
     k.all(arity, rule, pcap, u64{r.last}, u64{r.loop}, u64{r.root_rule}, u64{r.write}, u64{r.novelty}, u64{r.exact}, u64{r.cut},
