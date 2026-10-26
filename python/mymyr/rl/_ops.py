@@ -13,7 +13,7 @@ import numpy as np
 
 from mymyr._core import _rl_ops
 
-__all__ = ["HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks"]
+__all__ = ["HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
 
 
 class HerBatch(NamedTuple):
@@ -66,6 +66,29 @@ def _stream(fw: str, like: Any) -> Optional[int]:
 def _word_dtype(x: Any) -> str:
     """'uint64' for 64-bit state words, 'uint32' for 32-bit halves."""
     return "uint64" if x.dtype.itemsize == 8 else "uint32"
+
+
+def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: Any = None) -> Any:
+    """Membership in per-episode hash tables: bool [M] in the inputs' framework.
+
+    ``table`` (u)int64 [N, H] and ``count`` int32 [N] are an environment's visited arrays; ``succ_hash``
+    (u)int64 [M] contains State hashes and ``parent`` int32 [M] the environment of each successor (-1: padding).
+    With ``rows`` int32 [P], parent indexes this mapping to environment rows; mapped -1 is padding too.
+    Equal hashes share an entry, including zero and the reserved key 0x9E3779B97F4A7C15. Overflow can cause
+    false negatives. NumPy and torch CPU arrays are supported.
+    """
+    fw = _framework(table)
+    if fw == "torch":
+        from mymyr.rl.torch._ops import visited_mask as torch_mask
+
+        return torch_mask(table, count, succ_hash, parent, rows)
+    if fw != "numpy":
+        raise ValueError("mymyr: visited_mask requires NumPy or torch CPU arrays")
+    from mymyr._core import _rl
+
+    out = np.empty(succ_hash.shape, dtype=np.bool_)
+    _rl.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
+    return out
 
 
 def novelty_update(seen: Any, states: Any, width: int = 1) -> tuple[Any, Any]:

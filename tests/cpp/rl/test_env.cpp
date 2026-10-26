@@ -581,3 +581,26 @@ TEST(Visited, TinyTableAndPadding)
     rl::visited_mask(table.data(), &count, 2, hashes.data(), parent.data(), nullptr, 3, mask.data());
     EXPECT_EQ(mask, (std::array<u8, 3>{1, 0, 0}));
 }
+
+TEST(HostEnv, ClearVisitedOnlyReadsSelectedRows)
+{
+    auto task = load("gripper__prob05");
+    rl::HostEnv env(rl::TaskTable::single(task), {});
+    Batch x(env, 2);
+    std::array<u64, 16> visited{};
+    std::array<i32, 2> count{};
+    std::array<i32, 2> ids{};
+    i32 status = 0;
+    x.b.task_ids = ids.data();
+    x.b.visited = visited.data();
+    x.b.visited_count = count.data();
+    x.b.visited_capacity = 8;
+    x.b.visited_status = &status;
+    env.reset(x.b);
+    const auto before = visited;
+    ids[0] = -1;
+    const std::array<u8, 2> mask{0, 1};
+    EXPECT_NO_THROW(env.clear_visited(x.b, mask.data()));
+    EXPECT_EQ(count[1], 1);
+    EXPECT_EQ(visited, before);
+}

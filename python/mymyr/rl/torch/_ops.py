@@ -196,6 +196,28 @@ def _batch_ptrs(
     ]
 
 
+def _visited_ptrs(info: tuple, states: Tensor, visited: Optional[Tensor], visited_count: Optional[Tensor],
+                  visited_status: Optional[Tensor]) -> tuple[list[int], int]:
+    if visited is None:
+        if visited_count is not None or visited_status is not None:
+            raise ValueError("mymyr: visited tracking needs table, count and status arrays")
+        return [0, 0, 0], 0
+    if visited.ndim != 2:
+        raise ValueError("mymyr: visited must have shape [N, H]")
+    n, H = states.shape[0], visited.shape[1]
+    if H < 2 or H > 1 << 20 or H & (H - 1):
+        raise ValueError("mymyr: visited capacity must be a power of two in [2, 2^20]")
+    if info[0].type != "cpu":
+        raise ValueError("mymyr: visited tracking requires a CPU environment")
+    if visited_count is None or visited_status is None:
+        raise ValueError("mymyr: visited tracking needs table, count and status arrays")
+    return [
+        _ptr(visited, "visited", torch.int64, (n, H), info[0]),
+        _ptr(visited_count, "visited_count", torch.int32, (n,), info[0]),
+        _ptr(visited_status, "visited_status", torch.int32, (1,), info[0]),
+    ], H
+
+
 def reset_impl(
     env: int,
     states: Tensor,
@@ -209,6 +231,9 @@ def reset_impl(
     at_goal: Optional[Tensor],
     mask: Optional[Tensor],
     keep_goals: bool,
+    visited: Optional[Tensor] = None,
+    visited_count: Optional[Tensor] = None,
+    visited_status: Optional[Tensor] = None,
 ) -> None:
     """The body of ``mymyr::reset``."""
     e, info = _env_info(env)
@@ -220,7 +245,8 @@ def reset_impl(
         _ptr(mask, "mask", torch.bool, (n,), info[0]),
         _ptr(at_goal, "at_goal", torch.bool, (n,), info[0]),
     ]
-    e._reset_ptrs(n, p, keep_goals, _stream(states))
+    vp, H = _visited_ptrs(info, states, visited, visited_count, visited_status)
+    e._reset_ptrs(n, p + vp, keep_goals, _stream(states), H)
 
 
 def refresh_impl(
@@ -278,6 +304,10 @@ def step_impl(
     final: bool,
     action_schema: Optional[Tensor] = None,
     action_binding: Optional[Tensor] = None,
+    visited: Optional[Tensor] = None,
+    visited_count: Optional[Tensor] = None,
+    visited_status: Optional[Tensor] = None,
+    revisited: Optional[Tensor] = None,
     out: Optional[tuple[Tensor, ...]] = None,
 ) -> tuple[Tensor, ...]:
     """The body of ``mymyr::step``; ``out``: the 8 outputs' destinations (contiguous, of _step_outputs' shapes and
@@ -318,8 +348,41 @@ def step_impl(
         _ptr(action_schema, "action_schema", torch.int32, (n,), dev),
         _ptr(action_binding, "action_binding", torch.int32, (n, stride), dev),
     ]
-    e._step_ptrs(n, p, L, first_env, _stream(states), stride)
+    vp, H = _visited_ptrs(info, states, visited, visited_count, visited_status)
+    rp = _ptr(revisited, "revisited", torch.bool, (n,), dev)
+    e._step_ptrs(n, p + vp + [rp], L, first_env, _stream(states), stride, H)
     return out
+
+
+@_op("mymyr::visited_mask", mutates_args=())
+def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
+                 rows: Optional[Tensor] = None) -> Tensor:
+    """Membership of successor hashes in host visited tables; -1 parent or mapped row denotes padding."""
+    if table.device.type != "cpu":
+        raise ValueError("mymyr: visited_mask requires CPU tensors")
+    from mymyr._core import _rl
+
+    out = torch.empty(succ_hash.shape, dtype=torch.bool, device=table.device)
+    _rl.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
+    return out
+
+
+@visited_mask.register_fake
+def _(table, count, succ_hash, parent, rows=None):
+    return succ_hash.new_empty(succ_hash.shape, dtype=torch.bool)
+
+
+@_op("mymyr::clear_visited", mutates_args=("visited", "visited_count"))
+def clear_visited(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,
+                  visited_count: Tensor, visited_status: Tensor, mask: Optional[Tensor]) -> None:
+    """Clear masked host visited tables and insert the current states."""
+    lookup(env).clear_visited(states, task_ids, visited=visited, visited_count=visited_count,
+                              visited_status=visited_status, mask=mask)
+
+
+@clear_visited.register_fake
+def _(env, states, task_ids, visited, visited_count, visited_status, mask):
+    return None
 
 
 def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: Optional[int]) -> Tensor:
@@ -334,7 +397,8 @@ def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, 
 
 
 @_op(
-    "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count", "at_goal")
+    "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count", "at_goal",
+                  "visited", "visited_count", "visited_status")
 )
 def reset(
     env: int,
@@ -349,15 +413,20 @@ def reset(
     at_goal: Optional[Tensor],
     mask: Optional[Tensor],
     keep_goals: bool,
+    visited: Optional[Tensor] = None,
+    visited_count: Optional[Tensor] = None,
+    visited_status: Optional[Tensor] = None,
 ) -> None:
     """``mymyr::reset``: resets the rows (all, or those with ``mask[i]``) in place into their instances ``task_ids``
     (set by the caller first): steps 0, the instance's goal masks unless ``keep_goals``, the cache, ``count`` and
     ``at_goal``. ``env`` is a :func:`register` handle; the tensors are the environment state of the module docstring."""
-    reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals)
+    reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals,
+               visited, visited_count, visited_status)
 
 
 @reset.register_fake
-def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals):
+def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals,
+      visited=None, visited_count=None, visited_status=None):
     return None
 
 
@@ -408,7 +477,8 @@ def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
 @_op(
     "mymyr::step",
     mutates_args=(
-        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
+        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg",
+        "visited", "visited_count", "visited_status", "revisited"
     ),
 )
 def step(
@@ -429,6 +499,10 @@ def step(
     final: bool,
     action_schema: Optional[Tensor] = None,
     action_binding: Optional[Tensor] = None,
+    visited: Optional[Tensor] = None,
+    visited_count: Optional[Tensor] = None,
+    visited_status: Optional[Tensor] = None,
+    revisited: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step``: one step of every environment in place, ``action`` [N] int64 (None: the random policy);
     label mode instead takes ``action_schema`` int32 [N] and ``action_binding`` int32 [N, L] with action=None.
@@ -437,14 +511,15 @@ def step(
     autoreset, with ``final`` and [0, row_words] without."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final, action_schema, action_binding,
+        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited,
     )  # fmt: skip
 
 
 @step.register_fake
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-    first_env, final, action_schema=None, action_binding=None,
+    first_env, final, action_schema=None, action_binding=None, visited=None, visited_count=None,
+    visited_status=None, revisited=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 
@@ -452,7 +527,8 @@ def _(
 @_op(
     "mymyr::step_sync",
     mutates_args=(
-        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
+        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg",
+        "visited", "visited_count", "visited_status", "revisited"
     ),
     tags=_unsafe,
 )
@@ -474,19 +550,24 @@ def step_sync(
     final: bool,
     action_schema: Optional[Tensor] = None,
     action_binding: Optional[Tensor] = None,
+    visited: Optional[Tensor] = None,
+    visited_count: Optional[Tensor] = None,
+    visited_status: Optional[Tensor] = None,
+    revisited: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step_sync``: :func:`step` for environments whose calls synchronize (the device's general path);
     tagged ``cudagraph_unsafe``."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final, action_schema, action_binding,
+        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited,
     )  # fmt: skip
 
 
 @step_sync.register_fake
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-    first_env, final, action_schema=None, action_binding=None,
+    first_env, final, action_schema=None, action_binding=None, visited=None, visited_count=None,
+    visited_status=None, revisited=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 

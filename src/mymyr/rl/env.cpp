@@ -175,13 +175,13 @@ u32 HostEnv::reset_row(EnvBatch& b, u64 i, u32 instance, bool keep_goals, u32 di
 void HostEnv::clear_visited(EnvBatch& b, const u8* mask) const
 {
     check_env(*m_suite, b, nullptr);
-    m_suite->check_task_ids(b.task_ids, b.rows);
     if (!b.visited_capacity)
         return;
     for (u64 i = 0; i < b.rows; ++i)
     {
         if (mask && !mask[i])
             continue;
+        m_suite->check_task_ids(b.task_ids ? b.task_ids + i : nullptr, 1);
         u64* table = b.visited + i * b.visited_capacity;
         visited_clear(table, b.visited_capacity, b.visited_count[i]);
         visited_insert(table, b.visited_capacity, b.visited_count[i], row_view(b, i, *m_tasks[b.instance(i)]).hash());

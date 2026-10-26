@@ -138,7 +138,7 @@ from mymyr._core._rl import (
     random_walks,
     successor_bounds,
 )
-from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
+from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks, visited_mask
 from mymyr.rl._sampling import InstanceSampler
 
 __all__ = [
@@ -171,6 +171,7 @@ __all__ = [
     "schema_masks",
     "successor_bounds",
     "task_domains",
+    "visited_mask",
 ]
 
 TableLike = Union[TaskSuite, TaskTable, Task, TaskHandle]
@@ -288,7 +289,7 @@ def decode(table: TableLike, rows: Any, task_ids: Optional[Any] = None) -> list:
                              f"{task.words} atom words plus the table's {numeric} numeric words")
         part = words[where]
         if numeric:
-            part = np.concatenate([part[:, : task.words], part[:, width : width + task.numeric_words]], axis=1)
+            part = np.concatenate([part[:, : max(1, task.words)], part[:, width : width + task.numeric_words]], axis=1)
         else:
             part = part[:, :width]
         for i, state in zip(where.tolist(), task.decode(np.ascontiguousarray(part))):
