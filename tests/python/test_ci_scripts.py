@@ -1,7 +1,9 @@
 import base64
+import fnmatch
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -11,6 +13,8 @@ import time
 import tomllib
 import zipfile
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -467,3 +471,176 @@ def test_run_until_leaves_other_ninjas_alone(tmp_path: Path) -> None:
     finally:
         outsider.kill()
         outsider.wait()
+
+
+BUILD_STATE = ROOT / "ci" / "build_state.sh"
+# the script drives GNU tar, coreutils and findutils, as on the Linux runners
+gnu_tools = pytest.mark.skipif(sys.platform != "linux", reason="ci/build_state.sh needs GNU tar, coreutils and findutils")
+
+
+def build_state(tmp_path: Path, *args: object) -> subprocess.CompletedProcess:
+    """ci/build_state.sh with a zstd that passes the data through: the tests check what the script does with the
+    archives, the dry run of the workflow the compression."""
+    stub = tmp_path / "bin" / "zstd"
+    if not stub.exists():
+        stub.parent.mkdir()
+        stub.write_text("#!/bin/sh\nexec cat\n")
+        stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+    return subprocess.run(["bash", str(BUILD_STATE), *map(str, args)], capture_output=True, text=True, env=env,
+                          check=False, timeout=60)
+
+
+def snapshot(*roots: Path) -> dict[str, tuple]:
+    """Every entry under the roots: type, mode, size, modification second, link target and content hash (of the
+    files under 100 MB; larger ones are sparse)."""
+    out = {}
+    for root in roots:
+        for path in [root, *sorted(root.rglob("*"))]:
+            st = path.lstat()
+            kind = "link" if path.is_symlink() else "dir" if path.is_dir() else "file"
+            small = kind == "file" and st.st_size < 10**8
+            content = hashlib.sha256(path.read_bytes()).hexdigest() if small else None
+            target = os.readlink(path) if kind == "link" else None
+            out[str(path)] = (kind, st.st_mode, st.st_size if kind == "file" else None, int(st.st_mtime), target,
+                              content)
+    return out
+
+
+def build_tree(root: Path) -> None:
+    (root / "obj" / "deep").mkdir(parents=True)
+    (root / "empty").mkdir()
+    (root / "obj" / "deep" / "kernel.o").write_bytes(os.urandom(200_000))
+    (root / "build.ninja").write_text("rule cc\n" * 1000)
+    (root / "tool").write_text("#!/bin/sh\n")
+    (root / "tool").chmod(0o755)
+    (root / "latest").symlink_to("obj/deep/kernel.o")
+    # sub-second modification times, as a build leaves them
+    os.utime(root / "obj" / "deep" / "kernel.o", ns=(1_700_000_000_123_456_789, 1_700_000_000_987_654_321))
+    os.utime(root / "obj", ns=(1_700_000_100_500_000_000, 1_700_000_100_500_000_000))
+
+
+def manifest(tmp_path: Path, tree_bytes: int) -> Path:
+    path = tmp_path / "manifest"
+    path.write_text(f"part-bytes 1000\narchive 0 1000 {tree_bytes} {tmp_path / 'restored' / 'work'}\n")
+    return path
+
+
+@gnu_tools
+def test_build_state_round_trip_keeps_files_modes_links_and_modification_seconds(tmp_path: Path) -> None:
+    work, toolchain = tmp_path / "runner" / "work", tmp_path / "workspace" / "toolchain"
+    build_tree(work)
+    (toolchain / "bin").mkdir(parents=True)
+    (toolchain / "bin" / "nvcc").write_text("nvcc")
+    before = snapshot(work, toolchain)
+
+    packed = build_state(tmp_path, "pack", "--part-size", "64K", "--state", tmp_path / "state", work, toolchain)
+
+    assert packed.returncode == 0, packed.stderr
+    state = Path(packed.stdout.strip())
+    assert state == tmp_path / "state"
+    assert not work.exists() and not toolchain.exists()
+    lines = (state / "manifest").read_text().splitlines()
+    assert lines[0] == "part-bytes 65536"
+    assert [line.split()[0:2] + line.split()[4:] for line in lines[1:]] == [
+        ["archive", "0", str(work)], ["archive", "1", str(toolchain)]]
+    parts = sorted(p.name for p in state.glob("0.tar.zst.*"))
+    assert len(parts) >= 3 and parts[:3] == ["0.tar.zst.000", "0.tar.zst.001", "0.tar.zst.002"]
+    assert int(lines[1].split()[2]) == sum(p.stat().st_size for p in state.glob("0.tar.zst.*"))
+
+    unpacked = build_state(tmp_path, "unpack", state)
+
+    assert unpacked.returncode == 0, unpacked.stderr
+    assert snapshot(work, toolchain) == before
+    assert not state.exists()
+
+
+@gnu_tools
+def test_build_state_packs_only_where_the_largest_file_fits(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    build_tree(work)
+    # a sparse file larger than the free space: packing next to it would need its whole size at once
+    huge = work / "huge.a"
+    try:
+        with huge.open("wb") as stream:
+            stream.truncate(shutil.disk_usage(tmp_path).free + 10**12)
+    except OSError:
+        pytest.skip("the file system takes no sparse file larger than its free space")
+    before = snapshot(work)
+
+    result = build_state(tmp_path, "pack", "--state", tmp_path / "state", work)
+
+    assert result.returncode == 1
+    assert "error: no room for the build state" in result.stderr and "free, needs" in result.stderr
+    assert snapshot(work) == before
+    assert not (tmp_path / "state").exists()
+
+
+@gnu_tools
+def test_build_state_room_names_the_first_directory_that_fits(tmp_path: Path) -> None:
+    first, second = tmp_path / "mnt" / "state", tmp_path / "temp" / "state"
+
+    fits = build_state(tmp_path, "room", manifest(tmp_path, 5000), first, second)
+
+    assert fits.returncode == 0, fits.stderr
+    assert fits.stdout.strip() == str(first)
+
+    lacks = build_state(tmp_path, "room", manifest(tmp_path, shutil.disk_usage(tmp_path).free + 10**12), first, second)
+
+    assert lacks.returncode == 1
+    assert "error: no room to receive and unpack the build state" in lacks.stderr
+    assert lacks.stderr.count("free, needs") == 2
+
+
+@gnu_tools
+def test_build_state_unpack_without_room_keeps_the_parts(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    manifest(tmp_path, shutil.disk_usage(tmp_path).free + 10**12).rename(state / "manifest")
+    (state / "0.tar.zst.000").write_bytes(b"part")
+
+    result = build_state(tmp_path, "unpack", state)
+
+    assert result.returncode == 1
+    assert "error: no room to unpack the build state" in result.stderr
+    assert (state / "0.tar.zst.000").read_bytes() == b"part"
+    assert not (tmp_path / "restored").exists()
+
+
+@gnu_tools
+def test_build_state_space_fails_with_the_room_a_job_needs(tmp_path: Path) -> None:
+    assert build_state(tmp_path, "space", tmp_path, 0).returncode == 0
+
+    result = build_state(tmp_path, "space", tmp_path / "not-yet", 10**9)
+
+    assert result.returncode == 1
+    assert f"error: {tmp_path} has" in result.stderr and "this job needs at least 1000000000 GB" in result.stderr
+
+
+def cuda_wheel_jobs() -> dict[str, str]:
+    workflow = (ROOT / ".github" / "workflows" / "cuda-wheels.yml").read_text()
+    body = workflow.split("\njobs:\n", 1)[1]
+    return dict(re.findall(r"^  ([a-z-]+):\n(.*?)(?=^  [a-z-]+:\n|\Z)", body, re.MULTILINE | re.DOTALL))
+
+
+def test_cuda_wheel_jobs_stop_the_build_in_time_to_hand_it_on_or_test_it() -> None:
+    jobs = cuda_wheel_jobs()
+    room = {"compile": 45, "resume": 45, "wheel": 60}
+    for name, minutes in room.items():
+        timeout = int(re.search(r"timeout-minutes: (\d+)", jobs[name])[1])
+        deadline = re.findall(r"--minutes \$\(\(\(JOB_START \+ (\d+) \* 60", jobs[name])
+        assert len(deadline) == 1, name
+        assert timeout - int(deadline[0]) >= minutes, name
+        assert jobs[name].index("JOB_START=$(date +%s)") < jobs[name].index("--minutes"), name
+
+
+def test_cuda_build_state_artifacts_are_not_downloaded_as_wheels() -> None:
+    jobs = cuda_wheel_jobs()
+    actions = ROOT / ".github" / "actions"
+    texts = [*jobs.values(), *(p.read_text() for p in actions.glob("*-cuda-build/action.yml"))]
+    names = {n for text in texts for n in re.findall(r"^ +(?:name|artifact): (cuda-.+)$", text, re.MULTILINE)}
+    # attach_cuda_wheels.sh downloads the artifacts that match cuda-wheel-*
+    assert "--pattern 'cuda-wheel-*'" in ATTACH.read_text()
+    assert {n for n in names if fnmatch.fnmatch(n, "cuda-wheel-*")} == {"cuda-wheel-${{ matrix.python }}"}
+    assert "cuda-build-state-${{ matrix.python }}" in names
+    assert "cuda-build-state-${{ matrix.python }}-manifest" in names

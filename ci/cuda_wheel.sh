@@ -6,13 +6,13 @@
 #   2. a copy of the source tree gets the version <version>+cu13 and is built with jaxlib's XLA FFI headers
 #      (ci/cuda_wheel_jaxlib_requirements.txt), so that the wheel has the JAX targets of mymyr.rl.jax and
 #      mymyr.encoding.jax, and with the pinned build requirements (ci/cuda_wheel_build_requirements.txt) without build
-#      isolation;
+#      isolation; the benchmark drivers, which the wheel does not ship, are left out;
 #   3. auditwheel repairs the wheel; the checks: the manylinux_2_34_x86_64 tag, extensions that need only glibc (the
 #      CUDA runtime is linked statically and opens the driver, libcuda.so.1, at run time) and GPU code that is exactly
 #      the requested architectures;
-#   4. the wheel is installed into a fresh environment with the pinned test requirements
-#      (ci/cuda_wheel_test_requirements.txt, torch 2.14 for CUDA 13.0 among them) and passes the CPU test suite with no
-#      GPU visible, in a process that imports torch before mymyr.
+#   4. the build tree is removed, and the wheel is installed into a fresh environment with the pinned test
+#      requirements (ci/cuda_wheel_test_requirements.txt, torch 2.14 for CUDA 13.0 among them) and passes the CPU test
+#      suite with no GPU visible, in a process that imports torch before mymyr.
 #
 # usage: ci/cuda_wheel.sh [--python ABI] [--archs LIST] [--out DIR] [--toolchain DIR] [--work DIR] [--jobs N]
 #                         [--cuda-jobs N] [--stage STAGE] [--minutes N]
@@ -21,18 +21,22 @@
 #   --out        receives the wheel (default: wheelhouse/ in the source tree)
 #   --toolchain  GCC, the dependencies and CUDA (default /opt/mymyr-toolchain)
 #   --work       the source copy, build tree, test environment, caches and temporary files
-#                (default /tmp/mymyr-cuda-wheel); about 7 GB per architecture
+#                (default /tmp/mymyr-cuda-wheel); the build tree takes about 1.2 GB per architecture, the test
+#                environment about 4.5 GB
 #   --jobs       parallel build jobs (default: the number of CPUs)
 #   --cuda-jobs  parallel nvcc compiles (default 2), each up to 3 GB of memory; the four largest kernels (up to 7 GB)
 #                compile one at a time, which can make one compile more than N
 #   --stage      all (default): steps 1 to 4;
 #                toolchain: step 1 only;
-#                compile: steps 1 and 2, stopping the build cleanly --minutes after the start of the script if it has
-#                not finished by then;
-#                finish: the build in --work that a compile stage left (with the same --toolchain, unchanged, and
-#                the same paths), to its end, then steps 3 and 4. Ninja resumes it: what compiled is not compiled
-#                again
-#   --minutes    the time limit of the compile stage (default 270)
+#                compile: steps 1 and 2, stopping the build cleanly at the time limit if it has not finished by then;
+#                resume: the build in --work that a compile or resume stage left (with the same --toolchain,
+#                unchanged, and the same paths), stopping it at the time limit like compile. Ninja resumes it: what
+#                compiled is not compiled again;
+#                finish: the build that a compile or resume stage left, to its end, then steps 3 and 4; it fails
+#                if the build has not finished at the time limit.
+#                compile and resume write "finished" or "stopped" to --work/build-status
+#   --minutes    the time limit of the build in minutes after the start of the script (default 270 for compile and
+#                resume, none for all and finish)
 #
 # In a container, with the source tree at /src (see "Building a CUDA wheel" in docs/cuda.md):
 #   podman run --rm -v "$PWD":/src -v ~/.cache/mymyr-cuda-toolchain:/opt/mymyr-toolchain \
@@ -48,7 +52,7 @@ work=/tmp/mymyr-cuda-wheel
 jobs=$(nproc)
 cuda_jobs=2
 stage=all
-minutes=270
+minutes=
 
 usage() {
     sed -n '/^# usage:/,/^# In a container/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//' >&2
@@ -76,7 +80,7 @@ case "$python_abi" in
     *) echo "error: unknown CPython ABI '$python_abi'" >&2; exit 2 ;;
 esac
 case "$stage" in
-    all | toolchain | compile | finish) ;;
+    all | toolchain | compile | resume | finish) ;;
     *) echo "error: unknown stage '$stage'" >&2; exit 2 ;;
 esac
 python=/opt/python/$python_dir/bin/python
@@ -84,7 +88,8 @@ if [ ! -x "$python" ]; then
     echo "error: no $python: run this in the manylinux_2_34 image named in pyproject.toml" >&2
     exit 1
 fi
-[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^[1-9][0-9]*$ ]] || {
+case "$stage" in compile | resume) minutes=${minutes:-270} ;; esac
+[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^([1-9][0-9]*)?$ ]] || {
     echo "error: --jobs, --cuda-jobs and --minutes must be positive" >&2
     exit 2
 }
@@ -112,12 +117,17 @@ export TMPDIR=$work/tmp PIP_CACHE_DIR=$work/cache/pip XDG_CACHE_HOME=$work/cache
 export PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
 mkdir -p "$TMPDIR"
 start=$SECONDS
-step() { printf '\n== %s (%d min)\n' "$1" $(((SECONDS - start) / 60)); }
+step() {
+    printf '\n== %s (%d min, %s free in %s)\n' "$1" $(((SECONDS - start) / 60)) \
+        "$(df -h --output=avail "$work" | tail -1 | tr -d ' ')" "$work"
+}
 
 src=$work/src
 build_venv=$work/venv-build
 xla_include=$work/jaxlib/jaxlib/include
-if [ "$stage" = finish ]; then
+resuming=no
+case "$stage" in resume | finish) resuming=yes ;; esac
+if [ $resuming = yes ]; then
     # the source copy keeps the modification times the build tree was made with; a fresh copy would rebuild it all
     for path in "$src/pyproject.toml" "$build_venv/bin/python" "$xla_include/xla/ffi/api/ffi.h" "$work/build"; do
         [ -e "$path" ] || { echo "error: no $path: run the compile stage with this --work first" >&2; exit 1; }
@@ -134,7 +144,7 @@ readelf=$toolchain/gcc/bin/x86_64-conda-linux-gnu-readelf
 nvcc=$toolchain/cuda/bin/nvcc
 "$nvcc" --version | tail -2
 
-if [ "$stage" != finish ]; then
+if [ $resuming = no ]; then
     step "source copy with the CUDA wheel version"
     rm -rf "$src" "$work/build" "$work/dist" "$work/repaired" "$work/jaxlib" "$build_venv"
     mkdir -p "$src"
@@ -155,11 +165,11 @@ version=$("$python" -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv
     "$src/pyproject.toml")
 
 step "build mymyr $version for $python_abi, CUDA architectures $archs"
-rm -rf "$work/dist"
+rm -rf "$work/dist" "$work/build-status"
 export CMAKE_BUILD_PARALLEL_LEVEL=$jobs
-# the compile stage stops Ninja cleanly at the time limit (ci/run_until.py), and the finish stage resumes it
+# Ninja stops cleanly at the time limit (ci/run_until.py), and a resume or finish stage resumes it
 until=()
-if [ "$stage" = compile ]; then
+if [ -n "$minutes" ]; then
     until=("$python" -I "$repo/ci/run_until.py" "$(($(date +%s) + minutes * 60 - (SECONDS - start)))" --)
 fi
 status=0
@@ -172,13 +182,21 @@ ${until[@]+"${until[@]}"} "$build_venv/bin/python" -m pip wheel -v --no-deps --n
     -C cmake.define.CMAKE_CUDA_ARCHITECTURES="$archs" \
     -C cmake.define.CMAKE_JOB_POOLS="cuda_compile=$cuda_jobs;cuda_compile_heavy=1" \
     -C cmake.define.MYMYR_XLA_FFI_INCLUDE="$xla_include" \
+    -C cmake.define.MYMYR_BENCH=OFF \
     "$src" || status=$?
-if [ "$stage" = compile ] && [ $status -eq 75 ]; then
-    step "done: build stopped at the time limit of $minutes min, resume it with --stage finish"
-    exit 0
+if [ $status -eq 75 ]; then
+    if [ "$stage" = compile ] || [ "$stage" = resume ]; then
+        echo stopped > "$work/build-status"
+        step "done: build stopped at the time limit of $minutes min, resume it with --stage resume or finish"
+        exit 0
+    fi
+    echo "error: the build did not finish within the time limit of $minutes min; resume it with --stage finish," \
+         "or build fewer architectures (--archs)" >&2
+    exit 1
 fi
 [ $status -eq 0 ] || { echo "error: the build failed" >&2; exit $status; }
-if [ "$stage" = compile ]; then
+if [ "$stage" = compile ] || [ "$stage" = resume ]; then
+    echo finished > "$work/build-status"
     step "done: build finished, package and test it with --stage finish"
     exit 0
 fi
@@ -221,16 +239,17 @@ if [ "$have_sass" != "$want_sass" ] || [ "$have_ptx" != "$want_ptx" ]; then
     status=1
 fi
 [ $status -eq 0 ] || exit 1
-rm -rf "$check"
 ls -l "$wheel"
+# the tests need none of the build, and its disk space goes to their environment
+rm -rf "$check" "$work/build" "$work/dist" "$work/jaxlib" "$build_venv"
 
 step "test the wheel with the CPU suite, no GPU visible, torch imported first"
 venv=$work/venv-test
 rm -rf "$venv" "$work/consumer-"*
 "$python" -m venv "$venv"
-"$venv/bin/python" -m pip install --quiet --require-hashes --no-deps --only-binary=:all: \
+"$venv/bin/python" -m pip install --quiet --no-cache-dir --require-hashes --no-deps --only-binary=:all: \
     -r "$src/ci/cuda_wheel_test_requirements.txt"
-"$venv/bin/python" -m pip install --quiet --force-reinstall --no-deps "$wheel"
+"$venv/bin/python" -m pip install --quiet --no-cache-dir --force-reinstall --no-deps "$wheel"
 bash "$src/tests/parity/fetch_data.sh" "$work/test-data"
 mkdir -p "$work/test-run"
 (

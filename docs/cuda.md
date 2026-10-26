@@ -67,12 +67,14 @@ runs in the manylinux image of the release wheels (`manylinux-x86_64-image` unde
 `pyproject.toml`): it installs GCC 16, the dependencies and the CUDA 13.4 compiler (checksums in `ci/cuda_redist.json`)
 into a toolchain directory that later builds reuse, builds the wheel with the version `<version>+cu13` and pinned build
 requirements, repairs it with auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and
-runs the CPU test suite on it with torch loaded first. It needs network access, and its work directory takes about 7 GB
-per architecture. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc compiles. Nearly all of
-that time is per architecture (cicc and ptxas; the front end that the architectures share is a few percent), so the
-three architectures of the release wheels take three times as long. `--stage compile --minutes N` stops the build
-cleanly after N minutes, and `--stage finish` on the same work directory and toolchain resumes it and then packages and
-tests the wheel; the release workflow splits each wheel across two jobs this way.
+runs the CPU test suite on it with torch loaded first. It needs network access; its work directory takes about 1.2 GB
+per architecture for the build tree, which it removes before the test environment (about 4.5 GB) is installed, and the
+toolchain directory about 1.7 GB. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc
+compiles. Nearly all of that time is per architecture (cicc and ptxas; the front end that the architectures share is a
+few percent), so the three architectures of the release wheels take three times as long. `--stage compile --minutes N`
+stops the build cleanly N minutes after the script started, `--stage resume` on the same work directory and toolchain
+resumes it and stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
+the release workflow splits each wheel across up to three jobs this way.
 
 From the repository root, with podman (`docker run` takes the same arguments):
 
