@@ -253,7 +253,7 @@ def plan_rows(
                 if found not in same:
                     same.append(found)
             picked.append(same)
-        row = np.ascontiguousarray(np.asarray(step.full.succ)[at : at + 1], dtype=np.uint64)
+        row = np.array(np.asarray(step.full.succ)[at : at + 1], dtype=np.uint64)  # a copy, so no row keeps its expansion alive
         rows.append(row[0])
     goal_reached = bool(np.asarray(rl.is_goal(source, row, task_ids))[0])
     if goal_state:
@@ -261,10 +261,7 @@ def plan_rows(
     else:
         rows.pop()
         num_actions = num_actions[:n]
-    words = max(len(r) for r in rows) if rows else row.shape[1]
-    stacked = np.zeros((len(rows), words), np.uint64)
-    for k, r in enumerate(rows):
-        stacked[k, : len(r)] = r
+    stacked = np.stack(rows) if rows else np.empty((0, row.shape[1]), np.uint64)
     eq = None
     if equivalent is not None:
         eq = np.full((n, max((len(p) for p in picked), default=1)), -1, np.int32)
