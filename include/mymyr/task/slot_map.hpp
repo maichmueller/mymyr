@@ -7,6 +7,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace mymyr
@@ -23,6 +24,7 @@ struct SlotMapView
 /// A reusable name-based mapping between parses. Both tasks must outlive it.
 /// Predicate/function names, arities and ordered object names identify atoms and numeric values.
 /// Snapshots are immutable, remain valid as the source grows, and cover all source slots reserved before the call.
+/// Construction takes time linear in the declarations, the static facts and the canonical layouts.
 class SlotMap
 {
 public:
@@ -30,6 +32,9 @@ public:
     static constexpr u32 missing = ~u32{0};
     static constexpr u32 checked_static = ~u32{0} - 1;
     [[nodiscard]] static std::shared_ptr<SlotMap> between(const Task& source, const Task& target);
+    /// One entry per source fluent slot: missing, checked_static (a fact the target holds statically), or the target
+    /// fluent slot. For a target with lazy slots the entry is the target atom's canonical id instead, which
+    /// translate_row interns on use, so that translating a row assigns target slots only to the atoms the row holds.
     [[nodiscard]] std::shared_ptr<const std::vector<u32>> snapshot() const;
     [[nodiscard]] const Task& source() const noexcept { return m_source; }
     [[nodiscard]] const Task& target() const noexcept { return m_target; }
@@ -38,20 +43,34 @@ public:
     [[nodiscard]] const std::vector<std::string>& missing_constants() const noexcept { return m_missing_constants; }
     /// Unmatched source predicate signatures and object names, available without translating a row.
     [[nodiscard]] const std::vector<std::string>& unmatched() const noexcept { return m_unmatched; }
+    /// Throws for a bit outside slots (a snapshot). For a target with lazy slots, also interns the target atoms of the
+    /// row's true source atoms, so that the row translates into target().words() words.
+    void prepare_row(std::span<const u32> slots, StateView source, u64 row = 0) const;
     /// Maps one row in O(source words + true atoms + numeric slots + target words).
-    /// Missing true atoms and numeric values raise with their name and row unless drop is true.
-    /// Unmatched target numeric slots retain their initial values. Returns whether every source value was preserved.
+    /// A bit outside slots raises first; then missing true atoms and numeric values raise with their name and row
+    /// unless drop is true. Unmatched target numeric slots retain their initial values. Returns whether every source
+    /// value was preserved.
     bool translate_row(std::span<const u32> slots, StateView source, std::span<u64> atoms,
                        std::span<u64> numeric, bool drop = false, u64 row = 0) const;
     [[nodiscard]] State translate(StateView source, bool drop = false, bool* lossless = nullptr, u64 row = 0) const;
 
 private:
+    struct FactHash
+    {
+        usize operator()(const std::vector<u32>& fact) const noexcept;
+    };
+
     const Task& m_source;
     const Task& m_target;
+    /// Source and target agree on predicates, objects and canonical layout: entries come from canonical ids directly.
+    bool m_same_layout = false;
     [[nodiscard]] u32 match_atom(u32 predicate, std::span<const u32> arguments) const;
+    [[nodiscard]] u32 target_entry(u32 cid) const;
     std::vector<u32> m_predicates, m_objects, m_numeric;
     std::vector<u64> m_constant;
     std::vector<std::string> m_unmatched, m_missing_constants;
+    /// [predicate, objects...] of the target static facts whose predicate a source fluent predicate maps to.
+    std::unordered_set<std::vector<u32>, FactHash> m_target_statics;
     mutable std::mutex m_mutex;
     mutable std::shared_ptr<const std::vector<u32>> m_slots;
 };

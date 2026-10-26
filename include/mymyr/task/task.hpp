@@ -185,7 +185,7 @@ public:
     /// Cached map to a fixed-slot task with the same problem fingerprint and numeric layout, or null if incompatible.
     /// The target must outlive every use of the returned map.
     [[nodiscard]] std::shared_ptr<SlotMap> slot_map_to(const Task& target) const;
-    /// Cached name-based map. The target must outlive every use of the returned map.
+    /// Name-based map, cached while the target lives. The target must outlive every use of the returned map.
     [[nodiscard]] std::shared_ptr<SlotMap> translation_map_to(const Task& target) const;
     /// Translate a state into target's slot and numeric layout. Missing true atoms/values raise unless drop is true.
     [[nodiscard]] State translate(StateView state, const Task& target, bool drop = false, bool* lossless = nullptr) const;
@@ -274,7 +274,13 @@ private:
     mutable std::mutex m_frozen_mutex;
     mutable std::array<std::shared_ptr<const Task>, 3> m_frozen;
     mutable std::array<std::shared_ptr<SlotMap>, 3> m_slot_maps;
-    mutable std::unordered_map<u64, std::shared_ptr<SlotMap>> m_translations;
+    /// Name-based maps by target uid. An entry holds its target weakly and goes when the target does.
+    struct Translation
+    {
+        std::weak_ptr<const Task> target;
+        std::shared_ptr<SlotMap> map;
+    };
+    mutable std::unordered_map<u64, Translation> m_translations;
     friend class WorkspaceLease;
     void give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept;
 

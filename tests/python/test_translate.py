@@ -349,3 +349,56 @@ def test_mixed_table_widths_ignore_padding(tmp_path):
         translated = src.translate(encoded, dst)
         expected[row, :translated.shape[1]] = translated[0]
     assert np.array_equal(a.translate(rows, ids, b), expected)
+
+
+def test_lazy_targets_intern_only_translated_atoms(tmp_path):
+    source, _ = ipc_pair(tmp_path, "dense")
+    _, target = ipc_pair(tmp_path, "lazy")
+    before = target.num_atoms
+    states = walk(source, steps=4, walks=1)
+    translated = mymyr.SlotMap(source, target).translate(states)
+    assert [names(s) for s in translated] == [names(s) for s in states]
+    assert target.num_atoms <= before + len(set().union(*(names(s) for s in states)))
+    assert target.num_atoms < source.num_atoms
+    rows = source.translate(source.encode(states), target)
+    assert rows.shape == (len(states), target.words)
+    assert np.array_equal(target.translate(rows, source), source.encode(states))
+
+
+def invalid_and_missing_rows():
+    """Rows 0 and 2 hold an atom the target lacks; row 2 also sets a bit past the source's slots."""
+    source = parse(DOMAIN, PROBLEM, atoms="dense")
+    target = parse(DOMAIN.replace("(q ", "(r "), PROBLEM.replace("(q ", "(r "), atoms="dense")
+    rows = source.encode([source.state(["(q two)"]), source.initial_state, source.state(["(q two)"])])
+    rows[2, -1] |= np.uint64(1 << 63)
+    return source, target, rows, 64 * rows.shape[1] - 1
+
+
+def test_invalid_slots_raise_before_missing_values():
+    source, target, rows, slot = invalid_and_missing_rows()
+    for missing in ("raise", "drop"):
+        for pool in (None, rl.ThreadPool(2)):
+            with pytest.raises(ValueError, match=f"row 2 sets an unknown source slot {slot}$"):
+                source.translate(rows, target, missing=missing, pool=pool)
+
+
+def test_device_invalid_slots_raise_like_the_host():
+    torch = gpu()
+    source, target, host, slot = invalid_and_missing_rows()
+    rows = torch.from_numpy(host.view(np.int64).copy()).cuda()
+    mapping = mymyr.SlotMap(source, target)
+    for missing in ("raise", "drop"):
+        with pytest.raises(ValueError, match=f"row 2 sets an unknown source slot {slot}$"):
+            mapping.translate(rows, missing=missing)
+    status = torch.empty(3, dtype=torch.int32, device="cuda")
+    mapping.translate(rows, status=status)
+    torch.cuda.synchronize()
+    assert status.tolist() == [3, 2, slot]
+    clean = torch.from_numpy(host[:2].view(np.int64).copy()).cuda()
+    mapping.translate(clean, status=status)
+    torch.cuda.synchronize()
+    assert status.tolist() == [1, 0, status[2].item()] and status[2].item() >= 0
+    a, b = rl.TaskTable([source, source]), rl.TaskTable([target, target])
+    ids = torch.tensor([0, 1, 5], dtype=torch.int32, device="cuda")
+    with pytest.raises(ValueError, match=r"task_ids\[2\] is outside the source table"):
+        a.translate(clean.repeat(2, 1)[:3], ids, b, missing="drop")

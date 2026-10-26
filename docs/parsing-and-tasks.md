@@ -235,10 +235,28 @@ is lazy and accept its States, including while another thread searches that sour
 parsed domains and problems, match their atom and numeric function names:
 
 ```python
+import mymyr
+
+domain = """(define (domain move) (:requirements :strips)
+  (:predicates {})
+  (:action go :parameters (?x ?y)
+    :precondition (and (at ?x) (free ?y))
+    :effect (and (at ?y) (free ?x) (not (at ?x)) (not (free ?y)))))"""
+problem = "(define (problem p) (:domain move) (:objects {}) (:init (at a) (free b) (free c)) (:goal (at c)))"
+source = mymyr.Task(mymyr.Domain.from_string(domain.format("(at ?x) (free ?x)"))
+                    .instantiate_string(problem.format("a b c")))
+# The same problem with predicates and objects declared in another order: other slots, the same names.
+target = mymyr.Task(mymyr.Domain.from_string(domain.format("(free ?x) (at ?x)"))
+                    .instantiate_string(problem.format("c b a")))
+states = [source.initial_state]
+states += [source.apply(states[0], action) for action in source.applicable_actions(states[0])]
+
 translated = source.translate(states, target)
 rows = source.translate(source.encode(states), target)
 mapping = mymyr.SlotMap(source, target)
 translated, lossless = mapping.translate(states, missing='drop')
+assert lossless.all()
+assert [{str(a) for a in s.atoms()} for s in translated] == [{str(a) for a in s.atoms()} for s in states]
 ```
 
 A State returns a State owned by `target`; a list returns a list. NumPy, torch and JAX row arrays return rows in the
@@ -252,15 +270,19 @@ checking that a row is reachable or that the two tasks have equivalent actions.
 
 A source fluent that is static in the target is accepted when the target holds that fact. A source static fact that
 is fluent in the target is added to every row. Derived atoms are evaluated by the target. Host translation supports
-lazy sources and targets: maps extend as source slots appear, and target slots are interned under the task's normal
-thread safety rules. Raw lazy rows refer to the source task's current numbering. `pool=rl.ThreadPool(...)` splits
+lazy sources and targets: maps extend as source slots appear, and a lazy target assigns slots only to the atoms that
+translated rows hold (and to static source facts that are fluent in the target), under the task's normal thread
+safety rules. A row with a bit outside the source's slots raises before any missing value is reported, under both
+`missing` modes. Raw lazy rows refer to the source task's current numbering. `pool=rl.ThreadPool(...)` splits
 host batches across workers; the native loop releases the GIL. A reusable map avoids rebuilding name lookups.
 
 CUDA translation requires fixed target slots. It runs on `stream=` (or the task's context stream) and normally checks
 for errors after waiting. Passing a CUDA int32 `status` array of shape `[3]` leaves the check to the caller and permits
-graph capture. Its entries are flags, first offending row, first offending source slot; success is `[0, -1, -1]`.
-Flags are 1 for a missing value, 2 for invalid source slots or task ids, and 4 for unrepresentable numeric values.
-Numeric slots follow the instance's fluent slots in an error report, followed by unrepresentable static facts. Warm the map on the same context before capture,
+graph capture. Its entries are the flags of all rows, then the row and source slot of the first error, the one that
+host translation with `missing='raise'` reports; success is `[0, -1, -1]`. Flags are 1 for a missing value, 2 for invalid source slots or
+task ids, and 4 for unrepresentable numeric values. With flag 2 the error is the first row with an invalid source slot
+(the slot) or task id (slot -1). Otherwise it is the first row with a missing or unrepresentable value: numeric slots
+follow the instance's fluent slots, followed by unrepresentable static facts. Warm the map on the same context before capture,
 pass both `status=` and `stream=`, and keep inputs, outputs, status and tasks alive through every replay. Each replay
 resets status. Outputs are stream-ordered graph allocations: a native wrapper that retains them between replays must
 instantiate with `cudaGraphInstantiateFlagAutoFreeOnLaunch` ([CUDA graph memory](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__GRAPH.html));

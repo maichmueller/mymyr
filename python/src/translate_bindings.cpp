@@ -94,9 +94,9 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
         if (input.owners[r] != map.sources[i]->uid())
             throw nb::value_error("mymyr: translate: state belongs to another source task");
     }
-    const u32 tw = table ? map.target_words : std::max<u32>(1, map.targets[0]->words());
     const u32 tn = table ? map.target_numeric : map.targets[0]->numeric_words();
-    if (!states && !table && map.sources[0]->atoms().frozen() && input.view.words == tw && sn == tn &&
+    if (!states && !table && map.sources[0]->atoms().frozen() && sn == tn &&
+        input.view.words == std::max<u32>(1, map.targets[0]->words()) &&
         map.sources[0]->encoding_fingerprint() == map.targets[0]->encoding_fingerprint())
     {
         check_task_rows(input, *map.sources[0]);
@@ -107,6 +107,26 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
         return nb::make_tuple(nb::borrow(rows), export_array({mask, mask->data(), rl::DType::Bool,
                               {static_cast<i64>(input.view.rows)}, {}, false, false}, input.fw, input.enc));
     }
+    const auto view_of = [&](u64 r) {
+        const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
+        const u32 source_words = bits::words_for(static_cast<u32>(slots[i]->size()));
+        if (input.view.words < source_words || input.view.numeric_words < map.sources[i]->numeric_words())
+            throw std::invalid_argument("mymyr: translate: source row is too narrow");
+        const u64* row = input.view.row(r);
+        return StateView{row, std::min(input.view.words, source_words), sn ? row + input.view.words : nullptr,
+                         input.view.numeric_words};
+    };
+    {
+        // Every row is checked before any is translated, so that an invalid row is reported before missing values,
+        // and a lazy target interns the atoms of all rows before the output width is fixed.
+        nb::gil_scoped_release release;
+        for (u64 r = 0; r < input.view.rows; ++r)
+        {
+            const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
+            map.maps[i]->prepare_row(*slots[i], view_of(r), r);
+        }
+    }
+    const u32 tw = table ? map.target_words : std::max<u32>(1, map.targets[0]->words());
     const u32 rw = tw + tn;
     auto output = Block::make(checked_mul({input.view.rows, rw, sizeof(u64)}, "translated rows"));
     auto mask = Block::make(input.view.rows);
@@ -118,14 +138,7 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
             for (u64 r = begin; r < end; ++r)
             {
                 const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
-                const auto& src = *map.sources[i];
-                const u32 source_words = bits::words_for(static_cast<u32>(slots[i]->size()));
-                if (input.view.words < source_words || input.view.numeric_words < src.numeric_words())
-                    throw std::invalid_argument("mymyr: translate: source row is too narrow");
-                const u64* row = input.view.row(r);
-                const StateView view{row, std::min(input.view.words, source_words),
-                                     sn ? row + input.view.words : nullptr, input.view.numeric_words};
-                lossless[r] = map.maps[i]->translate_row(*slots[i], view, {data + r * rw, tw},
+                lossless[r] = map.maps[i]->translate_row(*slots[i], view_of(r), {data + r * rw, tw},
                                                         {data + r * rw + tw, tn}, drop || workers != nullptr, r);
             }
         };
@@ -141,10 +154,7 @@ nb::object run(PySlotMap& map, nb::handle rows, nb::handle ids, std::string_view
                 if (!lossless[r])
                 {
                     const u32 i = task_ids ? static_cast<u32>(task_ids[r]) : 0;
-                    const u64* row = input.view.row(r);
-                    const StateView view{row, std::min(input.view.words, bits::words_for(static_cast<u32>(slots[i]->size()))),
-                                         sn ? row + input.view.words : nullptr, input.view.numeric_words};
-                    map.maps[i]->translate_row(*slots[i], view, {data + r * rw, tw}, {data + r * rw + tw, tn}, false, r);
+                    map.maps[i]->translate_row(*slots[i], view_of(r), {data + r * rw, tw}, {data + r * rw + tw, tn}, false, r);
                 }
     }
     nb::object result;

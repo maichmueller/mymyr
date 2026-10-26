@@ -150,12 +150,16 @@ std::shared_ptr<SlotMap> Task::translation_map_to(const Task& target) const
         for (usize mode = 0; mode < m_frozen.size(); ++mode)
             if (m_frozen[mode].get() == &target)
                 return m_slot_maps[mode];
-        if (const auto it = m_translations.find(target.uid()); it != m_translations.end())
-            return it->second;
+        if (const auto it = m_translations.find(target.uid()); it != m_translations.end() && !it->second.target.expired())
+            return it->second.map;
     }
     auto map = SlotMap::between(*this, target);
+    std::weak_ptr<const Task> owner = target.weak_from_this();
+    if (owner.expired())
+        return map;
     std::lock_guard lock(m_frozen_mutex);
-    return m_translations.try_emplace(target.uid(), std::move(map)).first->second;
+    std::erase_if(m_translations, [](const auto& entry) { return entry.second.target.expired(); });
+    return m_translations.try_emplace(target.uid(), Translation{std::move(owner), std::move(map)}).first->second.map;
 }
 
 State Task::translate(StateView state, const Task& target, bool drop, bool* lossless) const

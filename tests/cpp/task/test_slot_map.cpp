@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <sstream>
 #include <thread>
 
@@ -20,6 +21,28 @@ TaskPtr task(bool fixed, bool fact, TaskOptions::Atoms mode = TaskOptions::Atoms
     TaskOptions options;
     options.atoms = mode;
     return Task::create(formalism::read_task_text(text), options);
+}
+
+// n objects; `link` holds 100 facts per object (static or fluent), `at` is fluent with one initial fact.
+TaskPtr linked(u32 n, bool fluent_links, TaskOptions::Atoms mode)
+{
+    std::string facts;
+    for (u32 a = 0; a < n; ++a)
+        for (u32 d = 1; d <= 100; ++d)
+            facts += "0 " + std::to_string(a) + " " + std::to_string((a + d) % n) + "\n";
+    const std::string count = std::to_string(n * 100);
+    const std::string statics = fluent_links ? "0\n" : count + "\n" + facts;
+    const std::string fluents = fluent_links ? std::to_string(n * 100 + 1) + "\n" + facts : std::string("1\n");
+    std::istringstream text("O " + std::to_string(n) + "\nP 2\n" + (fluent_links ? "F" : "S") + " 2 link\nF 1 at\nSI " +
+                            statics + "FI " + fluents + "1 0\nG 0\nA 0\n");
+    TaskOptions options;
+    options.atoms = mode;
+    return Task::create(formalism::read_task_text(text), options);
+}
+
+f64 seconds_since(std::chrono::steady_clock::time_point start)
+{
+    return std::chrono::duration<f64>(std::chrono::steady_clock::now() - start).count();
 }
 
 TEST(SlotMap, StaticFactsBecomeConstantFluentBits)
@@ -156,6 +179,83 @@ TEST(SlotMap, SnapshotsAndFingerprintsWaitForConcurrentPublication)
     for (u32 object = 0; object < 4096; ++object)
         (void)serial->atoms().intern(serial->atoms().layout().encode(0, &object));
     EXPECT_EQ(source->encoding_fingerprint(), serial->encoding_fingerprint());
+}
+
+
+TEST(SlotMap, ManyStaticFactsMapInLinearTime)
+{
+    // 150,000 static facts: comparing every source fact with every target fact takes several seconds.
+    const auto source = linked(1500, false, TaskOptions::Atoms::Dense), target = linked(1500, false, TaskOptions::Atoms::Dense);
+    auto start = std::chrono::steady_clock::now();
+    const auto map = SlotMap::between(*source, *target);
+    EXPECT_EQ(map->translate(source->initial_state()), target->initial_state());
+    const auto lazy = linked(1500, false, TaskOptions::Atoms::Lazy);
+    const auto twin = lazy->frozen(TaskOptions::Atoms::Dense);
+    EXPECT_EQ(lazy->slot_map_to(*twin)->translate(lazy->initial_state()), twin->initial_state());
+    EXPECT_LT(seconds_since(start), 3.0);
+
+    // Every source fluent link is checked against the target's static links.
+    const auto fluent = linked(400, true, TaskOptions::Atoms::Dense), statics = linked(400, false, TaskOptions::Atoms::Dense);
+    start = std::chrono::steady_clock::now();
+    const auto checked = SlotMap::between(*fluent, *statics);
+    const State state = checked->translate(fluent->initial_state());
+    EXPECT_LT(seconds_since(start), 3.0);
+    EXPECT_EQ(state, statics->initial_state());
+}
+
+TEST(SlotMap, LazyTargetsInternOnlyTranslatedAtoms)
+{
+    const auto source = linked(400, true, TaskOptions::Atoms::Dense), target = linked(400, true, TaskOptions::Atoms::Lazy);
+    const u32 before = target->atoms().fluent_slots();
+    const auto map = SlotMap::between(*source, *target);
+    (void)map->snapshot();
+    EXPECT_EQ(target->atoms().fluent_slots(), before);
+    const ObjectId objects[2] = {ObjectId{3}, ObjectId{4}};
+    const AtomArgs atom{PredicateId{0}, {objects, 2}};
+    const State state = source->make_state({&atom, 1});
+    const State translated = map->translate(state);
+    EXPECT_LE(target->atoms().fluent_slots(), before + 1);
+    EXPECT_EQ(target->format_atoms(translated), source->format_atoms(state));
+}
+
+TEST(SlotMap, InvalidSlotsAreReportedBeforeMissingAtoms)
+{
+    const auto source = task(false, true), target = task(true, false);
+    const auto map = SlotMap::between(*source, *target);
+    const auto slots = map->snapshot();
+    ASSERT_EQ(slots->size(), 2);
+    ASSERT_EQ((*slots)[0], SlotMap::missing);
+    const u64 word = 0b101;  // slot 0 is missing in the target, slot 2 is outside the source
+    std::vector<u64> atoms(target->words() + 1), numeric;
+    for (const bool drop : {false, true})
+    {
+        try
+        {
+            (void)map->translate_row(*slots, StateView{&word, 1, nullptr, 0}, atoms, numeric, drop, 7);
+            ADD_FAILURE() << "an invalid slot must raise";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_STREQ(e.what(), "mymyr: translate: row 7 sets an unknown source slot 2");
+        }
+    }
+}
+
+TEST(SlotMap, CachedMapsLeaveWithTheirTargets)
+{
+    const auto source = task(false, true);
+    std::weak_ptr<SlotMap> first;
+    {
+        const auto target = task(false, false);
+        first = source->translation_map_to(*target);
+        EXPECT_EQ(first.lock(), source->translation_map_to(*target));
+    }
+    for (u32 i = 0; i < 4; ++i)
+    {
+        const auto target = task(false, false);
+        (void)source->translation_map_to(*target)->translate(source->initial_state());
+    }
+    EXPECT_TRUE(first.expired());
 }
 
 }
