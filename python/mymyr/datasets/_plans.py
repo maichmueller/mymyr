@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 __all__ = ["PlanRows", "plan_rows"]
 
-ActionLike = Any
-"""An ``Action``, a label ``(schema, binding)`` or a line of IPC plan text."""
+ActionLike = Any  # an Action, a label (schema, binding) or a line of IPC plan text
 
 
 @dataclass(frozen=True)

@@ -139,6 +139,27 @@ def test_batched_env_steps_follow_a_plan():
     assert env.at_goal.all()
 
 
+SWITCHES = """(define (domain switches)
+ (:requirements :strips :negative-preconditions)
+ (:predicates (live) (p))
+ (:action idle-a :parameters (?x) :precondition (live) :effect (and))
+ (:action idle-b :parameters (?x) :precondition (live) :effect (and))
+ (:action set :parameters (?x) :precondition (and (live) (not (p))) :effect (p)))"""
+
+
+@needs_frontend
+def test_noop_steps_are_flagged_and_kept_by_drop_noops_only_without_other_actions():
+    problem = "(define (problem switches) (:domain switches) (:objects a) (:init (live)) (:goal (p)))"
+    task = mymyr.Task(mymyr.Domain.from_string(SWITCHES).instantiate_string(problem), atoms="dense")
+    pr = datasets.plan_rows(task, "(idle-b a)\n(set a)\n(idle-a a)\n", goal_state=True)
+    assert pr.noop.tolist() == [True, False, True] and pr.goal_reached
+    assert np.array_equal(pr.rows[0], pr.rows[1]) and np.array_equal(pr.rows[2], pr.rows[3])
+    check_against_expansions(task, pr)
+    assert len(np.flatnonzero(rl.expand(task, pr.rows[:1], drop_noops=True).index == pr.index[0])) == 0
+    ds = datasets.StateRows.from_plans([pr])
+    assert ds.labels["noop"].tolist() == [True, False, True, False]
+
+
 def test_witness_pruning_locates_pruned_actions_at_their_witness():
     task = text_task("organic-synthesis-opt18-strips__p20")
     plan = random_walk(task, 2)
