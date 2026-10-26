@@ -3,8 +3,10 @@
 #include "iw_detail.hpp"
 
 #include "tree_rows.hpp"
+#include "mymyr/core/memory.hpp"
 #include "mymyr/task/task.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <numeric>
 
@@ -59,15 +61,26 @@ public:
     {
         if (!m_rows)
             return;
-        const auto [row, fresh] = m_rows->insert(state);
-        (void)fresh;
+        SearchTree& t = *m_tree;
+        const usize at = t.t_row.size();
+        if (at == t.t_row.capacity())
+        {
+            // the transition arrays grow together, into buffers advised for huge pages
+            const usize capacity = std::max<usize>(at * 2, 1024);
+            reserve_huge(t.t_schema, capacity);
+            reserve_huge(t.t_binding, capacity * t.label_width);
+            reserve_huge(t.t_row, capacity);
+            reserve_huge(t.t_child, capacity);
+            reserve_huge(t.t_outcome, capacity);
+        }
         if (m_segments.empty() || m_segments.back().parent != parent)
-            m_segments.push_back({parent, m_tree->t_row.size()});
-        m_tree->t_schema.push_back(static_cast<i32>(schema));
-        append_binding(m_tree->t_binding, binding, arity);
-        m_tree->t_row.push_back(static_cast<i32>(row));
-        m_tree->t_child.push_back(child == ~u32{0} ? -1 : index(child));
-        m_tree->t_outcome.push_back(static_cast<u8>(outcome));
+            m_segments.push_back({parent, at});
+        t.t_schema.push_back(static_cast<i32>(schema));
+        append_binding(t.t_binding, binding, arity);
+        t.t_row.push_back(-1);
+        m_rows->stage(state, at, t.t_row);
+        t.t_child.push_back(child == ~u32{0} ? -1 : index(child));
+        t.t_outcome.push_back(static_cast<u8>(outcome));
     }
 
     /// Move the engine's storage into the public layout. Padding is rebuilt only when lazy-slot growth changed
@@ -112,7 +125,10 @@ public:
         m_goals.resize(N, -1);
         if (m_rows)
         {
-            std::vector<i32> remap(m_rows->size(), -1);
+            m_rows->flush(t.t_row);
+            std::vector<i32> remap;
+            reserve_huge(remap, m_rows->size());
+            remap.resize(m_rows->size(), -1);
             for (usize i = 0; i < N; ++i)
             {
                 const u64* row = R ? t.rows.data() + i * R : nullptr;
@@ -123,6 +139,7 @@ public:
             }
             usize next_row = N;
             row_count = N + static_cast<usize>(std::count(remap.begin(), remap.end(), -1));
+            reserve_huge(t.rows, row_count * R);
             t.rows.resize(row_count * R, 0);
             for (u32 i = 0; i < m_rows->size(); ++i)
                 if (remap[i] < 0)
