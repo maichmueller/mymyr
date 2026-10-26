@@ -103,7 +103,7 @@ _ids = itertools.count(1)
 
 
 def register(obj: Any) -> int:
-    """The op handle of a TaskTable, Task, TaskHandle or native Env (the same handle for the same object). The
+    """The op handle of a TaskTable, Task, TaskHandle, encoder or native Env (the same handle for the same object). The
     registry holds a reference until :func:`unregister`."""
     with _lock:
         h = _by_id.get(id(obj))
