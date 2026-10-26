@@ -170,6 +170,42 @@ TEST(CudaRuntime, LastUseFreesAfterTheCallersStreamIsGone)
     }
 }
 
+TEST(CudaRuntime, ReleasesDuringUnrelatedGraphCapture)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    cuda::Stream capture, user;
+    cuda::DeviceBuffer marker(ctx, sizeof(u64));
+    for (u32 cycle = 0; cycle < 12; ++cycle)
+    {
+        cuda::DeviceBuffer allocation(ctx, 4096), recorded(ctx, 4096), tracked(ctx, 4096);
+        cuda::stream_wait(user, ctx->stream());
+        recorded.record_stream(user);
+        auto last = std::make_shared<cuda::LastUse>(ctx->device());
+        last->record(user);
+        tracked.retire_stream(ctx->stream(), last);
+        cuda::stream_wait(capture, ctx->stream());
+        auto graph = cuda::GraphExec::capture(capture, [&] {
+            cuda::check(k::launch_iota(static_cast<u64*>(marker.data()), 1, cycle, capture), "iota");
+            allocation.reset();
+            recorded.reset();
+            tracked.reset();
+        });
+        for (u32 replay = 0; replay < 3; ++replay)
+        {
+            graph.launch(capture);
+            const auto h = to_host<u64>(marker.data(), 1, capture);
+            ASSERT_EQ(h[0], cycle);
+        }
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, sizeof(u64));
+        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+        cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "get capture mode");
+        EXPECT_EQ(mode, cudaStreamCaptureModeGlobal);
+        cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "restore capture mode");
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ arenas
 
 TEST(CudaArena, AppendsTailsSyncsAndGrows)

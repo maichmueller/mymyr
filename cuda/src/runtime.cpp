@@ -1,6 +1,7 @@
 // The CUDA backend's runtime layer: contexts, pools, buffers, events (include/mymyr/cuda/runtime.hpp).
 
 #include "completed_release.hpp"
+#include "capture_mode.hpp"
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
@@ -120,6 +121,7 @@ Stream::Stream() { check(cudaStreamCreateWithFlags(&m_s, cudaStreamNonBlocking),
 
 Stream::~Stream()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m_s)
     {
         (void)cudaStreamSynchronize(m_s);
@@ -168,7 +170,10 @@ public:
     void deallocate(void* p, usize, usize) noexcept override
     {
         if (p)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(p);
+        }
     }
     [[nodiscard]] MemKind kind() const noexcept override { return MemKind::Pinned; }
 
@@ -192,7 +197,10 @@ public:
     void deallocate(void* p, usize, usize) noexcept override
     {
         if (p)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFree(p);
+        }
     }
     [[nodiscard]] MemKind kind() const noexcept override { return MemKind::Managed; }
 
@@ -241,6 +249,7 @@ DeviceContext::DeviceContext(Private, int device, const ContextOptions& options)
 
 DeviceContext::~DeviceContext()
 {
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         DeviceGuard g(m_device);
@@ -279,6 +288,7 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
 {
     if (!p)
         return;
+    detail::RelaxedCaptureScope capture_mode;
     int prev = -1;
     const bool got = cudaGetDevice(&prev) == cudaSuccess;
     if (got && prev != m_device)
@@ -571,7 +581,10 @@ PinnedBuffer::PinnedBuffer(u64 bytes) : m_bytes(bytes)
 PinnedBuffer::~PinnedBuffer()
 {
     if (m_ptr)
+    {
+        detail::RelaxedCaptureScope capture_mode;
         (void)cudaFreeHost(m_ptr);
+    }
 }
 
 PinnedLease::~PinnedLease() { give_back(); }
@@ -612,7 +625,10 @@ PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& o) noexcept
     if (this != &o)
     {
         if (m_ptr)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(m_ptr);
+        }
         m_ptr = std::exchange(o.m_ptr, nullptr);
         m_bytes = std::exchange(o.m_bytes, 0);
     }

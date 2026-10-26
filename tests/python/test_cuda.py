@@ -12,6 +12,7 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # JAX would take 75% of the GPU otherwise
 
+import gc  # noqa: E402
 import random  # noqa: E402
 import threading  # noqa: E402
 
@@ -41,6 +42,89 @@ def torch_cuda():
     if not torch.cuda.is_available():
         pytest.skip("torch has no CUDA device")
     return torch
+
+
+@pytest.mark.parametrize("source", ["expand", "expand_dlpack", "encoding", "brfs", "device", "pinned", "managed",
+                                    "last_context"])
+@pytest.mark.parametrize("capture_thread", [False, True])
+def test_outputs_collected_during_unrelated_capture(source, capture_thread):
+    torch = torch_cuda()
+    from mymyr import encoding
+
+    task = text_task("gripper__prob05", atoms="dense")
+    table = rl.as_table(task)
+    ctx = mc.Context(0, max_bytes=64 << 20)
+    states = torch.from_numpy(np.asarray(table.initial_states()).view(np.int64).copy()).cuda()
+    if source == "encoding":
+        ctx = rl.expand(table, states).context
+    marker = torch.zeros(1, device="cuda", dtype=torch.int32)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    torch.cuda.synchronize()
+    used, torch_used = [], []
+    for cycle in range(12):
+        if source in ("expand", "expand_dlpack"):
+            output = rl.expand(table, states, ctx=ctx, framework="dlpack" if source == "expand_dlpack" else "torch")
+        elif source == "encoding":
+            encoder = encoding.FlatRelationEncoder(table)
+            output = (encoder, encoder.encode(states))
+            del encoder
+        elif source == "brfs":
+            result = getattr(mc, source)(task, ctx=ctx)
+            output = (result, result.state_words("torch"))
+            del result
+        elif source == "last_context":
+            owner = mc.Context(0, max_bytes=64 << 20)
+            output = mc.to_memory(np.zeros(64, dtype=np.int64), "device", owner)
+            del owner
+        else:
+            output = mc.to_memory(np.zeros(64, dtype=np.int64), source, ctx)
+        garbage = [output]
+        garbage.append(garbage)
+        del output
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        started, released = threading.Event(), threading.Event()
+        errors = []
+
+        def capture():
+            try:
+                with torch.cuda.graph(graph, stream=side):
+                    marker.add_(1)
+                    if capture_thread:
+                        started.set()
+                        assert released.wait(10)
+                    else:
+                        garbage.clear()
+                        gc.collect()
+            except BaseException as error:
+                errors.append(error)
+                started.set()
+
+        if capture_thread:
+            worker = threading.Thread(target=capture)
+            worker.start()
+            try:
+                assert started.wait(10)
+                garbage.clear()
+                gc.collect()
+            finally:
+                released.set()
+                worker.join()
+        else:
+            capture()
+        if errors:
+            raise errors[0]
+        for replay in range(3):
+            graph.replay()
+            torch.cuda.synchronize()
+            assert marker.item() == cycle * 3 + replay + 1
+        graph.reset()
+        ctx.synchronize()
+        used.append(ctx.usage()["used"])
+        torch_used.append(torch.cuda.memory_allocated())
+    assert used[1:] == [used[1]] * (len(used) - 1)
+    assert torch_used[1:] == [torch_used[1]] * (len(torch_used) - 1)
 
 
 def jax_gpu():

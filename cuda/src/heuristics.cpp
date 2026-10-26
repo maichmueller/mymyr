@@ -4,6 +4,8 @@
 
 #include "mymyr/cuda/heuristics.hpp"
 
+#include "capture_mode.hpp"
+
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/heuristics_kernels.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
@@ -179,6 +181,7 @@ DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuri
 
 DeviceHeuristic::~DeviceHeuristic()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

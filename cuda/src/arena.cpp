@@ -2,6 +2,8 @@
 
 #include "mymyr/cuda/arena.hpp"
 
+#include "capture_mode.hpp"
+
 #include "mymyr/core/checked.hpp"
 
 #include <algorithm>
@@ -25,6 +27,7 @@ DeviceArena::DeviceArena(ContextPtr ctx, u32 record_bytes, u64 capacity, bool ho
 
 DeviceArena::~DeviceArena()
 {
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         wait();  // the mirror must outlive the copies into it

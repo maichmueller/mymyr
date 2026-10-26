@@ -143,6 +143,7 @@ public:
     /// streams after an event handoff). Throws CudaError (cudaErrorMemoryAllocation beyond max_bytes).
     [[nodiscard]] void* allocate(u64 bytes, cudaStream_t s);
     /// Stream-ordered free on `s`: the memory is reused only after the work enqueued on s before this call.
+    /// May release memory outside an unrelated stream's graph capture.
     void deallocate(void* p, cudaStream_t s) noexcept;
 
     /// Memory resources (core/memory.hpp) of this context. Device: stream-ordered on stream(), and allocate()

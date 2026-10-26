@@ -6,6 +6,8 @@
 
 #include "mymyr/cuda/expand.hpp"
 
+#include "capture_mode.hpp"
+
 #include "numeric_pad.hpp"
 
 #include "mymyr/core/bitset.hpp"
@@ -1153,6 +1155,7 @@ DeviceExpander::DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStrea
 
 DeviceExpander::~DeviceExpander()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx && !detail::completed_release_active())
     {
         try

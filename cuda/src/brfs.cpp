@@ -2,6 +2,8 @@
 
 #include "mymyr/cuda/brfs.hpp"
 
+#include "capture_mode.hpp"
+
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/threads.hpp"
 #include "mymyr/cuda/generator.hpp"
@@ -189,6 +191,7 @@ DeviceBrfs::DeviceBrfs(ContextPtr ctx, TaskPtr task, const DeviceBrfsOptions& op
 
 DeviceBrfs::~DeviceBrfs()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try
