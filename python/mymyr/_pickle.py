@@ -19,6 +19,9 @@ can store by reference (native nanobind functions cannot be pickled).
 - A mymyr.encoding encoder (FlatRelationEncoder, SimpleEncoder, FlatHorizonEncoder, FlatRootedHorizonEncoder,
   FlatTransitionEncoder, FlatTransitionEffectsEncoder) pickles as its class, its table, its options and its schema's
   fingerprint; loading builds the encoder again and checks the fingerprint.
+- A FactLandmarkGraph pickles as its task, the task's content fingerprint and its arrays (FactLandmarkGraph.to_arrays:
+  canonical atom ids, the same under lazy atom slots); loading checks the fingerprint and validates the arrays
+  (FactLandmarkGraph.from_arrays). The achiever index travels as computed; nothing is grounded again.
 - A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
   space and costs) and is built again when loaded.
 """
@@ -64,6 +67,10 @@ def _restore_generation_result(status, space, states, seconds):
 
 def _restore_search_result(kind, task, fingerprint, fields):
     return _core._search._restore_search_result(kind, task, fingerprint, fields)
+
+
+def _restore_landmark_graph(task, fingerprint, arrays):
+    return _core._search._restore_landmark_graph(task, fingerprint, arrays)
 
 
 def _restore_heuristic(task, kind, costs, evaluation):

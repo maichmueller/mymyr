@@ -313,4 +313,154 @@ private:
     s += ')';
     return s;
 }
+
+/// Checks that `g` is a landmark graph of `task`, for graphs loaded from storage. Throws std::invalid_argument naming
+/// the first violation of:
+///   - every atom (fact landmarks, disjunctive members, ordering endpoints, lifted members and facts, index atoms and
+///     per-action lists) lies in the task's canonical space;
+///   - a lifted landmark names a fluent or derived predicate and binds each of its positions to an object or k_free;
+///     its members are strictly ascending atoms of that predicate agreeing with the binding, its fact is k_no_atom or
+///     the atom of a binding without free positions, and its parents are positions in lifted();
+///   - the achiever index lists ground actions of the task's schemas and objects, strictly ascending; its atoms are
+///     strictly ascending; its CSR offsets start at 0, never decrease and end at the list sizes; each atom's achievers
+///     and first achievers are strictly ascending action ids of the index, the first achievers among the achievers;
+///     and the per-action lists are those the achievers, the first achievers and the fact landmarks determine.
+/// Linear in the size of the graph.
+inline void check(const Task& task, const FactLandmarkGraph& g)
+{
+    const CanonicalLayout& L = task.atoms().layout();
+    const formalism::TaskData& t = task.data();
+    auto fail = [](const std::string& what) { throw std::invalid_argument("mymyr: invalid landmark graph: " + what); };
+    auto atom = [&](CanonicalAtom c, const char* what)
+    {
+        if (c >= L.total)
+            fail(std::string(what) + " " + std::to_string(c) + " lies outside the task's canonical space");
+    };
+    for (CanonicalAtom c : g.landmarks())
+        atom(c, "fact landmark");
+    for (const auto& members : g.disjunctive())
+        for (CanonicalAtom c : members)
+            atom(c, "disjunctive member");
+    for (const auto& [a, b] : g.orderings())
+    {
+        atom(a, "ordering endpoint");
+        atom(b, "ordering endpoint");
+    }
+    std::vector<u32> args(std::max<u32>(1, L.max_arity));
+    for (usize k = 0; k < g.lifted().size(); ++k)
+    {
+        const LiftedLandmark& l = g.lifted()[k];
+        const std::string at = "lifted landmark " + std::to_string(k) + ": ";
+        const u32 p = l.predicate.v;
+        if (p >= t.predicates.size() || !L.has_predicate(p))
+            fail(at + "its predicate is not a fluent or derived predicate of the task");
+        if (l.binding.size() != L.arity[p])
+            fail(at + "its binding does not have the predicate's arity");
+        bool bound = true;
+        for (u32 b : l.binding)
+        {
+            if (b != k_free && b >= L.num_objects)
+                fail(at + "its binding names an object outside the task");
+            bound = bound && b != k_free;
+        }
+        for (usize i = 0; i < l.members.size(); ++i)
+        {
+            atom(l.members[i], "lifted member");
+            if (i > 0 && l.members[i - 1] >= l.members[i])
+                fail(at + "its members are not strictly ascending");
+            if (L.decode(l.members[i], args.data()) != p)
+                fail(at + "a member is an atom of another predicate");
+            for (u32 j = 0; j < L.arity[p]; ++j)
+                if (l.binding[j] != k_free && l.binding[j] != args[j])
+                    fail(at + "a member disagrees with the binding");
+        }
+        if (l.fact != k_no_atom)
+        {
+            atom(l.fact, "lifted fact");
+            if (!bound || L.encode(p, l.binding.data()) != l.fact)
+                fail(at + "its fact is not the atom of its binding");
+        }
+        for (u32 x : l.parents)
+            if (x >= g.lifted().size())
+                fail(at + "a parent lies outside the lifted landmarks");
+    }
+    if (!g.has_achiever_index())
+        return;
+    const AchieverIndex& ix = g.achievers();
+    const usize A = ix.actions.size(), N = ix.atoms.size();
+    for (usize i = 0; i < A; ++i)
+    {
+        const Action& a = ix.actions[i];
+        if (a.schema.v >= t.schemas.size() || a.binding.size() != t.schemas[a.schema.v].arity())
+            fail("achiever index action " + std::to_string(i) + " is not a ground action of the task's schemas");
+        for (ObjectId o : a.binding)
+            if (o.v >= L.num_objects)
+                fail("achiever index action " + std::to_string(i) + " names an object outside the task");
+        if (i > 0 && !AchieverIndex::less(ix.actions[i - 1].label(), a.label()))
+            fail("the achiever index actions are not strictly ascending");
+    }
+    for (usize k = 0; k < N; ++k)
+    {
+        atom(ix.atoms[k], "achiever index atom");
+        if (k > 0 && ix.atoms[k - 1] >= ix.atoms[k])
+            fail("the achiever index atoms are not strictly ascending");
+    }
+    auto offsets = [&](const std::vector<u32>& begin, usize n, usize size, const char* what)
+    {
+        if (begin.size() != n + 1 || begin.front() != 0 || begin.back() != size)
+            fail(std::string("the offsets of the ") + what + " do not span their list");
+        for (usize i = 0; i < n; ++i)
+            if (begin[i] > begin[i + 1])
+                fail(std::string("the offsets of the ") + what + " decrease");
+    };
+    offsets(ix.achievers_begin, N, ix.achievers.size(), "achievers");
+    offsets(ix.first_achievers_begin, N, ix.first_achievers.size(), "first achievers");
+    offsets(ix.achieved_begin, A, ix.achieved.size(), "achieved landmarks");
+    offsets(ix.first_achieved_begin, A, ix.first_achieved.size(), "first-achieved landmarks");
+    offsets(ix.uniquely_achieved_begin, A, ix.uniquely_achieved.size(), "uniquely achieved landmarks");
+    auto ascending_actions = [&](std::span<const u32> v, const char* what)
+    {
+        for (usize i = 0; i < v.size(); ++i)
+            if (v[i] >= A || (i > 0 && v[i - 1] >= v[i]))
+                fail(std::string("the ") + what + " of an atom are not strictly ascending action ids of the index");
+    };
+    for (usize k = 0; k < N; ++k)
+    {
+        const auto all = ix.achievers_of(ix.atoms[k]), first = ix.first_achievers_of(ix.atoms[k]);
+        ascending_actions(all, "achievers");
+        ascending_actions(first, "first achievers");
+        if (!std::includes(all.begin(), all.end(), first.begin(), first.end()))
+            fail("a first achiever of atom " + std::to_string(ix.atoms[k]) + " is not one of its achievers");
+    }
+    // per action: the fact landmarks (ascending) whose list `by` names it
+    auto per_action = [&](auto&& by, const std::vector<u32>& begin, const std::vector<CanonicalAtom>& flat, const char* what)
+    {
+        std::vector<u32> count(A + 1, 0);
+        for (CanonicalAtom c : g.sorted_landmarks())
+            for (u32 x : by(c))
+                ++count[x + 1];
+        for (usize i = 0; i < A; ++i)
+            count[i + 1] += count[i];
+        bool same = count == begin;
+        if (same)
+        {
+            std::vector<CanonicalAtom> want(flat.size());
+            for (CanonicalAtom c : g.sorted_landmarks())
+                for (u32 x : by(c))
+                    want[count[x]++] = c;
+            same = want == flat;
+        }
+        if (!same)
+            fail(std::string("the ") + what + " landmarks per action disagree with the achievers and the fact landmarks");
+    };
+    per_action([&](CanonicalAtom c) { return ix.achievers_of(c); }, ix.achieved_begin, ix.achieved, "achieved");
+    per_action([&](CanonicalAtom c) { return ix.first_achievers_of(c); }, ix.first_achieved_begin, ix.first_achieved, "first-achieved");
+    per_action(
+        [&](CanonicalAtom c)
+        {
+            const auto a = ix.achievers_of(c);
+            return a.size() == 1 ? a : std::span<const u32>{};
+        },
+        ix.uniquely_achieved_begin, ix.uniquely_achieved, "uniquely achieved");
+}
 }  // namespace mymyr::landmarks

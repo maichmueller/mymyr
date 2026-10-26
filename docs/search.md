@@ -310,6 +310,51 @@ translator produces; mymyr works on the PDDL atoms. This accounts for most of th
 - States off the path: Fast Downward assumes its heuristic sees states reached from the initial state; mymyr infers the
   status of another start state (above).
 
+### Landmark graphs
+
+A `FactLandmarkGraph` (from `approximate_fact_landmarks`, `lifted_fact_landmarks`, or given atoms) names its atoms by
+canonical id, a property of the task's content: the same in every process and under lazy atom slots. It pickles as
+its task, the task's content fingerprint and its arrays; loading checks the fingerprint and validates the arrays, and
+nothing is computed again. `to_arrays()` gives the same arrays (NumPy, documented on the method) and
+`FactLandmarkGraph.from_arrays(task, arrays)` reads them back, validated against the task, for a cache of your own:
+
+```python
+import pickle
+
+g = search.approximate_fact_landmarks(task, first_achievers="possibly_before")
+blob = pickle.dumps(g)                    # with the task; or np.savez(path, **g.to_arrays())
+g = pickle.loads(blob)
+g.achievers(g.landmarks[0])               # the achiever index travels with the graph
+```
+
+The arrays include `fingerprint`, a `uint64[1]` array containing the task's content fingerprint. Loading into a task
+with a different fingerprint raises `ValueError`, even when its objects and predicates match. Arrays without this
+entry are accepted with structural validation only; their task identity cannot be checked.
+
+The achiever index dominates the size: a row of 4 (W + 1) bytes per ground action of the grounding (W: the widest
+schema) plus the achiever lists.
+
+A graph made from given atoms has no achiever index unless `achiever_index=True`: then the task is grounded as
+`approximate_fact_landmarks` grounds it. Both accept `max_operators=5_000_000`, `max_bindings=100_000_000`,
+`max_seconds=60.0` (`None`: unlimited), and `max_ground_actions=None` (unlimited; bounds the ground actions the index
+lists); exceeding any limit raises `RuntimeError`. The index is computed for the given landmarks, with first
+achievers by `first_achievers=` (`"hmax"` or `"possibly_before"`):
+
+```python
+subgoals = search.FactLandmarkGraph(task, ["(at ball1 roomb)", "(free left)"], achiever_index=True)
+subgoals.unique_achiever("(at ball1 roomb)")
+```
+
+First achievers are computed from the task's initial state, including for hand-made subgoal sets taken from later
+states. The constructor accepts fluent and derived atoms in landmarks, disjunctive sets and orderings. Derived atoms
+have no action achievers because axioms derive them; the graph's `achieved` / `unachieved` queries see fluent atoms
+only.
+
+On the landmarks of `approximate_fact_landmarks` with the same `first_achievers`, the rebuilt index equals the
+generator's, with one exception: with `"possibly_before"` the generator lists first achievers only for the atoms it
+expanded, the rebuild for every fact landmark and disjunctive member, so `first_achievers()` of an atom that is not a
+fact landmark can differ. To keep a computed index exactly, pickle the graph (or keep its arrays).
+
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and

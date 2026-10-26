@@ -9,6 +9,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 
@@ -20,31 +21,36 @@ namespace
 {
 constexpr u32 k_inf = std::numeric_limits<u32>::max();
 
-class Generator
+/// Step 1 and the possibly-before explorations over one grounding.
+class Exploration
 {
 public:
-    Generator(const RelaxedTask& R, const ApproximateFactLandmarkOptions& o)
-        : R(R), T(R.task()), L(R.task().atoms().layout()), O(o), m_args(std::max<u32>(1, L.max_arity))
+    explicit Exploration(const RelaxedTask& R) : R(R), T(R.task()), L(R.task().atoms().layout()) { dijkstra(); }
+
+    /// The first achievers (operators) of a canonical atom by `rule`; empty for an atom true initially, unreachable or
+    /// outside the grounding. FirstAchievers::PossiblyBefore explores once per atom, on first use.
+    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c, FirstAchievers rule)
     {
+        const u32 pp = R.fluent_props(c).first;
+        if (pp == RelaxedTask::k_none)
+            return {};
+        if (rule == FirstAchievers::PossiblyBefore)
+            return possibly_before(pp);
+        return m_first[pp];
     }
 
-    FactLandmarkGraph run()
+    /// The first achievers of proposition `q` by `rule` as far as they were computed: every proposition's for HMax, the
+    /// propositions first_achievers() explored for PossiblyBefore (empty for the others).
+    [[nodiscard]] std::span<const u32> computed_first_achievers(u32 q, FirstAchievers rule) const
     {
-        dijkstra();
-        fact_landmarks();
-        std::vector<std::vector<CanonicalAtom>> disjunctive;
-        if (O.max_disjunctive_landmark_size > 0)
-            disjunctive = disjunctive_landmarks();
-        return FactLandmarkGraph::create(m_landmarks, std::move(disjunctive), std::move(m_orderings), {}, achiever_index());
+        if (rule == FirstAchievers::HMax)
+            return m_first[q];
+        if (m_pb_done.empty() || !m_pb_done[q])
+            return {};
+        return m_pb[q];
     }
 
 private:
-    /// A "true" proposition of a fluent atom (or of a derived atom, with include_derived_atoms).
-    [[nodiscard]] bool positive_atom(u32 prop) const
-    {
-        return !R.negative(prop) && (R.prop_atom(prop) < L.fluent_count || (O.include_derived_atoms && R.prop_atom(prop) < L.total));
-    }
-
     /// Step 1: h_max-style Dijkstra with unit firing costs, first achievers per proposition.
     void dijkstra()
     {
@@ -199,6 +205,140 @@ private:
         return out;
     }
 
+    const RelaxedTask& R;
+    const Task& T;
+    const CanonicalLayout& L;
+    std::vector<u32> m_cost;
+    std::vector<std::vector<u32>> m_first;  // per proposition: operators of minimal firing cost
+    std::vector<u32> m_cnt0;                // per operator: unsatisfied preconditions in the initial state
+    std::vector<u32> m_init_props;          // the initial state's "true" propositions
+    std::vector<u32> m_init_neg_props;      // the "false" propositions of the atoms false in the initial state
+    // FirstAchievers::PossiblyBefore, per proposition on demand
+    std::vector<std::vector<u32>> m_pb;
+    std::vector<u8> m_pb_done;
+    std::vector<u32> m_adders_begin, m_adders;
+};
+
+/// Step 4: the achiever index over the ground actions of the grounding, with the first achievers `X` computed, for
+/// the fact landmarks `landmarks`.
+AchieverIndex achiever_index(const RelaxedTask& R, const Exploration& X, FirstAchievers rule, std::span<const CanonicalAtom> landmarks)
+{
+    const CanonicalLayout& L = R.task().atoms().layout();
+    // actions add fluent atoms only (axioms derive the derived ones), so the index lists fluent atoms
+    auto positive_fluent = [&](u32 q) { return !R.negative(q) && R.prop_atom(q) < L.fluent_count; };
+    AchieverIndex ix;
+    const u32 G = R.num_ground_actions(), NO = R.num_ops();
+    // ground actions in canonical order
+    std::vector<u32> order(G);
+    for (u32 g = 0; g < G; ++g)
+        order[g] = g;
+    std::sort(order.begin(), order.end(),
+              [&](u32 a, u32 b) { return AchieverIndex::less(R.ground_action_label(a), R.ground_action_label(b)); });
+    std::vector<u32> pos(G);
+    ix.actions.reserve(G);
+    for (u32 i = 0; i < G; ++i)
+    {
+        pos[order[i]] = i;
+        ix.actions.emplace_back(R.ground_action_label(order[i]));
+    }
+    // achievers: (atom, action position) over every operator adding a fluent atom
+    std::vector<std::pair<CanonicalAtom, u32>> ach, first;
+    for (u32 o = 0; o < NO; ++o)
+    {
+        if (R.is_axiom(o))
+            continue;
+        for (u32 q : R.eff(o))
+            if (positive_fluent(q))
+                ach.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
+    }
+    std::sort(ach.begin(), ach.end());
+    ach.erase(std::unique(ach.begin(), ach.end()), ach.end());
+    for (u32 q = 0; q < R.num_props(); ++q)
+        if (positive_fluent(q))
+            for (u32 o : X.computed_first_achievers(q, rule))
+                if (!R.is_axiom(o))
+                    first.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
+    std::sort(first.begin(), first.end());
+    first.erase(std::unique(first.begin(), first.end()), first.end());
+    for (const auto& [c, a] : ach)
+        if (ix.atoms.empty() || ix.atoms.back() != c)
+            ix.atoms.push_back(c);
+    const usize NA = ix.atoms.size();
+    ix.achievers_begin.assign(NA + 1, 0);
+    ix.first_achievers_begin.assign(NA + 1, 0);
+    {
+        usize i = 0;
+        for (usize k = 0; k < NA; ++k)
+        {
+            while (i < ach.size() && ach[i].first == ix.atoms[k])
+                ix.achievers.push_back(ach[i++].second);
+            ix.achievers_begin[k + 1] = static_cast<u32>(ix.achievers.size());
+        }
+        i = 0;
+        for (usize k = 0; k < NA; ++k)
+        {
+            while (i < first.size() && first[i].first < ix.atoms[k])
+                ++i;  // cannot happen: a first achiever is an achiever
+            while (i < first.size() && first[i].first == ix.atoms[k])
+                ix.first_achievers.push_back(first[i++].second);
+            ix.first_achievers_begin[k + 1] = static_cast<u32>(ix.first_achievers.size());
+        }
+    }
+    // per action: the landmarks it achieves, first-achieves and uniquely achieves
+    std::vector<std::vector<CanonicalAtom>> achieved(G), first_achieved(G), uniquely(G);
+    std::vector<CanonicalAtom> lms(landmarks.begin(), landmarks.end());
+    std::sort(lms.begin(), lms.end());
+    lms.erase(std::unique(lms.begin(), lms.end()), lms.end());
+    for (CanonicalAtom c : lms)
+    {
+        const auto a = ix.achievers_of(c);
+        for (u32 x : a)
+            achieved[x].push_back(c);
+        for (u32 x : ix.first_achievers_of(c))
+            first_achieved[x].push_back(c);
+        if (a.size() == 1)
+            uniquely[a[0]].push_back(c);
+    }
+    auto flatten = [&](const std::vector<std::vector<CanonicalAtom>>& v, std::vector<u32>& begin, std::vector<CanonicalAtom>& flat)
+    {
+        begin.assign(1, 0);
+        for (const auto& x : v)
+        {
+            flat.insert(flat.end(), x.begin(), x.end());
+            begin.push_back(static_cast<u32>(flat.size()));
+        }
+    };
+    flatten(achieved, ix.achieved_begin, ix.achieved);
+    flatten(first_achieved, ix.first_achieved_begin, ix.first_achieved);
+    flatten(uniquely, ix.uniquely_achieved_begin, ix.uniquely_achieved);
+    return ix;
+}
+
+class Generator
+{
+public:
+    Generator(const RelaxedTask& R, const ApproximateFactLandmarkOptions& o)
+        : R(R), T(R.task()), L(R.task().atoms().layout()), O(o), X(R), m_args(std::max<u32>(1, L.max_arity))
+    {
+    }
+
+    FactLandmarkGraph run()
+    {
+        fact_landmarks();
+        std::vector<std::vector<CanonicalAtom>> disjunctive;
+        if (O.max_disjunctive_landmark_size > 0)
+            disjunctive = disjunctive_landmarks();
+        AchieverIndex ix = achiever_index(R, X, O.first_achievers, m_landmarks);
+        return FactLandmarkGraph::create(m_landmarks, std::move(disjunctive), std::move(m_orderings), {}, std::move(ix));
+    }
+
+private:
+    /// A "true" proposition of a fluent atom (or of a derived atom, with include_derived_atoms).
+    [[nodiscard]] bool positive_atom(u32 prop) const
+    {
+        return !R.negative(prop) && (R.prop_atom(prop) < L.fluent_count || (O.include_derived_atoms && R.prop_atom(prop) < L.total));
+    }
+
     /// Positive fluent (and derived, with include_derived_atoms) preconditions of an operator: canonical ids,
     /// ascending, distinct.
     const std::vector<CanonicalAtom>& pre_atoms(u32 o)
@@ -220,15 +360,7 @@ private:
         return v;
     }
 
-    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c)
-    {
-        const u32 pp = R.fluent_props(c).first;
-        if (pp == RelaxedTask::k_none)
-            return {};
-        if (O.first_achievers == FirstAchievers::PossiblyBefore)
-            return possibly_before(pp);
-        return m_first[pp];
-    }
+    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c) { return X.first_achievers(c, O.first_achievers); }
 
     /// Step 2: goal facts and back-chaining through the shared preconditions of the first achievers.
     void fact_landmarks()
@@ -344,117 +476,31 @@ private:
         return out;  // FactLandmarkGraph::create sorts, dedups and drops the sets holding a fact landmark
     }
 
-    /// Step 4: the achiever index over the ground actions of the grounding.
-    AchieverIndex achiever_index()
-    {
-        AchieverIndex ix;
-        const u32 G = R.num_ground_actions(), NO = R.num_ops();
-        // ground actions in canonical order
-        std::vector<u32> order(G);
-        for (u32 g = 0; g < G; ++g)
-            order[g] = g;
-        std::sort(order.begin(), order.end(),
-                  [&](u32 a, u32 b) { return AchieverIndex::less(R.ground_action_label(a), R.ground_action_label(b)); });
-        std::vector<u32> pos(G);
-        ix.actions.reserve(G);
-        for (u32 i = 0; i < G; ++i)
-        {
-            pos[order[i]] = i;
-            ix.actions.emplace_back(R.ground_action_label(order[i]));
-        }
-        // achievers: (atom, action position) over every operator adding a fluent atom
-        std::vector<std::pair<CanonicalAtom, u32>> ach, first;
-        for (u32 o = 0; o < NO; ++o)
-        {
-            if (R.is_axiom(o))
-                continue;
-            for (u32 q : R.eff(o))
-                if (positive_atom(q))
-                    ach.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
-        }
-        std::sort(ach.begin(), ach.end());
-        ach.erase(std::unique(ach.begin(), ach.end()), ach.end());
-        const bool pb = O.first_achievers == FirstAchievers::PossiblyBefore;
-        for (u32 q = 0; q < R.num_props(); ++q)
-            if (positive_atom(q) && (!pb || (!m_pb_done.empty() && m_pb_done[q])))
-                for (u32 o : pb ? m_pb[q] : m_first[q])
-                    if (!R.is_axiom(o))
-                        first.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
-        std::sort(first.begin(), first.end());
-        first.erase(std::unique(first.begin(), first.end()), first.end());
-        for (const auto& [c, a] : ach)
-            if (ix.atoms.empty() || ix.atoms.back() != c)
-                ix.atoms.push_back(c);
-        const usize NA = ix.atoms.size();
-        ix.achievers_begin.assign(NA + 1, 0);
-        ix.first_achievers_begin.assign(NA + 1, 0);
-        {
-            usize i = 0;
-            for (usize k = 0; k < NA; ++k)
-            {
-                while (i < ach.size() && ach[i].first == ix.atoms[k])
-                    ix.achievers.push_back(ach[i++].second);
-                ix.achievers_begin[k + 1] = static_cast<u32>(ix.achievers.size());
-            }
-            i = 0;
-            for (usize k = 0; k < NA; ++k)
-            {
-                while (i < first.size() && first[i].first < ix.atoms[k])
-                    ++i;  // cannot happen: a first achiever is an achiever
-                while (i < first.size() && first[i].first == ix.atoms[k])
-                    ix.first_achievers.push_back(first[i++].second);
-                ix.first_achievers_begin[k + 1] = static_cast<u32>(ix.first_achievers.size());
-            }
-        }
-        // per action: the landmarks it achieves, first-achieves and uniquely achieves
-        std::vector<std::vector<CanonicalAtom>> achieved(G), first_achieved(G), uniquely(G);
-        std::vector<CanonicalAtom> lms = m_landmarks;
-        std::sort(lms.begin(), lms.end());
-        for (CanonicalAtom c : lms)
-        {
-            const auto a = ix.achievers_of(c);
-            for (u32 x : a)
-                achieved[x].push_back(c);
-            for (u32 x : ix.first_achievers_of(c))
-                first_achieved[x].push_back(c);
-            if (a.size() == 1)
-                uniquely[a[0]].push_back(c);
-        }
-        auto flatten = [&](const std::vector<std::vector<CanonicalAtom>>& v, std::vector<u32>& begin, std::vector<CanonicalAtom>& flat)
-        {
-            begin.assign(1, 0);
-            for (const auto& x : v)
-            {
-                flat.insert(flat.end(), x.begin(), x.end());
-                begin.push_back(static_cast<u32>(flat.size()));
-            }
-        };
-        flatten(achieved, ix.achieved_begin, ix.achieved);
-        flatten(first_achieved, ix.first_achieved_begin, ix.first_achieved);
-        flatten(uniquely, ix.uniquely_achieved_begin, ix.uniquely_achieved);
-        return ix;
-    }
-
     const RelaxedTask& R;
     const Task& T;
     const CanonicalLayout& L;
     const ApproximateFactLandmarkOptions& O;
+    Exploration X;
     std::vector<u32> m_args;
-    std::vector<u32> m_cost;
-    std::vector<std::vector<u32>> m_first;  // per proposition: operators of minimal firing cost
-    std::vector<u32> m_cnt0;                // per operator: unsatisfied preconditions in the initial state
-    std::vector<u32> m_init_props;          // the initial state's "true" propositions
-    std::vector<u32> m_init_neg_props;      // the "false" propositions of the atoms false in the initial state
-    // FirstAchievers::PossiblyBefore, per proposition on demand
-    std::vector<std::vector<u32>> m_pb;
-    std::vector<u8> m_pb_done;
-    std::vector<u32> m_adders_begin, m_adders;
     std::vector<std::vector<CanonicalAtom>> m_pre_cache;
     std::vector<u8> m_pre_done;
     std::vector<CanonicalAtom> m_landmarks;
     std::set<CanonicalAtom> m_is_landmark;
     std::vector<std::pair<CanonicalAtom, CanonicalAtom>> m_orderings;
 };
+
+/// The grounding of the generator and of the index rebuild: keeps the operators that can never fire (their effects
+/// count as achievers).
+std::shared_ptr<const RelaxedTask> ground(const Task& task, const heuristics::GroundingBudget& budget)
+{
+    heuristics::GroundingStats stats;
+    heuristics::RelaxedTaskOptions ro;
+    ro.keep_unreachable_operators = true;
+    auto R = RelaxedTask::build(task, budget, &stats, ro);
+    if (!R)
+        throw std::runtime_error("mymyr: landmark grounding failed: " + stats.reason);
+    return R;
+}
 }  // namespace
 
 FactLandmarkGraph approximate_fact_landmarks(const heuristics::RelaxedTask& relaxed, const ApproximateFactLandmarkOptions& options)
@@ -464,12 +510,28 @@ FactLandmarkGraph approximate_fact_landmarks(const heuristics::RelaxedTask& rela
 
 FactLandmarkGraph approximate_fact_landmarks(const Task& task, const ApproximateFactLandmarkOptions& options)
 {
-    heuristics::GroundingStats stats;
-    heuristics::RelaxedTaskOptions ro;
-    ro.keep_unreachable_operators = true;
-    const auto R = heuristics::RelaxedTask::build(task, options.budget, &stats, ro);
-    if (!R)
-        throw std::runtime_error("mymyr: approximate fact landmarks need a grounding: " + stats.reason);
-    return approximate_fact_landmarks(*R, options);
+    return approximate_fact_landmarks(*ground(task, options.budget), options);
+}
+
+AchieverIndex build_achiever_index(const heuristics::RelaxedTask& relaxed, std::span<const CanonicalAtom> landmarks,
+                                   const std::vector<std::vector<CanonicalAtom>>& disjunctive, FirstAchievers first_achievers)
+{
+    Exploration X(relaxed);
+    if (first_achievers == FirstAchievers::PossiblyBefore)
+    {
+        for (CanonicalAtom c : landmarks)
+            (void)X.first_achievers(c, first_achievers);
+        for (const auto& members : disjunctive)
+            for (CanonicalAtom c : members)
+                (void)X.first_achievers(c, first_achievers);
+    }
+    return achiever_index(relaxed, X, first_achievers, landmarks);
+}
+
+AchieverIndex build_achiever_index(const Task& task, std::span<const CanonicalAtom> landmarks,
+                                   const std::vector<std::vector<CanonicalAtom>>& disjunctive, FirstAchievers first_achievers,
+                                   const heuristics::GroundingBudget& budget)
+{
+    return build_achiever_index(*ground(task, budget), landmarks, disjunctive, first_achievers);
 }
 }  // namespace mymyr::landmarks
