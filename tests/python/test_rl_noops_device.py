@@ -319,3 +319,32 @@ def test_captured_noop_filtering_respects_live_parent_count():
         np.testing.assert_array_equal(array(out["index"][:expected.total]), expected.index)
         assert not out["succ_hash"][expected.total:].any() and torch.all(out["index"][expected.total:] == -1)
     torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_bounded_observation_actions_digest_without_successor_rows(drop):
+    from mymyr import encoding
+    from mymyr.encoding._device_actions import bounded_actions
+    task = pddl_task(atoms="dense")
+    encoder = encoding.FlatRelationEncoder(task)
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    expected = rl.expand(task, rows, hashes=True, noops=True, drop_noops=drop)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        bounded_actions(encoder, source, None, 16, drop_noops=drop)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = bounded_actions(encoder, source, None, 16, drop_noops=drop)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph.replay()
+    assert actual.succ is None and not actual.status.any()
+    np.testing.assert_array_equal(array(actual.succ_hash[:expected.total]), expected.succ_hash)
+    np.testing.assert_array_equal(array(actual.noop[:expected.total]), expected.noop)
+    if drop:
+        np.testing.assert_array_equal(array(actual.index[:expected.total]), expected.index)
+    source.zero_()
+    graph.replay()
+    assert not actual.offsets.any() and not actual.succ_hash.any()
+    torch.cuda.synchronize()
