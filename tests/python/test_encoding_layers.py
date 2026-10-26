@@ -404,14 +404,18 @@ def test_signed_fluent_and_derived_levels_targets_and_satisfaction(policy, layou
 
 
 @pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
-def test_repeated_literal_options_are_reported_and_valid_without_layers(policy):
+def test_repeated_literal_options_are_normalized_and_valid(policy):
     task = text_task(BLOCKS)
     for cls in (encoding.EncodingSchema, encoding.FlatRelationEncoder, encoding.SimpleEncoder,
                 encoding.FlatHorizonEncoder, encoding.FlatRootedHorizonEncoder,
                 encoding.FlatTransitionEncoder, encoding.FlatTransitionEffectsEncoder):
-        kwargs = {"horizon_mode": "full"} if cls is encoding.FlatHorizonEncoder else {}
-        assert cls(task, **kwargs).options["repeated_literals"] == "every"
-        assert cls(task, repeated_literals=policy, **kwargs).options["repeated_literals"] == policy
+        for levels in (0, 1):
+            kwargs = {"max_goal_level": levels}
+            if cls is encoding.FlatHorizonEncoder:
+                kwargs["horizon_mode"] = "full"
+            assert cls(task, **kwargs).options["repeated_literals"] == "every"
+            expected = policy if levels else "every"
+            assert cls(task, repeated_literals=policy, **kwargs).options["repeated_literals"] == expected
     with pytest.raises(ValueError, match="repeated_literals"):
         encoding.FlatRelationEncoder(task, repeated_literals="invalid")
     with pytest.raises(TypeError, match="repeated_literals"):

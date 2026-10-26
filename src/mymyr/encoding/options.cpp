@@ -100,6 +100,8 @@ FlatOptions normalized(const FlatOptions& options)
         invalid("max_goal_level must be in [0, 3], got " + std::to_string(out.max_goal_level));
     if (out.targets.contains(TargetSource::Subgoal) && out.max_goal_level == 0)
         invalid("subgoal targets need max_goal_level >= 1");
+    if (out.max_goal_level == 0)
+        out.repeated_literals = k_default_repeated_literals;
     const bool added = out.goal_derivations.contains(GoalDerivation::AddedSatisfied) ||
                        out.goal_derivations.contains(GoalDerivation::AddedUnsatisfied);
     if (added && out.horizon.mode != HorizonMode::Delta)

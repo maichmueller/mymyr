@@ -168,7 +168,8 @@ struct FlatOptions
     /// Subgoal layers beyond the goal: relations of level 1 .. max_goal_level, named `[sg]`, `[ssg]`, `[sssg]`.
     /// At most 3.
     u32 max_goal_level = 0;
-    /// Placement of literals listed at several goal levels (the goal is level 0).
+    /// Placement of literals listed at several goal levels (the goal is level 0); normalized to Every without subgoal
+    /// levels.
     RepeatedLiterals repeated_literals = k_default_repeated_literals;
     /// Relations of the static predicates (the types included) in the state lane.
     bool include_static = true;

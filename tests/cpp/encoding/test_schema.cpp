@@ -391,10 +391,12 @@ TEST(EncodingOptions, NormalizationAndText)
         EXPECT_EQ(to_string(*policy), text);
         FlatOptions options;
         options.repeated_literals = *policy;
+        EXPECT_EQ(normalized(options).repeated_literals, RepeatedLiterals::Every);
+        options.max_goal_level = 1;
         EXPECT_EQ(normalized(options).repeated_literals, *policy);
     }
     EXPECT_FALSE(parse_repeated_literals("invalid"));
-    for (const u32 levels : {0u, 2u})
+    for (const u32 levels : {0u, 1u, 2u, 3u})
     {
         FlatOptions options;
         options.max_goal_level = levels;
@@ -403,9 +405,17 @@ TEST(EncodingOptions, NormalizationAndText)
         const u64 lowest = EncodingSchema::create(blocks(), options)->fingerprint();
         options.repeated_literals = RepeatedLiterals::Highest;
         const u64 highest = EncodingSchema::create(blocks(), options)->fingerprint();
-        EXPECT_NE(every, lowest);
-        EXPECT_NE(every, highest);
-        EXPECT_NE(lowest, highest);
+        if (levels == 0)
+        {
+            EXPECT_EQ(every, lowest);
+            EXPECT_EQ(every, highest);
+        }
+        else
+        {
+            EXPECT_NE(every, lowest);
+            EXPECT_NE(every, highest);
+            EXPECT_NE(lowest, highest);
+        }
     }
 }
 
