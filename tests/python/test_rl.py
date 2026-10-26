@@ -145,7 +145,7 @@ def test_expand_into_writes_caller_arrays():
     parent, schema, offsets = np.zeros(M, np.int32), np.zeros(M, np.int32), np.zeros(len(states) + 1, np.int32)
     binding, goal = np.zeros((M, L), np.int32), np.zeros(M, np.bool_)
     r = rl.expand_into(task, states, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, offsets=offsets)
-    assert r == {"total": M, "words_needed": ref.words_needed, "overflow": False, "capacity": M}
+    assert r == {"total": M, "generated": M, "words_needed": ref.words_needed, "overflow": False, "capacity": M}
     for got, want in ((succ, ref.succ), (parent, ref.parent), (schema, ref.schema), (binding, ref.binding),
                       (goal, ref.goal), (offsets, ref.offsets)):
         assert np.array_equal(got, want)

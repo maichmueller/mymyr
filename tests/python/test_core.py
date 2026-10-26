@@ -3,6 +3,7 @@ import tomllib
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 import mymyr
 from conftest import FREE_THREADED, gil_stays_off
@@ -45,3 +46,21 @@ def test_hash_rows_from_many_threads():
         t.join()
     for r in results:
         assert np.array_equal(r, expected)
+
+
+@pytest.mark.parametrize("name", ["cs-counters", "cs-hydropower"])
+def test_hash_rows_numeric_words(name):
+    from conftest import ROOT, walk
+    task = mymyr.Task.from_text(str(ROOT / f"tests/data/numeric_tasks/{name}.txt"))
+    states = walk(task, steps=5, walks=1)
+    rows = np.asarray(task.encode(states))
+    hashes = mymyr.hash_rows(rows, numeric_words=task.numeric_words)
+    # The state hash combines the exact numeric words with the trimmed atom words.
+    widened = np.zeros((len(states), rows.shape[1] + 3), np.uint64)
+    atom_words = rows.shape[1] - task.numeric_words
+    widened[:, :atom_words] = rows[:, :atom_words]
+    widened[:, -task.numeric_words:] = rows[:, atom_words:]
+    np.testing.assert_array_equal(hashes, mymyr.hash_rows(widened, numeric_words=task.numeric_words))
+    assert not np.array_equal(hashes, mymyr.hash_rows(rows))
+    with pytest.raises(ValueError, match="numeric_words"):
+        mymyr.hash_rows(rows, numeric_words=rows.shape[1] + 1)

@@ -10,8 +10,9 @@
 //     the successors of row i are states of the same instance, labels carry its domain's schema ids and its
 //     instance-local object ids.
 //   - Destination-passing: the caller owns every output buffer and passes their capacity. expand() allocates
-//     nothing (the multi-threaded variant grows its caller-owned scratch, amortized) and synchronizes with nothing
-//     but its own pool. Rows beyond the capacity are counted, not written: `total` > `capacity` is the overflow.
+//     no output buffers (the pool variant grows caller-owned scratch, amortized) and synchronizes with nothing
+//     but its own pool. Dropping buffers one parent's rows on the calling thread. Rows beyond the capacity are
+//     counted, not written: `generated` > `capacity` is the overflow.
 //   - Canonical order (on by default): per state, successors by schema, then lexicographically by binding (the
 //     schema's full parameter list). An action is its label (schema, binding), never a slot index.
 //   - Witness pruning is off by default: every applicable ground action is a transition.
@@ -22,6 +23,17 @@
 //     evaluation of the successor row (shared with the goal flag). Rows are `derived_words` wide; an instance with fewer
 //     derived words (or none) has zeros past its own. They equal the evaluation the encoder does itself, bit for bit.
 //     Capacity and overflow rules are those of `succ`: rows past the capacity are counted, not written.
+//   - Optional successor digests do not require `succ`: `succ_hash` is hash::state over the trimmed atom words,
+//     seeded by the instance's numeric words, exactly State::hash() (not Python's task-aware hash). Derived atoms
+//     and table padding do not enter it. `noop` compares trimmed atom words and numeric words bit for bit with the
+//     parent; signed zero and NaN payload changes count as changes. Newly interned nonzero atom slots are changes.
+//   - With drop_noops, remove no-op rows per parent unless every successor is a no-op (then keep all). Empty parents
+//     stay empty. Order is stable; every requested array is compacted alike. `index` is required with drop_noops
+//     when capacity is nonzero, and gives each kept row's position in that parent's full expansion order (canonical
+//     by default; the requested generator order otherwise). It can also be requested without dropping.
+//   - `generated` counts all successors before dropping; `total` and offsets count kept rows. Capacity bounds the
+//     pre-drop count, including with label-only outputs. On generated > capacity the kept outputs are undefined.
+//     Width overflow also includes dropped rows. No digest or filtering work runs when those outputs/options are absent.
 //   - The padded [N, K] view (pad()) is built from the flat CSR by a scatter, with a validity mask and true counts.
 //   - Numeric tasks: a row is [bits | slots], the `words` atom words followed by the table's numeric words
 //     (`numeric_words` = table.numeric_words(); instance i uses the first numeric_words of its own, as in
@@ -62,6 +74,7 @@ struct ExpandOptions
     // reject rows with bits beyond their instance's assigned atom slots (rows narrower than a frozen instance's
     // width are rejected either way)
     bool validate = true;
+    bool drop_noops = false;
 };
 
 /// States of one batch, and successor rows (capacity, total) of one expansion, at most: parents and offsets are i32.
@@ -82,10 +95,14 @@ struct Expansion
     u64* derived = nullptr;  // [capacity, derived_words]: the successor's derived atoms (needs succ)
     i32* offsets = nullptr;  // [rows + 1]: successors of state i are [offsets[i], offsets[i+1]) (true counts)
 
-    u64 total = 0;         // successors of the whole batch (may exceed capacity)
+    u64* succ_hash = nullptr;  // [capacity]: State::hash() of the successor
+    u8* noop = nullptr;        // [capacity]: 1 iff atom and numeric words equal the parent's
+    i32* index = nullptr;      // [capacity]: position within the parent's full successor order
+    u64 generated = 0;         // successors before drop_noops; capacity bounds this count
+    u64 total = 0;         // kept successors of the whole batch (may exceed capacity)
     u32 words_needed = 0;  // widest successor (trimmed); > words means some rows did not fit
     u32 numeric_words = 0;  // numeric tables: table.numeric_words() (a row is words + numeric_words wide)
-    [[nodiscard]] bool overflow() const noexcept { return total > capacity || words_needed > words; }
+    [[nodiscard]] bool overflow() const noexcept { return generated > capacity || total > capacity || words_needed > words; }
 };
 
 /// Scratch of the pool variant: per-member row buffers, reused across calls (grown as needed).
@@ -114,6 +131,13 @@ void expand(const TaskSuite& suite, StateBatchView in, const i32* task_ids, Expa
 /// The same on every member of `pool`. Same results as the single-threaded call, bit for bit.
 void expand(const TaskSuite& suite, StateBatchView in, const i32* task_ids, Expansion& out,
             const ExpandOptions& options, ThreadPool& pool, ExpandScratch& scratch);
+/// One task, including a task with lazy slots. The task's live slot layout is used; task_ids is null or all zero.
+/// Lazy derived outputs need bits::words_for(task.atoms().max_derived_slots()) columns to cover slots interned
+/// during axiom evaluation. Missing input atom words are zero; fixed-slot tasks still require their full width.
+void expand(const Task& task, StateBatchView in, const i32* task_ids, Expansion& out,
+            const ExpandOptions& options = {});
+void expand(const Task& task, StateBatchView in, const i32* task_ids, Expansion& out,
+            const ExpandOptions& options, ThreadPool& pool, ExpandScratch& scratch);
 /// Over a table: its one-domain suite.
 inline void expand(const TaskTable& table, StateBatchView in, const i32* task_ids, Expansion& out,
                    const ExpandOptions& options = {})
@@ -130,7 +154,7 @@ inline void expand(const TaskTable& table, StateBatchView in, const i32* task_id
 struct PaddedExpansion
 {
     u32 k = 0;
-    i32* index = nullptr;    // [rows, K]: flat row of the k-th successor, -1 = none
+    i32* index = nullptr;    // [rows, K]: flat.index when present, else flat row; -1 padding
     u8* mask = nullptr;      // [rows, K]: 1 = valid
     i32* count = nullptr;    // [rows]: true successor counts (may exceed K)
     u32 words = 0;           // atom words per successor row of `succ`
@@ -143,11 +167,13 @@ struct PaddedExpansion
     u32 numeric_words = 0;   // numeric tasks: must equal the flat expansion's
     u32 derived_words = 0;   // words per row of `derived`
     u64* derived = nullptr;  // [rows, K, derived_words], zero padding
+    u64* succ_hash = nullptr;  // [rows, K], zero padding
+    u8* noop = nullptr;        // [rows, K], zero padding
 };
 
 /// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null are not
 /// written; an array whose flat source is null is filled with its padding (-1 for schema and binding, 0 for succ,
-/// goal and derived).
+/// goal, derived, succ_hash and noop).
 void pad(const Expansion& flat, u64 rows, PaddedExpansion& out);
 
 /// Goal flags of a batch (evaluates axioms when the goal mentions derived predicates): out[i] = the goal test of

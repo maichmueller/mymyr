@@ -110,7 +110,9 @@ struct Entry : FfiEntry
     std::vector<u64> scratch_succ;
     std::vector<i32> scratch_schema, scratch_binding, scratch_offsets;
     std::vector<u8> scratch_goal;
-    std::vector<u64> scratch_derived;
+    std::vector<u64> scratch_derived, scratch_hashes;
+    std::vector<u8> scratch_noops;
+    std::vector<i32> scratch_indices;
 #if defined(MYMYR_HAS_CUDA)
     struct Device
     {
@@ -740,7 +742,7 @@ ffi::Error env_step_cpu(i64 handle, MYMYR_STEP_PARAMS)
 }
 
 /// rl::expand of the states into the entry's host scratch (all successors): the offsets and the total.
-u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived)
+u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived, bool hashes, bool noops, bool drop, u64& generated)
 {
     const rl::StateBatchView in{st.as<u64>(), st.rows, e.W, 0, e.NN};
     rl::ExpandOptions opt;
@@ -754,6 +756,8 @@ u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived)
     x.offsets = e.scratch_offsets.data();
     rl::expand(*e.suite, in, ids, x, opt);  // counts only
     const u64 total = x.total;
+    generated = total;
+    opt.drop_noops = drop;
     e.scratch_succ.resize(std::max<u64>(total, 1) * e.row_words());
     e.scratch_schema.resize(std::max<u64>(total, 1));
     e.scratch_binding.resize(std::max<u64>(total, 1) * e.L);
@@ -763,6 +767,21 @@ u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived)
     x.schema = e.scratch_schema.data();
     x.binding = e.scratch_binding.data();
     x.goal = e.scratch_goal.data();
+    if (hashes)
+    {
+        e.scratch_hashes.resize(std::max<u64>(total, 1));
+        x.succ_hash = e.scratch_hashes.data();
+    }
+    if (noops || drop)
+    {
+        e.scratch_noops.resize(std::max<u64>(total, 1));
+        x.noop = e.scratch_noops.data();
+    }
+    if (drop)
+    {
+        e.scratch_indices.resize(std::max<u64>(total, 1));
+        x.index = e.scratch_indices.data();
+    }
     if (derived)
     {
         x.derived_words = e.suite->derived_words();
@@ -772,7 +791,51 @@ u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived)
     rl::expand(*e.suite, in, ids, x, opt);
     if (x.words_needed > e.W)
         fail("a successor needs " + std::to_string(x.words_needed) + " words; the rows have " + std::to_string(e.W));
-    return total;
+    return x.total;
+}
+
+/// Optional digest results follow the derived words. Hashes are uint32 pairs; absent outputs have zero size.
+struct DigestBufs
+{
+    std::optional<View> hashes, noops, index, generated;
+};
+
+DigestBufs digest_results(const ffi::RemainingRets& rest, u64 rows, bool hashes, bool noops, bool drop)
+{
+    DigestBufs d;
+    if (rest.size() != 5)
+    {
+        if (hashes || noops || drop)
+            fail("successor digest results are missing");
+        return d;
+    }
+    auto get = [&](size_t i, const char* name, ffi::DataType type, bool vector, i64 cols = -1)
+    {
+        auto r = rest.get<ffi::AnyBuffer>(i);
+        if (!r.has_value())
+            fail("an expansion result must be a buffer");
+        return view(**r, name, type, vector, cols);
+    };
+    if (hashes)
+    {
+        d.hashes = get(1, "succ_hash", ffi::DataType::U32, false, 2);
+        expect_rows(*d.hashes, rows, "succ_hash");
+    }
+    if (noops || drop)
+    {
+        d.noops = get(2, "noop", ffi::DataType::PRED, false);
+        if (d.noops->count != rows)
+            fail("noop must have one flag per successor");
+    }
+    if (drop)
+    {
+        d.index = get(3, "index", ffi::DataType::S32, false);
+        if (d.index->count != rows)
+            fail("index must have one position per successor");
+    }
+    d.generated = get(4, "generated", ffi::DataType::S32, true);
+    expect_rows(*d.generated, 1, "generated");
+    return d;
 }
 
 /// The padded results [N, K]: succ [N, K, 2 RW], schema, binding [N, K, L'], goal, mask, count.
@@ -781,25 +844,30 @@ struct PaddedBufs
     View succ, schema, binding, goal, mask, count;
     std::optional<View> derived;  // the optional extra result: [N, K, 2 D] uint32
     u32 K = 0;
+    DigestBufs digests;
 };
 
-/// The optional result after an expansion call's six: the derived words, uint32 [..., 2 D].
 std::optional<View> derived_result(const Entry& e, const ffi::RemainingRets& rest)
 {
     if (rest.size() == 0)
         return std::nullopt;
-    if (rest.size() > 1)
-        fail("an expansion has one optional extra result (the derived words)");
+    if (rest.size() != 1 && rest.size() != 5)
+        fail("an expansion has derived words and optional digest results");
     auto r = rest.get<ffi::AnyBuffer>(0);
     if (!r.has_value())
         fail("the extra result of an expansion must be a buffer");
-    return view(**r, "derived", ffi::DataType::U32, false, 2 * static_cast<i64>(e.suite->derived_words()));
+    auto v = view(**r, "derived", ffi::DataType::U32, false);
+    if (rest.size() == 5 && v.cols == 0)
+        return std::nullopt;
+    if (v.cols != 2 * e.suite->derived_words())
+        fail("derived words have the wrong row width");
+    return v;
 }
 
 PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> schema,
                           ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
                           ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count,
-                          const ffi::RemainingRets& rest)
+                          const ffi::RemainingRets& rest, bool hashes = false, bool noops = false, bool drop = false)
 {
     PaddedBufs p;
     p.derived = derived_result(e, rest);
@@ -810,6 +878,7 @@ PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> suc
     p.mask = view(*mask, "mask", ffi::DataType::PRED, false);
     p.count = view(*count, "count", ffi::DataType::S32, true);
     p.K = static_cast<u32>(p.schema.cols);
+    p.digests = digest_results(rest, N * p.K, hashes, noops, drop);
     expect_rows(p.schema, N, "schema");
     expect_rows(p.count, N, "count");
     if (p.succ.rows != N * p.K || p.goal.count != N * p.K || p.mask.count != N * p.K || p.binding.rows != N * p.K)
@@ -834,6 +903,9 @@ rl::PaddedExpansion make_padded(const Entry& e, const PaddedBufs& p)
     out.label_width = static_cast<u32>(p.binding.cols);
     out.binding = p.binding.as<i32>();
     out.goal = p.goal.as<u8>();
+    out.succ_hash = p.digests.hashes ? p.digests.hashes->as<u64>() : nullptr;
+    out.noop = p.digests.noops ? p.digests.noops->as<u8>() : nullptr;
+    out.index = p.digests.index ? p.digests.index->as<i32>() : nullptr;
     if (p.derived)
     {
         out.derived_words = e.suite->derived_words();
@@ -842,7 +914,7 @@ rl::PaddedExpansion make_padded(const Entry& e, const PaddedBufs& p)
     return out;
 }
 
-ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
+ffi::Error expand_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
                       ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
                       ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> mask,
                       ffi::Result<ffi::AnyBuffer> count, ffi::RemainingRets rest)
@@ -851,11 +923,12 @@ ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids
         EntryPtr e = entry(handle);
         const View st = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), st.rows);
-        const PaddedBufs p = padded_results(*e, st.rows, succ, schema, binding, goal, mask, count, rest);
+        const PaddedBufs p = padded_results(*e, st.rows, succ, schema, binding, goal, mask, count, rest, hashes, noops, drop);
         std::lock_guard lock(e->host_mutex);
-        const u64 total = host_expand(*e, st, ids, p.derived.has_value());
+        u64 generated = 0;
+        const u64 total = host_expand(*e, st, ids, p.derived.has_value(), hashes, noops, drop, generated);
         rl::Expansion x;
-        x.capacity = total;
+        x.capacity = generated;
         x.words = e->W;
         x.numeric_words = e->NN;
         x.label_width = e->L;
@@ -870,6 +943,12 @@ ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids
         }
         x.offsets = e->scratch_offsets.data();
         x.total = total;
+        x.generated = generated;
+        x.succ_hash = hashes ? e->scratch_hashes.data() : nullptr;
+        x.noop = noops || drop ? e->scratch_noops.data() : nullptr;
+        x.index = drop ? e->scratch_indices.data() : nullptr;
+        if (p.digests.generated)
+            *p.digests.generated->as<i32>() = static_cast<i32>(generated);
         rl::PaddedExpansion out = make_padded(*e, p);
         rl::pad(x, st.rows, out);
     });
@@ -881,12 +960,13 @@ struct FlatBufs
     View succ, parent, schema, binding, goal, offsets;
     std::optional<View> derived;  // the optional extra result: [M, 2 D] uint32
     u64 M = 0;
+    DigestBufs digests;
 };
 
 FlatBufs flat_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> parent,
                       ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
                       ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets,
-                      const ffi::RemainingRets& rest)
+                      const ffi::RemainingRets& rest, bool hashes = false, bool noops = false, bool drop = false)
 {
     FlatBufs f;
     f.derived = derived_result(e, rest);
@@ -897,6 +977,7 @@ FlatBufs flat_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, f
     f.goal = view(*goal, "goal", ffi::DataType::PRED, true);
     f.offsets = view(*offsets, "offsets", ffi::DataType::S32, true);
     f.M = f.parent.rows;
+    f.digests = digest_results(rest, f.M, hashes, noops, drop);
     if (f.succ.rows != f.M || f.schema.rows != f.M || f.goal.rows != f.M || f.binding.rows != f.M)
         fail("the flat results must have the same capacity M");
     if (f.offsets.rows != N + 1)
@@ -920,6 +1001,9 @@ rl::Expansion make_flat(const Entry& e, const FlatBufs& f)
     x.schema = f.schema.as<i32>();
     x.binding = f.binding.as<i32>();
     x.goal = f.goal.as<u8>();
+    x.succ_hash = f.digests.hashes ? f.digests.hashes->as<u64>() : nullptr;
+    x.noop = f.digests.noops ? f.digests.noops->as<u8>() : nullptr;
+    x.index = f.digests.index ? f.digests.index->as<i32>() : nullptr;
     if (f.derived)
     {
         x.derived_words = e.suite->derived_words();
@@ -929,7 +1013,7 @@ rl::Expansion make_flat(const Entry& e, const FlatBufs& f)
     return x;
 }
 
-ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
+ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
                            ffi::Result<ffi::AnyBuffer> parent, ffi::Result<ffi::AnyBuffer> schema,
                            ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
                            ffi::Result<ffi::AnyBuffer> offsets, ffi::RemainingRets rest)
@@ -938,7 +1022,7 @@ ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
         EntryPtr e = entry(handle);
         const View st = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), st.rows);
-        const FlatBufs f = flat_results(*e, st.rows, succ, parent, schema, binding, goal, offsets, rest);
+        const FlatBufs f = flat_results(*e, st.rows, succ, parent, schema, binding, goal, offsets, rest, hashes, noops, drop);
         // padding first: rows past the total keep it
         if (f.succ.count)
             std::memset(f.succ.data, 0, f.succ.count * 4);
@@ -949,11 +1033,18 @@ ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
             std::memset(f.goal.data, 0, f.goal.count);
         if (f.derived && f.derived->count)
             std::memset(f.derived->data, 0, f.derived->count * 4);
+        for (const auto* v : {&f.digests.hashes, &f.digests.noops, &f.digests.index})
+            if (*v && (*v)->count)
+                std::memset((*v)->data, v == &f.digests.index ? 0xFF : 0,
+                            (*v)->count * (v == &f.digests.noops ? 1 : 4));
         rl::Expansion x = make_flat(*e, f);
         rl::ExpandOptions opt;
         opt.canonical_order = e->cfg.canonical_order;
         opt.witness_pruning = e->cfg.witness_pruning;
+        opt.drop_noops = drop;
         rl::expand(*e->suite, rl::StateBatchView{st.as<u64>(), st.rows, e->W, 0, e->NN}, ids, x, opt);
+        if (f.digests.generated)
+            *f.digests.generated->as<i32>() = static_cast<i32>(x.generated);
     });
 }
 
@@ -1023,6 +1114,7 @@ ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()
+#define MYMYR_EXPAND_ATTRS .Attr<bool>("hashes").Attr<bool>("noops").Attr<bool>("drop_noops")
 #define MYMYR_EXPAND_BINDING                                                                                            \
     .Arg<ffi::AnyBuffer>()                                                                                              \
         .Arg<ffi::AnyBuffer>()                                                                                          \
@@ -1040,9 +1132,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_reset_cpu, env_reset_cpu,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_refresh_cpu, env_refresh_cpu,
                               ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_REFRESH_BINDING);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_step_cpu, env_step_cpu, ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_STEP_BINDING);
-XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_cpu, expand_cpu, ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_EXPAND_BINDING);
+XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_cpu, expand_cpu, ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_EXPAND_ATTRS MYMYR_EXPAND_BINDING);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_flat_cpu, expand_flat_cpu,
-                              ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_EXPAND_BINDING);
+                              ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_EXPAND_ATTRS MYMYR_EXPAND_BINDING);
 
 // ---- CUDA
 
@@ -1215,12 +1307,14 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
     return x;
 }
 
-ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
+ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
                        ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> schema,
                        ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
                        ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count, ffi::RemainingRets rest)
 {
     return guarded([&] {
+        if (hashes || noops || drop)
+            fail("successor digests and drop_noops require the CPU backend in this build");
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
@@ -1236,13 +1330,15 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer 
     });
 }
 
-ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
+ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashes, bool noops, bool drop, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
                             ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> parent,
                             ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
                             ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets,
                             ffi::RemainingRets rest)
 {
     return guarded([&] {
+        if (hashes || noops || drop)
+            fail("successor digests and drop_noops require the CPU backend in this build");
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
@@ -1327,9 +1423,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_refresh_sync_cuda, env_refresh_cuda,
                               ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_REFRESH_BINDING);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_step_sync_cuda, env_step_cuda,
                               ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_STEP_BINDING);
-XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_cuda, expand_cuda, ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_EXPAND_BINDING);
+XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_cuda, expand_cuda, ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_EXPAND_ATTRS MYMYR_EXPAND_BINDING);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_expand_flat_cuda, expand_flat_cuda,
-                              ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_EXPAND_BINDING);
+                              ffi::Ffi::Bind() MYMYR_CUDA_CTX MYMYR_EXPAND_ATTRS MYMYR_EXPAND_BINDING);
 #undef MYMYR_CUDA_CTX
 #undef MYMYR_CMD_BUFFER
 #undef MYMYR_INITIALIZE
