@@ -832,7 +832,7 @@ def literal_masks(encoder: int, predicates: Tensor, objects: Tensor, positive: T
 
 @literal_masks.register_fake
 def _(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, layers=None, num_layers=1):
-    table = mymyr.rl.as_table(lookup(encoder).table)
+    table = mymyr.rl.as_table(lookup(int(encoder)).table)
     shape = (num_rows,) if layers is None else (num_rows, num_layers)
     return [*(predicates.new_empty((*shape, words), dtype=torch.int64)
               for words in (table.words, table.words, table.derived_words, table.derived_words)),

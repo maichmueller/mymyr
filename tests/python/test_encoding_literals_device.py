@@ -40,7 +40,7 @@ def case(request, tmp_path):
     objects = np.array([o for _, o in atoms] * 2, np.int32)
     positive = np.array([True] * len(atoms) + [False] * len(atoms), np.bool_)
     rows = np.arange(len(predicates), dtype=np.int32) % 3
-    task_ids = np.array([1, 0, 1], np.int32)
+    task_ids = np.array([1, 0, 0], np.int32)
     layers = np.arange(len(predicates), dtype=np.int32) % 2
     return tasks, encoder, predicates, objects, positive, rows, task_ids, layers
 
