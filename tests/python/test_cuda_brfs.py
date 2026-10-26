@@ -12,6 +12,7 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # JAX would take 75% of the GPU otherwise
 
+import re  # noqa: E402
 import threading  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -409,4 +410,56 @@ def test_successor_windows_equal_cpu(tmp_path, kw):
     brfs_matches(dev, cpu)
     assert dev.counters["windows"] >= (2 if kw["max_states"] == 160_001 else 1)
     small.synchronize()
+
+
+@pytest.mark.parametrize("drop, budget", [(False, 24), (True, 64)])
+def test_search_runs_on_past_a_windowed_state(tmp_path, drop, budget):
+    """The initial state's 90000 successors (45150 distinct) a window at a time in a small context, and the rest of
+    the search after them in the same context (with drop: 180001 states and duplicates across parents)."""
+    from conftest import symfan_task
+
+    task = symfan_task(tmp_path, 300, drop)
+    cpu = mymyr.search.brfs(task, stop_at_goal=False, fingerprint=True, threads=1)
+    small = mc.Context(0, max_bytes=budget << 20)
+    dev = mc.brfs(task, ctx=small, stop_at_goal=False, fingerprint=True)
+    brfs_matches(dev, cpu)
+    assert dev.stats.states == (180_001 if drop else 45_151)
+    assert dev.counters["windows"] >= 2
+    small.synchronize()
+
+
+def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
+    """1100 successors of 151 KB rows (159 MiB) in a context of twice that: windows sized by what they allocate."""
+    from conftest import wide_fan_task
+
+    task = wide_fan_task(tmp_path)
+    row = (task.words + 63) // 64 * 64 * 8
+    small = mc.Context(0, max_bytes=2 * 1100 * row)
+    cpu = mymyr.search.brfs(task, fingerprint=True, threads=1)
+    dev = mc.brfs(task, ctx=small, fingerprint=True)
+    brfs_matches(dev, cpu)
+    assert dev.counters["windows"] >= 1
+    small.synchronize()
+
+
+def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wide):
+    """Every budget gives the CPU's result or a ValueError that names the memory, never an allocator error: the setup,
+    the windows of a state's successors, the chunks after them and the arenas' growth."""
+    from conftest import symfan_task
+
+    symfan = symfan_task(tmp_path, 300)
+    cases = [(symfan, {"stop_at_goal": False}), (symfan, {"max_states": 2000}), (blocksworld_wide, {"max_states": 2000})]
+    outcomes = []
+    for task, kw in cases:
+        cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
+        for budget in (1, 4, 8, 16, 32, 48):
+            small = mc.Context(0, max_bytes=budget << 20)
+            try:
+                brfs_matches(mc.brfs(task, ctx=small, fingerprint=True, **kw), cpu)
+                outcomes.append("equal")
+            except ValueError as e:
+                assert re.match(r"^mymyr: device BrFS: .*Raise the Context's max_bytes, or use the CPU BrFS\.$", str(e))
+                outcomes.append("refused")
+            small.synchronize()
+    assert "equal" in outcomes and "refused" in outcomes
 

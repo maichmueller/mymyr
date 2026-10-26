@@ -358,13 +358,9 @@ def test_wide_ipc_best_first_equals_cpu(ctx, blocksworld_wide, batch):
 def test_wide_best_first_keeps_the_requested_batch(ctx, tmp_path):
     """Rows of 18,924 words: a step still pops `batch` states (the rows are gathered a chunk at a time). The initial
     state has 1100 successors; the goal follows the last of them."""
-    n = 1100
-    text = f"O {n}\nP 4\nF 1 picked\nF 0 free\nF 2 pad\nF 0 done\nSI 0\nFI 1\n1\nG 1\n3 1\n"
-    text += "A 2\npick 1\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n2 1 0 0\n"
-    text += f"finish 0\nL 1\n0 1 {-n}\nE 1\n0\nL 0\nF 1\n3 1\n"
-    path = tmp_path / "wide-fan.txt"
-    path.write_text(text)
-    task = mymyr.Task.from_text(path, atoms="dense")
+    from conftest import wide_fan_task
+
+    task = wide_fan_task(tmp_path)
     assert task.words > 16 << 10
     for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
         cpu = cpu_search(task, heuristic="blind")

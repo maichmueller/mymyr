@@ -67,7 +67,11 @@ one chunk at a time. Numeric kernels hold whole rows and take states of at most 
 When a state's successors exceed what the context can still allocate, the device BrFS deduplicates and stores them
 a window at a time (the `windows` counter), with the ids, counts and plans of the CPU BrFS; device IW, rollouts and
 A*/GBFS expand a state's successors at once and raise `ValueError` naming the successor count, the bytes they need and
-what the context has left (raise the Context's `max_bytes`, or use the CPU search).
+what the context has left (raise the Context's `max_bytes`, or use the CPU search). The searches size their buffers by
+what the context can still allocate: the BrFS starts its arenas and state table within it, reserves the arenas for a
+windowed state's new states once and sizes each window by every buffer it allocates, and a chunk whose buffers do not
+fit runs with fewer parents. When the search's own buffers leave too little, or an allocation fails all the same, the
+`ValueError` names what holds the context's memory.
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
 into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
 `batched_iw1` and `rollouts`); a pass whose table cannot fit even one search ends the searches that reach it with
