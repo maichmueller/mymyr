@@ -2431,10 +2431,17 @@ void bind_search(nb::module_& parent)
                    ", memory_bytes=" + std::to_string(s.memory_bytes) + ")";
         });
 
-    auto tree = nb::class_<PySearchTree>(m, "SearchTree", "One IW pass as read-only, zero-copy NumPy arrays.");
-    tree.def_prop_ro("task", [](const PySearchTree& x) { return task_object(x.o.obj); })
-        .def_prop_ro("num_nodes", [](const PySearchTree& x) { return x.tree->num_nodes(); })
-        .def_prop_ro("num_transitions", [](const PySearchTree& x) { return x.tree->num_transitions(); })
+    auto tree = nb::class_<PySearchTree>(
+        m, "SearchTree",
+        "One IW pass as flat arrays: N nodes (the root is node 0, node i is row i), R distinct state rows and, "
+        "recorded with tree='transitions', T transitions grouped by their parent node (offsets). Every array is a "
+        "read-only, zero-copy NumPy view that keeps the tree's storage alive.");
+    tree.def_prop_ro("task", [](const PySearchTree& x) { return task_object(x.o.obj); },
+                     "The Task whose slot numbering and ids interpret the rows and labels.")
+        .def_prop_ro("num_nodes", [](const PySearchTree& x) { return x.tree->num_nodes(); },
+                     "N: the nodes of the tree, the root included.")
+        .def_prop_ro("num_transitions", [](const PySearchTree& x) { return x.tree->num_transitions(); },
+                     "T: the recorded transitions (0 when recorded with tree='nodes').")
         .def("states", [](const PySearchTree& x) {
             nb::typed<nb::list, PyState> out{nb::list()};
             const auto& t = *x.tree;
@@ -2461,49 +2468,71 @@ void bind_search(nb::module_& parent)
             return out;
         }, "Incoming node Actions; the root label is None.")
         .def("__reduce__", [](const PySearchTree& x) { return result_reduce("search_tree", x.o, enc_tree(x.o, x.tree)); });
-    tree.def_prop_ro("width", [](const PySearchTree& x) { return x.tree->width; });
-    tree.def_prop_ro("words", [](const PySearchTree& x) { return x.tree->words; });
-    tree.def_prop_ro("numeric_words", [](const PySearchTree& x) { return x.tree->numeric_words; });
-    tree.def_prop_ro("label_width", [](const PySearchTree& x) { return x.tree->label_width; });
+    tree.def_prop_ro("width", [](const PySearchTree& x) { return x.tree->width; }, "The novelty width of the pass.");
+    tree.def_prop_ro("words", [](const PySearchTree& x) { return x.tree->words; },
+                     "The fluent words of a row (the task's word width when the search ended).");
+    tree.def_prop_ro("numeric_words", [](const PySearchTree& x) { return x.tree->numeric_words; },
+                     "The numeric words of a row, after its fluent words.");
+    tree.def_prop_ro("label_width", [](const PySearchTree& x) { return x.tree->label_width; },
+                     "The largest action arity of the task: the columns of binding and t_binding.");
     tree.def_prop_ro("rows", [](const PySearchTree& x) {
         return tree_array(x, x.tree->rows, {x.tree->row_goal.size(), usize{x.tree->words} + x.tree->numeric_words});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "uint64 [R, words + numeric_words]: the distinct states, nodes first (row i is node i), then "
+       "the other successors in the order they were first generated; numeric words last.");
     tree.def_prop_ro("parent", [](const PySearchTree& x) {
         return tree_array(x, x.tree->parent, {x.tree->num_nodes()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [N]: the parent node of each node; -1 for the root.");
     tree.def_prop_ro("depth", [](const PySearchTree& x) {
         return tree_array(x, x.tree->depth, {x.tree->num_nodes()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [N]: the depth of each node; 0 for the root.");
     tree.def_prop_ro("schema", [](const PySearchTree& x) {
         return tree_array(x, x.tree->schema, {x.tree->num_nodes()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [N]: the action schema id of each node's incoming action; -1 for the root.");
     tree.def_prop_ro("binding", [](const PySearchTree& x) {
         return tree_array(x, x.tree->binding, {x.tree->num_nodes(), x.tree->label_width});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [N, label_width]: the object ids of each node's incoming action, padded with -1; all "
+       "-1 for the root.");
     tree.def_prop_ro("node_flags", [](const PySearchTree& x) {
         return tree_array(x, x.tree->node_flags, {x.tree->num_nodes()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "uint8 [N]: bit flags of each node: 1 successors generated, 2 goal, 4 counted as expanded "
+       "without generating successors, 8 dropped by a beam's layer selection, 16 entered the queue "
+       "more than once.");
     tree.def_prop_ro("offsets", [](const PySearchTree& x) {
         return tree_array(x, x.tree->offsets, {x.tree->offsets.size()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int64 [N + 1]: the transitions of node i are offsets[i]:offsets[i + 1]; empty when recorded "
+       "with tree='nodes'.");
     tree.def_prop_ro("t_schema", [](const PySearchTree& x) {
         return tree_array(x, x.tree->t_schema, {x.tree->num_transitions()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [T]: the action schema id of each transition.");
     tree.def_prop_ro("t_binding", [](const PySearchTree& x) {
         return tree_array(x, x.tree->t_binding, {x.tree->num_transitions(), x.tree->label_width});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [T, label_width]: the object ids of each transition's action, padded with -1.");
     tree.def_prop_ro("t_row", [](const PySearchTree& x) {
         return tree_array(x, x.tree->t_row, {x.tree->num_transitions()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [T]: the row of each transition's successor.");
     tree.def_prop_ro("t_child", [](const PySearchTree& x) {
         return tree_array(x, x.tree->t_child, {x.tree->num_transitions()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "int32 [T]: the node each transition entered (an existing one for a duplicate queue entry); "
+       "-1 when its successor got no node.");
     tree.def_prop_ro("t_outcome", [](const PySearchTree& x) {
         return tree_array(x, x.tree->t_outcome, {x.tree->num_transitions()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "uint8 [T]: the TransitionOutcome value of each transition, as an observer gets it.");
     tree.def_prop_ro("row_goal", [](const PySearchTree& x) {
         return tree_array(x, x.tree->row_goal, {x.tree->row_goal.size()});
-    }, nb::rv_policy::reference);
+    }, nb::rv_policy::reference,
+       "uint8 [R]: 1 for each row that satisfies the pass's goal, else 0.");
     auto iw_pass = nb::class_<PyIwPass>(m, "IwPass", "The counts and optional tree of one IW pass.");
     iw_pass.def("__reduce__", [](const PyIwPass& x) { return result_reduce("iw_pass", x.o, enc(x.o, x.p)); });
     iw_pass.def_prop_ro("width", [](const PyIwPass& x) { return x.p.width; },
@@ -2524,7 +2553,7 @@ void bind_search(nb::module_& parent)
                         "Wall time of the pass, in seconds.");
     iw_pass.def_prop_ro("placeholder", [](const PyIwPass& x) { return x.p.placeholder; },
                         "The empty width-0 entry of an optimized IW(1) ladder.");
-    iw_pass.def_prop_ro("stats", [](const PyIwPass& x) { return x.p.stats(); })
+    iw_pass.def_prop_ro("stats", [](const PyIwPass& x) { return x.p.stats(); }, "The pass's counts as Statistics.")
         .def_prop_ro("tree", [](const PyIwPass& x) -> nb::typed<nb::object, std::optional<PySearchTree>> {
             if (!x.p.tree)
                 return nb::none();
@@ -2535,14 +2564,19 @@ void bind_search(nb::module_& parent)
                    ", expanded=" + std::to_string(x.p.expanded) + ", generated=" + std::to_string(x.p.generated) +
                    ", generated_in_tree=" + std::to_string(x.p.generated_in_tree) + ")";
         });
-    auto subproblem = nb::class_<PySiwSubproblem>(m, "SiwSubproblem", "One serialized IW subproblem.");
+    auto subproblem = nb::class_<PySiwSubproblem>(
+        m, "SiwSubproblem", "One subproblem of SIW: reach a state with fewer unsatisfied goal literals.");
     subproblem.def("__reduce__", [](const PySiwSubproblem& x) { return result_reduce("siw_subproblem", x.o, enc(x.o, x.p)); });
-    subproblem.def_prop_ro("status", [](const PySiwSubproblem& x) { return x.p.status; });
-    subproblem.def_prop_ro("unsatisfied_at_start", [](const PySiwSubproblem& x) { return x.p.unsatisfied_at_start; });
-    subproblem.def_prop_ro("plan_length", [](const PySiwSubproblem& x) { return x.p.plan_length; });
-    subproblem.def_prop_ro("effective_width", [](const PySiwSubproblem& x) { return x.p.effective_width; });
+    subproblem.def_prop_ro("status", [](const PySiwSubproblem& x) { return x.p.status; },
+                           "How its IW ladder ended (Status).");
+    subproblem.def_prop_ro("unsatisfied_at_start", [](const PySiwSubproblem& x) { return x.p.unsatisfied_at_start; },
+                           "Goal literals unsatisfied in the subproblem's start state.");
+    subproblem.def_prop_ro("plan_length", [](const PySiwSubproblem& x) { return x.p.plan_length; },
+                           "Actions of its subplan.");
+    subproblem.def_prop_ro("effective_width", [](const PySiwSubproblem& x) { return x.p.effective_width; },
+                           "The width of the pass that solved it.");
     subproblem.def_prop_ro("passes", [](const PySiwSubproblem& x) { return pass_list(x.o, x.p.passes); },
-                           "Its IW passes, one per width.")
+                           "Its IW passes (a list of IwPass), one per width.")
         .def("__repr__", [](const PySiwSubproblem& x) {
             return std::string("SiwSubproblem(status=") + search::to_string(x.p.status) +
                    ", unsatisfied_at_start=" + std::to_string(x.p.unsatisfied_at_start) +
