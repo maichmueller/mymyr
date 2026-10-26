@@ -31,7 +31,7 @@ that knows the toolkit's PTX version (newer than the minimum for SASS), so build
 run on and keep PTX only as the forward-compatible fallback for GPUs newer than the build. A GPU that has neither
 matching SASS nor loadable PTX fails at the first device call.
 
-Device operations include task upload and smoke kernels, BrFS, multi-IW and rollouts; batched grounded h-max, h-add,
+Device operations include task upload and smoke kernels, BrFS, multi-IW, LIW(1) and rollouts; batched grounded h-max, h-add,
 h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for `mymyr.rl.expand`. Device arrays can exchange
 data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
 cap it. Arrays and device tasks keep their context alive.
@@ -57,10 +57,37 @@ fallback. Numeric goal expressions use at most 64 stack values. Callable goals a
 search require CPU search; device A*/GBFS use the task goal. See [Formula values](formulas.md) for goal construction.
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
+`cuda.liw(task_or_table, starts, landmarks=graph, ...)` runs width zero then LIW(1), with the status,
+plan, goal state and per-pass counts of `search.liw(..., max_width=1)`. `landmarks` is one
+`search.FactLandmarkGraph` shared by the searches or a sequence with one graph per start; `None` uses BOT throughout.
+`disjunctive`, `all_private` and `unshared_atoms` select the same landmark grouping as on the CPU. A TaskTable uses
+`task_ids` to select each search's instance. `cuda.rollouts(..., landmarks=graph)` runs randomized LIW(1), one graph
+shared across the seeds or one per seed; its seeded layer ordering equals CPU LIW. LIW(2) and numeric LIW require
+CPU search. Exact rank-aware novelty preserves CPU admission order for every group and chunk size, including wide
+rows, and chunk shapes capture and replay as CUDA graphs. Each rank needs one bit per slot and an empty-tuple word;
+`table_bytes` bounds the tables per group. A table that cannot fit raises `ValueError` with its required size and the
+option to raise.
+
+```python skip-if-no-cuda
+from pathlib import Path
+import mymyr
+from mymyr import cuda, search
+
+pddl = Path("tests/data/pddl/blocks")
+liw_task = mymyr.Task.from_pddl(pddl / "domain.pddl", pddl / "probBLOCKS-8-0.pddl")
+graph = search.approximate_fact_landmarks(liw_task)
+starts = [liw_task.initial_state] * 2
+batch = cuda.liw(liw_task, starts, landmarks=graph, max_states=100)
+reference = search.liw(liw_task, landmarks=graph, max_width=1, max_states=100)
+assert batch.status[0] == reference.status
+assert batch.plan(0) == reference.plan
+assert batch.expanded[0] == sum(p.expanded for p in reference.passes)
+```
+
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks.
 Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
-up to 32 words). Classical BrFS, IW, rollouts, A*/GBFS and state spaces accept rows of any width that fits memory.
+up to 32 words). Classical BrFS, IW, LIW(1), rollouts, A*/GBFS and state spaces accept rows of any width that fits memory.
 Arenas keep power-of-two widths through 64 words and round wider rows to 64-word chunks; successors are built
 one chunk at a time. Numeric kernels hold whole rows and take states of at most 64 words; a numeric search raises
 `ValueError` when its states reach more (also when a lazy task's rows grow there during the search).
@@ -70,7 +97,7 @@ A*/GBFS expand a state's successors at once and raise `ValueError` naming the su
 what the context has left (raise the Context's `max_bytes`, or use the CPU search).
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
 into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
-`batched_iw1` and `rollouts`); a pass whose table cannot fit even one search raises `ValueError` with its required
+`batched_iw1`, `liw` and `rollouts`); a pass whose table cannot fit even one search raises `ValueError` with its required
 byte size and the budget when a search reaches that pass, so that searches solved at a lower width run. Wide exact novelty uses
 full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the

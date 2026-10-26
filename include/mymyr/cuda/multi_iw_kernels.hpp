@@ -70,7 +70,7 @@ inline constexpr u64 k_empty_key = ~0ull;
 inline constexpr u32 k_key_atom_bits = 12;
 
 /// Wide exact-novelty keys, ordered by (search, atoms): two full 32-bit slots packed as (min, max), and the search
-/// id in the low 32 bits of search. Stable radix sorting makes the first equal key's candidate its exact owner.
+/// id in the low 32 bits of search. LIW uses (rank, atom), with k_none for the empty tuple. Stable radix sorting makes the first equal key's candidate its exact owner.
 /// Search ids are local to a group; atom slots use the task's row layout, including slots beyond the first chunk.
 struct TupleKey
 {

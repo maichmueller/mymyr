@@ -24,6 +24,7 @@
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
+#include "mymyr/search/liw.hpp"
 #include "mymyr/search/parallel_rollouts.hpp"
 #include "mymyr/successor/conditions.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -1027,4 +1028,85 @@ TEST(DeviceIw, VeryWideRowsRespectByteReservations)
     cuda::DeviceMultiIw device(ctx, task, o);
     const auto batch = device.run(starts);
     expect_same(batch.result(0, *task, starts[0], true), search::iw(*task, cpu_options(o, starts[0])), "very wide rows");
+}
+
+TEST(DeviceLiw, LandmarkGroupsAndWideRowsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    for (bool lazy : {false, true})
+    {
+        const auto task = wide_task(80, lazy ? TaskOptions::Atoms::Lazy : TaskOptions::Atoms::Dense,
+                                    lazy ? 4093 : 80, lazy);
+        std::vector<CanonicalAtom> facts;
+        for (u32 slot = 0; slot < 75; ++slot)
+            facts.push_back(task->atoms().canonical(AtomKind::Fluent, slot));
+        const auto graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+            landmarks::FactLandmarkGraph::create(facts, {{facts[0], facts[1]}, {facts[1], facts[2]}}));
+        const std::vector<State> starts(3, task->initial_state());
+        for (u32 grouping = 0; grouping < 3; ++grouping)
+        {
+            cuda::MultiIwOptions o;
+            o.landmarks.emplace(3);
+            (*o.landmarks)[1].graph = graph;
+            (*o.landmarks)[1].disjunctive = true;
+            (*o.landmarks)[1].all_private = grouping == 1;
+            if (grouping == 2)
+                (*o.landmarks)[1].unshared_atoms = {facts[1]};
+            (*o.landmarks)[2] = (*o.landmarks)[1];
+            o.chunk_states = 1;
+            o.max_searches = 2;
+            cuda::DeviceMultiIw device(ctx, task, o);
+            for (u32 repeat = 0; repeat < 2; ++repeat)
+            {
+                const auto batch = device.run(starts);
+                for (u32 i = 0; i < starts.size(); ++i)
+                {
+                    search::LiwOptions cpu;
+                    cpu.max_width = 1;
+                    cpu.start = starts[i];
+                    cpu.landmarks = (*o.landmarks)[i];
+                    expect_same(batch.result(i, *task, starts[i], true), search::liw(*task, cpu), "landmark groups");
+                }
+            }
+        }
+    }
+}
+
+TEST(DeviceLiw, SeededRolloutsReplayCapturedChunks)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    const auto root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(facts));
+    o.budget.max_states = 100;
+    o.max_next_layer_states = 8;
+    cuda::DeviceRollouts device(ctx, task, o);
+    const std::vector<u64> seeds{0, 1, 7};
+    u64 replays = 0;
+    for (u32 repeat = 0; repeat < 4; ++repeat)
+    {
+        const auto batch = device.run(seeds);
+        replays += batch.stats.replays;
+        for (u32 i = 0; i < seeds.size(); ++i)
+        {
+            search::LiwOptions cpu;
+            cpu.max_width = 1;
+            cpu.landmarks = o.landmarks->front();
+            cpu.control.budget = o.budget;
+            cpu.layers.kind = search::LayerOrdering::Kind::Randomized;
+            cpu.layers.seed = seeds[i];
+            cpu.layers.max_next_layer_states = o.max_next_layer_states;
+            expect_same(batch.result(i, *task, root, true), search::liw(*task, cpu), "seeded landmark rollout");
+        }
+    }
+    if (cuda::GraphExec::enabled())
+        EXPECT_GT(replays, 0u);
 }

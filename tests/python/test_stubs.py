@@ -251,6 +251,10 @@ def test_cuda_stubs_are_typed():
     assert "def to_host(self) -> mymyr._core._datasets.StateSpace" in cuda
     assert "def host(self) -> mymyr._core._datasets.StateSpace | None" in cuda
     assert f"def multi_iw(task: {table}, starts: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack, *," in cuda
+    assert f"def liw(task: {table}," in cuda
+    graph = "mymyr._core._search.FactLandmarkGraph"
+    assert f"landmarks: {graph} | Sequence[{graph}] | None" in cuda
+    assert "disjunctive: bool = False, all_private: bool = False" in cuda
     assert f"def batched_iw1(task: {table}," in cuda and "def task_ids(self) -> list[int]" in cuda
     assert f"chunk_states: int | None = None, {ids}) -> IwBatch:" in cuda
     ds = (d / "_datasets.pyi").read_text()
