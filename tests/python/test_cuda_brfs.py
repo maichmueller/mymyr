@@ -403,8 +403,8 @@ def test_successor_windows_equal_cpu(tmp_path, kw):
     from conftest import fan_task
 
     task = fan_task(tmp_path, 400)
-    kw = {"max_states": 160_001} | kw  # (the arenas then hold the space without growing)
-    small = mc.Context(0, max_bytes=160 << 20)
+    kw = {"max_states": 160_001} | kw
+    small = mc.Context(0, max_bytes=40 << 20)
     cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
     dev = mc.brfs(task, ctx=small, fingerprint=True, **kw)
     brfs_matches(dev, cpu)

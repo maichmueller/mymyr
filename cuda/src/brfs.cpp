@@ -184,19 +184,13 @@ struct DeviceBrfs::Impl
             return;
         a.reserve(more, device_room(*ctx) / 3 / a.record_bytes());
     }
-    /// At least `bytes` of `x`; with `exact`, a buffer that must grow is freed first and replaced by one of exactly
-    /// `bytes` (no growth margin, and the old one is not held while the new one is allocated).
+    /// At least `bytes` of `x`; with `exact`, exactly max(bytes, 64): a buffer of another size is freed first (no
+    /// growth margin, and the old one is not held while the new one is allocated).
     void* size_buffer(Scratch& x, u64 bytes, bool exact) const
     {
-        if (exact && x.size() < bytes)
+        if (exact && x.size() != std::max<u64>(bytes, 64))
             x.reset();
         return x.ensure(ctx, bytes, s);
-    }
-    /// The bytes size_buffer(x, bytes, true) allocates.
-    static u64 buffer_growth(const Scratch& x, u64 bytes)
-    {
-        bytes = std::max<u64>(bytes, 64);
-        return x.size() >= bytes ? 0 : bytes - x.size();
     }
     [[nodiscard]] u64 buffer_bytes() const
     {
@@ -502,24 +496,36 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         if (M > 0x7FFFFFFFu)  // (the counts' prefixes saturate past the device's 31-bit row index)
             throw std::length_error("mymyr: device BrFS: a state has more than 2^31 - 1 successors; use the CPU BrFS");
         phase = "a successor window";
-        // Every new state of the state in arenas reserved at once, as far as they fit beside a window of one row: a
-        // window then allocates only its candidate buffers and table slots (arenas grown per window would hold the
-        // stored states twice at each growth). A window adds at most as many states as the arenas have room for, so
-        // that only a partial reservation grows them again.
+        // A window's buffers at their exact sizes: the candidate buffers (those of another size are freed first,
+        // window_room counts them as free), the table's growth, and the arenas' growth when they have no room for its
+        // new states.
+        Scratch* const buffers[] = {&parent, &cand, &sort, &result, &rank, &scan};
+        auto window_room = [&]
+        {
+            u64 n = device_room(*ctx);
+            for (const Scratch* x : buffers)
+                n += x->size();
+            return n;
+        };
         auto window_bytes = [&](const SuccessorWindow& w)
         {
             const u64 n = w.rows;
-            u64 bytes = buffer_growth(parent, n * sizeof(u32)) + buffer_growth(cand, n * W * sizeof(u64)) +
-                        buffer_growth(result, n * sizeof(u32)) + buffer_growth(rank, (n + 1) * sizeof(u32)) +
-                        buffer_growth(scan, state_set::rank_temp_bytes(n)) + table_growth(count, n) * sizeof(u64);
+            auto at_least = [](u64 x) { return std::max<u64>(x, 64); };
+            u64 bytes = at_least(n * sizeof(u32)) * 2 + at_least(n * W * sizeof(u64)) + at_least((n + 1) * sizeof(u32)) +
+                        at_least(state_set::rank_temp_bytes(n)) + table_growth(count, n) * sizeof(u64);
             if (sorting)
-                bytes += buffer_growth(sort, w.scratch_rows * L * sizeof(u32));
+                bytes += at_least(std::max<u64>(w.scratch_rows, 1) * L * sizeof(u32));
             return bytes + states->growth_bytes(n, count + n) + nodes->growth_bytes(n, count + n);
         };
+        // Every new state of the state in arenas reserved at once, as far as they fit beside a quarter of the room for
+        // the windows (arenas grown per window would hold the stored states twice at each growth). A window adds at
+        // most as many states as the arenas have room for, so that only a partial reservation grows them again.
         {
+            for (Scratch* x : buffers)
+                x->reset();
             const u64 room = device_room(*ctx), row = states->record_bytes() + nodes->record_bytes();
-            const u64 one = window_bytes(successor_window(off, 0, 1));
-            const u64 most = room > one ? (room - one) / row : 0;
+            const u64 keep = std::max(window_bytes(successor_window(off, 0, 1)), room / 4);
+            const u64 most = room > keep ? (room - keep) / row : 0;
             const u64 total = std::min({count + M, std::max<u64>(budget, count + 1), most});
             if (total > states->capacity())
                 (void)try_allocate(*ctx, [&](int)
@@ -542,7 +548,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 return false;
             }
             // the window: the most rows whose buffers fit 15/16 of the room (a margin for the pool's granularity)
-            const u64 room = device_room(*ctx), usable = room - room / 16;
+            const u64 room = window_room(), usable = room - room / 16;
             u64 hi = std::min(window_cap, M - f);
             if (const u64 spare = std::min(states->capacity(), nodes->capacity()) - count; spare > 0)
                 hi = std::min(hi, spare);
@@ -567,18 +573,22 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                                   "Raise the Context's max_bytes, or use the CPU BrFS.", per_candidate(), held());
             if (count + w.rows > state_set::k_max_states)
                 throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states (with a chunk's candidates)");
+            // (the largest first: freed candidate buffers and the arenas' growth, then the table and the buffers)
             const bool fits = try_allocate(*ctx, [&](int)
                                            {
-                                               ensure_table(count, w.rows);
-                                               size_scratch(w.rows, true, std::max<u64>(w.scratch_rows, 1));
+                                               if (states->growth_bytes(w.rows, count + w.rows) != 0)
+                                                   for (Scratch* x : buffers)
+                                                       x->reset();
                                                states->reserve(w.rows, count + w.rows);
                                                nodes->reserve(w.rows, count + w.rows);
+                                               ensure_table(count, w.rows);
+                                               size_scratch(w.rows, true, std::max<u64>(w.scratch_rows, 1));
                                            });
             if (!fits)
             {
                 // (nothing of the window ran: a smaller one, down to a single successor)
                 if (w.rows == 1)
-                    refuse_successors(*ctx, "device BrFS", "a state", M, window_bytes(w), device_room(*ctx),
+                    refuse_successors(*ctx, "device BrFS", "a state", M, window_bytes(w), window_room(),
                                       "Raise the Context's max_bytes, or use the CPU BrFS.", per_candidate(), held());
                 window_cap = w.rows / 2;
                 continue;
