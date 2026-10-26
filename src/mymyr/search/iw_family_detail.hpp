@@ -57,7 +57,8 @@ inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer&
     orderer = LayerOrderer(env.task, lo);
     env.layers = &orderer;
     if (orderer.relaxed() && env.slow())
-        return "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a successor order";
+        return "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+               "successor order or a transition tree (tree='transitions')";
     if (orderer.beam() && !env.slow() && (T > 1 || orderer.relaxed()) &&
         (env.tree == TreeRecord::None || orderer.relaxed()))
     {

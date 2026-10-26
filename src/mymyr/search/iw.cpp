@@ -160,8 +160,8 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
     if (T > 1 && !o.layers.beam())
         error = "IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)";
     else if (layers && layers->relaxed() && slow)
-        error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a "
-                "successor order";
+        error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+                "successor order or a transition tree (tree='transitions')";
     else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
              (o.tree == TreeRecord::None || layers->relaxed()))
         team = std::make_unique<BeamTeam>(t, o.tree == TreeRecord::None ? T : 1);
