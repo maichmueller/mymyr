@@ -1112,3 +1112,27 @@ TEST(DeviceLiw, SeededRolloutsReplayCapturedChunks)
         EXPECT_GT(replays, 0u);
     }
 }
+
+TEST(DeviceLiw, LandmarkResolutionSizesLazyRowsBeforeSearch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = wide_task(80, TaskOptions::Atoms::Lazy, 4093);
+    const State root = task->initial_state();
+    ASSERT_FALSE(cuda::lifted::wide_row(task->words()));
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create({6399, 6398, 6319, 6318}));
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const std::vector<State> starts(2, root);
+    const auto batch = device.run(starts);
+    EXPECT_TRUE(cuda::lifted::wide_row(task->words()));
+    search::LiwOptions cpu;
+    cpu.max_width = 1;
+    cpu.start = root;
+    cpu.landmarks = o.landmarks->front();
+    const auto expected = search::liw(*task, cpu);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, root, true), expected, "landmark slot resolution");
+}

@@ -835,24 +835,6 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     out.num_passes.assign(n, 0);
     Host host;
     host.plan_at.assign(n, ~u64{0});
-    const u32 slots = task->numeric_slots();
-    if (starts.words < (starts.numeric_words ? starts.numeric_words : slots))
-        throw std::invalid_argument("mymyr: device IW: start rows have no numeric block");
-    const u32 input_atoms = starts.words - (starts.numeric_words ? starts.numeric_words : slots);
-    W = bucket(std::max({task->words(), input_atoms, 1u}), slots);
-    DevArray<u64> numeric_starts;
-    if (slots)
-    {
-        auto view = gen->view();
-        if (!starts.numeric_words)
-            view.numeric.storage = 0;
-        else if (starts.numeric_words != task->numeric_words())
-            throw std::invalid_argument("mymyr: device IW: start rows have the wrong numeric width");
-        auto* converted = numeric_starts.ensure(ctx, std::max<u64>(u64{n} * W, 1), s);
-        check(numeric::launch_convert(view, starts.data, starts.stride, input_atoms, converted, W, W - slots, n, true, s),
-              "numeric starts");
-        starts = DeviceStarts{converted, W, W, n};
-    }
     coordinates.clear();
     landmark_ranks = 0;
     if (o.landmarks)
@@ -881,6 +863,26 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
             landmark_ranks = std::max(landmark_ranks, coordinates.back().num_ranks());
         }
         mask_words = bits::words_for(landmark_ranks);
+        gen->refresh();
+        cpu_goal = host_goal && derived_goal && !gen->device_axioms();
+    }
+    const u32 slots = task->numeric_slots();
+    if (starts.words < (starts.numeric_words ? starts.numeric_words : slots))
+        throw std::invalid_argument("mymyr: device IW: start rows have no numeric block");
+    const u32 input_atoms = starts.words - (starts.numeric_words ? starts.numeric_words : slots);
+    W = bucket(std::max({task->words(), input_atoms, 1u}), slots);
+    DevArray<u64> numeric_starts;
+    if (slots)
+    {
+        auto view = gen->view();
+        if (!starts.numeric_words)
+            view.numeric.storage = 0;
+        else if (starts.numeric_words != task->numeric_words())
+            throw std::invalid_argument("mymyr: device IW: start rows have the wrong numeric width");
+        auto* converted = numeric_starts.ensure(ctx, std::max<u64>(u64{n} * W, 1), s);
+        check(numeric::launch_convert(view, starts.data, starts.stride, input_atoms, converted, W, W - slots, n, true, s),
+              "numeric starts");
+        starts = DeviceStarts{converted, W, W, n};
     }
     // group size: the novelty tables of a group fit table_bytes
     u32 group = group_size(o.max_width, task->words(), o.table_bytes, landmark_ranks);
@@ -965,6 +967,8 @@ void DeviceMultiIw::Impl::upload_landmarks(u32 begin, u32 count)
     for (u32 i = 0; i < count; ++i)
     {
         const auto& coords = coordinates[coordinates.size() == 1 ? 0 : begin + i];
+        if (!coords.atoms().empty() && coords.atoms().back() >= u64{W} * 64)
+            throw std::logic_error("mymyr: device LIW: landmark slots exceed the node row width");
         counts.push_back(coords.num_ranks());
         std::vector<std::vector<u32>> members(landmark_ranks);
         for (u32 j = 0; j < coords.atoms().size(); ++j)
