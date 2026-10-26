@@ -1226,6 +1226,7 @@ raise for invalid inputs and have `status=None`.
 
 ```python needs-torch skip-if-no-cuda
 import torch
+from mymyr import rl
 
 predicate = task.atom(0)
 predicates = torch.tensor([rl.as_table(task).predicate_names.index(predicate.predicate.name)],

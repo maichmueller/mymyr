@@ -5,7 +5,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from test_encoding_literals import goals_task, ids, predicate_id
+from test_encoding_literals import GOALS, goals_task, ids, predicate_id
 
 mc = pytest.importorskip("mymyr.cuda", exc_type=ImportError)
 torch = pytest.importorskip("torch", exc_type=ImportError)
@@ -23,8 +23,13 @@ def tensor(array):
 
 
 @pytest.fixture(params=["reachable", "dense"])
-def case(request):
-    tasks = [goals_task(problem, atoms=request.param) for problem in ("static_true", "static_false")]
+def case(request, tmp_path):
+    first = goals_task("static_true", atoms=request.param)
+    problem = (GOALS / "static_false.pddl").read_text().replace("a b - place", "a b c - place")
+    problem = problem.replace("(heavy t1)", "(heavy t2)")
+    path = tmp_path / "problem.pddl"
+    path.write_text(problem)
+    tasks = [first, mymyr.Task.from_pddl(GOALS / "domain.pddl", path, atoms=request.param)]
     table = rl.TaskTable(tasks)
     encoder = encoding.FlatRelationEncoder(table, max_goal_level=2, include_static=False,
                                            include_derived=False, nullary=False)
@@ -167,6 +172,12 @@ def test_custom_ops_fake_compile_and_cuda_graph_replay(case, layered):
             graph.replay()
         stream.synchronize()
         assert captured[5].item() == 4 and captured[-1].item() == 4
+        with torch.cuda.stream(stream):
+            inputs[0][0] = int(p[0])
+            graph.replay()
+        stream.synchronize()
+        assert captured[5].item() == 0 and captured[-1].item() == 0
+        assert_masks(expected, result)
     finally:
         stream.synchronize()
         del graph
@@ -216,6 +227,10 @@ def test_single_instance_defaults_nullary_empty_and_validation():
         rt.unregister(handle)
     with pytest.raises(TypeError, match="encoder"):
         encoding.literal_slots(task, predicates, objects)
+    with pytest.raises(TypeError, match="cuda"):
+        encoding.literal_slots(encoder, predicates, objects.cpu())
+    with pytest.raises(ValueError, match="contiguous"):
+        encoding.literal_slots(encoder, predicates.expand(2), objects.expand(2, 0))
 
 
 def test_fluent_words_without_derived_slots_include_the_high_bit():
@@ -232,3 +247,13 @@ def test_fluent_words_without_derived_slots_include_the_high_bit():
     actual = encoding.literal_masks(encoder, tensor(p), tensor(o), tensor(signs), tensor(rows), 1)
     assert actual.derived_pos is None and actual.derived_neg is None
     assert_masks(expected, actual)
+    handle = rt.register(encoder)
+    try:
+        inputs = (tensor(p), tensor(o), tensor(signs), tensor(rows))
+        with torch._subclasses.fake_tensor.FakeTensorMode() as mode:
+            fake = rt.literal_masks(handle, *(mode.from_tensor(x) for x in inputs), 1)
+        assert fake[2].shape == (1, 0) and fake[3].shape == (1, 0)
+        op = rt.literal_masks(handle, *inputs, 1)
+        assert_masks(expected, encoding.GoalMasks(op[0], op[1], None, None, op[4], op[5]))
+    finally:
+        rt.unregister(handle)

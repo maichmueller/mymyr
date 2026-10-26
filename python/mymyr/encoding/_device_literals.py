@@ -84,4 +84,4 @@ def masks(encoder, predicates, objects, positive, rows, num_rows, task_ids=None,
         native.literal_masks(stream.cuda_stream, count, objects.shape[1], num_rows, num_layers,
                              _pointers(inputs), _pointers([*outputs, unsatisfiable, status]))
         _record(inputs, stream)
-    return [*outputs, unsatisfiable.bool(), status]
+        return [*outputs, unsatisfiable.bool(), status]
