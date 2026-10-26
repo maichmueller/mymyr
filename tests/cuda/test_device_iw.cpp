@@ -1091,7 +1091,7 @@ TEST(DeviceLiw, SeededRolloutsReplayCapturedChunks)
     cuda::DeviceRollouts device(ctx, task, o);
     const std::vector<u64> seeds{0, 1, 7};
     u64 replays = 0;
-    for (u32 repeat = 0; repeat < 4; ++repeat)
+    for (u32 repeat = 0; repeat < 6; ++repeat)
     {
         const auto batch = device.run(seeds);
         replays += batch.stats.replays;

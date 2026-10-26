@@ -408,6 +408,7 @@ struct DeviceMultiIw::Impl
     void ensure_lists(u64 n, u64 keep_a, u64 keep_b);
     void widen(u32 nw, u32 arity);
     void grow_table(u32 arity);
+    void require_table_room(u64 bytes) const;
     /// The scans' states for scans of up to n items (zeroed when allocated; not while a chunk is captured).
     void ensure_scan(u64 n);
     [[nodiscard]] miw::ScanState scan_state(u32 site) const { return {scan_ws.data(), scan_tiles, site}; }
@@ -730,6 +731,14 @@ void DeviceMultiIw::Impl::widen(u32 nw, u32 arity)
     grow_table(arity);
 }
 
+void DeviceMultiIw::Impl::require_table_room(u64 bytes) const
+{
+    if (o.landmarks && bytes > device_room(*ctx))
+        throw std::invalid_argument("mymyr: device LIW(1): the novelty tables require " + std::to_string(bytes) +
+                                    " bytes, beyond the CUDA context's available memory (raise Context max_bytes=, "
+                                    "or lower max_searches= / table_bytes=)");
+}
+
 void DeviceMultiIw::Impl::grow_table(u32 arity)
 {
     const u32 tw = task->words();
@@ -739,8 +748,9 @@ void DeviceMultiIw::Impl::grow_table(u32 arity)
     const u32 group = table_group(arity, tw, o.table_bytes, landmark_ranks);
     if (B > group)
         throw Regroup{group};
+    require_table_room(u64{B} * per * sizeof(u64));
     DevArray<u64> t;
-    t.ensure(ctx, u64{B} * per, s, 0, lifted::wide_row(tw));
+    t.ensure(ctx, u64{B} * per, s, 0, o.landmarks.has_value() || lifted::wide_row(tw));
     if (o.landmarks)
     {
         check(cudaMemsetAsync(t.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
@@ -1504,10 +1514,8 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
         if (B > group)
             throw Regroup{group};
         const u64 need = u64{B} * per * sizeof(u64);
-        if (o.landmarks && need > table.bytes() && need > device_room(*ctx))
-            throw std::invalid_argument("mymyr: device LIW(1): the novelty tables require " + std::to_string(need) +
-                                        " bytes, beyond the CUDA context's available memory (raise Context max_bytes=, "
-                                        "or lower max_searches= / table_bytes=)");
+        if (need > table.bytes())
+            require_table_room(need);
         table.ensure(ctx, u64{B} * per, s, 0, o.landmarks.has_value() || lifted::wide_row(RW));
         if (o.landmarks || (arity == 2 && lifted::wide_row(RW)))
             check(cudaMemsetAsync(table.data(), 0, u64{B} * per * sizeof(u64), s), "cudaMemsetAsync");
