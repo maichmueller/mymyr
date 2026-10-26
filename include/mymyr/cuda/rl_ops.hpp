@@ -37,7 +37,7 @@ cudaError_t launch_expansion_generated(u32 value, u32* out, cudaStream_t s);
 cudaError_t launch_hash_rows(const u64* states, u64 rows, u64 stride, u32 words, u32 numeric_words,
                              u64* out, cudaStream_t s);
 /// Kept counts per parent (all-no-op parents keep all rows); counts[rows] = 0 for an exclusive scan.
-cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s);
+cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s, const u32* status = nullptr);
 /// Stable scatter into scanned offsets, including canonical indices and cleared padding.
 cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, cudaStream_t s);
 /// Canonical positions without dropping, and zero digest padding beyond the live total.

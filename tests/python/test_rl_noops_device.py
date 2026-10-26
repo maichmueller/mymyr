@@ -287,3 +287,35 @@ def test_numeric_noop_uses_public_float_bits():
     rows = np.tile(task.encode([task.initial_state]), (3, 1))
     rows[:, -1] = np.array([0, 0x8000000000000000, 0x7ff8000000001234], np.uint64)
     compare(task, rows)
+
+
+def test_captured_noop_filtering_respects_live_parent_count():
+    task = pddl_task(atoms="dense")
+    rows = np.asarray(task.encode([task.initial_state] * 3))
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    kw = dict(device="cuda", dtype=torch.int32)
+    live = torch.tensor([3], **kw)
+    out = dict(succ_hash=torch.empty(16, dtype=torch.int64, device="cuda"),
+               noop=torch.empty(16, dtype=torch.bool, device="cuda"), index=torch.empty(16, **kw),
+               offsets=torch.empty(4, **kw), status=torch.empty(1, **kw))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    def run():
+        rl.expand_into(task, source, **out, row_count=live, drop_noops=True, stream=stream)
+    with torch.cuda.stream(stream):
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for count in (3, 1, 0, 3):
+        live.fill_(count)
+        graph.replay()
+        expected = rl.expand(task, rows[:count], hashes=True, drop_noops=True)
+        offsets = np.pad(expected.offsets, (0, 3 - count), constant_values=expected.total)
+        assert not int(out["status"].item())
+        np.testing.assert_array_equal(array(out["offsets"]), offsets)
+        np.testing.assert_array_equal(array(out["succ_hash"][:expected.total]), expected.succ_hash)
+        np.testing.assert_array_equal(array(out["index"][:expected.total]), expected.index)
+        assert not out["succ_hash"][expected.total:].any() and torch.all(out["index"][expected.total:] == -1)
+    torch.cuda.synchronize()

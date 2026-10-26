@@ -100,14 +100,14 @@ __global__ void k_hash_wide(const u64* states, u64 rows, u64 stride, u32 words, 
     }
 }
 
-__global__ void k_noop_counts(ExpansionRows src, u64 rows, u32* counts)
+__global__ void k_noop_counts(ExpansionRows src, u64 rows, u32* counts, const u32* status)
 {
     const u32 lane = threadIdx.x & 31;
     for (u64 p = (u64{blockIdx.x} * blockDim.x + threadIdx.x) / 32; p < rows; p += u64{gridDim.x} * blockDim.x / 32)
     {
         const u32 b = static_cast<u32>(src.offsets[p]), e = static_cast<u32>(src.offsets[p + 1]);
         u32 n = 0;
-        const bool fits = static_cast<u32>(src.offsets[rows]) <= src.capacity;
+        const bool fits = static_cast<u32>(src.offsets[rows]) <= src.capacity && (!status || *status == 0);
         if (fits)
             for (u64 j = u64{b} + lane; j < e; j += 32)
                 n += !src.noop[j];
@@ -206,9 +206,9 @@ cudaError_t launch_hash_rows(const u64* states, u64 rows, u64 stride, u32 words,
     return cudaGetLastError();
 }
 
-cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s)
+cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s, const u32* status)
 {
-    k_noop_counts<<<grid_for(rows * 32), k_block, 0, s>>>(src, rows, counts);
+    k_noop_counts<<<grid_for(rows * 32), k_block, 0, s>>>(src, rows, counts, status);
     return cudaGetLastError();
 }
 

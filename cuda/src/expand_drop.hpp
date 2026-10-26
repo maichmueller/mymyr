@@ -36,10 +36,11 @@ struct ExpansionDrop
         return e;
     }
 
-    void compact(const rl::Expansion& src, rl::Expansion& out, u64 rows, const ContextPtr& ctx, cudaStream_t s)
+    void compact(const rl::Expansion& src, rl::Expansion& out, u64 rows, const ContextPtr& ctx, cudaStream_t s,
+                 const u32* status = nullptr)
     {
         auto* count = static_cast<u32*>(counts.ensure(ctx, (rows + 1) * sizeof(u32), s));
-        check(launch_noop_counts(expansion_rows(src), rows, count, s), "launch_noop_counts");
+        check(launch_noop_counts(expansion_rows(src), rows, count, s, status), "launch_noop_counts");
         const u64 bytes = lifted::scan_temp_bytes(rows + 1);
         check(lifted::launch_scan(count, reinterpret_cast<u32*>(out.offsets), rows + 1,
                                  scan.ensure(ctx, bytes, s), bytes, s), "launch_scan");

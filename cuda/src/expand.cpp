@@ -1408,7 +1408,7 @@ void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl
     rl::Expansion raw = options.drop_noops ? I.drop.prepare(out, in.rows, I.ctx, I.s) : out;
     I.expand_async(raw, status);
     if (options.drop_noops)
-        I.drop.compact(raw, out, in.rows, I.ctx, I.s);
+        I.drop.compact(raw, out, in.rows, I.ctx, I.s, status);
     else if (out.index || out.succ_hash || out.noop)
         check(launch_expansion_indices(detail::expansion_rows(out), in.rows, I.s), "launch_expansion_indices");
 }
