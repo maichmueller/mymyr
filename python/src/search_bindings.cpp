@@ -29,6 +29,7 @@
 #include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
 #include "mymyr/search/iw_family.hpp"
+#include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/search/liw.hpp"
 #include "mymyr/search/parallel_rollouts.hpp"
 #include "mymyr/search/plan_file.hpp"
@@ -1499,12 +1500,9 @@ search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle 
     l.seed = int_arg<u64>(seed, "seed");
     l.prefer_more_satisfied_goals = prefer_more_satisfied_goals;
     if (auto v = opt_int_arg<u32>(max_next_layer_states, "max_next_layer_states", 0))
-        l.max_next_layer_states = *v;  // checked by the search (0, or a limit with 'queue', is an error)
+        l.max_next_layer_states = *v;
     if (auto v = opt_int_arg<u32>(beam_width, "beam_width", 0))
-        l.beam_width = *v;  // checked by the search, as above
-    if (l.beam() && l.kind == search::LayerOrdering::Kind::Queue)
-        throw nb::value_error("mymyr: beam_width requires an ordered layer kind: set layer_order to 'in_order', "
-                              "'reverse', 'randomized' or 'goal_count'");
+        l.beam_width = *v;
     const std::string bn = str_arg(beam_novelty, "beam_novelty");
     if (bn == "all_tested")
         l.beam_novelty = search::LayerOrdering::BeamNovelty::AllTested;
@@ -1515,7 +1513,10 @@ search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle 
     else
         throw nb::value_error("mymyr: beam_novelty must be 'all_tested', 'survivors_only' or 'relaxed_survivors_only'");
     l.randomize_ties = randomize_ties;
-    l.beam_chunk = int_arg<u32>(beam_chunk, "beam_chunk");  // checked by the search (0 is an error)
+    l.beam_chunk = int_arg<u32>(beam_chunk, "beam_chunk");
+    // Raised here rather than reported as a FAILED result, so that no search starts with options it rejects.
+    if (std::string e = search::check_layers(l); !e.empty())
+        throw nb::value_error(("mymyr: " + e).c_str());
     return l;
 }
 

@@ -1589,7 +1589,7 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         throw std::invalid_argument("mymyr brfs: the flat, chunked and compact stores are single-threaded (but for a beam)");
     if (options.goal.kind == search::GoalSpec::Kind::Custom && (T > 1 || !options.goal.test))
         throw std::invalid_argument("mymyr brfs: a custom goal test needs threads == 1 and a test function");
-    if (std::string e = search::detail::check_layers(options.layers); !e.empty())
+    if (std::string e = search::check_layers(options.layers); !e.empty())
         throw std::invalid_argument("mymyr brfs: " + e);
     if (ordered && store != BrfsOptions::Store::Flat && store != BrfsOptions::Store::Chunked)
         throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store");

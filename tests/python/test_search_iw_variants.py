@@ -409,8 +409,8 @@ def test_argument_errors(blocks, gripper):
     g2 = search.FactLandmarkGraph(blocks, [], [["(on c a)", "(on b a)"]])
     r = search.liw(blocks, landmarks=g2, disjunctive=True, all_private=True, unshared_atoms=["(on a b)"])
     assert r.status == Status.FAILED and "all_private" in r.message
-    r = search.abstracted_iw(blocks, max_next_layer_states=3)
-    assert r.status == Status.FAILED and "max_next_layer_states" in r.message
+    with pytest.raises(ValueError, match="max_next_layer_states"):
+        search.abstracted_iw(blocks, max_next_layer_states=3)
     b = search.find_rollouts_parallel(blocks, [1], max_width=1)
     b2 = search.find_rollouts_parallel(gripper, [1], max_width=1)
     with pytest.raises(ValueError):

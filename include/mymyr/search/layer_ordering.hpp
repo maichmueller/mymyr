@@ -46,6 +46,8 @@
 
 #include "mymyr/core/types.hpp"
 
+#include <string>
+
 namespace mymyr::search
 {
 struct LayerOrdering
@@ -87,4 +89,29 @@ struct LayerOrdering
 
     [[nodiscard]] bool beam() const noexcept { return beam_width != ~u32{0}; }
 };
+
+/// Checks a LayerOrdering against the rules above: an error message, or an empty string. Every search that takes a
+/// LayerOrdering applies this check.
+[[nodiscard]] inline std::string check_layers(const LayerOrdering& lo)
+{
+    if (lo.kind == LayerOrdering::Kind::Queue && lo.max_next_layer_states != ~u32{0})
+        return "LayerOrdering::max_next_layer_states requires an ordered layer kind (every kind but Queue)";
+    if (lo.max_next_layer_states == 0)
+        return "LayerOrdering::max_next_layer_states must be positive";
+    if (lo.beam_width == 0)
+        return "LayerOrdering::beam_width must be positive";
+    if (lo.beam() && lo.kind == LayerOrdering::Kind::Queue)
+        return "LayerOrdering::beam_width requires an ordered layer kind (every kind but Queue)";
+    if (lo.beam() && lo.max_next_layer_states != ~u32{0})
+        return "LayerOrdering::beam_width and LayerOrdering::max_next_layer_states are mutually exclusive";
+    if (!lo.beam() && lo.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
+        return "LayerOrdering::beam_novelty other than AllTested requires a beam (beam_width)";
+    if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount)
+        return "LayerOrdering::randomize_ties requires Kind::GoalCount (the only kind with scores)";
+    if (lo.beam_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly && lo.kind != LayerOrdering::Kind::GoalCount)
+        return "LayerOrdering::beam_novelty RelaxedSurvivorsOnly requires Kind::GoalCount (it ranks by score)";
+    if (lo.beam_chunk == 0)
+        return "LayerOrdering::beam_chunk must be positive";
+    return {};
+}
 }  // namespace mymyr::search
