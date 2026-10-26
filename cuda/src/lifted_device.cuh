@@ -1602,7 +1602,9 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
     ptrim = g.max(ptrim);
     apply(i0, y0, y1, true);
     const bool digest = inside && (out.hash || out.noop);
-    bool same = y0 == (i0 < pw ? st[i0] : 0) && y1 == (i1 < pw ? st[i1] : 0);
+    bool same = true;
+    if (digest)
+        same = y0 == (i0 < pw ? st[i0] : 0) && y1 == (i1 < pw ? st[i1] : 0);
     if (missing && out.missing_flag && g.sub == 0)
         *out.missing_flag = 1;
     const bool fits = !missing && ptrim <= ow && max_add <= ow;

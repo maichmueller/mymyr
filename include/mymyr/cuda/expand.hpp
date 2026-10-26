@@ -4,7 +4,7 @@
 //
 //   mymyr::cuda::DeviceExpander x(ctx, table);
 //   rl::Expansion out{...device pointers, capacity, words, label_width...};
-//   x.expand({d_states, N, W, 0}, d_task_ids, out);   // out.total, out.words_needed as rl::expand sets them
+//   x.expand({d_states, N, W, 0}, d_task_ids, out);   // out.total, out.generated, out.words_needed as rl::expand sets them
 //   x.pad(out, N, padded);                             // rl::pad on the device
 //
 // The results are byte-equal to rl::expand on the same table: the same canonical order (per state by schema, then
@@ -29,6 +29,12 @@
 // PerInstance): its rows are copied down, rl::expand runs on the host's threads and the results are copied up (count()
 // and write() synchronize). So are a numeric instance's batches whose rows (the batch's atom words and the numeric
 // slots) are wider than 64 words.
+//
+// Optional succ_hash/noop destinations digest the actual successor while it is built, including when succ is null.
+// Hashes equal State::hash(), with public packed numeric words; noop compares fluent and numeric bits. With
+// drop_noops, a stable compaction keeps effective successors, or all successors of an all-no-op parent. The index
+// destination carries the kept rows' positions in each parent's full expansion. generated counts before compaction,
+// total and offsets after it; capacity bounds generated. Capturable calls retain compaction scratch across replays.
 //
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
 // successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
@@ -126,7 +132,7 @@ public:
     /// out.words); an invalid batch writes no successor or label. Once the running total saturates at UINT32_MAX,
     /// successor widths past it are not counted: bit 1's width check is exact only while the batch fits; bit 0 is
     /// always exact. Successor rows past the total are zero, and goal flags and derived words cover every row below
-    /// the capacity (past the total: those of zero rows). out.total and out.words_needed are not set, and a later write()
+    /// the capacity (past the total: those of zero rows). out.total, out.generated and out.words_needed are not set, and a later write()
     /// needs a count() first. With rows_dev (device u32), only min(*rows_dev, in.rows) rows are present;
     /// padding contributes neither successors nor validation errors, and its offsets equal the live total.
     /// Needs async_unsupported() empty (std::invalid_argument otherwise).

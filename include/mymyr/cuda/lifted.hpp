@@ -152,7 +152,7 @@ struct Labels
 /// Successor rows of launch_write.
 struct SuccessorRows
 {
-    u64* words = nullptr;  // [capacity, out_words] (null: widths and missing atoms only)
+    u64* words = nullptr;  // [capacity - first, out_words] (null: no row storage)
     u32 out_words = 0;
     u32* words_needed = nullptr;  // atomicMax of the trimmed width of the rows that do not fit out_words (rl::expand)
     u32* missing_flag = nullptr;  // set to 1 when an added atom has no slot (lazy slots)
