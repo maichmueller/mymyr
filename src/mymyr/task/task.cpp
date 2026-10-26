@@ -179,6 +179,9 @@ u64 Task::compute_encoding_fingerprint() const
         h = hash::mix64(h ^ (u64{n} + k));
         for (u32 s = 0; s < n; ++s)
         {
+            // Lazy slot reservation precedes publication of its atom record.
+            if (!m_atoms.frozen())
+                (void)m_atoms.canonical(kind, s);
             const u32* record = m_atoms.record(kind, s);
             const auto& pred = m_data.predicates[record[0]];
             h = name(h, m_data.str(pred.name));

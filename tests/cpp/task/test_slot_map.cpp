@@ -3,6 +3,7 @@
 #include "mymyr/task/task.hpp"
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <sstream>
 #include <thread>
 
@@ -77,4 +78,45 @@ TEST(SlotMap, SnapshotsRemainValidWhileLazySlotsGrow)
     EXPECT_EQ(before->size(), 1);
     EXPECT_EQ(map->snapshot()->size(), 2);
 }
+
+TEST(SlotMap, SnapshotsAndFingerprintsWaitForConcurrentPublication)
+{
+    const auto make = [](TaskOptions::Atoms mode) {
+        std::istringstream text("O 4096\nP 1\nF 1 p\nSI 0\nFI 0\nG 0\nA 1\nset 1\nL 0\nE 1\n0\nL 0\nF 1\n0 1 0\n");
+        TaskOptions options;
+        options.atoms = mode;
+        return Task::create(formalism::read_task_text(text), options);
+    };
+    const auto source = make(TaskOptions::Atoms::Lazy), target = make(TaskOptions::Atoms::Dense);
+    const auto map = SlotMap::between(*source, *target);
+    const auto before = map->snapshot();
+    std::atomic<bool> done{false};
+    std::thread writer([&] {
+        for (u32 object = 0; object < 4096; ++object)
+            (void)source->atoms().intern(source->atoms().layout().encode(0, &object));
+        done.store(true, std::memory_order_release);
+    });
+    u32 checked = 0;
+    do
+    {
+        const auto slots = map->snapshot();
+        for (; checked < slots->size(); ++checked)
+        {
+            EXPECT_LT((*slots)[checked], target->atoms().fluent_slots());
+            if ((*slots)[checked] < target->atoms().fluent_slots())
+            {
+                EXPECT_EQ(target->format(SlotId{(*slots)[checked]}), source->format(SlotId{checked}));
+            }
+        }
+        (void)source->encoding_fingerprint();
+    } while (!done.load(std::memory_order_acquire));
+    writer.join();
+    EXPECT_TRUE(before->empty());
+    EXPECT_EQ(map->snapshot()->size(), 4096);
+    const auto serial = make(TaskOptions::Atoms::Lazy);
+    for (u32 object = 0; object < 4096; ++object)
+        (void)serial->atoms().intern(serial->atoms().layout().encode(0, &object));
+    EXPECT_EQ(source->encoding_fingerprint(), serial->encoding_fingerprint());
+}
+
 }

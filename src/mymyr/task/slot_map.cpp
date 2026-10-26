@@ -123,6 +123,9 @@ std::shared_ptr<const std::vector<u32>> SlotMap::snapshot() const
         slots->reserve(size);
         for (u32 slot = static_cast<u32>(slots->size()); slot < size; ++slot)
         {
+            // A reserved lazy slot's record becomes readable when its canonical id is published.
+            if (!m_source.atoms().frozen())
+                (void)m_source.atoms().canonical(AtomKind::Fluent, slot);
             const SlotId id{slot};
             slots->push_back(match_atom(m_source.atoms().predicate(id).v, m_source.atoms().arguments(id)));
         }
