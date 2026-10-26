@@ -250,8 +250,8 @@ is_object = object_mask(batch)
 ```
 
 The first five helpers support `jax.jit` and CUDA graph capture without reading device values on the host. Their
-shapes include capacity: per-graph entries past the live graph count are zero; unused entity entries have graph
-`G - 1` (the last live graph, or -1 with no live graphs), role 0 and object mask False. `E` is the stored entity
+shapes include capacity: per-graph entries past the live graph count are zero; unused entity entries point to
+the last live graph (live count − 1, or -1 with no live graphs), with role 0 and object mask False. `E` is the stored entity
 extent, or the scalar entity capacity retained by a device/JAX batch with implicit arrays. Host batches with
 implicit arrays have no entity capacity storage, so their per-entity results cover only the live entities.
 When wrapping the raw torch op's outputs with `DeviceFlatBatch.from_arrays`, supply `entity_capacity=` if entity
