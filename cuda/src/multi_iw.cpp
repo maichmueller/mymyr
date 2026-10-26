@@ -325,10 +325,10 @@ struct DeviceMultiIw::Impl
     DevArray<unsigned long long> sa_u64;
     DevArray<u64> rng, goal_pos, goal_neg, reached, table;
     std::vector<novelty::LandmarkCoordinates> coordinates;
-    u32 landmark_ranks = 0, mask_words = 0;
+    u32 landmark_ranks = 0, mask_words = 0, landmark_begin = 0;
     DevArray<u32> rank_counts, rank_slots;
     DevArray<u64> rank_offsets, node_masks;
-    void upload_landmarks(u32 begin, u32 count);
+    void upload_landmarks(u32 begin, u32 count, std::span<const u32> active);
     miw::Searches sv;
     // chunk scratch
     DevArray<u8> row_flags, host_goal_dev, c_flags;
@@ -885,12 +885,13 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         starts = DeviceStarts{converted, W, W, n};
     }
     // group size: the novelty tables of a group fit table_bytes
-    u32 group = group_size(o.max_width, task->words(), o.table_bytes, landmark_ranks);
+    const u32 grouping_ranks = landmark_ranks;
+    u32 group = group_size(o.max_width, task->words(), o.table_bytes, grouping_ranks);
     if (o.max_searches)
         group = std::min(group, o.max_searches);
     for (u32 g0 = 0; g0 < n;)
     {
-        group = std::min(group, group_size(o.max_width, task->words(), o.table_bytes, landmark_ranks));
+        group = std::min(group, group_size(o.max_width, task->words(), o.table_bytes, grouping_ranks));
         const u32 count = std::min(group, n - g0);
         const DeviceStarts gs{starts.data + static_cast<u64>(g0) * starts.stride, starts.stride, starts.words, count};
         const MultiIwStats before = st;
@@ -960,18 +961,27 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     return out;
 }
 
-void DeviceMultiIw::Impl::upload_landmarks(u32 begin, u32 count)
+void DeviceMultiIw::Impl::upload_landmarks(u32 begin, u32 count, std::span<const u32> active)
 {
+    std::vector<u8> used(count, 0);
+    landmark_ranks = 1;
+    for (u32 i : active)
+    {
+        used[i] = 1;
+        const auto& coords = coordinates[coordinates.size() == 1 ? 0 : begin + i];
+        landmark_ranks = std::max(landmark_ranks, coords.num_ranks());
+    }
+    mask_words = bits::words_for(landmark_ranks);
     std::vector<u32> counts, slots;
     std::vector<u64> offsets{0};
     for (u32 i = 0; i < count; ++i)
     {
         const auto& coords = coordinates[coordinates.size() == 1 ? 0 : begin + i];
-        if (!coords.atoms().empty() && coords.atoms().back() >= u64{W} * 64)
+        if (used[i] && !coords.atoms().empty() && coords.atoms().back() >= u64{W} * 64)
             throw std::logic_error("mymyr: device LIW: landmark slots exceed the node row width");
-        counts.push_back(coords.num_ranks());
+        counts.push_back(used[i] ? coords.num_ranks() : 1);
         std::vector<std::vector<u32>> members(landmark_ranks);
-        for (u32 j = 0; j < coords.atoms().size(); ++j)
+        for (u32 j = 0; used[i] && j < coords.atoms().size(); ++j)
             for (u32 rank : coords.ranks_at(j))
                 members[rank].push_back(coords.atoms()[j]);
         for (const auto& rank : members)
@@ -990,8 +1000,8 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
                                     std::span<const u64> seeds, MultiIwBatch& out, Host& host)
 {
     alloc_searches(count);
-    if (o.landmarks)
-        upload_landmarks(g0, count);
+    landmark_begin = g0;
+    landmark_ranks = mask_words = 0;
     h_goals.assign(goals.begin(), goals.end());
     goal_programs.reset();
     if (per_search_goals && host_goal)
@@ -1493,6 +1503,8 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
         starts = DeviceStarts{converted, W, W, starts.rows};
     }
     const u32 R = static_cast<u32>(roots.size());
+    if (o.landmarks && arity)
+        upload_landmarks(landmark_begin, B, roots);
     n_tail = 0;
     ensure_nodes(R);
     u32* rd = roots_dev.ensure(ctx, std::max<u32>(R, 1), s);

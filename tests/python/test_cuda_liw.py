@@ -166,7 +166,7 @@ def test_liw_childsnack_ipc(ctx):
     data = ROOT / "tests/data/ipc/childsnack-ipc/test"
     task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01-medium.pddl", atoms="dense")
     graph = search.approximate_fact_landmarks(task)
-    batch = mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graph, max_states=10000, max_depth=1, chunk_states=1)
+    batch = mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graph, max_states=10000, max_depth=1, chunk_states=128)
     expected = search.liw(task, landmarks=graph, max_width=1, max_states=10000, max_depth=1)
     assert len(expected.passes) == 2
     for i in range(2):
@@ -242,3 +242,18 @@ def test_liw_table_budget_changes_only_grouping(ctx):
     expected = search.liw(task, landmarks=graph, max_width=1, max_states=60)
     for i in range(3):
         assert_equal(batch, i, expected)
+
+
+def test_liw_tables_are_needed_only_by_searches_reaching_width_one(ctx):
+    task = text_task("blocks__probBLOCKS-8-0")
+    graphs = [search.FactLandmarkGraph(task, list(task.initial_state.atoms())), search.FactLandmarkGraph(task, [])]
+    goals = [task.ground_condition([]), task.goal_condition]
+    expected = [search.liw(task, landmarks=graph, goal=goal, max_width=1, max_states=60)
+                for graph, goal in zip(graphs, goals)]
+    assert len(expected[0].passes) == 1 and len(expected[1].passes) == 2
+    budget = 2 * 8 * (task.words + 1)
+    for group in (1, 2):
+        batch = mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graphs, goals=goals,
+                       max_searches=group, table_bytes=budget, max_states=60)
+        for i, cpu in enumerate(expected):
+            assert_equal(batch, i, cpu)
