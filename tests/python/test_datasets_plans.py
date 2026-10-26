@@ -233,6 +233,9 @@ def test_equivalent_actions_map_to_canonical_indices():
     hot = eq.equivalent_actions()
     assert hot.shape == (len(plan) + 1, int(eq.num_actions.max())) and not hot[-1].any()
     assert hot[:-1].sum(axis=1).tolist() == pr.num_actions.tolist()
+    assert eq.equivalent_actions(40).shape == (len(plan) + 1, 40)
+    with pytest.raises(ValueError, match="smaller than a state's"):
+        eq.equivalent_actions(1)
     # the plan's own action alone
     alone = datasets.plan_rows(task, plan, equivalent=[[] for _ in plan])
     assert alone.equivalent.tolist() == [[int(k)] for k in pr.index]
@@ -315,17 +318,42 @@ def test_state_rows_from_plans_with_equivalent_actions():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="needs torch")
-def test_state_rows_from_plans_on_a_torch_device():
-    import torch
-
+def test_state_rows_from_plans_on_the_torch_cpu_device_are_host_rows():
     task = text_task("gripper__prob05")
     replays = [datasets.plan_rows(task, random_walk(task, 6, seed=s), goal_state=True) for s in range(2)]
     host = datasets.StateRows.from_plans(replays)
     ds = datasets.StateRows.from_plans(replays, device="cpu")
-    assert isinstance(ds.rows, np.ndarray)  # CPU tensors are host arrays of the dataset
-    assert np.array_equal(ds.rows, host.rows)
+    assert isinstance(ds.rows, np.ndarray) and np.array_equal(ds.rows, host.rows)
     assert all(np.array_equal(np.asarray(ds.labels[k]), host.labels[k]) for k in host.labels)
-    if torch.cuda.is_available():
-        on_device = datasets.StateRows.from_plans(replays, device="cuda:0")
-        assert on_device.rows.is_cuda and on_device.labels["action"].is_cuda
-        assert np.array_equal(on_device.rows.cpu().numpy().view(np.uint64), host.rows)
+
+
+def test_device_plan_rows_encode_without_a_host_copy(monkeypatch):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
+    try:
+        import mymyr.cuda as mc
+    except ImportError:
+        pytest.skip("mymyr was built without the CUDA backend")
+    if not mc.available():
+        pytest.skip("mymyr sees no CUDA device")
+    task = text_task("gripper__prob05", atoms="dense")
+    replays = [datasets.plan_rows(task, random_walk(task, 6, seed=s), goal_state=s == 0,
+                                  equivalent=[[] for _ in range(6)]) for s in range(3)]
+    host = datasets.StateRows.from_plans(replays)
+    ds = datasets.StateRows.from_plans(replays, device="cuda:0")
+    assert ds.rows.is_cuda and all(v.is_cuda for v in ds.labels.values()) and ds.task_ids.is_cuda
+    assert np.array_equal(ds.rows.cpu().numpy().view(np.uint64), host.rows)
+    encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
+    expected = datasets.EncodingCollate(encoder)(host.take([4, 0, 7]))
+    with monkeypatch.context() as patch:
+        def no_host(*args, **kwargs):
+            raise AssertionError("device datasets must not download their stored rows")
+        patch.setattr(torch.Tensor, "cpu", no_host)
+        patch.setattr(torch.Tensor, "numpy", no_host)
+        loaded = datasets.EncodingCollate(encoder)(ds.take([4, 0, 7]))
+    torch.cuda.synchronize()
+    h, d = expected.graphs.as_dict(), loaded.graphs.as_dict("numpy")
+    assert h.keys() == d.keys() and all(np.array_equal(np.asarray(h[k]), np.asarray(d[k])) for k in h)
+    for name, values in expected.labels.items():
+        assert loaded.labels[name].is_cuda and np.array_equal(loaded.labels[name].cpu().numpy(), values)
