@@ -2063,6 +2063,16 @@ i64 py_hash(u64 h)
 }
 }  // namespace
 
+GroundLiteral ground_literal_of(PyTaskCore& core, nb::handle literal)
+{
+    const LiteralSpec l = literal_spec(core, literal);
+    if (!l.ground())
+        throw nb::value_error(("mymyr: the literal " + nb::cast<std::string>(nb::repr(literal)) +
+                               " has variables: literals must be ground")
+                                  .c_str());
+    return GroundLiteral{ground_atom(l), l.positive};
+}
+
 std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
                                                        nb::handle partial)
 {

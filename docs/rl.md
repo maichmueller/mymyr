@@ -167,7 +167,9 @@ send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)
 
 The [relational encoder](encoding.md) reads the arrays of a `CpuEnvPool` batch where they are. A pool created with
 `goals=True` carries the goal of every environment as masks (`goal_pos`, `goal_neg`), and the expansion of the batch's
-states, which `rl.expand` makes, is what the policy's actions index. One call encodes all of it:
+states, which `rl.expand` makes, is what the policy's actions index. Goals of the caller's own, such as a manager's
+subgoals decoded as literals, become such masks with `encoding.goal_masks(table, literals, task_ids)`
+([Goals](encoding.md#goals)). One call encodes all of it:
 
 ```python
 import numpy as np

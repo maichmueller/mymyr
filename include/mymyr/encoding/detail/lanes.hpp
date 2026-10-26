@@ -265,6 +265,10 @@ struct ContextView
                                         // function term, -1 padded
     RepeatedLiterals repeated_literals = k_default_repeated_literals;
     u32 numeric_storage = 0;            // how the rows store numeric values: k_numeric_storage_f64 or _i32
+    // Literal resolution (literals.hpp): per instance and table domain predicate, its arity, its kind and the ranges
+    // of its fluent slots, derived slots and static tuples (null: a view without the section).
+    const u32* literal_ranges = nullptr;  // [num_instances, num_predicates, k_literal_columns]
+    u32 num_predicates = 0;               // the table's domain predicates
 };
 
 /// One instance of a context, resolved to pointers and counts.

@@ -41,9 +41,13 @@ import numpy as np
 
 from mymyr._core import _encoding_jax
 from mymyr.encoding import _device
+from mymyr.encoding._literals import GoalMasks, LayerMasks
 from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
+
+jax.tree_util.register_pytree_node_class(GoalMasks)
+jax.tree_util.register_pytree_node_class(LayerMasks)
 
 _ARRAYS = tuple(name for name in _device._ARRAYS
                 if name not in (*_device._SIMPLE_ARRAYS, "numeric_values", *_device._STATIC_ARRAYS))
@@ -396,7 +400,7 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     empty = jnp.zeros((0,), jnp.uint32)
     if goals is None:
         return empty, empty, empty, empty
-    if not isinstance(goals, (tuple, list)) or len(goals) not in (2, 4):
+    if isinstance(goals, str) or not hasattr(goals, "__len__") or len(goals) not in (2, 4):
         raise _error("goals are (goal_pos, goal_neg) or (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)")
     names = ("goal_pos", "goal_neg", "goal_derived_pos", "goal_derived_neg")
     masks = [_halves(g, names[k], True) for k, g in enumerate(goals)]

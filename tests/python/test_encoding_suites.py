@@ -96,6 +96,34 @@ def test_inputs_per_row_are_split_by_domain(sets):  # noqa: F811
     assert not result.expansions
 
 
+def literal_mask_inputs(name, layout, shared):
+    tasks = [text_task(name), text_task(name)]
+    table = rl.TaskTable(tasks)
+    encoder = encoding.SuiteEncoder(table, layout=layout, max_goal_level=1,
+                                   target_sources=("goal", "subgoal"))
+    ids = np.array([1, 0, 1], np.int32)
+    states = np.asarray(table.initial_states())[ids]
+    atoms = [str(a) for a in tasks[0].initial_state.atoms()]
+    derived = [str(g) for g in tasks[0].encoding_goal if g.atom.kind == "derived"]
+    rows = [[atoms[0], *derived], [f"(not {atoms[1]})"], [atoms[2]]]
+    subgoals = [[[atoms[3]]], [[atoms[4], *derived]], [[f"(not {atoms[5]})"]]]
+    mask_ids = ids[:1] if shared else ids
+    goals = encoding.goal_masks(table, rows[:len(mask_ids)], mask_ids)
+    layers = encoding.subgoal_masks(table, subgoals[:len(mask_ids)], mask_ids)
+    return encoder, states, ids, goals, layers
+
+
+@pytest.mark.parametrize("name", ["gripper__prob05", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("shared", [False, True])
+def test_suite_accepts_literal_mask_objects(name, layout, shared):
+    encoder, states, ids, goals, layers = literal_mask_inputs(name, layout, shared)
+    actual = encoder.encode(states, ids, goals=goals, subgoals=layers)
+    expected = encoder.encoders[0].encode(states, ids, goals=tuple(goals), subgoals=tuple(layers))
+    arrays_equal(actual[0], expected)
+    assert np.array_equal(actual.rows[0], np.arange(len(ids)))
+
+
 def test_expansions_that_are_given_are_used(sets):  # noqa: F811
     suite = suite_of(sets, "gripper+blocks")
     states, ids = suite_batch(suite)

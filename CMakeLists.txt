@@ -177,7 +177,7 @@ target_sources(mymyr_core PRIVATE
 )
 
 add_library(mymyr_encoding STATIC src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
-    src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/horizon.cpp src/mymyr/encoding/horizon_graphs.cpp
+    src/mymyr/encoding/context.cpp src/mymyr/encoding/literals.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/horizon.cpp src/mymyr/encoding/horizon_graphs.cpp
     src/mymyr/encoding/validate.cpp src/mymyr/encoding/stream.cpp src/mymyr/encoding/hgraph.cpp
     src/mymyr/encoding/collate.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)

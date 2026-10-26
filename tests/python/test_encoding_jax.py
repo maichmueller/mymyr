@@ -461,6 +461,33 @@ def test_lax_scan_encodes_every_step(cases):
                 assert int(sizes[key][k]) == want[key], key
 
 
+@pytest.mark.parametrize("name", ["gripper__prob05", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("layered", [False, True])
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_literal_mask_objects_are_pytrees_that_encode_under_jit(name, layered, platform):
+    task = text_task(name)
+    encoder = encoding.FlatRelationEncoder(task, max_goal_level=1)
+    literals = [str(next(iter(task.initial_state.atoms())))]
+    literals += [str(g) for g in task.encoding_goal if g.atom.kind == "derived"]
+    masks = (encoding.subgoal_masks(task, [[literals], [[]]]) if layered else
+             encoding.goal_masks(task, [literals, []]))
+    masks.unsatisfiable[1] = True
+    key = "subgoals" if layered else "goals"
+    rows = np.asarray(task.encode([task.initial_state, task.initial_state]))
+    expected = encoder.encode(rows, **{key: masks})
+    caps = exact_capacities(expected)
+    expected = encoder.encode(rows, capacities=caps, **{key: masks})
+    leaves, tree = jax.tree_util.tree_flatten(masks)
+    assert len(leaves) == len(masks) + 1
+    converted = jax.tree_util.tree_unflatten(tree, [put(halves(a) if a.dtype == np.uint64 else a, platform)
+                                                 for a in leaves])
+    restored = jax.jit(lambda m: m)(converted)
+    assert type(restored) is type(masks)
+    np.testing.assert_array_equal(restored.unsatisfiable, masks.unsatisfiable)
+    actual = jax.jit(lambda m: ej.encode(encoder, halves(rows), capacities=caps, **{key: m}))(converted)
+    same_batch(expected, actual)
+
+
 def test_vmap_encodes_each_batch_on_its_own(cases):
     case = cases["gripper"].resized(30)
     encoder = encoding.FlatRelationEncoder(case.source)

@@ -11,6 +11,7 @@
 #include "mymyr/encoding/collate.hpp"
 #include "mymyr/encoding/hgraph.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
+#include "mymyr/encoding/literals.hpp"
 #include "mymyr/encoding/schema.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
@@ -100,6 +101,9 @@ struct EncodingStatics
 struct EncodingRepeatedLiterals
 {
 };
+struct EncodingLiteralSource
+{
+};
 }
 
 namespace nanobind::detail
@@ -148,15 +152,17 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingGoals>
 {
     static constexpr auto Name = const_name(
-        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
-        "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+        "mymyr._typing.GoalMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | "
+        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, "
+        "mymyr._typing.SupportsDLPack]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingSubgoals>
 {
     static constexpr auto Name = const_name(
-        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
-        "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+        "mymyr._typing.LayerMasks | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | "
+        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, "
+        "mymyr._typing.SupportsDLPack]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingHistory>
@@ -207,6 +213,13 @@ template<>
 struct type_caster<mymyr::python::ann::HGraphEdgeType>
 {
     static constexpr auto Name = const_name("tuple[str, str, str]");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingLiteralSource>
+{
+    static constexpr auto Name =
+        const_name("FlatRelationEncoder | FlatHorizonEncoder | FlatTransitionEncoder | FlatTransitionEffectsEncoder | "
+                   "mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
@@ -2540,10 +2553,216 @@ std::shared_ptr<const encoding::FlatEncoder> flat_encoder_of(nb::handle obj)
     return nb::cast<const PyFlatEncoder&>(obj).encoder;
 }
 
+// ------------------------------------------------------------------------------------------------ literals
+
+namespace
+{
+/// The context and the table of a literal helper's source: an encoder's own, or the context of a TaskTable, Task or
+/// TaskHandle with the default options, made once per table or task. The literal section of a context does not
+/// depend on the options.
+struct LiteralSource
+{
+    TableRef reference;
+    std::shared_ptr<const encoding::EncodingContext> context;
+};
+
+LiteralSource literal_source(nb::handle source)
+{
+    const PyFlatEncoder* encoder = nullptr;
+    if (nb::isinstance<PyFlatEncoder>(source))
+        encoder = nb::inst_ptr<PyFlatEncoder>(source);
+    else if (nb::isinstance<PyFlatHorizonEncoder>(source))
+        encoder = nb::inst_ptr<PyFlatHorizonEncoder>(source);
+    else if (nb::isinstance<PyFlatTransitionEncoder>(source))
+        encoder = nb::inst_ptr<PyFlatTransitionEncoder>(source);
+    else if (nb::isinstance<PyFlatTransitionEffectsEncoder>(source))
+        encoder = nb::inst_ptr<PyFlatTransitionEffectsEncoder>(source);
+    if (encoder)
+        return {encoder->reference, encoder->encoder->context_ptr()};
+    if (!nb::isinstance<PyTable>(source) && !nb::isinstance<PyTask>(source) && !nb::isinstance<PyHandle>(source))
+        throw nb::type_error(
+            ("mymyr: encoding: expected an encoder, a mymyr.rl.TaskTable, a Task or a TaskHandle, not " +
+             nb::cast<std::string>(nb::type_name(source.type())))
+                .c_str());
+    TableRef reference = table_of(source);
+    std::shared_ptr<const void> context;
+    {
+        std::lock_guard lock(reference.encoding_mutex());
+        std::shared_ptr<const void>& cached = reference.encoding_context();
+        if (!cached)
+            cached = encoding::EncodingContext::create(
+                reference.table, encoding::EncodingSchema::create(*reference.table, encoding::FlatOptions{}));
+        context = cached;
+    }
+    return {std::move(reference), std::static_pointer_cast<const encoding::EncodingContext>(context)};
+}
+
+using I32Vector = nb::ndarray<const i32, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using I32Matrix = nb::ndarray<const i32, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using U8Vector = nb::ndarray<const u8, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+std::span<const i32> span_of(const I32Vector& a) { return {a.data(), a.shape(0)}; }
+std::span<const i32> span_of(const std::optional<I32Vector>& a)
+{
+    return a ? span_of(*a) : std::span<const i32>{};
+}
+
+encoding::FixedLiterals fixed_of(const std::string& fixed)
+{
+    if (fixed == "decide")
+        return encoding::FixedLiterals::Decide;
+    if (fixed == "raise")
+        return encoding::FixedLiterals::Raise;
+    throw nb::value_error(("mymyr: encoding: fixed must be 'decide' or 'raise', not '" + fixed + "'").c_str());
+}
+
+/// The masks as (pos, neg, derived_pos, derived_neg, unsatisfiable) NumPy arrays: [rows, words] (with `layered`, [rows,
+/// layers, words]), the derived pair None for a table without derived words, unsatisfiable uint8 [rows] ([rows, layers]).
+using MasksTuple = nb::typed<nb::tuple, ann::Any, ann::Any, ann::Any, ann::Any, ann::Any>;
+using LiteralSourceArg = Arg<ann::EncodingLiteralSource>;
+
+MasksTuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
+{
+    const usize rows = m.rows, layers = m.layers;
+    auto words = [&](std::vector<u64>&& v, usize width)
+    {
+        return layered ? numpy_array(std::move(v), {rows, layers, width}) : numpy_array(std::move(v), {rows, width});
+    };
+    nb::object pos = words(std::move(m.pos), m.words), neg = words(std::move(m.neg), m.words);
+    nb::object derived_pos = nb::none(), derived_neg = nb::none();
+    if (m.derived_words)
+    {
+        derived_pos = words(std::move(m.derived_pos), m.derived_words);
+        derived_neg = words(std::move(m.derived_neg), m.derived_words);
+    }
+    nb::object unsatisfiable = layered ? numpy_array(std::move(m.unsatisfiable), {rows, layers})
+                                       : numpy_array(std::move(m.unsatisfiable), {rows});
+    return MasksTuple(nb::make_tuple(pos, neg, derived_pos, derived_neg, unsatisfiable));
+}
+
+nb::typed<nb::tuple, ann::Any, ann::Any> literal_slots(LiteralSourceArg source, I32Vector predicates, I32Matrix objects,
+                                                       std::optional<I32Vector> task_ids)
+{
+    const LiteralSource s = literal_source(source);
+    const usize n = predicates.shape(0);
+    if (objects.shape(0) != n || (task_ids && task_ids->shape(0) != n))
+        throw nb::value_error("mymyr: encoding: predicates, objects and task_ids must have one entry per literal");
+    if (!task_ids && s.context->table().size() != 1)
+        throw nb::value_error("mymyr: encoding: task_ids are required for a table of several instances");
+    std::vector<encoding::LiteralKind> kinds(n);
+    std::vector<i32> slots(n);
+    const encoding::LiteralArrays literals{span_of(predicates), {objects.data(), n * objects.shape(1)},
+                                           static_cast<u32>(objects.shape(1))};
+    encoding::resolve_literals(*s.context, literals, span_of(task_ids), kinds, slots);
+    std::vector<u8> kind_codes(n);
+    std::ranges::transform(kinds, kind_codes.begin(), [](encoding::LiteralKind k) { return static_cast<u8>(k); });
+    return nb::typed<nb::tuple, ann::Any, ann::Any>(
+        nb::make_tuple(numpy_array(std::move(kind_codes), {n}), numpy_array(std::move(slots), {n})));
+}
+
+MasksTuple literal_masks(LiteralSourceArg source, I32Vector predicates, I32Matrix objects, U8Vector positive,
+                         I32Vector rows, u32 num_rows, std::optional<I32Vector> task_ids,
+                         std::optional<I32Vector> layers, u32 num_layers, const std::string& fixed)
+{
+    const LiteralSource s = literal_source(source);
+    const usize n = predicates.shape(0);
+    if (objects.shape(0) != n)
+        throw nb::value_error("mymyr: encoding: predicates and objects must have one entry per literal");
+    const encoding::LiteralArrays literals{span_of(predicates), {objects.data(), n * objects.shape(1)},
+                                           static_cast<u32>(objects.shape(1))};
+    const encoding::LiteralPlacement placement{{positive.data(), positive.shape(0)}, span_of(rows), num_rows,
+                                               span_of(layers), layers ? num_layers : 1, span_of(task_ids)};
+    return masks_tuple(encoding::literal_masks(*s.context, literals, placement, fixed_of(fixed)), layers.has_value());
+}
+
+/// The masks of rows of literals given as Task.literal takes them: `rows[r]` is a list of literals, or with `layered`
+/// a list of layers, each a list of literals. Names are parsed in the task of each row's instance.
+MasksTuple named_literal_masks(LiteralSourceArg source, nb::typed<nb::list, ann::Any> rows,
+                               std::optional<I32Vector> task_ids, bool layered, const std::string& fixed_name)
+{
+    const encoding::FixedLiterals fixed = fixed_of(fixed_name);
+    const LiteralSource s = literal_source(source);
+    const rl::TaskTable& table = s.context->table();
+    const u32 num_rows = static_cast<u32>(rows.size());
+    if (task_ids ? task_ids->shape(0) != num_rows : num_rows > 0 && table.size() != 1)
+        throw nb::value_error(task_ids ? "mymyr: encoding: task_ids must have one entry per row"
+                                       : "mymyr: encoding: task_ids are required for a table of several instances");
+    const std::span<const i32> instances = span_of(task_ids);
+    for (const i32 instance : instances)
+        if (instance < 0 || static_cast<u32>(instance) >= table.size())
+            throw nb::value_error(
+                ("mymyr: encoding: task_ids must be in [0, " + std::to_string(table.size()) + ")").c_str());
+    const u32 width = s.context->max_arity();
+    std::vector<i32> predicates, objects, row_of, layer_of;
+    std::vector<u8> positive;
+    u32 num_layers = layered ? 0 : 1;
+    auto add = [&](u32 row, u32 layer, nb::handle item)
+    {
+        const u32 instance = instances.empty() ? 0 : static_cast<u32>(instances[row]);
+        const GroundLiteral literal = ground_literal_of(s.reference.core_of(instance), item);
+        const u32 table_predicate = table.instance(instance).pred_map.at(literal.atom.predicate.v);
+        if (table_predicate >= table.num_domain_predicates())
+            throw nb::value_error(("mymyr: encoding: the literal " + nb::cast<std::string>(nb::repr(item)) +
+                                   " is over a derived predicate of its problem alone, which the encoding has no "
+                                   "relation for")
+                                      .c_str());
+        predicates.push_back(static_cast<i32>(table_predicate));
+        for (u32 k = 0; k < width; ++k)
+            objects.push_back(k < literal.atom.objects.size() ? static_cast<i32>(literal.atom.objects[k].v) : -1);
+        positive.push_back(literal.positive ? 1 : 0);
+        row_of.push_back(static_cast<i32>(row));
+        layer_of.push_back(static_cast<i32>(layer));
+    };
+    for (u32 r = 0; r < num_rows; ++r)
+    {
+        nb::handle row = rows[r];
+        if (!layered)
+        {
+            for (nb::handle item : row)
+                add(r, 0, item);
+            continue;
+        }
+        u32 layer = 0;
+        for (nb::handle literals : row)
+        {
+            for (nb::handle item : literals)
+                add(r, layer, item);
+            ++layer;
+        }
+        num_layers = std::max(num_layers, layer);
+    }
+    const encoding::LiteralArrays literals{predicates, objects, width};
+    const encoding::LiteralPlacement placement{positive, row_of, num_rows, layer_of, num_layers, instances};
+    return masks_tuple(encoding::literal_masks(*s.context, literals, placement, fixed), layered);
+}
+}  // namespace
+
 void bind_encoding(nb::module_& parent)
 {
     nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
 
+    nb::enum_<encoding::LiteralKind>(module, "LiteralKind", nb::is_arithmetic(),
+                                     "What decides the truth of a ground atom in an instance's states (literal_slots).")
+        .value("FLUENT", encoding::LiteralKind::Fluent, "The atom has a fluent slot.")
+        .value("DERIVED", encoding::LiteralKind::Derived, "The atom has a derived slot.")
+        .value("STATIC_TRUE", encoding::LiteralKind::StaticTrue,
+               "The atom is over a static predicate and holds in every state.")
+        .value("STATIC_FALSE", encoding::LiteralKind::StaticFalse,
+               "The atom is over a static predicate and holds in no state.")
+        .value("UNREACHABLE", encoding::LiteralKind::Unreachable,
+               "The atom is over a fluent or derived predicate but has no slot: it holds in no state.")
+        .value("INVALID", encoding::LiteralKind::Invalid,
+               "The task id, the predicate, an object or the -1 padding is out of range.");
+    module.def("_literal_slots", &literal_slots, "source"_a, "predicates"_a, "objects"_a, "task_ids"_a.none(),
+               "(kind uint8 [N], slot int32 [N]) of N literals given as arrays (mymyr.encoding.literal_slots).");
+    module.def("_literal_masks", &literal_masks, "source"_a, "predicates"_a, "objects"_a, "positive"_a, "rows"_a,
+               "num_rows"_a, "task_ids"_a.none(), "layers"_a.none(), "num_layers"_a, "fixed"_a,
+               "(pos, neg, derived_pos, derived_neg, unsatisfiable) of literals given as arrays "
+               "(mymyr.encoding.literal_masks).");
+    module.def("_named_literal_masks", &named_literal_masks, "source"_a, "rows"_a, "task_ids"_a.none(), "layered"_a,
+               "fixed"_a,
+               "(pos, neg, derived_pos, derived_neg, unsatisfiable) of rows of literals as Task.literal takes them "
+               "(mymyr.encoding.goal_masks, subgoal_masks, history_masks).");
     module.def("_collate", [](const std::vector<PyFlatBatch>& batches)
     {
         if (batches.empty())
@@ -2693,9 +2912,10 @@ void bind_encoding(nb::module_& parent)
              "for a table of several instances). derived: the derived atom words of each row [N, D] (default: evaluated "
              "here). goals: a goal for every row instead of its instance's goal, (goal_pos, goal_neg) or "
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
-             "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
-             "masks define the whole row goal (no constant part), and goal_complete is 1. With subgoal layers, "
-             "repeated_literals decides which levels hold these literals. "
+             "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them, or the "
+             "GoalMasks of `mymyr.encoding.goal_masks` (goals from lists of literals); the "
+             "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "With subgoal layers, repeated_literals decides which levels hold these literals. "
              "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
              "call with them equals a call without `goals` only for an instance whose complete goal has no literal "
              "over a static or derived predicate or over an atom without a slot. "
@@ -2713,8 +2933,8 @@ void bind_encoding(nb::module_& parent)
              "listed at several levels. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
              "dt, count, derived_pos, derived_neg): masks [N, H, W] ([N, H, D]) of its steps oldest first, dt "
              "[N, H] integers and count [N] the valid steps of each row (a prefix; None: all H); only the newest "
-             "history_max_steps of them are encoded. `mymyr.encoding.subgoal_masks` and `history_masks` build both "
-             "from lists of literals. "
+             "history_max_steps of them are encoded. `mymyr.encoding.subgoal_masks` (a LayerMasks) and "
+             "`history_masks` build both from lists of literals. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "

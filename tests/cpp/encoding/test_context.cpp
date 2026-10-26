@@ -1,6 +1,7 @@
 #include "support.hpp"
 
 #include "mymyr/encoding/context.hpp"
+#include "mymyr/encoding/detail/literals.hpp"
 
 #include <gtest/gtest.h>
 
@@ -407,6 +408,121 @@ TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
         if (lanes::is_goal_op(v.row_cells[i].op))
         {
             EXPECT_LT(v.row_cells[i].a, v.row_cells[i].b);
+        }
+    }
+}
+
+/// The kind of the atom `objects` of instance predicate `ip` from the task's atom metadata, by a linear scan.
+lanes::LiteralSlot expected_literal(const rl::ArrayBundle& meta, u32 ip, const std::vector<i32>& objects)
+{
+    auto column = [&](const char* name)
+    {
+        const rl::ArrayInfo& info = *meta.find(name);
+        return std::span(static_cast<const i32*>(meta.data(info)), info.elements());
+    };
+    auto scan = [&](const char* pred_name, const char* padded_name, u32& at)
+    {
+        const auto pred = column(pred_name), padded = column(padded_name);
+        const u64 width = pred.empty() ? 0 : padded.size() / pred.size();
+        for (u64 k = 0; k < pred.size(); ++k)
+            if (static_cast<u32>(pred[k]) == ip &&
+                std::equal(objects.begin(), objects.end(), padded.begin() + static_cast<std::ptrdiff_t>(k * width)))
+            {
+                at = static_cast<u32>(k);
+                return true;
+            }
+        return false;
+    };
+    u32 at = 0;
+    switch (column("pred_kind")[ip])
+    {
+    case rl::k_pred_static:
+        return {scan("static_pred", "static_args_padded", at) ? lanes::LiteralKind::StaticTrue
+                                                              : lanes::LiteralKind::StaticFalse,
+                0};
+    case rl::k_pred_derived:
+        return scan("derived_pred", "derived_args_padded", at) ? lanes::LiteralSlot{lanes::LiteralKind::Derived, at}
+                                                               : lanes::LiteralSlot{lanes::LiteralKind::Unreachable, 0};
+    default:
+        return scan("atom_pred", "atom_args_padded", at) ? lanes::LiteralSlot{lanes::LiteralKind::Fluent, at}
+                                                         : lanes::LiteralSlot{lanes::LiteralKind::Unreachable, 0};
+    }
+}
+
+TEST(EncodingContext, TheLiteralSectionResolvesEveryAtomUnderEveryFixedLayoutAndAnyOptions)
+{
+    // every tuple of objects of every domain predicate: fluent, derived and static predicates, nullary ones and `=`
+    std::vector<FlatOptions> variants(6, test::encoder_options());
+    variants[1].include_static = false;
+    variants[2].include_derived = false;
+    variants[3].nullary = false;
+    variants[4].statics = Statics::Shared;
+    variants[5].horizon.mode = HorizonMode::Delta;
+    for (const auto atoms : {TaskOptions::Atoms::Reachable, TaskOptions::Atoms::Dense})
+    {
+        TaskOptions task_options;
+        task_options.atoms = atoms;
+        const TaskPtr task = Task::create(test::pddl_task("goals", "static_true")->data(), task_options);
+        const auto table = rl::TaskTable::single(task);
+        const rl::ArrayBundle meta = rl::atom_metadata(*task);
+        const auto& instance = table->instance(0);
+        const u32 objects = task->num_objects();
+        for (const FlatOptions& options : variants)
+        {
+            const auto context = context_of(table, options);
+            const lanes::ContextView view = context->view();
+            ASSERT_EQ(view.num_predicates, table->num_domain_predicates());
+            u32 kinds[6] = {};
+            for (u32 ip = 0; ip < instance.pred_map.size(); ++ip)
+            {
+                const u32 tp = instance.pred_map[ip];
+                if (tp >= table->num_domain_predicates())
+                    continue;
+                const u32 arity = table->predicate_arities()[tp];
+                ASSERT_LE(arity, context->max_arity());
+                std::vector<i32> tuple(arity, 0);
+                for (bool more = true; more;)
+                {
+                    std::vector<i32> padded = tuple;
+                    padded.resize(context->max_arity() + 1, -1);
+                    const lanes::LiteralSlot got =
+                        lanes::resolve_literal(view, 0, tp, padded.data(), static_cast<u32>(padded.size()));
+                    const lanes::LiteralSlot want = expected_literal(meta, ip, tuple);
+                    EXPECT_EQ(got.kind, want.kind) << table->predicate_names()[tp];
+                    EXPECT_EQ(got.slot, want.slot) << table->predicate_names()[tp];
+                    ++kinds[static_cast<u32>(got.kind)];
+                    more = false;
+                    for (u32 k = arity; k-- > 0 && !more;)
+                    {
+                        more = ++tuple[k] < static_cast<i32>(objects);
+                        if (!more)
+                            tuple[k] = 0;
+                    }
+                }
+            }
+            for (const lanes::LiteralKind kind : {lanes::LiteralKind::Fluent, lanes::LiteralKind::Derived,
+                                                  lanes::LiteralKind::StaticTrue, lanes::LiteralKind::StaticFalse})
+                EXPECT_GT(kinds[static_cast<u32>(kind)], 0u) << static_cast<u32>(kind);
+            if (atoms == TaskOptions::Atoms::Reachable)
+            {
+                EXPECT_GT(kinds[static_cast<u32>(lanes::LiteralKind::Unreachable)], 0u);
+            }
+            EXPECT_EQ(kinds[static_cast<u32>(lanes::LiteralKind::Invalid)], 0u);
+
+            // out of range: the instance, the predicate, an object, the padding, a row too narrow for the arity
+            const auto& names = table->predicate_names();
+            const i64 at = std::ranges::find(names, std::string("at")) - names.begin();
+            const i64 past = table->num_domain_predicates();
+            const i32 good[3] = {0, 1, -1}, negative[3] = {-1, 1, -1}, beyond[3] = {0, static_cast<i32>(objects), -1},
+                      unpadded[3] = {0, 1, 0};
+            EXPECT_NE(lanes::resolve_literal(view, 0, at, good, 3).kind, lanes::LiteralKind::Invalid);
+            for (const auto& [instance_id, predicate, row, width] :
+                 {std::tuple{i64{1}, at, good, 3u}, std::tuple{i64{-1}, at, good, 3u},
+                  std::tuple{i64{0}, i64{-1}, good, 3u}, std::tuple{i64{0}, past, good, 3u},
+                  std::tuple{i64{0}, at, negative, 3u}, std::tuple{i64{0}, at, beyond, 3u},
+                  std::tuple{i64{0}, at, unpadded, 3u}, std::tuple{i64{0}, at, good, 1u}})
+                EXPECT_EQ(lanes::resolve_literal(view, instance_id, predicate, row, width).kind,
+                          lanes::LiteralKind::Invalid);
         }
     }
 }
