@@ -449,6 +449,15 @@ def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
         small.synchronize()
 
 
+def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):
+    """20000 states of 69 blocks in 64 MiB: a chunk holds the parents whose views fit an eighth of what the context can
+    still allocate, not the 65536 parents of a large context."""
+    cpu = mymyr.search.brfs(blocksworld_wide, fingerprint=True, threads=1, max_states=20000)
+    small = mc.Context(0, max_bytes=64 << 20)
+    brfs_matches(mc.brfs(blocksworld_wide, ctx=small, fingerprint=True, max_states=20000), cpu)
+    small.synchronize()
+
+
 def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wide):
     """Every budget gives the CPU's result or a ValueError that names the memory, never an allocator error: the setup,
     the windows of a state's successors, the chunks after them and the arenas' growth."""

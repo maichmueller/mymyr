@@ -331,13 +331,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     }
     // chunk size: the views of a chunk (and its derived bitsets) fit the budget (by default half of L2, so they are
     // read from L2, not DRAM), but a chunk has at least 65536 parents while their views take at most 256 MB: with
-    // views of kilobytes (philosophers: 3.5-4 KB) an L2-sized chunk would leave most of the device idle
-    u64 chunk_cap = 0;
+    // views of kilobytes (philosophers: 3.5-4 KB) an L2-sized chunk would leave most of the device idle; and the
+    // views of a chunk take at most an eighth of what the context can still hold (view_parents)
+    u64 chunk_cap = 0, view_per = 8;
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
         const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
         const u64 per = std::max<u64>(8, (gen->view_words() + dw + (lifted::wide_row(W) ? W : 0)) * 8);
+        view_per = per;
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per)
                                  : std::max<u64>({lifted::wide_row(W) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
@@ -450,6 +452,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     auto reused_bytes = [&] { return parent.size() + cand.size() + sort.size() + result.size() + rank.size() + scan.size(); };
     auto room_bytes = [&] { return device_room(*ctx) + reused_bytes(); };
     auto room_rows = [&] { return room_bytes() / 4 / per_candidate(); };
+    // the most parents whose views take an eighth of the room (the generator's buffers of a chunk follow its parents)
+    auto view_parents = [&] { return std::max<u64>(1, room_bytes() / 8 / view_per); };
     // A state whose successors exceed room_rows(): its successors a window at a time (lifted::Labels::first), each
     // window deduplicated and committed before the next, so that ids, counts and the plan are the ones of a chunk
     // that holds them all. The generator reads the state from a copy of its own (arena growth moves the arena).
@@ -755,7 +759,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     PinnedLease loop_pin;
     // runs the loop from the cursor; false when it ended at a halted chunk (the cursor's; its record in `halted`)
     // the loop's chunk (parents) and its candidates' capacity at the cursor: the layer twice over (shapes repeat)
-    auto loop_chunk = [&] { return std::min<u64>({o.chunk_states, chunk_cap, k_loop_layer, std::bit_ceil(std::max<u64>(2048, 2 * (le - lb)))}); };
+    auto loop_chunk = [&]
+    { return std::min<u64>({o.chunk_states, chunk_cap, view_parents(), k_loop_layer, std::bit_ceil(std::max<u64>(2048, 2 * (le - lb)))}); };
     auto loop_capacity = [&](u64 C) { return std::bit_ceil(estimate(C)); };
     // the arenas' room for a loop: four chunks' capacities (a loop ends when the next chunk might not fit, k_loop_room;
     // the next one starts in a grown arena), but no more than o.candidate_bytes of rows past one chunk's (organic-
@@ -934,11 +939,12 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         if (looped && device_loop(loop_c, loop_cap, halted, halted_ns))
             continue;  // (the cursor moved)
         plan.clear();
+        const u64 parents = std::min(chunk_cap, view_parents());
         for (u64 x = b; x < le;)
         {
             // (a loop's halted chunk first: its parents, as the loop ran it, launch_loop_size, its record holds)
             const u64 most = looped && x == b ? halted_ns : o.chunk_states;
-            const u32 ns = static_cast<u32>(std::min<u64>({most, le - x, chunk_cap}));
+            const u32 ns = static_cast<u32>(std::min<u64>({most, le - x, parents}));
             plan.push_back({x, ns});
             x += ns;
         }
