@@ -17,7 +17,7 @@ from encoding_hgraph_parity import HGRAPH_CONFIGS
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    goal_literals, literal_text, needed_differences,
+    goal_literals, is_horizon, layer_inputs, literal_text, needed_differences,
     lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
     sources_of, is_transition, recorded_successor,
 )
@@ -429,6 +429,36 @@ def test_a_literal_in_two_layers_is_expected_once_in_each_layer():
     higher = copy(actual)
     higher.entities[higher.entities.index(("subgoal", f"{name}[sg]"))] = ("subgoal", f"{name}[ssg]")
     assert {m.kind for m in compare(expected, higher, context)} == {"entity"}
+
+
+@pytest.mark.parametrize("prefix, config, state", [
+    ("f01", "C4_L1", "s2"), ("f09", "C4_L2", "s3"),
+    ("f01", "C7T", "s2"), ("f01", "C7S", "s2"),
+])
+def test_highest_placement_matches_the_reference_with_duplicate_tuples_collapsed(prefix, config, state):
+    fixture, task = load(prefix_path(prefix))
+    record = next(r for r in fixture["encodings"] if r["config"] == config and r["state"] == state)
+    recorded_state = next(s for s in fixture["states"] if s["id"] == state)
+    encoder = native_encoder(task, config, repeated_literals="highest")
+    arguments, dropped = layer_inputs(encoder, record["inputs"])
+    if is_horizon(config):
+        table = rl.as_table(task)
+        rows = horizon_view(table, [horizon_dag(task, table, record["inputs"]["dag"])])
+    else:
+        rows = [replay(task, recorded_state["path"])]
+    batch = encoder.encode(rows, **arguments)
+    actual = native_graph(encoder, batch, 0, [task], lanes_of(config))
+    expected = fixture_graph(fixture, record, sources_of(config))
+    collapsed = copy(expected)
+    collapsed.tuples = {name: list(dict.fromkeys(tuples)) for name, tuples in expected.tuples.items()}
+    assert collapsed.tuples != expected.tuples
+    context = record_context(fixture, task, recorded_state, config, record, dropped)
+    allowed = [name for name in NAMES if name not in ("repeated_literal", "repeated_literal_horizon")]
+    assert compare(collapsed, actual, context, allowed) == []
+    duplicate = next(name for name, tuples in expected.tuples.items() if len(tuples) != len(collapsed.tuples[name]))
+    twice = copy(actual)
+    twice.tuples[duplicate] += twice.tuples[duplicate][:1]
+    assert any(m.kind == "tuple" and m.where == duplicate for m in compare(collapsed, twice, context, allowed))
 
 
 def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
