@@ -62,8 +62,8 @@ plan, goal state and per-pass counts of `search.liw(..., max_width=1)`. `landmar
 `search.FactLandmarkGraph` shared by the searches or a sequence with one graph per start; `None` uses BOT throughout.
 `disjunctive`, `all_private` and `unshared_atoms` select the same landmark grouping as on the CPU. A TaskTable uses
 `task_ids` to select each search's instance. `cuda.rollouts(..., landmarks=graph)` runs randomized LIW(1), one graph
-shared across the seeds or one per seed; its seeded layer ordering equals CPU LIW. LIW(2) and numeric LIW require
-CPU search. Exact rank-aware novelty preserves CPU admission order for every group and chunk size, including wide
+shared across the seeds or one per seed; its seeded layer ordering equals CPU LIW. LIW(2) requires CPU search;
+LIW does not support numeric fluents. Exact rank-aware novelty preserves CPU admission order for every group and chunk size, including wide
 rows, and chunk shapes capture and replay as CUDA graphs. Each rank needs one bit per slot and an empty-tuple word;
 `table_bytes` bounds the tables per group. A table that cannot fit raises `ValueError` with its required size and the
 option to raise.

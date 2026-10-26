@@ -659,8 +659,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "Landmark-restricted IW(1) from every start: search i equals mymyr.search.liw for every group and chunk "
         "size in exact mode (status, plan, goal state and per-pass counts). Runs width zero then LIW(1), without "
         "optimized IW(1). landmarks: one FactLandmarkGraph shared by all searches, or one per search; None uses BOT. "
-        "disjunctive, all_private and unshared_atoms select the CPU landmark grouping. Widths above 1 and numeric "
-        "fluents require CPU search. table_bytes bounds the novelty tables per group; a pass whose single table "
+        "disjunctive, all_private and unshared_atoms select the CPU landmark grouping. Widths above 1 require CPU "
+        "search.liw; LIW does not support numeric fluents. table_bytes bounds the novelty tables per group; a pass whose single table "
         "exceeds it raises ValueError naming table_bytes. TaskTable searches use task_ids in input order.");
 
     m.def(
