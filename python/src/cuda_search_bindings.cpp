@@ -71,7 +71,7 @@ using Slots = nb::typed<nb::sequence, int>;
 using GoalArg = std::variant<PyGroundCondition, nb::typed<nb::tuple, Slots, Slots>>;
 using GoalsArg = Arg<nb::typed<nb::sequence, GoalArg>>;
 using SeedsArg = nb::typed<nb::sequence, int>;
-using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, nb::typed<nb::sequence, PyFactLandmarkGraph>>>;
+using LandmarksArg = Arg<std::optional<std::variant<PyFactLandmarkGraph, nb::typed<nb::sequence, PyFactLandmarkGraph>>>>;
 using UnsharedArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 /// Start states: host states (a State, a sequence of States, a host word array) or, for batched_iw1, a CUDA device
 /// word array [N, W] uint64 / [N, 2W] uint32 read in place.
