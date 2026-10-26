@@ -67,7 +67,8 @@ class PlanRows:
             raise ValueError("mymyr: datasets: the plan rows have no equivalent actions (plan_rows(..., equivalent=))")
         width = int(self.num_actions.max(initial=0)) if width is None else int(width)
         if width < int(self.num_actions.max(initial=0)):
-            raise ValueError(f"mymyr: datasets: width {width} is smaller than a state's {self.num_actions.max()} actions")
+            raise ValueError(
+                f"mymyr: datasets: width {width} is smaller than a state's {self.num_actions.max()} actions")
         hot = np.zeros((len(self.rows), width), dtype=bool)
         steps, slots = np.nonzero(self.equivalent >= 0)
         hot[steps, self.equivalent[steps, slots]] = True
@@ -253,7 +254,8 @@ def plan_rows(
                 if found not in same:
                     same.append(found)
             picked.append(same)
-        row = np.array(np.asarray(step.full.succ)[at : at + 1], dtype=np.uint64)  # a copy, so no row keeps its expansion alive
+        # a copy, so that no row keeps its expansion alive
+        row = np.array(np.asarray(step.full.succ)[at : at + 1], dtype=np.uint64)
         rows.append(row[0])
     goal_reached = bool(np.asarray(rl.is_goal(source, row, task_ids))[0])
     if goal_state:

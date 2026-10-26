@@ -254,6 +254,10 @@ action targets chooses entities, and `mymyr.encoding` maps a chosen entity back 
 - without `entities` both cover every action entity of the batch, in entity order
   (`encoding.action_entities(batch)` lists their ids).
 
+The targets of behaviour cloning are positions of this kind: `datasets.plan_rows` replays a plan into its states and,
+per step, the canonical successor index of the plan's action, the entity whose `action_indices` equals it
+([Plans for behaviour cloning](datasets.md#plans-for-behaviour-cloning)).
+
 An expansion lists an action once per action schema that produces it (a disjunctive precondition splits a schema), and
 an entity stands for the first of those rows. The small loop below encodes the pool's states, lets a random policy
 pick one action entity per graph, and steps the pool with it; the state each environment reaches is the successor in
