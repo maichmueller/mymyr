@@ -220,7 +220,6 @@ def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
             return torch.ops.mymyr.expand(handle, s, None, 4, capacity=16, **opts)
         return torch.ops.mymyr.expand_flat(handle, s, None, 16, **opts)
     eager = run(source)
-    torch._dynamo.reset()  # each case registers its own handle: keep it a constant, not a dynamic integer
     compiled = torch.compile(run, backend="eager", fullgraph=True)
     actual = compiled(source)
     assert len(actual) == 11

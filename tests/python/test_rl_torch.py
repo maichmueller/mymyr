@@ -736,6 +736,26 @@ def test_static_marking_equals_torch_dynamo():
 
 
 @pytest.mark.needs_gil
+def test_compiled_expansion_takes_handles_as_arguments():
+    """Handles passed to a compiled function name different objects: each one specializes the graph."""
+    from test_rl_noops import pddl_task
+    task = pddl_task(atoms="dense")
+    source = torch.from_numpy(np.asarray(task.encode([task.initial_state] * 2)).view(np.int64))
+    expected = rl.expand(task, source, hashes=True, drop_noops=True)
+    handles = [rt.register(t) for t in (task, pddl_task(atoms="dense"), pddl_task(atoms="dense"))]
+    compiled = torch.compile(lambda h, s: torch.ops.mymyr.expand_flat(h, s, None, 16, hashes=True, drop_noops=True),
+                             backend="eager", fullgraph=True)
+    try:
+        for h in handles:
+            actual = compiled(h, source)
+            assert torch.equal(actual[7][:expected.total], expected.succ_hash)
+            assert torch.equal(actual[9][:expected.total], expected.index)
+    finally:
+        for h in handles:
+            rt.unregister(h)
+
+
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("rows", [False, True])
 @pytest.mark.parametrize("drop", [False, True])
@@ -768,7 +788,6 @@ def test_expand_ops_successor_digest_options(padded, rows, drop, capacity):
         if drop:
             assert torch.equal(actual[9][:expected.total], expected.index)
     if capacity is not None:
-        torch._dynamo.reset()
         compiled = torch.compile(run, backend="eager", fullgraph=True)(source)
         assert all(torch.equal(a, b) for a, b in zip(compiled, actual))
     rt.unregister(handle)

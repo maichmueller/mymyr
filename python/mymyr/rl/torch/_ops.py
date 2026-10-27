@@ -132,6 +132,10 @@ def _register_owned(obj: Any) -> int:
 
 def lookup(handle: int) -> Any:
     """The object registered under ``handle`` (:func:`register`). Raises ValueError for an unknown handle."""
+    if isinstance(handle, torch.SymInt):
+        # A handle passed to a compiled function becomes symbolic once it varies: specialize on it (one guard and
+        # one recompilation per handle) since every handle names a different object.
+        handle = int(handle)
     try:
         return _objects[handle]
     except KeyError:
