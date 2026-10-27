@@ -541,6 +541,7 @@ def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_res
     ctx.synchronize()
 
 
+@pytest.mark.jax_on_cpu
 @pytest.mark.parametrize("release_during_capture", [False, True])
 def test_repeated_capture_destruction_releases_workspace_memory(release_during_capture):
     device = gpu()
