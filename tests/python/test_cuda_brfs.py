@@ -475,6 +475,30 @@ def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):
     small.synchronize()
 
 
+def test_brfs_arenas_grow_geometrically_near_the_memory_limit():
+    """Sokoban p05-medium (a CPU-fallback schema: the states' arena keeps a pinned mirror), 400000 states in 1.1 times
+    the device memory they take in a large context: the arenas grow by a factor while it fits, not by each chunk's
+    new states, and the mirror at least doubles."""
+    from conftest import ROOT
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/ipc/sokoban-ipc/test"
+    task = mymyr.Task.from_pddl(directory / "domain.pddl", directory / "p05-medium.pddl")
+    big = mc.Context(0)
+    free = mc.brfs(task, ctx=big, max_states=400_000, fingerprint=True)
+    big.synchronize()
+    peak = big.usage()["used_high"]
+    del big
+    assert free.counters["host_schemas"] >= 1
+    small = mc.Context(0, max_bytes=peak * 11 // 10)
+    tight = mc.brfs(task, ctx=small, max_states=400_000, fingerprint=True)
+    small.synchronize()
+    assert (tight.stats.states, tight.fingerprint) == (free.stats.states, free.fingerprint)
+    assert tight.counters["chunks"] > 2 * tight.counters["growths"], tight.counters
+    assert tight.counters["mirror_growths"] <= 8, tight.counters
+
+
 def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wide):
     """Every budget gives the CPU's result or a ValueError that names the memory the search sized, never an allocator
     error or a failed allocation beyond that sizing: the setup, the windows of a state's successors, the chunks after
