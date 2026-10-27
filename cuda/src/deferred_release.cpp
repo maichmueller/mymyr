@@ -18,6 +18,7 @@ struct Release
     std::vector<std::shared_ptr<const LastUse>> lasts;
     std::vector<CapturePtr> captures;
     std::shared_ptr<void> owner;
+    void (*on_failure)() noexcept = nullptr;
 
     bool ready() const noexcept
     {
@@ -97,6 +98,8 @@ private:
                 {
                     // A failed device may still read these resources; retain them for driver teardown.
                     std::fprintf(stderr, "mymyr: CUDA: deferred release retained resources: %s\n", e.what());
+                    if (release->on_failure)
+                        release->on_failure();
                     (void)release.release();
                 }
                 {
@@ -163,11 +166,12 @@ void release_deferred(ContextPtr ctx, void* pointer, std::vector<Event> events,
     start_reclaimer().submit(std::move(release));
 }
 
-void release_deferred(ContextPtr ctx, std::shared_ptr<void> owner, Event ready)
+void release_deferred(ContextPtr ctx, std::shared_ptr<void> owner, Event ready, void (*on_failure)() noexcept)
 {
     auto release = std::make_unique<Release>();
     release->ctx = std::move(ctx);
     release->owner = std::move(owner);
+    release->on_failure = on_failure;
     release->events.push_back(std::move(ready));
     start_reclaimer().submit(std::move(release));
 }

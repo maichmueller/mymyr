@@ -316,7 +316,7 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
     }
 }
 
-void DeviceContext::release_after(std::shared_ptr<void> owner)
+void DeviceContext::release_after(std::shared_ptr<void> owner, void (*on_failure)() noexcept)
 {
     DeviceGuard guard(m_device);
     cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
@@ -325,7 +325,7 @@ void DeviceContext::release_after(std::shared_ptr<void> owner)
         throw std::invalid_argument("mymyr: CUDA: release_after needs a non-capturing context stream");
     Event ready;
     ready.record(m_stream);
-    detail::release_deferred(shared_from_this(), std::move(owner), std::move(ready));
+    detail::release_deferred(shared_from_this(), std::move(owner), std::move(ready), on_failure);
 }
 
 PoolUsage DeviceContext::usage() const

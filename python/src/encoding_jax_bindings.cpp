@@ -187,7 +187,7 @@ struct EncoderEntry : FfiEntry
                     retiring->held.emplace(std::move(*held));
                     held.reset();
                 }
-                ctx->release_after(retiring);
+                ctx->release_after(retiring, []() noexcept { ++leaked_devices; });
             }
             catch (...)
             {

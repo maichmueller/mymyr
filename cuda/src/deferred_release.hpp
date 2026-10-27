@@ -20,7 +20,7 @@ CapturePtr capture_lifetime(cudaStream_t stream);
 void release_deferred(ContextPtr ctx, void* pointer, std::vector<Event> events,
                       std::vector<std::shared_ptr<const LastUse>> lasts, std::vector<CapturePtr> captures);
 /// Releases a host owner on a worker once ready completes. Its destructor may call CUDA.
-void release_deferred(ContextPtr ctx, std::shared_ptr<void> owner, Event ready);
+void release_deferred(ContextPtr ctx, std::shared_ptr<void> owner, Event ready, void (*on_failure)() noexcept);
 /// Waits for this context's ready releases, without waiting for a live graph's lifetime fence.
 void drain_releases(const DeviceContext& ctx);
 }  // namespace mymyr::cuda::detail

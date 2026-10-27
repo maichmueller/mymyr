@@ -176,7 +176,8 @@ public:
     void deallocate(void* p, cudaStream_t s) noexcept;
     /// Destroys an owner on a host worker after the context's stream finishes its preceding work. The caller does
     /// not wait; the owner and context stay alive until the worker releases them. The stream must not be capturing.
-    void release_after(std::shared_ptr<void> owner);
+    /// If completion fails, retains the owner and calls on_failure from the worker.
+    void release_after(std::shared_ptr<void> owner, void (*on_failure)() noexcept = nullptr);
 
     /// Memory resources (core/memory.hpp) of this context. Device: stream-ordered on stream(), and allocate()
     /// synchronizes that stream so the memory is usable anywhere; Pinned: cudaMallocHost; Managed: cudaMallocManaged.
