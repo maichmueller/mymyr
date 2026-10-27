@@ -487,9 +487,22 @@ def test_brfs_window_reaching_max_states_ends_the_search(tmp_path):
         small.synchronize()
 
 
+def compute_sanitizer_attached() -> bool:
+    """Whether compute-sanitizer (or another CUDA injection tool) instruments this process: its injection libraries
+    are named in the environment or mapped into the process once CUDA is initialized."""
+    names = os.environ.get("LD_PRELOAD", "")
+    try:
+        with open("/proc/self/maps") as maps:
+            names += maps.read()
+    except OSError:
+        pass
+    return bool(os.environ.get("CUDA_INJECTION64_PATH")) or "libsanitizer" in names or "TreeLauncher" in names
+
+
 def test_brfs_refuses_windows_held_to_a_few_spare_rows(tmp_path):
     """symfan(300) without drop just below the memory it needs: the fan's windows shrink to the arenas' few spare rows,
-    which cannot grow; the search refuses at once instead of going a few successors per window."""
+    which cannot grow; the search refuses at once instead of going a few successors per window (under 3 s each, a
+    bound that holds only without compute-sanitizer)."""
     import time
 
     from conftest import symfan_task
@@ -505,7 +518,8 @@ def test_brfs_refuses_windows_held_to_a_few_spare_rows(tmp_path):
         except ValueError as e:
             assert re.match(SIZED_BRFS_REFUSAL, str(e)), str(e)
             window_refusals += "with a successor window's buffers" in str(e)
-            assert time.perf_counter() - t < 3.0
+            elapsed = time.perf_counter() - t
+            assert elapsed < 3.0 or compute_sanitizer_attached(), f"refused after {elapsed:.1f} s"
         small.synchronize()
     assert window_refusals >= 1
 
