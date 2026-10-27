@@ -168,7 +168,12 @@ def test_incremental_layer_restrictions():
     task = text_task('gripper__prob05')
     for fn, width in [(search.iw, dict(max_width=1)), (search.iw_pass, dict(width=1)),
                       (search.abstracted_iw, dict(width=1))]:
-        for kw in [dict(threads=0), dict(threads=2), dict(layer_order='in_order', max_next_layer_states=3),
+        # Several threads without a beam are invalid without incremental_first_applicability too; either rule may
+        # report them.
+        for kw in [dict(threads=0), dict(threads=2)]:
+            with pytest.raises(ValueError, match='one thread|threads > 1 requires a beam'):
+                fn(task, **width, incremental_first_applicability=True, **kw)
+        for kw in [dict(layer_order='in_order', max_next_layer_states=3),
                    dict(layer_order='in_order', beam_width=2),
                    dict(layer_order='in_order', beam_width=2, beam_novelty='survivors_only'),
                    dict(layer_order='goal_count', beam_width=2, beam_novelty='relaxed_survivors_only')]:
