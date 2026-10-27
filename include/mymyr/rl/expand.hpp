@@ -36,10 +36,10 @@
 //     by default; the requested generator order otherwise). It can also be requested without dropping.
 //   - `generated` counts all successors before dropping, on every path (equal to `total` without drop_noops); `total`
 //     and offsets count kept rows. Capacity bounds the pre-drop count, including with label-only outputs:
-//     generated > capacity is the overflow. On that overflow with drop_noops, `generated` is exact, but `total`,
-//     offsets and every kept output are unspecified (an implementation may count only the rows it stored); size the
-//     capacity from `generated`. Without drop_noops, `total` and offsets stay the true counts. Width overflow also
-//     includes dropped rows. No digest or filtering work runs when those outputs/options are absent.
+//     generated > capacity is the overflow. On that overflow with drop_noops, `total` and offsets are the counts
+//     before dropping (offsets[N] == total == generated), and the rows and per-successor outputs are unspecified; size
+//     the capacity from `generated` or offsets[N]. Without drop_noops, `total` and offsets stay the true counts. Width
+//     overflow also includes dropped rows. No digest or filtering work runs when those outputs/options are absent.
 //   - The padded [N, K] view (pad()) is built from the flat CSR by a scatter, with a validity mask and true counts.
 //     Its `index` is always the flat row; `canonical` carries the flat `index` (the position in the parent's full
 //     order).

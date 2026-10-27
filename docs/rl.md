@@ -120,8 +120,8 @@ asynchronous device table: host expansion is rejected when a device live count i
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
 output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
 `k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
-expansion path, including tables of instances with axioms and suites). The torch ops `expand_derived` and
-`expand_flat_derived` return the words as a seventh result, and `Env.expand(..., derived=True)` /
+expansion path, including tables of instances with axioms and suites). The torch ops `expand` and
+`expand_flat` return the words as their seventh result with `derived=True`, and `Env.expand(..., derived=True)` /
 `Env.expand_flat(..., derived=True)` of `mymyr.rl.jax` fill the `derived` field (uint32 pairs).
 
 ```python
@@ -138,7 +138,7 @@ print(expansion.derived.shape)
 
 ## Successor hashes and no-op actions
 
-On the host, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
+On host and CUDA arrays, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
 and `noop` (bool), one per successor. The hash is the native state hash: trimmed atom words seeded by the numeric
 words. For instances with the same numeric width it equals
 `mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. For mixed numeric widths, use each instance's numeric
@@ -169,10 +169,12 @@ assert np.array_equal(padded.canonical[padded.mask], kept.index)
 ```
 
 `generated` counts successors before filtering; `total` and `offsets` count kept successors. A fixed `capacity` bounds
-`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering,
-`generated` stays exact, but `total`, `offsets` and the kept rows are undefined: size `capacity` from `generated`.
+`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering, `total`
+and `offsets` are the counts before filtering (`offsets[N] == total == generated`) on every platform, and the rows
+and per-successor outputs are unspecified: size `capacity` from `generated` or `offsets[N]`.
 `expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations; `drop_noops=True` requires `index=` when it
-writes any per-successor array (counting with `offsets=` alone needs none). Digests work with `succ=None`, without
+writes any per-successor array. With `offsets=` alone the capacity is 0, so the offsets are the counts before
+filtering. Digests work with `succ=None`, without
 storing successor rows; they are exact for every stored row, also one too wide for `words` (`words_needed`), and the
 width bounds stored rows only, so a label-only call never reports a width overflow. A single `Task` may use lazy atom slots: expansion
 uses its live slot layout, counts new atoms as changes, and grows output rows automatically unless `words=` fixes
@@ -181,10 +183,21 @@ flags and derived words. The padded view adds zero-padded hashes and no-op flags
 each kept successor's position in its parent's full order, -1 padding. Its `index` is always the flat row.
 Padding preserves the flat expansion's capacity and atom-word width overflow, even when `K` fits every parent's count.
 
-JAX CPU `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit` and `vmap`; hashes
+JAX `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit` and `vmap`; hashes
 use uint32 pairs (low word first), the padded result names the positions `canonical` and the flat one `index`, and
 `generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
 Absent digests are `None` and cost no digest work.
+
+On CUDA arrays, `rl.expand` and `rl.expand_into` compute the same hashes, no-op flags and filtered rows bit for bit,
+also without a `succ=` destination (the label-only form), and `mymyr.hash_rows(rows, numeric_words=..., stream=...)`
+hashes device rows. With `status=` and `stream=` the filtering stays on the stream and captures in CUDA graphs; an
+overflowing filtered call reports the offsets before filtering, as on the host, so `offsets[N]` sizes the next
+capacity. JAX
+`Env.expand` and `Env.expand_flat` take the same flags on a CUDA device. The torch ops `mymyr::expand` and
+`mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops` and `drop_noops` and return eleven tensors `(succ,
+parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status)`, empty where absent; the padded
+op's `index` slot holds the canonical positions. `rows=False` selects label-only output, `capacity=` keeps counts and
+status on the device, and both trace with `torch.compile(fullgraph=True)`. See [CUDA](cuda.md#driver).
 
 ## JAX and PyTorch
 

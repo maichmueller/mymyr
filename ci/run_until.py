@@ -9,6 +9,10 @@ its compiles, removes their partial outputs and keeps the log of the edges it fi
 again, resumes after them. Only descendants are signalled, so other builds on the machine are left alone. The script
 then waits for COMMAND and for the interrupted Ninja processes, which can outlive the build tool that started them.
 
+COMMAND starts with SIGINT at its default action even when this script runs with SIGINT ignored, as a background job
+of a non-interactive shell does: an ignored signal stays ignored across exec, so Ninja would ignore the interrupt, and
+a shell cannot trap a signal that was ignored when it started.
+
 Exit status: COMMAND's (0 if it succeeded) when no Ninja had to be interrupted; 75 when the build was stopped.
 """
 
@@ -55,7 +59,11 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     deadline = float(argv[1])
-    process = subprocess.Popen(argv[3:])
+    previous = signal.signal(signal.SIGINT, signal.SIG_DFL)  # inherited by COMMAND, whatever this process ignores
+    try:
+        process = subprocess.Popen(argv[3:])
+    finally:
+        signal.signal(signal.SIGINT, previous)
     stopping = False
     interrupted: set[int] = set()
     while True:

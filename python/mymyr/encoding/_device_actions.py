@@ -45,8 +45,13 @@ def action_states(encoder: Any, states: Any, ids: Any) -> Any:
     return torch.where(torch.arange(states.shape[1], device=device) < words[local, None], states, 0)
 
 
-def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live: Any = None) -> Any:
-    """Expand labels into caller-sized device arrays, retaining the backend's overflow and invalid-input flags."""
+def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live: Any = None, hashes: bool = False,
+                    noops: bool = False, drop_noops: bool = False) -> Any:
+    """Expand labels into caller-sized device arrays, retaining the backend's overflow and invalid-input flags.
+
+    ``hashes``, ``noops`` and ``drop_noops`` add ``succ_hash``, ``noop`` and ``index`` (None when absent), digested
+    while each successor is built, without storing successor rows.
+    """
     from collections import Counter
     from types import SimpleNamespace
     from mymyr import rl
@@ -62,13 +67,17 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
     x = SimpleNamespace(succ=None,
                         schema=torch.zeros(capacity, **opts), binding=torch.zeros((capacity, table.label_width), **opts),
                         parent=torch.zeros(capacity, **opts), offsets=torch.zeros(states.shape[0] + 1, **opts),
-                        status=torch.zeros(1, **opts))
+                        status=torch.zeros(1, **opts),
+                        succ_hash=torch.zeros(capacity, dtype=torch.int64, device=device) if hashes else None,
+                        noop=torch.zeros(capacity, dtype=torch.bool, device=device) if noops or drop_noops else None,
+                        index=torch.full((capacity,), -1, **opts) if drop_noops else None)
     if len(table):
         from mymyr._core import _cuda
 
         _cuda._check_async_expansion(table, states.shape[0], device.index, _stream(device))
         result = rl.expand_into(table, states, ids, schema=x.schema, binding=x.binding, parent=x.parent,
                                 offsets=x.offsets, status=x.status, stream=_stream(device),
+                                succ_hash=x.succ_hash, noop=x.noop, index=x.index, drop_noops=drop_noops,
                                 row_count=None if live is None else live.clamp(0, states.shape[0]).to(torch.int32))
         x._workspace = result.get("_workspace")
         if live is not None:

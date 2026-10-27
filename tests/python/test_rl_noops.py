@@ -123,16 +123,55 @@ def test_mixed_noops_all_noop_fallback_and_dead_end():
     assert short.generated == full.total > short.capacity and short.overflow and short.pad().overflow
     with pytest.raises(ValueError, match="requires index"):
         rl.expand_into(task, states, drop_noops=True, noop=np.zeros(full.total, bool))
-    # Counting needs no index: no per-successor array is written.
+    # Counting needs no index: no per-successor array is written. The capacity is then 0, so the offsets are the
+    # counts before dropping.
     offsets = np.zeros(len(states) + 1, np.int32)
     counted = rl.expand_into(task, states, offsets=offsets, drop_noops=True)
-    assert counted["generated"] == full.total and counted["overflow"]
+    assert counted["generated"] == counted["total"] == full.total and counted["overflow"]
+    np.testing.assert_array_equal(offsets, full.offsets)
     empty_counted = rl.expand_into(task, states[2:], offsets=offsets[:2], drop_noops=True)
     assert empty_counted["generated"] == 0 and not empty_counted["overflow"] and offsets[:2].tolist() == [0, 0]
     zero = rl.expand(task, states, drop_noops=True, capacity=0)
     assert zero.overflow and zero.generated == full.total
     empty = rl.expand(task, np.empty((0, task.words), np.uint64), drop_noops=True, hashes=True)
     assert empty.total == empty.generated == 0 and empty.offsets.tolist() == [0]
+
+
+def overflow_case():
+    """Three parents of four successors each, two of them no-ops: the kept rows fit a capacity the others do not."""
+    task = pddl_task(atoms="dense")
+    states = [task.initial_state] * 3
+    full = rl.expand(task, states, noops=True)
+    assert rl.expand(task, states, drop_noops=True).total < full.total - 1
+    return task, states, full
+
+
+def test_overflow_with_drop_reports_the_counts_before_dropping():
+    task, states, full = overflow_case()
+    cap = full.total - 1
+    for kw in ({}, {"pool": rl.ThreadPool(3)}):
+        short = rl.expand(task, states, hashes=True, drop_noops=True, capacity=cap, **kw)
+        assert short.overflow and short.generated == short.total == full.total
+        np.testing.assert_array_equal(short.offsets, full.offsets)
+        index = np.zeros(cap, np.int32)
+        offsets = np.zeros(len(states) + 1, np.int32)
+        result = rl.expand_into(task, states, index=index, offsets=offsets, drop_noops=True, **kw)
+        assert result["overflow"] and result["generated"] == result["total"] == full.total
+        np.testing.assert_array_equal(offsets, full.offsets)
+
+
+def test_jax_cpu_overflow_with_drop_reports_the_counts_before_dropping():
+    jax = pytest.importorskip("jax")
+    from mymyr._core import _rl_jax
+    if not _rl_jax.has_ffi():
+        pytest.skip("built without the XLA FFI headers")
+    from mymyr.rl.jax import Env
+    task, states, full = overflow_case()
+    env = Env(task, device="cpu")
+    source = jax.device_put(np.asarray(task.encode(states)).view(np.uint32), jax.devices("cpu")[0])
+    actual = jax.jit(lambda s: env.expand_flat(s, full.total - 1, hashes=True, drop_noops=True))(source)
+    assert int(actual.generated) == full.total
+    np.testing.assert_array_equal(np.asarray(actual.offsets), full.offsets)
 
 
 def test_lazy_slots_hash_and_new_atoms():

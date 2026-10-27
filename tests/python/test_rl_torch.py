@@ -283,14 +283,15 @@ def test_expand_ops_equal_rl_expand(blocks):
     h = rt.register(blocks)
     s = env.states.clone()
     succ, schema, binding, off, goal = expand_rows(blocks, s)
-    fsucc, fparent, fschema, fbinding, fgoal, foff = torch.ops.mymyr.expand_flat(h, s, None, None, False)
+    fsucc, fparent, fschema, fbinding, fgoal, foff, *_ = torch.ops.mymyr.expand_flat(h, s, None, None, False)
     assert torch.equal(fsucc, succ) and torch.equal(fschema, schema) and torch.equal(fbinding, binding)
     assert torch.equal(foff.to(torch.int64), off) and torch.equal(fgoal, goal)
     K = int((off[1:] - off[:-1]).max())
-    psucc, pschema, pbinding, pgoal, pmask, pcount = torch.ops.mymyr.expand(h, s, None, K, False)
+    psucc, pparent, pschema, pbinding, pgoal, poff, *_ = torch.ops.mymyr.expand(h, s, None, K, False)
+    pmask, pcount = pparent >= 0, poff[1:] - poff[:-1]
     assert torch.equal(pcount.to(torch.int64), off[1:] - off[:-1])
     assert torch.equal(psucc[pmask], succ) and torch.equal(pschema[pmask], schema)
-    csucc, cparent, *_, coff = torch.ops.mymyr.expand_flat(h, s, None, 16, False)
+    csucc, cparent, _, _, _, coff, *_ = torch.ops.mymyr.expand_flat(h, s, None, 16, False)
     assert csucc.shape[0] == 16 and torch.equal(coff, foff) and torch.equal(csucc, succ[:16])
 
 
@@ -732,3 +733,61 @@ def test_static_marking_equals_torch_dynamo():
     _mark_static(mine)
     torch._dynamo.mark_static_address(reference)
     assert mine._dynamo_static_input_type == reference._dynamo_static_input_type
+
+
+@pytest.mark.needs_gil
+def test_compiled_expansion_takes_handles_as_arguments():
+    """Handles passed to a compiled function name different objects: each one specializes the graph."""
+    from test_rl_noops import pddl_task
+    task = pddl_task(atoms="dense")
+    source = torch.from_numpy(np.asarray(task.encode([task.initial_state] * 2)).view(np.int64))
+    expected = rl.expand(task, source, hashes=True, drop_noops=True)
+    handles = [rt.register(t) for t in (task, pddl_task(atoms="dense"), pddl_task(atoms="dense"))]
+    compiled = torch.compile(lambda h, s: torch.ops.mymyr.expand_flat(h, s, None, 16, hashes=True, drop_noops=True),
+                             backend="eager", fullgraph=True)
+    try:
+        for h in handles:
+            actual = compiled(h, source)
+            assert torch.equal(actual[7][:expected.total], expected.succ_hash)
+            assert torch.equal(actual[9][:expected.total], expected.index)
+    finally:
+        for h in handles:
+            rt.unregister(h)
+
+
+@pytest.mark.needs_gil
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("rows", [False, True])
+@pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.parametrize("capacity", [None, 16])
+def test_expand_ops_successor_digest_options(padded, rows, drop, capacity):
+    from test_rl_noops import pddl_task
+    task = pddl_task(atoms="dense")
+    source = torch.from_numpy(np.asarray(task.encode([task.initial_state] * 2)).view(np.int64))
+    expected = rl.expand(task, source, hashes=True, noops=True, drop_noops=drop)
+    handle = rt.register(task)
+    options = dict(rows=rows, derived=rows, hashes=True, noops=True, drop_noops=drop)
+    def run(s):
+        if padded:
+            return torch.ops.mymyr.expand(handle, s, None, 4, capacity=capacity, **options)
+        return torch.ops.mymyr.expand_flat(handle, s, None, capacity, **options)
+    actual = run(source)
+    assert len(actual) == 11 and not actual[-1].any()
+    count = expected.total if capacity is None else capacity
+    assert actual[1].shape == ((source.shape[0], 4) if padded else (count,))
+    shape = (source.shape[0], 4, source.shape[1]) if padded else (count, source.shape[1])
+    assert actual[0].shape == (shape if rows else (0, 0))
+    if padded:
+        reference = expected.pad(4)
+        assert torch.equal(actual[7], reference.succ_hash) and torch.equal(actual[8], reference.noop)
+        if drop:
+            assert torch.equal(actual[9], reference.canonical)
+    else:
+        assert torch.equal(actual[7][:expected.total], expected.succ_hash)
+        assert torch.equal(actual[8][:expected.total], expected.noop)
+        if drop:
+            assert torch.equal(actual[9][:expected.total], expected.index)
+    if capacity is not None:
+        compiled = torch.compile(run, backend="eager", fullgraph=True)(source)
+        assert all(torch.equal(a, b) for a, b in zip(compiled, actual))
+    rt.unregister(handle)

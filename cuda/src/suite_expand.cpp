@@ -8,6 +8,7 @@
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/suite_kernels.hpp"
 #include "table_launch.hpp"
+#include "expand_drop.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -43,7 +44,10 @@ struct SuiteExpander::Impl
     };
     std::vector<Part> parts;  // in batch order of their first rows (runs), or by domain (gathered)
     bool runs = false;        // every domain's rows are one run of the batch
-    bool counted = false;
+    bool counted = false, drop_noops = false;
+    detail::ExpansionDrop drop;
+    Scratch digest_offsets;
+    const i32* generated_offsets = nullptr;  // the pre-drop offsets of the last write with drop_noops
     rl::StateBatchView in{};
     u64 stride = 0, total = 0;
     // the suite on the device: each instance's domain and local id, and its fluent slots (uploaded once)
@@ -171,6 +175,8 @@ struct SuiteExpander::Impl
             e.schema = out.schema ? out.schema + p.base : nullptr;
             e.binding = out.binding ? out.binding + p.base * L : nullptr;
             e.goal = out.goal ? out.goal + p.base : nullptr;
+            e.succ_hash = out.succ_hash ? out.succ_hash + p.base : nullptr;
+            e.noop = out.noop ? out.noop + p.base : nullptr;
             e.derived_words = out.derived_words;
             e.derived = out.derived ? out.derived + p.base * out.derived_words : nullptr;
             e.offsets = out.offsets ? out.offsets + p.first : nullptr;
@@ -316,7 +322,10 @@ u64 SuiteExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::E
                                     " instances needs task ids");
     I.in = in;
     I.stride = in.stride ? in.stride : in.words + in.numeric_words;
-    const u64 total = I.count_domains(task_ids, opt);
+    I.drop_noops = opt.drop_noops;
+    rl::ExpandOptions full = opt;
+    full.drop_noops = false;
+    const u64 total = I.count_domains(task_ids, full);
     I.counted = true;
     return total;
 }
@@ -350,11 +359,33 @@ void SuiteExpander::write(rl::Expansion& out)
         throw std::invalid_argument("mymyr: device expand: output numeric width differs from the suite");
     if (out.offsets && I.total > rl::k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
+    if (I.drop_noops && out.capacity && !out.index)
+        throw std::invalid_argument("mymyr: expand: drop_noops requires index");
+    rl::Expansion dest = out;
+    if ((I.drop_noops || out.index) && !dest.offsets)
+        dest.offsets = scratch_of<i32>(I.digest_offsets, I.ctx, I.in.rows + 1, I.s);
+    rl::Expansion raw = I.drop_noops ? I.drop.prepare(dest, I.in.rows, I.ctx, I.s) : dest;
+    I.generated_offsets = I.drop_noops ? raw.offsets : nullptr;
     if (I.runs)
-        I.write_runs(out);
+        I.write_runs(raw);
     else
-        I.write_gathered(out);
+        I.write_gathered(raw);
     out.generated = I.total;
+    out.total = raw.total;
+    out.words_needed = raw.words_needed;
+    if (I.drop_noops)
+    {
+        I.drop.compact(raw, dest, I.in.rows, I.ctx, I.s);
+        i32 kept = 0;
+        check(cudaMemcpyAsync(&kept, dest.offsets + I.in.rows, sizeof(i32), cudaMemcpyDeviceToHost, I.s), "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");
+        out.total = static_cast<u32>(kept);
+    }
+    else if (out.index)
+    {
+        check(launch_expansion_indices(detail::expansion_rows(dest), I.in.rows, I.s), "launch_expansion_indices");
+        check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");
+    }
 }
 
 void SuiteExpander::expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options)
@@ -376,7 +407,13 @@ void SuiteExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl:
     if (!m->one())
         throw std::invalid_argument("mymyr: device expand: the expansion needs the host: " + async_unsupported(in.rows, options));
     m->counted = false;
+    m->generated_offsets = nullptr;
     m->subs[0]->expand_async(in, task_ids, out, status, options, rows_dev);
+}
+
+const i32* SuiteExpander::generated_offsets() const noexcept
+{
+    return m->generated_offsets || !m->one() ? m->generated_offsets : m->subs[0]->generated_offsets();
 }
 
 void SuiteExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)

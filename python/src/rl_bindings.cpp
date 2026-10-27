@@ -552,11 +552,9 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
                     bool goal, bool derived, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
                     bool validate, StreamArg stream, ContextArg ctx, bool hashes, bool noops, bool drop)
 {
-    if (is_cuda_array(states) && (hashes || noops || drop))
-        throw nb::type_error("mymyr: successor digests and drop_noops require host states in this build");
     if (device_hooks().expand && is_cuda_array(states))
         return device_hooks().expand(
-            {table, states, task_ids, capacity, words, k, goal, derived, canonical, witness, framework, validate, stream, ctx});
+            {table, states, task_ids, capacity, words, k, goal, derived, canonical, witness, framework, validate, stream, ctx, hashes, noops, drop});
     const u32 threads = threads_arg(threads_in);
     ExpansionSource tt(table);
     SuiteRef& ref = tt.ref;
@@ -646,14 +644,12 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
                        PoolArg pool, bool validate, StreamArg stream, ContextArg ctx, ArrayArg status, ArrayArg row_count,
                        ArrayArg succ_hash, ArrayArg noop, ArrayArg index, bool drop)
 {
-    if ((is_cuda_array(states) || is_cuda_array(succ_hash) || is_cuda_array(noop) || is_cuda_array(index)) &&
-        (!succ_hash.is_none() || !noop.is_none() || !index.is_none() || drop))
-        throw nb::type_error("mymyr: successor digests and drop_noops require host arrays in this build");
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
-                                       is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status)))
+                                       is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status) ||
+                                       is_cuda_array(succ_hash) || is_cuda_array(noop) || is_cuda_array(index)))
         return device_hooks().expand_into({table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets,
-                                           canonical, witness, validate, stream, ctx, status, row_count});
+                                           canonical, witness, validate, stream, ctx, status, row_count, succ_hash, noop, index, drop});
     if (!row_count.is_none())
         throw nb::type_error("mymyr: expand_into: row_count requires device states and status=");
     if (!status.is_none())

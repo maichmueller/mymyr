@@ -30,6 +30,14 @@
 // and write() synchronize). So are a numeric instance's batches whose rows (the batch's atom words and the numeric
 // slots) are wider than 64 words.
 //
+// Optional succ_hash/noop destinations digest the actual successor while it is built, including when succ is null.
+// Hashes equal State::hash(), with public packed numeric words; noop compares fluent and numeric bits. With
+// drop_noops, the expansion goes to retained scratch of out.capacity rows and a stable compaction (scan and scatter)
+// keeps effective successors, or all successors of an all-no-op parent. The index destination carries the kept
+// rows' positions in each parent's full expansion. generated counts before compaction, total and offsets after it;
+// capacity bounds generated. On generated > capacity, as on the host, total and offsets are the counts before
+// compaction, so offsets[N] equals generated (the rows are unspecified). Capturable calls retain the scratch across replays.
+//
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
 // successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
 // words are zero; PerInstance parts are scattered at the caller's width. A mapped write in Multi mode does not write
@@ -90,11 +98,15 @@ public:
     /// outside the table or rows with unassigned atom slots (validate), std::length_error beyond 2^31 - 1 successors.
     u64 count(rl::StateBatchView in, const i32* task_ids, const rl::ExpandOptions& options = {});
     /// Writes the expansion of the counted batch (count() first; the batch and its task ids must still hold the same
-    /// values) into `out` and sets out.total, out.generated (equal to the total) and out.words_needed. May be called
-    /// again with other destinations.
+    /// values) into `out` and sets out.total, out.generated and out.words_needed as rl::expand does (generated equals
+    /// the total without drop_noops). May be called again with other destinations.
     void write(rl::Expansion& out);
     /// count() then write().
     void expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options = {});
+    /// After a write() or expand_async() with drop_noops: the device CSR offsets [rows + 1] of the successors before
+    /// dropping (offsets[i + 1] - offsets[i] counts state i's generated successors), on this expander's stream and
+    /// valid until its next call; null after a call without drop_noops.
+    [[nodiscard]] const i32* generated_offsets() const noexcept;
 
     /// The counted batch as a part of a larger batch (cuda::SuiteExpander's domains): row q of the counted batch
     /// is row rows[q] of the larger one, whose CSR offsets are batch_offsets (device arrays; [counted rows] and [larger

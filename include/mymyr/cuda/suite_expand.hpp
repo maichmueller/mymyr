@@ -62,6 +62,8 @@ public:
     void write(rl::Expansion& out);
     /// count() then write().
     void expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options = {});
+    /// DeviceExpander::generated_offsets of the last write() or expand_async().
+    [[nodiscard]] const i32* generated_offsets() const noexcept;
     /// DeviceExpander::async_unsupported and expand_async of a suite of one domain; a suite of several domains reads
     /// its classification back, so it always needs the host.
     [[nodiscard]] std::string async_unsupported(u64 rows, const rl::ExpandOptions& options = {}) const;

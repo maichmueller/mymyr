@@ -16,6 +16,7 @@
 //     (cuda_datasets_bindings.cpp).
 
 #include "arrays.hpp"
+#include "device_hooks.hpp"
 #include "py_task.hpp"
 #include "translate_bindings.hpp"
 #include "typing.hpp"
@@ -61,6 +62,8 @@ mymyr::python::Arg<mymyr::python::ann::Any> hash_rows(mymyr::python::Arg<mymyr::
 {
     using namespace mymyr;
     using namespace mymyr::python;
+    if (device_hooks().hash_rows && is_cuda_array(states))
+        return device_hooks().hash_rows(states, numeric_words, stream);
     if (!stream.is_none())
         throw nb::type_error("mymyr: hash_rows: stream requires device rows");
     if (nb::isinstance<nb::list>(states) || nb::isinstance<nb::tuple>(states))

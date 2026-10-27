@@ -189,6 +189,28 @@ struct ActionWriter
         }
         if (out.words_needed && needed > atoms)
             atomicMax(out.words_needed, needed);
+        if (out.hash || out.noop)
+        {
+            u64 atom[k_max_words], num[k_max_words]{};
+            bool same = !missing_atom;
+            for (u32 w = 0; w < k_max_words; ++w)
+            {
+                atom[w] = ((w < p.words ? row[w] : 0) & ~dels[w]) | adds[w];
+                same = same && atom[w] == (w < p.words ? row[w] : 0);
+            }
+            const u32 slots = t.numeric.slots, nn = t.numeric.storage ? (slots + 1) / 2 : slots;
+            for (u32 k = 0; k < slots; ++k)
+            {
+                same = same && values[k] == row[p.words + k];
+                if (t.numeric.storage)
+                    num[k >> 1] |= u64{static_cast<u32>(static_cast<i32>(numeric_value(values, k)))} << ((k & 1) * 32);
+                else
+                    num[k] = values[k];
+            }
+            if (out.hash) out.hash[position] = hash::state(atom, k_max_words, num, nn);
+            if (out.noop) out.noop[position] = same ? 1 : 0;
+        }
+        if (!out.words) return;
         u64* dst = out.words + position * out.out_words;
         if (needed > atoms)
         {
@@ -274,7 +296,7 @@ __global__ void successors(TaskView t, Parents p, Views v, SchemaSet set, const 
             if (labels.binding)
                 for (u32 i = 0; i < labels.label_width; ++i)
                     labels.binding[pos * labels.label_width + i] = i < arity ? b[i] : k_none;
-            if (out.words) writer.put(pos);
+            if (out.words || out.hash || out.noop) writer.put(pos);
         };
         auto emit = [&](const u32* b)
         {
