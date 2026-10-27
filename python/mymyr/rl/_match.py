@@ -70,8 +70,9 @@ def upload(host, stream=None):
 
     if stream is None:
         stream = torch.cuda.current_stream()
-    elif isinstance(stream, int):
-        stream = torch.cuda.ExternalStream(stream, device=torch.cuda.current_device())
+    elif not isinstance(stream, torch.cuda.Stream):
+        handle = operator.index(getattr(stream, "cuda_stream", stream))
+        stream = torch.cuda.ExternalStream(handle, device=torch.cuda.current_device())
     with torch.cuda.device(stream.device), torch.cuda.stream(stream):
         return DeviceGoalTemplates(host, stream.device)
 

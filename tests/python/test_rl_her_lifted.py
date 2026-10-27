@@ -833,3 +833,22 @@ def test_match_first_word_halves(on_device):
         actual = rl.match_first(halves, None, templates)
     for a, b in zip(expected, actual):
         np.testing.assert_array_equal(a, b)
+
+
+def test_match_first_upload_accepts_stream_handles_and_stream_protocol():
+    torch = cuda_match_runtime()
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=True)
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    stream = torch.cuda.Stream(device=0)
+
+    class StreamReference:
+        cuda_stream = stream.cuda_stream
+
+    for source in (stream, stream.cuda_stream, StreamReference()):
+        uploaded = templates.upload(source)
+        actual = rl.match_first(x, None, uploaded, first=True)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
