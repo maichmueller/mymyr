@@ -27,9 +27,11 @@
 #include "mymyr/cuda/expand.hpp"
 #include "mymyr/cuda/kernels.hpp"
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/cuda/masks.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/translate.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
+#include "mymyr/rl/masks.hpp"
 #include "mymyr/search/control.hpp"
 #include "mymyr/search/validate.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -578,7 +580,8 @@ void retain_workspace(cudaGraph_t graph, const std::shared_ptr<ExpansionWorkspac
 }
 
 /// Per-table CUDA state (a Task's on its core, a TaskTable's on the table, a TaskSuite's on the suite): a default
-/// context per device and idle device expanders per context (they keep their context alive until the table goes).
+/// context per device, and per context the idle device expanders and the device masks (they keep their context alive
+/// until the table goes).
 struct TranslateUpload;
 
 struct TaskCuda
@@ -587,6 +590,8 @@ struct TaskCuda
     std::map<std::vector<u64>, std::shared_ptr<TranslateUpload>> translations;
     std::map<const cuda::DeviceContext*, std::vector<std::shared_ptr<ExpansionWorkspace>>> idle;
     std::map<std::pair<const cuda::DeviceContext*, unsigned long long>, std::weak_ptr<ExpansionWorkspace>> captures;
+    std::optional<std::string> masks_why;  // DeviceMasks::unsupported of the suite
+    std::map<const cuda::DeviceContext*, std::shared_ptr<const cuda::DeviceMasks>> masks;
 };
 
 TaskCuda& slot_cuda(std::shared_ptr<void>& slot)  // with the slot's mutex held
@@ -1222,6 +1227,232 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     r["overflow"] = x.overflow();
     r["capacity"] = x.capacity;
     return r;
+}
+
+// ------------------------------------------------------------------------------------------------ action masks
+
+/// The device masks of (suite, context), cached on the table; null when the kernels do not run the suite (`why`).
+std::shared_ptr<const cuda::DeviceMasks> table_masks(const SuiteRef& ref, const PyContextPtr& c,
+                                                     std::string* why = nullptr)
+{
+    std::lock_guard lock(ref.cuda_mutex());
+    TaskCuda& tc = slot_cuda(ref.cuda());
+    if (!tc.masks_why)
+        tc.masks_why = cuda::DeviceMasks::unsupported(*ref.suite);
+    if (why)
+        *why = *tc.masks_why;
+    if (!tc.masks_why->empty())
+        return nullptr;
+    std::shared_ptr<const cuda::DeviceMasks>& m = tc.masks[c->ctx.get()];
+    if (!m)
+        m = std::make_shared<const cuda::DeviceMasks>(c->ctx, ref.suite);
+    return m;
+}
+
+/// An action-mask call over device rows: the arguments of DeviceMasks plus the numeric words the host functions read.
+struct MaskCall
+{
+    MaskKind kind = MaskKind::Schemas;
+    cuda::DeviceMasks::Batch b;
+    u32 numeric_words = 0;
+    cuda::DeviceMasks::Schemas schema;
+    const i32* labels = nullptr;  // the prefix (objects) or the binding (applicable), [rows, width]
+    u32 width = 0;
+    u32 depth = 0;
+    u32 num_objects = 0;
+    u8* out = nullptr;
+    u64* views = nullptr;  // [rows, view_words] (schemas and objects on the device)
+    u32* status = nullptr;
+
+    [[nodiscard]] u64 columns(const rl::TaskSuite& suite) const
+    {
+        return kind == MaskKind::Schemas ? suite.max_schemas() : kind == MaskKind::Objects ? num_objects : 1;
+    }
+};
+
+/// The host functions' checks that read no rows, with their errors.
+void check_mask_call(const MaskCall& m, const rl::TaskSuite& suite)
+{
+    if (m.kind == MaskKind::Objects)
+    {
+        if (m.num_objects < suite.max_objects())
+            throw std::invalid_argument("mymyr: parameter_masks: num_objects is below the suite's maximum");
+        if (m.width < m.depth || (m.b.rows && m.depth && !m.labels))
+            throw std::invalid_argument("mymyr: parameter_masks: prefix needs at least depth columns");
+    }
+    if (m.kind == MaskKind::Applicable && m.b.rows && m.width && !m.labels)
+        throw std::invalid_argument("mymyr: is_applicable: null label or output buffer");
+}
+
+/// The host functions over host copies of the call's device inputs, the result copied into m.out: the path of tasks
+/// the device masks do not run, and of calls whose status reports an error (the host function raises it). Waits for s.
+void host_masks(const rl::TaskSuite& suite, const MaskCall& m, cudaStream_t s)
+{
+    const u64 n = m.b.rows;
+    const u64 row = u64{m.b.words} + m.numeric_words;
+    std::vector<u64> rows(n ? (n - 1) * m.b.stride + row : 0);
+    std::vector<i32> ids(m.b.task_ids ? n : 0), schema(n, m.schema.value), labels(m.labels ? n * m.width : 0);
+    auto get = [&](void* dst, const void* src, u64 bytes)
+    {
+        if (bytes)
+            cuda::check(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+    };
+    get(rows.data(), m.b.states, rows.size() * sizeof(u64));
+    get(ids.data(), m.b.task_ids, ids.size() * sizeof(i32));
+    if (m.schema.schema)
+        get(schema.data(), m.schema.schema, n * sizeof(i32));
+    get(labels.data(), m.labels, labels.size() * sizeof(i32));
+    cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+    const rl::StateBatchView view{rows.data(), n, m.b.words, m.b.stride, m.numeric_words};
+    const i32* id = m.b.task_ids ? ids.data() : nullptr;
+    const i32* lab = m.labels ? labels.data() : nullptr;
+    std::vector<u8> out(n * m.columns(suite));
+    switch (m.kind)
+    {
+    case MaskKind::Schemas:
+        rl::schema_masks(suite, view, id, out.data(), nullptr);
+        break;
+    case MaskKind::Objects:
+        suite.check_task_ids(id, n);
+        if (id || suite.size() == 1)
+            for (u64 i = 0; i < n; ++i)
+            {
+                const auto& plans = suite.task_of(id, i).compiled().schemas;
+                if (schema[i] >= 0 && static_cast<u32>(schema[i]) < plans.size() && m.depth >= plans[schema[i]].arity)
+                    throw std::invalid_argument("mymyr: depth must be below the schema arity");
+            }
+        rl::parameter_masks(suite, view, id, schema.data(), lab, m.width, m.depth, out.data(), m.num_objects, nullptr);
+        break;
+    case MaskKind::Applicable:
+        rl::is_applicable(suite, view, id, schema.data(), lab, m.width, out.data(), nullptr);
+        break;
+    }
+    if (out.empty())
+        return;
+    cuda::check(cudaMemcpyAsync(m.out, out.data(), out.size(), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
+    cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+}
+
+/// Runs a mask call on stream s: on the device masks dm, or the host functions without them (they wait for s and raise
+/// their errors). On the device, errors are status bits (*m.status) and nothing waits; with `raise` the call waits for
+/// the status and raises the host function's error for a nonzero one.
+void run_masks(const rl::TaskSuite& suite, const cuda::DeviceMasks* dm, const MaskCall& m, cudaStream_t s, bool raise)
+{
+    check_mask_call(m, suite);
+    if (!dm)
+    {
+        if (m.status)
+            cuda::check(cudaMemsetAsync(m.status, 0, sizeof(u32), s), "cudaMemsetAsync");
+        host_masks(suite, m, s);
+        return;
+    }
+    switch (m.kind)
+    {
+    case MaskKind::Schemas:
+        dm->schemas(m.b, m.out, m.views, m.status, s);
+        break;
+    case MaskKind::Objects:
+        dm->objects(m.b, m.schema, m.labels, m.width, m.depth, m.out, m.num_objects, m.views, m.status, s);
+        break;
+    case MaskKind::Applicable:
+        dm->applicable(m.b, m.schema, m.labels, m.width, m.out, m.status, s);
+        break;
+    }
+    if (!raise)
+        return;
+    u32 status = 0;
+    cuda::check(cudaMemcpyAsync(&status, m.status, sizeof(u32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+    cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+    if (status)
+        host_masks(suite, m, s);
+}
+
+/// An int32 CUDA array [rows] (matrix: [rows, cols], *cols set) read in place on the operation's stream.
+const i32* device_i32(nb::handle obj, const PyContext& c, const OpStream& os, u64 rows, bool matrix, u32* cols,
+                      std::vector<std::shared_ptr<void>>& keep, const char* name)
+{
+    DeviceInput in = import_device(obj, c, os, name);
+    const dl::Imported& im = in.im;
+    const std::string q = std::string("mymyr: '") + name + "'";
+    if (im.dtype.code != dl::k_int || im.dtype.bits != 32 || im.dtype.lanes != 1)
+        throw nb::type_error((q + " must be an int32 CUDA array like the states").c_str());
+    if (im.shape.size() != (matrix ? 2u : 1u) || static_cast<u64>(im.shape[0]) != rows)
+        throw nb::value_error((q + " must have shape [" + std::to_string(rows) + (matrix ? ", L]" : "]")).c_str());
+    const bool empty = std::find(im.shape.begin(), im.shape.end(), 0) != im.shape.end();
+    i64 expect = 1;
+    for (usize d = im.shape.size(); !empty && d-- > 0;)
+    {
+        if (im.shape[d] > 1 && im.strides[d] != expect)
+            throw nb::value_error((q + " must be C-contiguous").c_str());
+        expect *= im.shape[d];
+    }
+    if (matrix)
+        *cols = static_cast<u32>(im.shape[1]);
+    keep.push_back(im.keep);
+    return static_cast<const i32*>(im.data);
+}
+
+/// rl.applicable_schemas / rl.applicable_objects / rl.is_applicable on CUDA arrays: the device masks on the table's
+/// context stream, the host functions for tasks the kernels do not run; waits for the result and raises the host
+/// functions' errors.
+nb::object device_action_masks(const MaskArgs& a)
+{
+    SuiteRef ref = suite_of(a.table);
+    const rl::TaskSuite& tt = *ref.suite;
+    PyContextPtr c = table_context(ref, nb::none(), dl::dlpack_device(a.states).device_id);
+    c->drain();
+    const OpStream os = c->stream_of(nb::none());
+    DeviceInput in = import_device(a.states, *c, os, "states");
+    const WordsLayout w = device_words(in);
+    const u32 NN = tt.numeric_words();
+    if (w.words < NN)
+        throw nb::value_error("mymyr: numeric states have no numeric block");
+    std::vector<std::shared_ptr<void>> keep{in.im.keep};
+    MaskCall m;
+    m.kind = a.kind;
+    m.b = {static_cast<const u64*>(w.data), w.rows, w.words - NN, w.stride, nullptr};
+    m.numeric_words = NN;
+    m.b.task_ids = device_task_ids(a.task_ids, *c, os, w.rows, keep);
+    if (a.kind != MaskKind::Schemas)
+    {
+        if (a.schema.is_none())
+            throw nb::type_error("mymyr: schema must be an int or an int32 array [N]");
+        if (PyIndex_Check(a.schema.ptr()) && dl::dlpack_device(a.schema).device_type < 0)
+            m.schema.value = int_arg<i32>(a.schema, "schema");
+        else
+            m.schema.schema = device_i32(a.schema, *c, os, w.rows, false, nullptr, keep, "schema");
+    }
+    if (a.kind == MaskKind::Objects)
+    {
+        m.depth = int_arg<u32>(a.depth, "depth");
+        m.num_objects = opt_int_arg<u32>(a.num_objects, "num_objects").value_or(tt.max_objects());
+    }
+    if (a.kind == MaskKind::Applicable && a.labels.is_none())
+        throw nb::type_error("mymyr: binding must be an int32 array [N, L]");
+    if (!a.labels.is_none())
+        m.labels = device_i32(a.labels, *c, os, w.rows, true, &m.width, keep,
+                              a.kind == MaskKind::Objects ? "prefix" : "binding");
+    const std::shared_ptr<const cuda::DeviceMasks> dm = table_masks(ref, c);
+    const u64 cols = m.columns(tt);
+    auto out = device_output(*c, checked_mul({w.rows, cols}, "action masks"), os);
+    auto status = device_output(*c, sizeof(u32), os);
+    std::shared_ptr<cuda::DeviceBuffer> views;
+    if (dm && a.kind != MaskKind::Applicable)
+        views = device_output(*c, checked_mul({w.rows, dm->view_words(), sizeof(u64)}, "action masks"), os);
+    m.out = static_cast<u8*>(out->data());
+    m.status = static_cast<u32*>(status->data());
+    m.views = views ? static_cast<u64*>(views->data()) : nullptr;
+    {
+        nb::gil_scoped_release release;
+        cuda::DeviceGuard g(c->ctx->device());
+        run_masks(tt, dm.get(), m, os.s, true);
+    }
+    c->release_after(os.s, std::move(keep));
+    const auto [fw, enc] = output_kind(in, w, nb::none());
+    std::vector<i64> shape{static_cast<i64>(w.rows)};
+    if (a.kind != MaskKind::Applicable)
+        shape.push_back(static_cast<i64>(cols));
+    return export_buffer(out, os, rl::DType::Bool, std::move(shape), false, fw, enc);
 }
 
 // ------------------------------------------------------------------------------------------------ device BrFS
@@ -1931,6 +2162,55 @@ void bind_cuda(nb::module_& parent)
 
     device_hooks().expand = &device_expand;
     device_hooks().expand_into = &device_expand_into;
+    device_hooks().masks = &device_action_masks;
+    m.def(
+        "_masks_info",
+        [](SuiteArg table, int device) {
+            const SuiteRef ref = suite_of(table);
+            std::string why;
+            const auto dm = table_masks(ref, table_context(ref, nb::none(), device), &why);
+            return std::make_tuple(dm ? dm->view_words() : u64{0}, why, ref.suite->max_schemas(),
+                                   ref.suite->max_objects());
+        },
+        "table"_a, "device"_a,
+        "(views words per row, why not, schema columns, object columns) of the table's device masks on a device: the "
+        "scratch the mask ops take, an empty string if the kernels run every instance (else the ops run the host "
+        "functions, which wait and raise), and the widths of the schema and object masks.");
+    m.def(
+        "_masks_ptrs",
+        [](SuiteArg table, int kind, int device, std::intptr_t stream, u64 rows, u32 row_words, std::uintptr_t states,
+           std::uintptr_t task_ids, std::uintptr_t schema, i32 value, std::uintptr_t labels, u32 width, u32 depth,
+           std::uintptr_t out, u32 num_objects, std::uintptr_t views, std::uintptr_t status) {
+            if (kind < 0 || kind > 2)
+                throw nb::value_error("mymyr: unknown mask kind");
+            const SuiteRef ref = suite_of(table);
+            const rl::TaskSuite& tt = *ref.suite;
+            const u32 NN = tt.numeric_words();
+            if (row_words < NN)
+                throw nb::value_error("mymyr: numeric states have no numeric block");
+            MaskCall m;
+            m.kind = static_cast<MaskKind>(kind);
+            m.b = {reinterpret_cast<const u64*>(states), rows, row_words - NN, row_words,
+                   reinterpret_cast<const i32*>(task_ids)};
+            m.numeric_words = NN;
+            m.schema = {reinterpret_cast<const i32*>(schema), value};
+            m.labels = reinterpret_cast<const i32*>(labels);
+            m.width = width;
+            m.depth = depth;
+            m.num_objects = num_objects;
+            m.out = reinterpret_cast<u8*>(out);
+            m.views = reinterpret_cast<u64*>(views);
+            m.status = reinterpret_cast<u32*>(status);
+            const auto dm = table_masks(ref, table_context(ref, nb::none(), device));
+            nb::gil_scoped_release release;
+            cuda::DeviceGuard g(device);
+            run_masks(tt, dm.get(), m, cuda_stream(stream), false);
+        },
+        "table"_a, "kind"_a, "device"_a, "stream"_a, "rows"_a, "row_words"_a, "states"_a, "task_ids"_a, "schema"_a,
+        "value"_a, "labels"_a, "width"_a, "depth"_a, "out"_a, "num_objects"_a, "views"_a, "status"_a,
+        "The mask ops' native entry on device pointers (kind 0 for schemas, 1 for objects, 2 for applicable), on "
+        "`stream`: status bits instead of errors on the device; the host functions (waiting, raising) for tables the "
+        "kernels do not run.");
     m.def("_check_async_expansion",
           [](TableArg table, u64 rows, int device, std::intptr_t stream)
           {

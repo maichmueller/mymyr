@@ -223,16 +223,17 @@ def test_masks_validation_and_mutation():
     empty = rows[:0]
     assert rl.applicable_schemas(task, empty).shape == (0, task.num_schemas)
     assert rl.is_applicable(task, empty, 0, np.zeros((0, task.label_width), np.int32)).shape == (0,)
-    # Device tags can be rejected before any memory is imported or accessed.
-    class DeviceRows:
-        def __dlpack_device__(self):
-            return (2, 0)
-    with pytest.raises(ValueError, match="CPU; pass host rows"):
-        rl.applicable_schemas(task, DeviceRows())
-    with pytest.raises(ValueError, match="CPU; pass host rows"):
-        rl.applicable_objects(task, rows, DeviceRows(), None, 0)
-    with pytest.raises(ValueError, match="CPU; pass host rows"):
-        rl.is_applicable(task, rows, 0, DeviceRows())
+    # Without the CUDA backend, device tags are rejected before any memory is imported or accessed.
+    if not hasattr(mymyr._core, "_cuda"):
+        class DeviceRows:
+            def __dlpack_device__(self):
+                return (2, 0)
+        with pytest.raises(ValueError, match="no CUDA backend"):
+            rl.applicable_schemas(task, DeviceRows())
+        with pytest.raises(ValueError, match="no CUDA backend"):
+            rl.applicable_objects(task, rows, DeviceRows(), None, 0)
+        with pytest.raises(ValueError, match="no CUDA backend"):
+            rl.is_applicable(task, rows, 0, DeviceRows())
 
 
 @pytest.mark.parametrize("pool_size", [0, 3])

@@ -89,8 +89,6 @@ public:
         m_init_count.resize(t->size());
         if (!device.is_none())
         {
-            if (cfg.actions == rl::ActionSpace::Label)
-                throw nb::value_error("mymyr: label actions run on the CPU; use device=None");
             m_device = int_arg<int>(device, "device", 0);
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
@@ -488,12 +486,14 @@ private:
     void run_step(rl::EnvBatch& b, const rl::StepOutputs& o, const i64* action, const i32* next_task_ids,
                   const rl::Labels* labels = nullptr)
     {
-        if (labels)
-            return m_host->step(b, o, *labels, next_task_ids, m_pool.get());
 #if defined(MYMYR_HAS_CUDA)
+        if (m_dev && labels)
+            return m_dev->step(b, o, *labels, next_task_ids);
         if (m_dev)
             return m_dev->step(b, o, rl::Actions{action, nullptr}, next_task_ids);
 #endif
+        if (labels)
+            return m_host->step(b, o, *labels, next_task_ids, m_pool.get());
         m_host->step(b, o, rl::Actions{action, nullptr}, next_task_ids, m_pool.get());
     }
     void run_random_actions(const u64* d, const i32* cnt, u64 rows, u64 first_env, u32 max_actions, i64* o)
@@ -894,12 +894,15 @@ void bind_rl_torch(nb::module_& parent)
 
     m.def(
         "fast_unsupported",
-        [](SuiteArg table, bool canonical, bool witness) -> std::string {
+        [](SuiteArg table, bool canonical, bool witness, const std::string& actions) -> std::string {
             const SuiteRef ref = suite_of(table);
+            if (actions != "index" && actions != "label")
+                throw nb::value_error("mymyr: actions must be 'index' or 'label'");
 #if defined(MYMYR_HAS_CUDA)
             rl::EnvConfig c;
             c.canonical_order = canonical;
             c.witness_pruning = witness;
+            c.actions = actions == "label" ? rl::ActionSpace::Label : rl::ActionSpace::Index;
             return cuda::DeviceEnv::fast_unsupported(*ref.suite, c);
 #else
             (void)ref;
@@ -908,8 +911,9 @@ void bind_rl_torch(nb::module_& parent)
             return "a CPU build (no CUDA backend)";
 #endif
         },
-        "table"_a, nb::kw_only(), "canonical_order"_a = true, "witness_pruning"_a = false,
-        "Why the device fast path does not run the table ('' if it does).");
+        "table"_a, nb::kw_only(), "canonical_order"_a = true, "witness_pruning"_a = false, "actions"_a = "index",
+        "Why the device fast path does not run the table ('' if it does); with actions='label', why a device "
+        "environment cannot step labels (label mode runs on the fast path only).");
 
     m.def(
         "philox",

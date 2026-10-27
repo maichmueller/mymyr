@@ -61,10 +61,10 @@ false rows. The scalar depth must be below the arity of every valid selected sch
 Zero-parameter schemas participate in `applicable_schemas` and
 `is_applicable` with binding shape `[N, 0]`.
 
-These functions take a Task, TaskTable or TaskSuite and the same CPU state inputs as `expand`: NumPy, torch or JAX
+These functions take a Task, TaskTable or TaskSuite and the same state inputs as `expand`: NumPy, torch or JAX
 arrays, a State, or a list of States. Outputs use the state array's framework (States produce NumPy arrays).
-Calls release the GIL, accept `pool=ThreadPool(T)` and support concurrent callers. They are eager CPU operations;
-CUDA inputs raise `ValueError` with “runs on the CPU; pass host rows”.
+Calls release the GIL, accept `pool=ThreadPool(T)` and support concurrent callers. CUDA state arrays run on their
+device with the same results (see [Action masks and label steps on the device](#action-masks-and-label-steps-on-the-device)).
 
 The masks equal `schema_masks(rl.expand(...))` and `prefix_masks(rl.expand(...), ...)` with witness pruning off.
 Full-label checks equal membership in that expansion's labels, including derived and numeric preconditions and
@@ -91,8 +91,8 @@ Dead ends, absorbing goals, rewards, truncation, goal masks, `next_task_ids`, sa
 regardless of `witness_pruning` and `canonical_order`. `step(None)` and `random_actions()` raise `ValueError` in
 label mode, since a uniform random action requires enumerating the action space.
 
-Label stepping runs on the host and torch CPU, including `torch.compile`. Requesting `actions="label"` with a
-CUDA device raises `ValueError`. The C++ API selects `EnvConfig::actions = rl::ActionSpace::Label` and passes
+Label stepping runs on the host and torch CPU, including `torch.compile`, and on a CUDA device (see
+[Action masks and label steps on the device](#action-masks-and-label-steps-on-the-device)). The C++ API selects `EnvConfig::actions = rl::ActionSpace::Label` and passes
 `rl::Labels{schema, binding, stride}` to `HostEnv::step`; `stride` is the binding row width in int32 elements.
 Index mode uses `rl::ActionSpace::Index` and `rl::Actions`.
 
@@ -786,6 +786,63 @@ task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probBLOCKS-8-0.pddl", 
 env = BatchedEnv(task, 4, device=torch.device("cuda", 0), max_steps=4, seed=0)
 step = env.step(final=True)
 print(env.states.shape, step.reward.shape)
+```
+
+### Action masks and label steps on the device
+
+`rl.applicable_schemas`, `rl.applicable_objects` and `rl.is_applicable` take CUDA state arrays (torch or JAX, the
+atom words and then the numeric words of each row). `task_ids`, a per-row `schema`, `prefix` and `binding` are then
+int32 CUDA arrays on the same device; a scalar schema stays an integer. The masks equal the host's bit for bit and
+come back as device arrays of the states' framework. These calls wait for the device and raise the host's errors.
+The kernels run tasks without numeric fluents and axioms whose schemas have at most 16 parameters. Rows of other
+tasks are copied to the host, computed there and copied back.
+
+The torch custom ops `mymyr.rl.torch.applicable_schemas(handle, states, task_ids=None)`,
+`applicable_objects(handle, states, schema, prefix, depth, task_ids=None, num_objects=None)` and
+`is_applicable(handle, states, schema, binding, task_ids=None)` take a table handle (`mymyr.rl.torch.register`) and
+return `(mask, status)`. On a device they run on torch's current stream and do not wait. They allocate only their
+outputs and scratch, so they trace under `torch.compile` (fake implementations) and capture into CUDA graphs once
+warmed. Instead of raising, they OR bits into the int32 `status` scalar: 1 for a task id outside the table, 2 for a
+row with atom slots its instance does not have, 4 for rows narrower than an instance's atom words, 8 for a depth not
+below a selected schema's arity, and 16 for a binding narrower than a selected schema's arity. The mask rows these
+inputs concern are unspecified. Over tasks the kernels do not run, the ops take the host path, which waits and
+raises.
+
+`BatchedEnv(table, N, actions="label", device="cuda")` steps labels on the device without a host round trip, with the
+same states, rewards, flags, autoresets, final states and goal masks as the CPU environment. Its 0/1 `count` comes from
+each schema's existence matcher. Label steps capture into CUDA graphs: `env.capture(K, policy)` with a policy that
+returns `(schema, binding)` keeps the policy's labels in the rollout's `action_schema` and `action_binding`. Label
+mode needs tables without numeric fluents, axioms and conditional effects whose schemas have at most 16 parameters.
+`mymyr.rl.torch.fast_unsupported(table, actions="label")` explains why a table does not qualify, and the constructor
+raises `ValueError` for it.
+
+The example decodes one applicable label per row from the masks and steps it:
+
+```python skip-if-no-cuda
+from pathlib import Path
+
+import mymyr
+import torch
+from mymyr import rl
+from mymyr.rl.torch import BatchedEnv, applicable_objects, applicable_schemas, register
+
+data = Path("tests/data/pddl/blocks")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probBLOCKS-8-0.pddl")
+env = BatchedEnv(task, 4, device="cuda", actions="label", max_steps=8, seed=0)
+handle = register(task)
+schemas, status = applicable_schemas(handle, env.states)
+assert int(status) == 0
+assert torch.equal(schemas.cpu(), rl.applicable_schemas(task, env.states.cpu()))
+schema = schemas.int().argmax(1).int()  # the first applicable schema of each row
+arity = torch.tensor([s.arity for s in task.formalism.schemas], device="cuda")
+binding = torch.zeros((4, task.label_width), dtype=torch.int32, device="cuda")
+for depth in range(task.label_width):
+    selected = torch.where(arity[schema.long()] > depth, schema, -1)  # rows whose schema has this parameter
+    objects, status = applicable_objects(handle, env.states, selected, binding, depth)
+    binding[:, depth] = objects.int().argmax(1).int()  # the first object with an applicable completion
+assert rl.is_applicable(task, env.states, schema, binding).all()
+result = env.step((schema, binding))
+assert not result.invalid.any() and torch.equal(result.schema, schema)
 ```
 
 ## Encoded observations

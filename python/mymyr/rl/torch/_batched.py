@@ -126,11 +126,14 @@ class BatchedEnv:
     ``reset(mask)``. ``step(action=None)`` is the random policy: a uniform successor from the counter-based RNG (seed,
     env id ``first_env + i``, draw counter), the same on the CPU and on any device and batch split.
 
-    ``actions="label"`` runs on the CPU and takes ``step((schema, binding))`` with int32 tensors [N] and [N, L],
-    where L is at least the largest schema arity. It validates and applies the label directly, without enumerating
-    successors. ``count`` is then 0/1 (whether an applicable action exists); ``step(None)`` and ``random_actions``
-    are unavailable. Inapplicable labels do not move and set ``invalid`` in a nonterminal state with applicable
-    actions. Padding past a schema's arity is ignored. Labels use each row's domain's schemas and instance's objects.
+    ``actions="label"`` takes ``step((schema, binding))`` with int32 tensors [N] and [N, L] on the environments'
+    device, where L is at least the largest schema arity. It validates and applies the label directly, without
+    enumerating successors. ``count`` is then 0/1 (whether an applicable action exists); ``step(None)`` and
+    ``random_actions`` are unavailable. Inapplicable labels do not move and set ``invalid`` in a nonterminal state with
+    applicable actions. Padding past a schema's arity is ignored. Labels use each row's domain's schemas and instance's
+    objects. On a device, label steps make no host round trip and can be captured (``capture`` with a policy returning
+    the labels); they need tables without numeric fluents, axioms and conditional effects whose schemas have at most 16
+    parameters (``fast_unsupported(table, actions="label")`` says why not).
 
     ``track_visited=H`` keeps CPU hash tables ``visited`` int64 [N, H], ``visited_count`` int32 [N], and
     ``visited_status`` int32 [1] (sticky bit 0: overflow). H is a power of two in [2, 2^20]; True selects the next
@@ -195,8 +198,6 @@ class BatchedEnv:
         self.device = torch.device(device)
         if actions not in ("index", "label"):
             raise ValueError("mymyr: actions must be 'index' or 'label'")
-        if actions == "label" and self.device.type != "cpu":
-            raise ValueError("mymyr: label actions run on the CPU; use device='cpu'")
         self.visited_capacity = _rl._visited_capacity(track_visited, max_steps)
         if self.visited_capacity and self.device.type != "cpu":
             raise ValueError("mymyr: visited tracking requires device='cpu'")

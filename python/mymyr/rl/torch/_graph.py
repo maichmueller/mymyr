@@ -21,7 +21,7 @@ class Rollout(NamedTuple):
     concatenates them into one batch of the K * N rows in step order (over a suite: per domain,
     ``collate([o.batches[d] for o in rollout.obs])``)."""
 
-    action: Optional[Tensor]  # int64 [K, N]: the policy's actions (None: the random policy)
+    action: Optional[Tensor]  # int64 [K, N]: the policy's actions (None: the random policy, or label mode)
     reward: Tensor  # float32 [K, N]
     terminated: Tensor  # bool [K, N]
     truncated: Tensor  # bool [K, N]
@@ -39,6 +39,8 @@ class Rollout(NamedTuple):
     obs: Optional[tuple] = None  # the K steps' encoded observations
     final_obs: Optional[tuple] = None  # the K steps' encoded final observations (final=True)
     revisited: Optional[Tensor] = None  # bool [K, N]: false when visit tracking is disabled
+    action_schema: Optional[Tensor] = None  # int32 [K, N]: the policy's labels in label mode
+    action_binding: Optional[Tensor] = None  # int32 [K, N, L]: their bindings (L: the policy's binding columns)
 
 
 class CapturedRollout:
@@ -53,6 +55,8 @@ class CapturedRollout:
     device without host synchronization (a network over ``env.states``, a sampler over ``env.random_actions()``); it
     runs twice on a side stream before the capture to warm up (lazy initializations such as cuBLAS handles), without
     stepping. ``next_task_ids`` [N] int32 is read at every replay: write the next instances into it between replays.
+    In label mode (``actions="label"``) the policy returns the labels, ``(schema int32 [N], binding int32 [N, L])``,
+    and is required; the rollout keeps them in ``action_schema`` and ``action_binding``.
 
     Needs a device environment whose calls can be captured (``env.capturable``: the fast path). The graph keeps
     pointers into the environments' tensors and its scratch: it holds the BatchedEnv, whose tensors must not be
@@ -78,6 +82,9 @@ class CapturedRollout:
             raise ValueError(f"mymyr: this BatchedEnv's steps cannot be captured into a CUDA graph: {why}")
         if steps <= 0:
             raise ValueError("mymyr: a captured rollout needs steps > 0")
+        labels = env.actions == "label"
+        if labels and policy is None:
+            raise ValueError("mymyr: label mode has no random policy; pass a policy returning (schema, binding)")
         observer = env._observer
         if observer is not None and observer.capacities is None:
             raise ValueError("mymyr: a captured rollout encodes observations at fixed sizes: construct the BatchedEnv "
@@ -122,19 +129,29 @@ class CapturedRollout:
                 torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
                 torch.empty_like(b), revisited=torch.zeros_like(b),
             )  # fmt: skip
-            actions = None if policy is None else torch.empty((K, n), dtype=torch.int64, device=dev)
+            actions = None if policy is None or labels else torch.empty((K, n), dtype=torch.int64, device=dev)
+            label_schema, label_binding = None, None
             for k in range(K):
                 a = None
                 if actions is not None:
                     a = actions[k]
                     a.copy_(policy(env).reshape(n))
+                elif labels:
+                    schema, binding = policy(env)
+                    if label_binding is None:
+                        label_schema = torch.empty((K, n), dtype=torch.int32, device=dev)
+                        label_binding = torch.empty((K, n, binding.shape[-1]), dtype=torch.int32, device=dev)
+                    label_schema[k].copy_(schema.reshape(n))
+                    label_binding[k].copy_(binding.reshape(n, -1))
+                    a = (label_schema[k], label_binding[k])
                 step_obs, step_final = env._step_into(
                     StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
                 )
                 obs.append(step_obs)
                 final_obs.append(step_final)
             self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,
-                                   tuple(final_obs) if observer is not None and final else None, out.revisited)
+                                   tuple(final_obs) if observer is not None and final else None, out.revisited,
+                                   label_schema, label_binding)
 
     @property
     def result(self) -> Rollout:

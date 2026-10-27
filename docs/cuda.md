@@ -223,6 +223,43 @@ assert task.is_goal(state)
 ctx.synchronize()
 ```
 
+## Action masks and label steps
+
+The action masks `rl.applicable_schemas`, `rl.applicable_objects` and `rl.is_applicable` run on CUDA state arrays.
+Each row of the batch runs the schema's mask matchers on its matcher view. The matchers are the existence matcher and
+one matcher per parameter, with the parameters before it bound from the prefix. They search one witness for the
+parameters after it. Schema masks take a thread per (row, schema) and stop at the first binding. Object masks take a
+warp per row whose lanes split the candidates of the asked parameter. Label checks take a thread per row. The results
+equal the host's bit for bit. The mask matchers are part of the device task layout, so the first call per table and
+context uploads the table and later calls allocate nothing beyond their outputs and scratch. Tasks with numeric
+fluents or axioms, or schemas of more than 16 parameters, are computed on the host from copies of the rows.
+
+`BatchedEnv(..., actions="label", device="cuda")` (C++: `DeviceEnv` with `rl::EnvConfig::actions =
+rl::ActionSpace::Label` and `DeviceEnv::step(batch, outputs, rl::Labels{schema, binding, stride})`) applies each row's
+label where it is applicable. It then tests the moved rows for an applicable action with the existence matchers and
+finishes like the fast path: goal tests, rewards, truncation and same-step autoresets. A step does not synchronize and
+can be captured into a CUDA graph. Label mode needs tasks the masks run whose schemas have no conditional effects.
+
+```python skip-if-no-cuda
+from pathlib import Path
+
+import mymyr
+import torch
+from mymyr import rl
+from mymyr.rl.torch import is_applicable, register
+
+data = Path("tests/data/pddl/gripper")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01.pddl")
+states = torch.as_tensor(task.encode([task.initial_state]).view("int64")).cuda()
+expansion = rl.expand(task, states.cpu())
+schema = torch.as_tensor(expansion.schema[:1]).cuda()
+binding = torch.as_tensor(expansion.binding[:1]).cuda()
+mask, status = is_applicable(register(task), states, schema, binding)
+assert bool(mask[0]) and int(status) == 0
+binding[0, 0] = task.num_objects  # an object outside the instance: not applicable
+assert not rl.is_applicable(task, states, schema, binding).any()
+```
+
 ## Encoded observations and resident rows
 
 [Device encoding](encoding.md#encoding-on-the-device) reads CUDA state rows directly and returns torch arrays:

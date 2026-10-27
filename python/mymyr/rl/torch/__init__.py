@@ -19,7 +19,9 @@ of one):
   random_actions`` on an environment handle, and ``torch.ops.mymyr.expand`` (padded [N, K]) / ``expand_flat`` (CSR;
   ``capacity=None``: the row count is an unbacked symbolic size under ``torch.compile``; ``expand_derived`` /
   ``expand_flat_derived`` add the derived words of the successors) on a table or suite handle
-  (:func:`register`); ``literal_slots`` / ``literal_masks`` resolve CUDA literals on an encoder handle.
+  (:func:`register`); ``literal_slots`` / ``literal_masks`` resolve CUDA literals on an encoder handle;
+  ``applicable_schemas`` / ``applicable_objects`` / ``is_applicable`` (:mod:`mymyr.rl.torch._masks`) are the action
+  masks of mymyr.rl on a table handle, with a status scalar in place of errors on a device.
   All have fake implementations: they trace under ``torch.compile`` without graph breaks
   (``fullgraph=True`` works for loops of ``step``; the TorchRL env's own Python and TensorDict code is not meant to be
   compiled).
@@ -51,7 +53,9 @@ Device environments support numeric tables through the general path. The fast de
 synchronization at all) needs no axioms and device-complete schemas in every instance
 (``fast_unsupported(table)`` says why not); other tables take the general path (a device expansion per step, which
 synchronizes on the successor count). Over a suite the device groups each step's rows by domain and runs every domain
-on its table's path, on a stream of its own (captured graphs included).
+on its table's path, on a stream of its own (captured graphs included). Label mode (``actions="label"``) runs on
+the fast path only, without host synchronization: ``fast_unsupported(table, actions="label")`` says why a table cannot
+(numeric fluents, axioms, conditional effects, schemas of more than 16 parameters).
 """
 
 from mymyr._core._rl_torch import Env, fast_unsupported
@@ -59,6 +63,7 @@ from mymyr._core._rl_torch import Env, fast_unsupported
 from . import rng
 from ._batched import BatchedEnv, Observation, StepResult, SuiteObservation
 from ._graph import CapturedRollout, Rollout
+from ._masks import applicable_objects, applicable_schemas, is_applicable
 from ._ops import (
     expand,
     expand_derived,
@@ -78,6 +83,9 @@ from ._ops import (
 )
 
 __all__ = [
+    "applicable_objects",
+    "applicable_schemas",
+    "is_applicable",
     "literal_masks",
     "literal_slots",
     "BatchedEnv",
