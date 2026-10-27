@@ -269,7 +269,8 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
 /// Scratch binding, base and mask each have num_vars[k] entries, private to the lane; no recursion or allocation.
 /// Worst-case work is exponential. The budget bounds candidate tiles and binding trials per row/template;
 /// each tile scan is linear in the template's literals and their indexed tuples. All lanes consume equal steps.
-template<class Group>
+/// Candidate filtering resolves a final pair directly; PruneDomains may be false for searches of at most two variables.
+template<class Group, bool PruneDomains = true>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
                       i32* binding, u32* base, u32* masks, Budget& budget)
 {
@@ -291,15 +292,16 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         binding[variable] = -1;
         if (enter)
         {
-            if (t.distinct[k] && static_cast<u32>(depth + 1) < vars &&
-                !domains_possible(grp, t, g, k, objects, vars - static_cast<u32>(depth), binding, state, derived, budget))
-            {
-                --depth;
-                enter = false;
-                if (budget.exhausted)
-                    return false;
-                continue;
-            }
+            if constexpr (PruneDomains)
+                if (t.distinct[k] && vars - static_cast<u32>(depth) > 2 &&
+                    !domains_possible(grp, t, g, k, objects, vars - static_cast<u32>(depth), binding, state, derived, budget))
+                {
+                    --depth;
+                    enter = false;
+                    if (budget.exhausted)
+                        return false;
+                    continue;
+                }
             if (!budget.take())
                 return false;
             base[depth] = 0;

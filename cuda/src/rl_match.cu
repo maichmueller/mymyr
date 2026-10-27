@@ -30,6 +30,7 @@ __global__ void initialize(rl::MatchTemplates t, rl::MatchBatch b)
         }
     }
 }
+template<u32 MaxVars>
 __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
 {
     const MatchWarp grp;
@@ -52,15 +53,15 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
             const i32 last = b.first ? end : first + 1;
             for (i32 k = first; k < last; ++k)
             {
-                if (t.num_vars[k] > 64)
+                if (t.num_vars[k] > static_cast<i32>(MaxVars))
                 {
                     flags |= 2;
                     continue;
                 }
-                i32 binding[64];
-                u32 base[64], masks[64];
+                i32 binding[MaxVars];
+                u32 base[MaxVars], masks[MaxVars];
                 rl::match_detail::Budget budget{b.max_steps};
-                const bool found = rl::match_detail::search(grp, t, static_cast<u32>(g), static_cast<u32>(k),
+                const bool found = rl::match_detail::search<MatchWarp, (MaxVars > 2)>(grp, t, static_cast<u32>(g), static_cast<u32>(k),
                         b.states + row * b.row_words, b.derived ? b.derived + row * b.derived_words : nullptr,
                         binding, base, masks, budget);
                 if (budget.exhausted)
@@ -108,7 +109,13 @@ cudaError_t launch_match_first(const rl::MatchTemplates& t, const rl::MatchBatch
         return err;
     const u64 jobs = b.rows * (b.first || !t.capacity ? 1 : t.capacity);
     if (jobs)
-        match<<<static_cast<u32>((jobs + 3) / 4 > 65535 ? 65535 : (jobs + 3) / 4), 128, 0, stream>>>(t, b, jobs);
+    {
+        const u32 search_blocks = static_cast<u32>((jobs + 3) / 4 > 65535 ? 65535 : (jobs + 3) / 4);
+        if (t.max_vars <= 2)
+            match<2><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+        else
+            match<64><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+    }
     return cudaGetLastError();
 }
 }  // namespace mymyr::cuda

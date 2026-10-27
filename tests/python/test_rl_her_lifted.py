@@ -1011,3 +1011,31 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
                                 templates.to("cuda:0"), first=first, max_steps=6)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("padding", [False, True])
+@pytest.mark.parametrize("max_steps", [2, 3])
+def test_match_first_pair_budget_with_small_and_large_template_tables(on_device, padding, max_steps):
+    domain = mymyr.Domain.from_string("""(define (domain pairs)
+        (:requirements :adl :equality) (:predicates (ok) (member ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem pairs) (:domain pairs)
+        (:objects a b c) (:init (ok) (member a)) (:goal (ok)))"""))
+    pair = task.condition(["?x", "?y"], ["(member ?x)", "(member ?y)"], equalities=[("?x", "?y", False)])
+    conditions = [pair]
+    if padding:
+        conditions.append(task.condition(["?x", "?y", "?z"], ["(not (ok))"]))
+    templates = rl.GoalTemplates.from_conditions(task, [conditions])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, capacity=1, max_steps=max_steps)
+    assert int(expected.status) == (8 if max_steps == 2 else 0)
+    assert not expected.found.any() and expected.count.tolist() == [0]
+    assert (expected.binding == -1).all() and expected.template.tolist() == [[-1]]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), capacity=1, max_steps=max_steps)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
