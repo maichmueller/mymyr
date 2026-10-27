@@ -247,7 +247,8 @@ struct GoalMasks
 inline constexpr u32 k_device_arrays_version = 2;
 /// Section versions of the latest layout.
 inline constexpr u32 k_section_core_version = 1;  // version 1's arrays
-inline constexpr u32 k_section_plan_version = 2;  // compiled plans (task_arrays_view.hpp); 2: the compact view, plan_view_map
+inline constexpr u32 k_section_plan_version = 3;  // compiled plans (task_arrays_view.hpp); 2: the compact view, plan_view_map;
+                                                  // 3: the mask matchers (plan_schema k_sc_masks)
 
 /// The versioned POD export of the task. Throws std::invalid_argument for an unknown version, and
 /// std::length_error when a version-2 table outgrows its u32 offsets.

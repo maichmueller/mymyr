@@ -58,7 +58,7 @@ TEST_P(TaskArraysV2, IsASupersetOfVersionOneAndDeterministic)
     EXPECT_EQ(v1.find("plan_matcher"), nullptr);
     EXPECT_EQ(v1.scalar("section_plan", -7), -7);
     EXPECT_EQ(v2.scalar("section_core"), 1);
-    EXPECT_EQ(v2.scalar("section_plan"), 2);
+    EXPECT_EQ(v2.scalar("section_plan"), 3);
     for (const rl::ArrayInfo& a : v1.arrays())
     {
         const rl::ArrayInfo* b = v2.find(a.name);
@@ -101,7 +101,7 @@ TEST_P(TaskArraysV2, ValidatesAndMatchesThePlan)
     usize matchers = 0, ces = 0, axioms = 0;
     for (const plan::Schema& s : C.schemas)
     {
-        matchers += 2 + s.ces.size();
+        matchers += 2 + (s.arity + 1) + s.ces.size();  // pre0, pre1, the mask matchers, the conditions
         ces += s.ces.size();
     }
     for (const plan::Stratum& st : C.strata)
@@ -112,6 +112,17 @@ TEST_P(TaskArraysV2, ValidatesAndMatchesThePlan)
     EXPECT_EQ(v.n_matchers, matchers);
     EXPECT_EQ(v.n_cond_effects, ces);
     EXPECT_EQ(v.n_axioms, axioms);
+    // the mask matchers: existence (nothing prebound), then parameter d with d parameters prebound
+    for (u32 s = 0; s < v.num_schemas; ++s)
+    {
+        const u32* sc = v.schema + static_cast<u64>(s) * rl::dev::k_sc_count;
+        for (u32 e = 0; e <= C.schemas[s].arity; ++e)
+        {
+            const u32* mx = v.matcher + (static_cast<u64>(sc[rl::dev::k_sc_masks]) + e) * rl::dev::k_mc_count;
+            EXPECT_EQ(mx[rl::dev::k_mc_total], C.schemas[s].arity);
+            EXPECT_EQ(mx[rl::dev::k_mc_first_free], e == 0 ? 0u : e - 1);
+        }
+    }
     EXPECT_EQ(v.goal_check_n, C.goal.lits.size());
     // every pattern key equals the engine's for a random binding (pattern vars resolved through plan_rs)
     std::mt19937_64 rng(11);

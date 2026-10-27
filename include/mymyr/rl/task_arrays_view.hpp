@@ -125,6 +125,9 @@ enum SchemaCol : u32
     k_sc_dels, k_sc_dels_n,          // plan_pattern
     k_sc_ces, k_sc_ces_n,            // plan_cond_effect
     k_sc_pre_lits, k_sc_pre_lits_n,  // plan_check
+    // the first of arity + 1 consecutive mask matchers: existence (no prebound parameter, no enumerated one), then
+    // per parameter d the matcher with parameters 0 .. d - 1 prebound, d enumerated and the rest witness-only
+    k_sc_masks,
     k_sc_count
 };
 
@@ -514,7 +517,7 @@ namespace detail
     {
         const u32* s = v.schema + i * k_sc_count;
         if (s[k_sc_arity] > s[k_sc_bind_size] || s[k_sc_bind_size] > v.max_bind || s[k_sc_pre0] >= v.n_matchers ||
-            s[k_sc_pre1] >= v.n_matchers)
+            s[k_sc_pre1] >= v.n_matchers || !detail::in(s[k_sc_masks], u64{s[k_sc_arity]} + 1, v.n_matchers))
             return 30;
         if (!detail::in(s[k_sc_adds], s[k_sc_adds_n], v.n_patterns) || !detail::in(s[k_sc_dels], s[k_sc_dels_n], v.n_patterns) ||
             !detail::in(s[k_sc_ces], s[k_sc_ces_n], v.n_cond_effects) ||

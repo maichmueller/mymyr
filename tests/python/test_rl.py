@@ -230,7 +230,7 @@ def test_device_arrays(blocks):
     assert d["schema_arity"].tolist() == [blocks.formalism.schemas[i].arity for i in range(4)]
     # version 2 (the default) is a superset: every version-1 array and scalar unchanged, plus section "plan"
     v2 = blocks.device_arrays()
-    assert v2["version"] == 2 and v2["section_core"] == 1 and v2["section_plan"] == 2
+    assert v2["version"] == 2 and v2["section_core"] == 1 and v2["section_plan"] == 3
     for k, v in d.items():
         if k != "version":
             assert np.array_equal(np.asarray(v2[k]), np.asarray(v)), k

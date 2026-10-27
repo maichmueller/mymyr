@@ -2,6 +2,7 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "../task/compile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -429,6 +430,13 @@ public:
                 const bool deep = m.total > dev::k_max_matcher_depth || m.steps.size() > dev::k_max_matcher_depth;
                 const bool fc = deep ? m.use_fc : prefers_fc(m_costs.schemas[s][wi]) && (keys_fit || !fixed_in_order(m));
                 row[wi == 0 ? dev::k_sc_pre0 : dev::k_sc_pre1] = matcher(m, fc);
+            }
+            // the mask matchers (rl/masks.hpp), consecutive rows: existence, then one per parameter
+            row[dev::k_sc_masks] = count(m_matcher_rows.size() / dev::k_mc_count);
+            for (u32 entry = 0; entry <= ps.arity; ++entry)
+            {
+                const plan::Matcher& m = mymyr::detail::mask_matcher(C, static_cast<u32>(s), entry);
+                (void)matcher(m, m.use_fc);
             }
             put(row, dev::k_sc_adds, patterns(ps.adds));
             put(row, dev::k_sc_dels, patterns(ps.dels));
