@@ -1,6 +1,7 @@
 #pragma once
 // Lifted conjunctions matched in the compiler's binding order, objects ascending. The iterative search intersects
 // positive literal candidates in 32-object tiles and checks other literals when their last variable is bound.
+// Still-free variables of a positive literal are existential filters, pruning candidates without changing order.
 // The same search serves a host thread or a device warp; lane-parallel scans keep each tile's candidate set exact.
 #include "mymyr/encoding/detail/literals.hpp"
 
@@ -93,15 +94,12 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
     {
         if (!t.polarity[l])
             continue;
-        bool eligible = true;
         i32 position = -1;
         const i32* terms = t.terms + u64{l} * t.max_arity;
         for (i32 j = 0; j < t.arity[l]; ++j)
             if (terms[j] == variable)
                 position = j;
-            else if (terms[j] >= 0 && binding[terms[j]] < 0)
-                eligible = false;
-        if (!eligible || position < 0)
+        if (position < 0)
             continue;
         const u32* r = t.literals.literal_ranges + (u64{g} * t.literals.num_predicates + t.predicate[l]) * ed::k_literal_columns;
         const u32 kind = r[ed::k_literal_predicate_kind];
@@ -123,7 +121,12 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
             {
                 const i32 term = terms[j];
                 const i32 want = term == variable ? static_cast<i32>(object) : term < 0 ? -(term + 1) : binding[term];
-                same &= row[j] == want;
+                if (want >= 0)
+                    same &= row[j] == want;
+                if (term >= 0 && want < 0)
+                    for (i32 before = 0; before < j; ++before)
+                        if (terms[before] == term)
+                            same &= row[before] == row[j];
             }
             if (same)
                 lane_mask |= u32{1} << (object - base);

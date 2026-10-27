@@ -209,7 +209,7 @@ def test_stubs_parse_and_are_typed():
     assert f"def fast_unsupported({table}, *, canonical_order: bool = True," in env
     assert "def recv(self, min_rows: int = 0) -> PoolBatch" in rl and "class CpuEnvPool:" in rl
     assert f"def __init__(self, {table}, *, device: int | None = None," in jx
-    assert "def to(self, device: Any) -> mymyr.rl.DeviceGoalTemplates:" in rl
+    assert "def to(self, device: Any) -> mymyr._typing.DeviceGoalTemplates:" in rl
     assert "def capacity(self) -> int:" in rl
     # lifted goal templates
     assert (f"def lifted_goal_templates({suite.replace('table:', 'source:')}, *, max_subgoals_per_size: int = 2, "

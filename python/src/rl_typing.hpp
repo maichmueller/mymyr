@@ -95,7 +95,7 @@ struct type_caster<mymyr::python::ann::GoalTemplates>
 template<>
 struct type_caster<mymyr::python::ann::DeviceGoalTemplates>
 {
-    static constexpr auto Name = const_name("mymyr.rl.DeviceGoalTemplates");
+    static constexpr auto Name = const_name("mymyr._typing.DeviceGoalTemplates");
 };
 template<>
 struct type_caster<mymyr::python::ann::TemplateDistinct>

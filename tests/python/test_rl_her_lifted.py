@@ -776,3 +776,60 @@ def test_match_first_thread_pool_matches_serial_with_status():
         for a, b in zip(expected, actual):
             np.testing.assert_array_equal(a, b)
         assert int(actual.status) & 4
+
+
+@needs_frontend
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("distinct", [True, False, "equality"])
+def test_match_first_device_equals_host_on_ipc_walks(domain, distinct):
+    torch = cuda_match_runtime()
+    tasks = [ipc(domain, "train", "p01"), ipc(domain, "train", "p02")]
+    states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=12, seed=7, walks=1)]
+    source, rows, ids, derived = match_rows(tasks, states)
+    templates = rl.lifted_goal_templates(source, distinct=distinct)
+    uploaded = templates.to("cuda:0")
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    task_ids = torch.tensor(ids, device="cuda:0")
+    d = torch.tensor(derived.view(np.int64), device="cuda:0")
+    for first in (False, True):
+        expected = rl.match_first(rows, ids, templates, first=first, derived=derived)
+        actual = rl.match_first(x, task_ids, uploaded, first=first, derived=d)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+def test_match_first_device_variable_limit():
+    torch = cuda_match_runtime()
+    task = text_task("gripper__prob05")
+    literal = str(next(iter(task.initial_state.atoms())))
+    rows = np.asarray(task.encode([task.initial_state]))
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    for variables in (64, 65):
+        condition = task.condition([f"?x{v}" for v in range(variables)], [literal])
+        templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+        expected = rl.match_first(rows, None, templates, first=True)
+        assert expected.found.all() and expected.binding.shape == (1, variables)
+        if variables == 65:
+            with pytest.raises(ValueError, match="64 variables"):
+                templates.to("cuda:0")
+        else:
+            actual = rl.match_first(x, None, templates.to("cuda:0"), first=True)
+            for host, gpu in zip(expected, actual):
+                np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@pytest.mark.parametrize("on_device", [False, True])
+def test_match_first_word_halves(on_device):
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode(walk(task, steps=5, walks=1)))
+    expected = rl.match_first(rows, None, templates)
+    halves = rows.view(np.uint32)
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(halves, device="cuda:0"), None, templates.to("cuda:0"))
+        actual = [v.cpu().numpy() for v in actual]
+    else:
+        actual = rl.match_first(halves, None, templates)
+    for a, b in zip(expected, actual):
+        np.testing.assert_array_equal(a, b)

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from mymyr.encoding import GoalMasks as GoalMasks
     from mymyr.encoding import GraphDescription as GraphDescription
     from mymyr.encoding import LayerMasks as LayerMasks
+    from mymyr.rl import DeviceGoalTemplates as DeviceGoalTemplates
     from mymyr.rl import InstanceSampler as InstanceSampler
 
 __all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows"]

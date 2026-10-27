@@ -67,6 +67,7 @@ from ._ops import (
     lookup,
     literal_masks,
     literal_slots,
+    match_first,
     random_actions,
     refresh,
     refresh_sync,
@@ -80,6 +81,7 @@ from ._ops import (
 __all__ = [
     "literal_masks",
     "literal_slots",
+    "match_first",
     "BatchedEnv",
     "CapturedRollout",
     "Env",
