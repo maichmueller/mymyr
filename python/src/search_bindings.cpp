@@ -171,6 +171,29 @@ struct PyCancelToken
 
 // ------------------------------------------------------------------------------------------------ callbacks
 
+/// Native search workers are joined before the binding returns. Keep their Python thread state until thread exit,
+/// detached between callbacks so that the GIL and garbage collection can proceed while native work runs. Creating
+/// and clearing a state per event would repeatedly abandon its allocator heaps into the shared segment pool.
+nb::gil_scoped_acquire acquire_callback()
+{
+    if (!PyGILState_GetThisThreadState())
+    {
+        struct ThreadState
+        {
+            PyGILState_STATE token = PyGILState_Ensure();
+            PyThreadState* state = PyEval_SaveThread();
+
+            ~ThreadState()
+            {
+                PyEval_RestoreThread(state);
+                PyGILState_Release(token);
+            }
+        };
+        thread_local ThreadState retained;
+    }
+    return {};
+}
+
 /// Collects the first exception of any callback, and cancels the search when one occurs.
 struct CallbackErrors
 {
@@ -328,7 +351,7 @@ public:
             return false;
         if (!m_progress.is_valid())
             return true;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::object r = m_progress(so_far);
@@ -356,7 +379,7 @@ private:
     {
         if (!fn.is_valid() || m_errors.failed.load(std::memory_order_relaxed))
             return;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::tuple args = make_args();
@@ -425,7 +448,7 @@ std::function<bool(StateView)> goal_test(std::shared_ptr<PyGoalTest> w)
     return [w = std::move(w)](StateView s) -> bool {
         if (w->errors->failed.load(std::memory_order_relaxed))
             return false;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::object r = w->fn(make_state(w->owner, State(s)));
