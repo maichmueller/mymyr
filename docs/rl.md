@@ -185,15 +185,15 @@ use uint32 pairs (low word first), the padded result names the positions `canoni
 `generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
 Absent digests are `None` and cost no digest work.
 
-CUDA digests also work without storing successor rows, including the bounded observation-action path. With
-`status=` and `stream=`, device-complete Single and Multi tables compute and compact on the stream without a host
-wait; status bit 0 reports pre-drop capacity overflow. Warm up the same shapes and options before CUDA graph
-capture. Numeric conversion and CPU-fallback schemas retain the general path's synchronization. Device
-`hash_rows(..., numeric_words=..., stream=...)` returns the same native hashes. Torch `expand` and `expand_flat`
-accept `derived`, `rows`, `hashes`, `noops`, and `drop_noops`, returning eleven tensors: `(succ, parent, schema,
-binding, goal, offsets, derived, succ_hash, noop, index, status)`; absent fields are empty. `rows=False` selects
-label-only output, and `capacity=` keeps counts and status on the device. The padded op takes `k` and uses parent
--1 for padding while `offsets` retain CSR counts. Both trace with `torch.compile(fullgraph=True)`.
+On CUDA arrays, `rl.expand` and `rl.expand_into` compute the same hashes, no-op flags and filtered rows bit for bit,
+also without a `succ=` destination (the label-only form), and `mymyr.hash_rows(rows, numeric_words=..., stream=...)`
+hashes device rows. With `status=` and `stream=` the filtering stays on the stream and captures in CUDA graphs; an
+overflowing filtered call keeps the offsets before filtering there, so `offsets[N]` sizes the next capacity. JAX
+`Env.expand` and `Env.expand_flat` take the same flags on a CUDA device. The torch ops `mymyr::expand` and
+`mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops` and `drop_noops` and return eleven tensors `(succ,
+parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status)`, empty where absent; the padded
+op's `index` slot holds the canonical positions. `rows=False` selects label-only output, `capacity=` keeps counts and
+status on the device, and both trace with `torch.compile(fullgraph=True)`. See [CUDA](cuda.md#driver).
 
 ## JAX and PyTorch
 

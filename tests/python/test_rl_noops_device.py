@@ -430,10 +430,10 @@ def test_bounded_observation_actions_digest_without_successor_rows(drop):
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        bounded_actions(encoder, source, None, 16, drop_noops=drop)
+        bounded_actions(encoder, source, None, 16, hashes=True, noops=True, drop_noops=drop)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            actual = bounded_actions(encoder, source, None, 16, drop_noops=drop)
+            actual = bounded_actions(encoder, source, None, 16, hashes=True, noops=True, drop_noops=drop)
     torch.cuda.current_stream().wait_stream(stream)
     graph.replay()
     assert actual.succ is None and not actual.status.any()

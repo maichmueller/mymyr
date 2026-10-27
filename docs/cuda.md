@@ -165,24 +165,32 @@ host, expanded on the host's threads and the successors copied back, which synch
 those instances take the host and the others stay on the device, so the environments' general path serves every
 table and suite; the fast path and CUDA graph capture need every instance on the device. Unsupported schema/axiom
 plans use the documented CPU fallback.
-`rl.expand(..., hashes=True, noops=True)` returns native state hashes and bitwise parent-equality flags on the
-device. `drop_noops=True` stably removes no-ops per parent, keeping every action for all-no-op parents; `index`
-retains each kept action's canonical position. Capacity bounds the count before filtering (`generated`), and status
-bit 0 reports overflow before filtering. Derived atoms are excluded from both digests. Numeric values enter the
-hash and equality in their public packed encoding. `mymyr.hash_rows(rows, numeric_words=..., stream=...)` computes
-the same hashes on CUDA arrays, with int64 bit patterns for torch and uint32 pairs for JAX.
+Successor hashes, no-op flags and `drop_noops` (see [Successor hashes and no-op
+actions](rl.md#successor-hashes-and-no-op-actions)) are computed on the device, bit for bit equal to the host:
+`succ_hash` is `State::hash()` of the successor (numeric values in their public I32/F64 encoding), `noop` compares the
+atom and numeric bits with the parent, and derived atoms enter neither. Every path that builds a successor digests it
+there (device schemas, conditional effects, wide rows, successor windows, numeric tasks, Multi tables and suites); a
+CPU-fallback schema or a numeric row beyond the device kernels digests on the host and uploads the result. Digests
+need no `succ=` destination: the label-only `rl.expand_into(..., succ_hash=, noop=, index=)` builds each successor,
+digests it and stores only the requested arrays. `drop_noops=True` expands into retained scratch of `capacity` rows
+and compacts every requested array by a scan and a stable scatter, with `index` the kept row's position in its
+parent's full order; the padded view (`DeviceExpansion.pad()`) carries those positions in `canonical` and the flat row
+in `index`. Capacity bounds the successors before dropping (status bit 0, `generated > capacity`). On that overflow the
+device keeps the offsets before dropping, so `offsets[N]` is the generated count also on the asynchronous path below,
+and the kept rows are unspecified. `mymyr.hash_rows(rows, numeric_words=..., stream=...)` hashes CUDA rows (a thread
+per row, a warp per wide row), with int64 bit patterns for torch and uint32 pairs for JAX, and captures in CUDA graphs.
 
-The label-only `rl.expand_into` path accepts `succ_hash=`, `noop=`, and `index=` without a `succ=` destination.
-Digests are computed while building each successor, including wide rows and successor windows. With `status=` and
-`stream=`, device-complete Single and Multi tables keep counts, validation, compaction, and every requested output
-on the caller's stream. Warm up the same shapes and options on that stream before capture; the graph retains its
-workspace across replays. Numeric conversion and CPU-fallback paths retain their documented host synchronization.
+With `status=` and `stream=`, device-complete Single and Multi tables keep counts, digests, compaction and every
+requested output on the caller's stream, without a host wait. Warm up the same shapes and options on that stream
+before capture; the graph retains its workspace across replays. Numeric conversion and CPU-fallback paths keep their
+host synchronization. JAX `Env.expand` and `Env.expand_flat` on a CUDA device take `hashes`, `noops` and `drop_noops`
+like the CPU environment (the padded `generated` holds each state's count, so that `vmap` batches it).
 
-The torch ops `mymyr::expand` and `mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops`, and `drop_noops`
+The torch ops `mymyr::expand` and `mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops` and `drop_noops`
 flags and return `(succ, parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status)`. Absent
-outputs are empty tensors. `rows=False` is the label-only form; `capacity=` makes the device form capturable.
-The padded op also takes `k`, pads parent and canonical indices with -1, and leaves `offsets` as CSR counts.
-All outputs have fake implementations for `torch.compile(fullgraph=True)`.
+outputs are empty tensors. `rows=False` is the label-only form; `capacity=` makes the device form capturable. The
+padded op also takes `k`; its tenth result holds the canonical positions (-1 padding), parent -1 marks padding and
+`offsets` stay CSR counts. All outputs have fake implementations for `torch.compile(fullgraph=True)`.
 
 The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
 [Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule

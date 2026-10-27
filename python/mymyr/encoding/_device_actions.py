@@ -45,8 +45,13 @@ def action_states(encoder: Any, states: Any, ids: Any) -> Any:
     return torch.where(torch.arange(states.shape[1], device=device) < words[local, None], states, 0)
 
 
-def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live: Any = None, hashes: bool = True, noops: bool = True, drop_noops: bool = False) -> Any:
-    """Expand labels into caller-sized device arrays, retaining the backend's overflow and invalid-input flags."""
+def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live: Any = None, hashes: bool = False,
+                    noops: bool = False, drop_noops: bool = False) -> Any:
+    """Expand labels into caller-sized device arrays, retaining the backend's overflow and invalid-input flags.
+
+    ``hashes``, ``noops`` and ``drop_noops`` add ``succ_hash``, ``noop`` and ``index`` (None when absent), digested
+    while each successor is built, without storing successor rows.
+    """
     from collections import Counter
     from types import SimpleNamespace
     from mymyr import rl
