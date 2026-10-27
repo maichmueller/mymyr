@@ -34,6 +34,7 @@
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/masks.hpp"
 #include "mymyr/rl/pool.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <nanobind/nanobind.h>
@@ -1352,6 +1353,13 @@ public:
     PyCpuPool& operator=(const PyCpuPool&) = delete;
 
     [[nodiscard]] const rl::CpuEnvPool& pool() const noexcept { return *m_pool; }
+    void clear_visited(nb::handle env_ids)
+    {
+        PoolArgs a;
+        const u32* envs = a.env_ids(env_ids, m_pool->num_envs());
+        nb::gil_scoped_release release;
+        m_pool->clear_visited(envs, a.n);
+    }
     [[nodiscard]] const SuiteRef& ref() const noexcept { return m_ref; }
     [[nodiscard]] Framework framework() const noexcept { return m_fw; }
     [[nodiscard]] const nb::object& sampler() const noexcept { return m_sampler; }
@@ -2224,6 +2232,39 @@ void bind_rl(nb::module_& parent)
         "one of them; negative literals, deletes and numeric conditions are relaxed, static literals are exact). "
         "Grounds each instance once; raises ValueError when an instance's grounding exceeds the relaxation budget.");
 
+    m.def("_visited_capacity", [](Arg<std::variant<bool, int>> value, SizeArg max_steps) {
+        return visited_capacity_arg(value, opt_int_arg<u32>(max_steps, "max_steps", 1).value_or(0));
+    }, "value"_a, "max_steps"_a = nb::none(), "Resolve and validate an episode visited-table capacity.");
+
+    m.def("visited_mask", [](ArrayArg table, ArrayArg count, ArrayArg succ_hash, ArrayArg parent,
+                             ArrayArg rows, ArrayArg out) {
+        using namespace rlimp;
+        Imports in(-1, dl::k_stream_default, false);
+        if (table.is_none() || count.is_none() || succ_hash.is_none() || parent.is_none() || out.is_none())
+            throw nb::type_error("mymyr: visited_mask requires table, count, succ_hash, parent and out arrays");
+        std::vector<i64> ext, hashes, mapping;
+        const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
+        const i64 n = ext[0], H = ext[1];
+        if (H < 2 || H > (1 << 20) || (H & (H - 1)))
+            throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+        const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
+        const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &hashes);
+        const i64 size = hashes[0];
+        const i32* p = in.get<const i32>(parent, "parent", {i32t}, {size}, false);
+        const i32* map = in.get<const i32>(rows, "rows", {i32t}, {-1}, false, &mapping);
+        u8* dst = in.get<u8>(out, "out", {boolt}, {size}, true);
+        const i64 parents = rows.is_none() ? n : mapping[0];
+        {
+            nb::gil_scoped_release release;
+            for (i64 j = 0; j < size; ++j)
+                if (p[j] < -1 || p[j] >= parents || (p[j] >= 0 && map && (map[p[j]] < -1 || map[p[j]] >= n)))
+                    throw std::invalid_argument("mymyr: visited_mask: parent or mapped row is outside the table");
+            rl::visited_mask(tab, cnt, static_cast<u32>(H), hash, p, map, static_cast<u64>(size), dst);
+        }
+    }, "table"_a, "count"_a, "succ_hash"_a, "parent"_a, nb::kw_only(), "rows"_a = nb::none(), "out"_a,
+       "Writes one bool per successor hash into out. parent indexes table rows, or rows when supplied; -1 is padding. "
+       "Host NumPy and torch arrays; equal 64-bit hashes share an entry.");
+
     // --- CpuEnvPool
     using OptArray = Arg<std::optional<ann::Any>>;
     auto opt = [](bool present, auto&& make) -> OptArray {
@@ -2277,6 +2318,9 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("truncated", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->truncated, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool (None after a reset)")
+        .def_prop_ro("revisited", [opt](const PyPoolBatch& p) {
+            return opt(p.stepped(), [&] { return p.array(p.b->revisited, rl::DType::Bool, {p.rows()}); });
+        }, "Whether each reached state was visited earlier in its episode (False with tracking disabled).")
         .def_prop_ro("invalid", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->invalid, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool: the given action was outside [0, count) (None after a reset)")
@@ -2318,7 +2362,7 @@ void bind_rl(nb::module_& parent)
             [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
                bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in,
-               Arg<ann::SamplerArg> sampler) {
+               Arg<ann::SamplerArg> sampler, Arg<std::variant<bool, int>> track_visited) {
                 const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
                 const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
@@ -2336,6 +2380,7 @@ void bind_rl(nb::module_& parent)
                 c.canonical_order = canonical;
                 c.witness_pruning = witness;
                 rl::PoolOptions o;
+                o.visited_capacity = visited_capacity_arg(track_visited, max_steps);
                 o.threads = threads;
                 o.goals = goals;
                 o.words = words.value_or(0);
@@ -2348,7 +2393,7 @@ void bind_rl(nb::module_& parent)
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 1, "goals"_a = false, "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
-            "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto",
+            "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto", "track_visited"_a = false,
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
             "results come as `framework` arrays (None: NumPy). sampler (\"auto\" and \"uniform\": uniform, or an "
             "rl.InstanceSampler) places every env in a sampled instance and restarts it in its next one on each reset "
@@ -2360,6 +2405,12 @@ void bind_rl(nb::module_& parent)
             "words fixes the width of every batch instead (at least table.words).")
         .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); },
                      "The TaskTable or TaskSuite the environments run on.")
+        .def_prop_ro("visited_capacity", [](const PyCpuPool& p) { return p.pool().visited_capacity(); },
+                     "Slots per visited table, or zero with tracking disabled.")
+        .def_prop_ro("visited_status", [](const PyCpuPool& p) { return p.pool().visited_status(); },
+                     "Sticky overflow status: bit 0 means some episode exceeded its table's load limit.")
+        .def("clear_visited", [](PyCpuPool& p, TaskIdsArg env_ids) { p.clear_visited(env_ids); },
+             "env_ids"_a = nb::none(), "Clear selected idle environments' tables and insert their current states.")
         .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); },
                      "The number of environments.")
         .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); },

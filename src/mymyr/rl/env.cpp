@@ -4,10 +4,12 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -85,6 +87,11 @@ StateView row_view(const EnvBatch& b, u64 i, const Task& task)
 
 void check_env(const TaskSuite& table, const EnvBatch& b, const StepOutputs* out)
 {
+    if (b.visited_capacity && (b.visited_capacity < 2 || b.visited_capacity > (1u << 20) ||
+                               (b.visited_capacity & (b.visited_capacity - 1))))
+        throw std::invalid_argument("mymyr: env: visited capacity must be a power of two in [2, 2^20]");
+    if (b.visited_capacity && b.rows && (!b.visited || !b.visited_count || !b.visited_status))
+        throw std::invalid_argument("mymyr: env: visited tracking needs table, count and status arrays");
     if (b.rows && !b.states)
         throw std::invalid_argument("mymyr: env: null state array");
     if (b.rows > static_cast<u64>(std::numeric_limits<i32>::max()))
@@ -119,6 +126,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
         throw std::invalid_argument("mymyr: HostEnv: null task suite");
     m_init_count.resize(m_suite->size());
     m_init_goal.resize(m_suite->size());
+    m_init_hash.resize(m_suite->size());
     m_tasks.resize(m_suite->size());
     m_label_width = std::max<u32>(1, m_suite->label_width());
     for (u32 i = 0; i < m_suite->size(); ++i)
@@ -128,6 +136,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
         const WorkspaceLease lease = task.workspace();
         Successors& succ = lease->successors();
         succ.prepare(view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()));
+        m_init_hash[i] = view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()).hash();
         m_init_count[i] = count_prepared(succ, m_config);
         m_init_goal[i] = succ.goal_holds() ? 1 : 0;
     }
@@ -154,7 +163,29 @@ u32 HostEnv::reset_row(EnvBatch& b, u64 i, u32 instance, bool keep_goals, u32 di
         std::copy_n(in.goal_neg.begin(), w, gn);
         std::fill(gn + w, gn + z, u64{0});
     }
+    if (b.visited_capacity)
+    {
+        u64* table = b.visited + i * b.visited_capacity;
+        visited_clear(table, b.visited_capacity, b.visited_count[i]);
+        visited_insert(table, b.visited_capacity, b.visited_count[i], m_init_hash[instance]);
+    }
     return m_init_count[instance];
+}
+
+void HostEnv::clear_visited(EnvBatch& b, const u8* mask) const
+{
+    check_env(*m_suite, b, nullptr);
+    if (!b.visited_capacity)
+        return;
+    for (u64 i = 0; i < b.rows; ++i)
+    {
+        if (mask && !mask[i])
+            continue;
+        m_suite->check_task_ids(b.task_ids ? b.task_ids + i : nullptr, 1);
+        u64* table = b.visited + i * b.visited_capacity;
+        visited_clear(table, b.visited_capacity, b.visited_count[i]);
+        visited_insert(table, b.visited_capacity, b.visited_count[i], row_view(b, i, *m_tasks[b.instance(i)]).hash());
+    }
 }
 
 void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) const
@@ -396,6 +427,20 @@ void HostEnv::step_row_impl(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i
         std::fill(f + w, f + FW, u64{0});
         std::copy_n(s2n, NN, f + FW);
     }
+
+    bool revisited = false;
+    const bool episode_over = !m_config.autoreset &&
+        (absorbed || (m_config.max_steps && b.steps && b.steps[i] >= static_cast<i32>(m_config.max_steps)));
+    if (b.visited_capacity && !episode_over)
+    {
+        const u32 H = b.visited_capacity;
+        revisited = visited_insert(b.visited + i * H, H, b.visited_count[i],
+                                   StateView{s2, bits::trimmed_size(s2, w), nn ? s2n : nullptr, nn}.hash());
+        if (b.visited_count[i] == static_cast<i32>(H))
+            std::atomic_ref<i32>(*b.visited_status).fetch_or(1, std::memory_order_relaxed);
+    }
+    if (out.revisited)
+        out.revisited[o] = revisited ? 1 : 0;
 
     // 5. the move, or the autoreset
     if (m_config.autoreset && (term || trunc))

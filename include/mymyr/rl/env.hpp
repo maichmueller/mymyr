@@ -111,6 +111,11 @@ struct EnvBatch
     /// requires it). Writing states or goal masks directly needs refresh().
     u8* at_goal = nullptr;
 
+    u64* visited = nullptr;       // [rows, visited_capacity]; null with tracking disabled
+    i32* visited_count = nullptr;  // [rows]; capacity denotes overflow
+    u32 visited_capacity = 0;      // 0: disabled; otherwise a power of two in [2, 2^20]
+    i32* visited_status = nullptr; // [1]; sticky bit 0: some row overflowed
+
     [[nodiscard]] u32 row_words() const noexcept { return words + numeric_words; }
     [[nodiscard]] bool goals() const noexcept { return goal_pos != nullptr; }
     [[nodiscard]] u32 instance(u64 row) const noexcept { return task_ids ? static_cast<u32>(task_ids[row]) : 0; }
@@ -130,6 +135,7 @@ struct StepOutputs
     u8* invalid = nullptr;      // [rows]: an out-of-range index or inapplicable label in a nonterminal, non-stuck row
     u8* goal = nullptr;         // [rows]: the reached state is a goal state
     u32 words = 0;  // atom words of a final_states row (0: the batch's; at least each stepped row's instance width)
+    u8* revisited = nullptr;    // [rows]: reached hash was present before the step; false when tracking is off
 };
 
 /// The given actions of a step: [rows] indices into the canonical successor order, as int64 or int32 (at most one of
@@ -183,7 +189,10 @@ public:
     /// (task_ids, which the caller sets first): steps 0, goal masks (if the batch has them and keep_goals is false)
     /// the instances' goals, count (if set) the initial states' successor counts (Label: 0/1), at_goal (if set) their goal tests (kept
     /// goal masks included). Draw counters are kept (set_seed and the caller decide when streams restart).
+    /// Reset clears each selected visited table and inserts its initial state.
     void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false) const;
+    /// Clears the masked visited rows and inserts their current states; leaves the sticky overflow status alone.
+    void clear_visited(EnvBatch& b, const u8* mask = nullptr) const;
     /// One step of every row (see the file comment); `action` [rows] indexes the canonical successor order (none: the
     /// random policy); `next_task_ids` [rows] (optional) names the instance an autoresetting row restarts in.
     void step(EnvBatch& b, const StepOutputs& out, Actions action = {}, const i32* next_task_ids = nullptr,
@@ -235,7 +244,8 @@ private:
     TaskSuitePtr m_suite;
     EnvConfig m_config;
     std::vector<u32> m_init_count;       // per instance
-    std::vector<u8> m_init_goal;         // per instance
+    std::vector<u8> m_init_goal;
+    std::vector<u64> m_init_hash;        // per instance
     std::vector<const Task*> m_tasks;    // per instance: its task (the rows' lookup without the suite's indirections)
     u32 m_label_width = 1;               // max(1, the suite's label width)
     std::vector<Scratch> m_scratch;      // per pool member

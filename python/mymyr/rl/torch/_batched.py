@@ -56,6 +56,7 @@ class StepResult(NamedTuple):
     at_goal: Tensor  # bool: the next observation's state is a goal (an autoreset into a solved initial state)
     obs: Any = None  # the encoding of the next observation
     final_obs: Any = None  # the encoding of the reached states before the autoreset (final=True)
+    revisited: Optional[Tensor] = None  # bool [N]: reached state was visited before this step
 
 
 def _mark_static(t: Tensor) -> None:
@@ -131,6 +132,14 @@ class BatchedEnv:
     are unavailable. Inapplicable labels do not move and set ``invalid`` in a nonterminal state with applicable
     actions. Padding past a schema's arity is ignored. Labels use each row's domain's schemas and instance's objects.
 
+    ``track_visited=H`` keeps CPU hash tables ``visited`` int64 [N, H], ``visited_count`` int32 [N], and
+    ``visited_status`` int32 [1] (sticky bit 0: overflow). H is a power of two in [2, 2^20]; True selects the next
+    power of two at least 2 * (max_steps + 1), requiring bounded episodes. Reset inserts the initial state;
+    step reports ``revisited`` before inserting the reached state and before any autoreset clears its table.
+    Equal state hashes share one entry. Above 3/4 occupancy new keys are skipped, so membership can miss revisits.
+    ``clear_visited(mask)`` clears selected histories and inserts their current states; refresh keeps histories.
+    The table and counts are borrowed read-only views; status can be acknowledged with ``visited_status.zero_()``.
+
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over a
     suite of several domains: one encoder per domain, in the suite's order). Every step then encodes the next
     observation (``StepResult.obs``) and, with ``final=True``, the reached states before the autoreset
@@ -181,12 +190,16 @@ class BatchedEnv:
         obs_capacities: Any = None,
         obs_actions: bool = False,
         actions: Literal["index", "label"] = "index",
+        track_visited: bool | int = False,
     ) -> None:
         self.device = torch.device(device)
         if actions not in ("index", "label"):
             raise ValueError("mymyr: actions must be 'index' or 'label'")
         if actions == "label" and self.device.type != "cpu":
             raise ValueError("mymyr: label actions run on the CPU; use device='cpu'")
+        self.visited_capacity = _rl._visited_capacity(track_visited, max_steps)
+        if self.visited_capacity and self.device.type != "cpu":
+            raise ValueError("mymyr: visited tracking requires device='cpu'")
         self.actions = actions
         index = _device_index(self.device)
         if index is not None:
@@ -210,6 +223,10 @@ class BatchedEnv:
         self._sampling_seed = torch.tensor([int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=d)
         self._sampling_env_ids = torch.arange(self.first_env, self.first_env + n, dtype=torch.int64, device=d)
         self._sampling_arrays = None if self.sampler is None else self.sampler._arrays(self.task_ids)
+        H = self.visited_capacity
+        self.visited = torch.zeros((n, H), dtype=torch.int64, device=d) if H else None
+        self.visited_count = torch.zeros(n, dtype=torch.int32, device=d) if H else None
+        self.visited_status = torch.zeros(1, dtype=torch.int32, device=d) if H else None
         self.steps = torch.zeros(n, dtype=torch.int32, device=d)
         self.draws = torch.zeros(n, dtype=torch.int64, device=d)
         self.counts = torch.zeros((n, self.core.cache_schemas), dtype=torch.int32, device=d)
@@ -333,7 +350,9 @@ class BatchedEnv:
     def _tensors(self) -> list[Tensor]:
         t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count, self.at_goal,
              self._reset_counts, self._sampling_seed, self._sampling_env_ids]
-        return t + ([self.goal_pos, self.goal_neg] if self.goals else [])
+        return t + ([self.goal_pos, self.goal_neg] if self.goals else []) + (
+            [self.visited, self.visited_count, self.visited_status] if self.visited_capacity else []
+        )
 
     def _sample_task_ids(self) -> Tensor:
         return self.sampler.sample(
@@ -373,7 +392,7 @@ class BatchedEnv:
             self.goal_neg.copy_(_where(mask, goal_neg.to(self.goal_neg), self.goal_neg))
         args = (
             self.handle, self.states, self._ids(), self.steps, self.counts, self.views, self.goal_pos, self.goal_neg,
-            self.count, self.at_goal, mask, keep,
+            self.count, self.at_goal, mask, keep, self.visited, self.visited_count, self.visited_status,
         )  # fmt: skip
         if torch.compiler.is_compiling():
             torch.ops.mymyr.reset(*args)
@@ -381,6 +400,19 @@ class BatchedEnv:
             _ops.reset_impl(*args)  # eager: without the dispatcher's round trip
         self._advance_resets(mask)
         return self.count
+
+    def clear_visited(self, mask: Optional[Tensor] = None) -> None:
+        """Clear all tables, or rows selected by bool mask [N], and insert their current states.
+
+        Use after writing states directly; refresh() only updates the action and goal caches. Overflow status is
+        sticky across resets and clears; visited_status.zero_() explicitly acknowledges it.
+        """
+        if not self.visited_capacity:
+            return
+        if mask is not None:
+            mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
+        _ops.clear_visited(self.handle, self.states, self._ids(), self.visited, self.visited_count,
+                           self.visited_status, mask)
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
@@ -416,9 +448,12 @@ class BatchedEnv:
         final_obs = self._final_obs(before, r[7], observation.encoding, final)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
                           observation.goal_pos, observation.goal_neg, observation.at_goal, observation.encoding,
-                          final_obs)
+                          final_obs, args[-1])
 
-    def _step_args(self, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool) -> tuple:
+    def _step_args(self, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool,
+                   revisited: Optional[Tensor] = None) -> tuple:
+        if revisited is None:
+            revisited = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         schema, binding = None, None
         if self.actions == "label":
             if not isinstance(action, tuple) or len(action) != 2:
@@ -443,6 +478,7 @@ class BatchedEnv:
         return (
             self.handle, self.states, self._ids(), self.steps, self.draws, self.counts, self.views, self.count,
             self.at_goal, self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final, schema, binding,
+            self.visited, self.visited_count, self.visited_status, revisited,
         )  # fmt: skip
 
     def _step_into(
@@ -451,7 +487,7 @@ class BatchedEnv:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
         outputs); returns the step's ``obs`` and ``final_obs``."""
         before = self._before_step(final)
-        _ops.step_impl(*self._step_args(action, next_task_ids, final), out=tuple(out)[:8])
+        _ops.step_impl(*self._step_args(action, next_task_ids, final, out.revisited), out=tuple(out)[:8])
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
         out.count.copy_(self.count)
