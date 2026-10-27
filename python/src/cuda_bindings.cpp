@@ -251,7 +251,16 @@ struct DeviceInput
     Framework fw = Framework::DLPack;
 };
 
-DeviceInput import_device(nb::handle obj, const PyContext& c, const OpStream& os, const char* name)
+/// The stream handoffs of one call. torch's __dlpack__(stream=s) makes s wait on torch's current stream as a whole,
+/// not on the one tensor, so once a call's first torch import has done that, its later torch imports pass no stream
+/// (each handoff costs about 8 us of host time).
+struct ImportSync
+{
+    bool torch = false;
+};
+
+DeviceInput import_device(nb::handle obj, const PyContext& c, const OpStream& os, const char* name,
+                          ImportSync* sync = nullptr)
 {
     const dl::Device d = dl::dlpack_device(obj);
     if (d.device_type != dl::k_cuda && d.device_type != dl::k_cuda_managed)
@@ -263,8 +272,11 @@ DeviceInput import_device(nb::handle obj, const PyContext& c, const OpStream& os
                                ", the context on cuda:" + std::to_string(c.ctx->device()))
                                   .c_str());
     DeviceInput in;
-    in.im = dl::import_dlpack(obj, os.dl);
     in.fw = framework_of(obj);
+    const bool torch = sync && in.fw == Framework::Torch;
+    in.im = dl::import_dlpack(obj, torch && sync->torch ? dl::k_stream_none : os.dl);
+    if (torch)
+        sync->torch = true;
     return in;
 }
 
@@ -1050,7 +1062,8 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         c->drain();
     else if (a.status.is_none())
         throw nb::value_error("mymyr: expand_into under CUDA graph capture needs status= and stream=");
-    DeviceInput in = import_device(a.states, *c, os, "states");
+    ImportSync sync;
+    DeviceInput in = import_device(a.states, *c, os, "states", &sync);
     const WordsLayout w = device_words(in);
     std::vector<std::shared_ptr<void>> keep{in.im.keep};
     const i32* ids = device_task_ids(a.task_ids, *c, os, w.rows, keep);
@@ -1067,7 +1080,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
             throw nb::type_error((std::string("mymyr: expand_into: '") + name +
                                   "' must be a CUDA device array like the states (device states write device destinations)")
                                      .c_str());
-        DeviceInput d = import_device(obj, *c, os, name);
+        DeviceInput d = import_device(obj, *c, os, name, &sync);
         keep.push_back(d.im.keep);
         return d;
     };
