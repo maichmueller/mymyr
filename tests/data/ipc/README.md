@@ -1,1 +1,1 @@
-Sample of the IPC 2023 learning-track domains (blocksworld, childsnack, ferry, floortile, miconic, rovers, satellite, sokoban, transport): domain.pddl and a few train and test problems per domain. Files are unchanged.
+Sample of the IPC 2023 learning-track domains (blocksworld, childsnack, ferry, floortile, miconic, rovers, satellite, sokoban, spanner, transport): domain.pddl, a few train and test problems per domain, and the plans of those train problems from the same benchmark set (`train/pNN.plan`, IPC plan text). Files are unchanged.

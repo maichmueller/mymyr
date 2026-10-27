@@ -20,8 +20,10 @@
 #include "dlpack.hpp"
 #include "py_domain.hpp"
 #include "py_expansion.hpp"
+#include "py_formula.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
+#include "translate_bindings.hpp"
 #include "py_task.hpp"
 #include "rl_imports.hpp"
 #include "rl_typing.hpp"
@@ -31,7 +33,10 @@
 #include "mymyr/core/threads.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/goal_templates.hpp"
+#include "mymyr/rl/masks.hpp"
 #include "mymyr/rl/pool.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <nanobind/nanobind.h>
@@ -283,8 +288,8 @@ struct PaddedResult
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
     bool has_goal = false, has_derived = false, overflow = false;
-    bool has_hashes = false, has_noops = false;
-    u64 off_hashes = 0, off_noops = 0;
+    bool has_hashes = false, has_noops = false, has_canonical = false;
+    u64 off_hashes = 0, off_noops = 0, off_canonical = 0;
     Framework fw = Framework::Numpy;
     WordEncoding enc;
 };
@@ -301,6 +306,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     p.has_goal = f.has_goal;
     p.has_hashes = f.has_hashes;
     p.has_noops = f.has_noops;
+    p.has_canonical = f.has_index;
     p.has_derived = f.has_derived;
     p.derived_words = f.derived_words;
     p.fw = fw;
@@ -308,6 +314,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     const u64 NK = checked_mul({f.rows, k}, "a padded expansion (rows x k)");
     p.off_hashes = lay.add(f.has_hashes ? NK : 0, sizeof(u64));
     p.off_noops = lay.add(f.has_noops ? NK : 0, 1);
+    p.off_canonical = lay.add(f.has_index ? NK : 0, sizeof(i32));
     p.off_index = lay.add(NK, sizeof(i32));
     p.off_mask = lay.add(NK, 1);
     p.off_count = lay.add(f.rows, sizeof(i32));
@@ -322,6 +329,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     out.k = k;
     out.succ_hash = f.has_hashes ? reinterpret_cast<u64*>(b + p.off_hashes) : nullptr;
     out.noop = f.has_noops ? reinterpret_cast<u8*>(b + p.off_noops) : nullptr;
+    out.canonical = f.has_index ? reinterpret_cast<i32*>(b + p.off_canonical) : nullptr;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
@@ -636,8 +644,6 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
                        PoolArg pool, bool validate, StreamArg stream, ContextArg ctx, ArrayArg status, ArrayArg row_count,
                        ArrayArg succ_hash, ArrayArg noop, ArrayArg index, bool drop)
 {
-    if (drop && index.is_none())
-        throw nb::value_error("mymyr: expand_into: drop_noops requires index");
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
                                        is_cuda_array(derived) || is_cuda_array(offsets) || is_cuda_array(status) ||
@@ -785,6 +791,38 @@ nb::object bool_array(std::shared_ptr<Block> block, u64 n, Framework fw)
     s.dtype = rl::DType::Bool;
     s.shape = {static_cast<i64>(n)};
     return export_array(std::move(s), fw, default_words(fw));
+}
+
+void mask_host_arrays(std::initializer_list<nb::handle> arrays)
+{
+    for (nb::handle a : arrays)
+        if (is_cuda_array(a))
+            throw nb::value_error("mymyr: action masking runs on the CPU; pass host rows");
+}
+
+struct MaskSchema
+{
+    std::vector<i32> scalar;
+    const i32* data;
+    MaskSchema(nb::handle obj, u64 rows, rlimp::Imports& imports) : data(nullptr)
+    {
+        if (PyIndex_Check(obj.ptr()) && dl::dlpack_device(obj).device_type < 0)
+        {
+            scalar.assign(rows, int_arg<i32>(obj, "schema"));
+            data = scalar.data();
+        }
+        else
+            data = imports.get<const i32>(obj, "schema", {rlimp::i32t}, {static_cast<i64>(rows)}, false);
+        if (obj.is_none())
+            throw nb::type_error("mymyr: schema must be an int or an int32 array [N]");
+    }
+};
+
+ArrayOut mask_output(std::shared_ptr<Block> block, std::vector<i64> shape, const StateBatch& in)
+{
+    const Framework fw = in.packed ? Framework::Numpy : in.fw;
+    ArraySpec s{block, block->data(), rl::DType::Bool, std::move(shape), {}, false, false};
+    return ArrayOut(export_array(std::move(s), fw, default_words(fw)));
 }
 
 std::string words_repr(const PyExpansion& e)
@@ -1313,6 +1351,13 @@ public:
     PyCpuPool& operator=(const PyCpuPool&) = delete;
 
     [[nodiscard]] const rl::CpuEnvPool& pool() const noexcept { return *m_pool; }
+    void clear_visited(nb::handle env_ids)
+    {
+        PoolArgs a;
+        const u32* envs = a.env_ids(env_ids, m_pool->num_envs());
+        nb::gil_scoped_release release;
+        m_pool->clear_visited(envs, a.n);
+    }
     [[nodiscard]] const SuiteRef& ref() const noexcept { return m_ref; }
     [[nodiscard]] Framework framework() const noexcept { return m_fw; }
     [[nodiscard]] const nb::object& sampler() const noexcept { return m_sampler; }
@@ -1435,6 +1480,126 @@ ExpansionBuffers expansion_buffers(nb::handle obj)
     return out;
 }
 
+// ------------------------------------------------------------------------------------------------ goal templates
+
+namespace
+{
+struct PyGoalTemplates
+{
+    std::shared_ptr<const rl::GoalTemplates> t;
+    nb::object source;  // the TaskSuite, TaskTable, Task or TaskHandle the templates are over
+};
+
+using DistinctArg = Arg<ann::TemplateDistinct>;
+/// An instance of a source: an index (Python index rules) or one of its Tasks.
+using InstanceArg = Arg<std::variant<int, PyTask, PyHandle>>;
+using ConditionLists = nb::typed<nb::sequence, nb::typed<nb::sequence, PyConjunctiveCondition>>;
+
+rl::Distinct distinct_arg(nb::handle h)
+{
+    if (nb::isinstance<nb::bool_>(h))
+        return nb::cast<bool>(h) ? rl::Distinct::All : rl::Distinct::None;
+    if (nb::isinstance<nb::str>(h) && nb::cast<std::string>(h) == "equality")
+        return rl::Distinct::Equality;
+    throw nb::value_error("mymyr: distinct must be True, False or 'equality'");
+}
+
+nb::object distinct_value(rl::Distinct d)
+{
+    if (d == rl::Distinct::Equality)
+        return nb::str("equality");
+    return nb::bool_(d == rl::Distinct::All);
+}
+
+/// Global instance index of an int (Python index rules) or of a Task / TaskHandle of the templates' source.
+u32 template_instance(const PyGoalTemplates& t, nb::handle h)
+{
+    const SuiteRef r = suite_of(t.source);
+    const i64 n = r.suite->size();
+    if (nb::isinstance<PyTask>(h) || nb::isinstance<PyHandle>(h))
+    {
+        const PyTaskCore* core = owner_of(h).core;
+        for (u32 g = 0; g < n; ++g)
+            if (r.owner(g).core == core)
+                return g;
+        throw nb::value_error("mymyr: the task is not an instance of the templates' source");
+    }
+    i64 i = int_arg<i64>(h, "instance");
+    if (i < 0)
+        i += n;
+    if (i < 0 || i >= n)
+        throw nb::index_error("mymyr: instance index out of range");
+    return static_cast<u32>(i);
+}
+
+/// The generator options of templates (None for templates from conditions), by keyword.
+using TemplateOptionsDict = nb::typed<nb::dict, std::string, std::variant<u64, bool, std::string>>;
+/// The pickled arrays of templates: bytes per array and the max_arity scalar.
+using TemplateStateDict = nb::typed<nb::dict, std::string, std::variant<nb::bytes, u32>>;
+
+std::optional<TemplateOptionsDict> template_options(const rl::GoalTemplates& t)
+{
+    const rl::TemplateOptions* o = t.options();
+    if (!o)
+        return std::nullopt;
+    TemplateOptionsDict d{nb::dict()};
+    d["max_subgoals_per_size"] = o->max_subgoals_per_size;
+    d["max_size"] = o->max_size;
+    d["max_subsets_per_size"] = o->max_subsets_per_size;
+    d["max_component_samples"] = o->max_component_samples;
+    d["max_products"] = o->max_products;
+    d["distinct"] = distinct_value(o->distinct);
+    d["seed"] = o->seed;
+    return d;
+}
+
+rl::TemplateOptions options_of(nb::handle max_subgoals_per_size, nb::handle max_size, nb::handle max_subsets_per_size,
+                               nb::handle max_component_samples, nb::handle max_products, nb::handle distinct, nb::handle seed)
+{
+    rl::TemplateOptions o;
+    o.max_subgoals_per_size = int_arg<u32>(max_subgoals_per_size, "max_subgoals_per_size", 1);
+    o.max_size = int_arg<u32>(max_size, "max_size", 1);
+    o.max_subsets_per_size = int_arg<u32>(max_subsets_per_size, "max_subsets_per_size", 1);
+    o.max_component_samples = int_arg<u32>(max_component_samples, "max_component_samples", 1);
+    o.max_products = int_arg<u32>(max_products, "max_products", 1);
+    o.distinct = distinct_arg(distinct);
+    o.seed = int_arg<u64>(seed, "seed");
+    o.validate();
+    return o;
+}
+
+nb::object make_templates(rl::GoalTemplates&& t, nb::object source)
+{
+    return nb::cast(PyGoalTemplates{std::make_shared<const rl::GoalTemplates>(std::move(t)), std::move(source)},
+                    nb::rv_policy::move);
+}
+
+/// The raw bytes of one array of the packed form.
+nb::bytes array_bytes(const rl::ArrayBundle& b, std::string_view name)
+{
+    const rl::ArrayInfo& a = *b.find(name);
+    return nb::bytes(static_cast<const char*>(b.data(a)), a.elements() * rl::dtype_bytes(a.dtype));
+}
+
+template<class T>
+std::vector<T> bytes_array(nb::handle state, const char* name)
+{
+    nb::object v = state[name];
+    if (!nb::isinstance<nb::bytes>(v))
+        throw nb::value_error("mymyr: GoalTemplates: corrupt pickle state");
+    const auto b = nb::borrow<nb::bytes>(v);
+    if (b.size() % sizeof(T))
+        throw nb::value_error("mymyr: GoalTemplates: corrupt pickle state");
+    std::vector<T> out(b.size() / sizeof(T));
+    std::memcpy(out.data(), b.c_str(), b.size());
+    return out;
+}
+
+constexpr const char* k_template_arrays[] = {"instance_offsets", "template_size", "num_vars", "distinct", "literal_offsets",
+                                             "predicate",        "polarity",      "kind",     "arity",    "terms",
+                                             "goal_literal"};
+}  // namespace
+
 void bind_rl(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl", "Batched RL primitives (mymyr.rl)");
@@ -1496,6 +1661,13 @@ void bind_rl(nb::module_& parent)
             "as 'f64' when one of them needs it (a table has one numeric storage). Raises ValueError when a directory "
             "or pattern has no problem files.")
 #endif
+        .def("translate", [](nb::pointer_and_handle<PyTable> self, StatesLike rows, TaskIdsArg task_ids,
+                              TableArg other, std::string_view missing, PoolArg pool, ArrayArg status,
+                              StreamArg stream, ContextArg ctx) {
+            return Arg<ann::Any>(translate_table(self.h, rows, task_ids, other, missing, pool, status, stream, ctx));
+        }, "rows"_a, "task_ids"_a, "other_table"_a, nb::kw_only(), "missing"_a = "raise", "pool"_a = nb::none(),
+           "status"_a = nb::none(), "stream"_a = nb::none(), "ctx"_a = nb::none(),
+           "Translate instance i into instance i of another equally sized table, matching names.")
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
         .def(
             "__getitem__",
@@ -1791,7 +1963,7 @@ void bind_rl(nb::module_& parent)
                      "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k}));
-        }, "[N, K] int32: canonical successor position with drop_noops, else flat row; -1 padding")
+        }, "[N, K] int32: row of the flat arrays, -1 = none")
         .def_prop_ro("mask", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] bool")
@@ -1831,6 +2003,12 @@ void bind_rl(nb::module_& parent)
                 return nb::none();
             return padded_array(p, p.off_noops, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] successor noop, zero padding; None if absent")
+        .def_prop_ro("canonical", [](const PaddedResult& p) -> ArrayOut {
+            if (!p.has_canonical)
+                return nb::none();
+            return padded_array(p, p.off_canonical, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] int32: the flat index (position in the parent's full successor order, the environment action), "
+           "-1 padding; None if the expansion has no index")
         .def("__repr__", [](const PaddedResult& p) {
             return "PaddedExpansion(states=" + std::to_string(p.rows) + ", k=" + std::to_string(p.k) +
                    (p.overflow ? ", overflow" : "") + ")";
@@ -1979,6 +2157,92 @@ void bind_rl(nb::module_& parent)
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
           "status"_a = nb::none(), "row_count"_a = nb::none(), "succ_hash"_a = nb::none(), "noop"_a = nb::none(), "index"_a = nb::none(), "drop_noops"_a = false, "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
     m.def(
+        "applicable_schemas",
+        [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, PoolArg pool) {
+            mask_host_arrays({states, task_ids});
+            const SuiteRef ref = suite_of(table);
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            PyPool* p = pool_arg(pool);
+            const u32 S = ref.suite->max_schemas();
+            auto block = Block::make(std::max<u64>(1, in.view.rows * S));
+            {
+                nb::gil_scoped_release release;
+                rl::schema_masks(*ref.suite, in.view, ids.ptr, reinterpret_cast<u8*>(block->data()), p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows), S}, in);
+        },
+        "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
+        "Applicable schemas [N, S] bool without an expansion. A schema is true iff an applicable full binding exists; "
+        "S is the table's maximum schema count, with zero padding for smaller domains. CPU inputs only.");
+    m.def(
+        "applicable_objects",
+        [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema,
+           ArrayArg prefix, IntArg depth_in, TaskIdsArg task_ids, SizeArg num_objects, PoolArg pool) {
+            mask_host_arrays({states, task_ids, schema, prefix});
+            const SuiteRef ref = suite_of(table);
+            const u32 depth = int_arg<u32>(depth_in, "depth");
+            const u32 O = opt_int_arg<u32>(num_objects, "num_objects").value_or(ref.suite->max_objects());
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            rlimp::Imports imports(-1, dl::k_stream_default, false);
+            const MaskSchema sch(schema, in.view.rows, imports);
+            for (u64 i = 0; i < in.view.rows; ++i)
+            {
+                const auto& plans = ref.suite->task_of(ids.ptr, i).compiled().schemas;
+                if (sch.data[i] >= 0 && static_cast<u32>(sch.data[i]) < plans.size() &&
+                    depth >= plans[sch.data[i]].arity)
+                    throw nb::value_error("mymyr: depth must be below the schema arity");
+            }
+            std::vector<i64> shape;
+            const i32* pre = imports.get<const i32>(prefix, "prefix", {rlimp::i32t},
+                                                   {static_cast<i64>(in.view.rows), -1}, false, &shape);
+            const u32 stride = shape.empty() ? 0 : static_cast<u32>(shape[1]);
+            PyPool* p = pool_arg(pool);
+            auto block = Block::make(std::max<u64>(1, in.view.rows * O));
+            {
+                nb::gil_scoped_release release;
+                rl::parameter_masks(*ref.suite, in.view, ids.ptr, sch.data, pre, stride, depth,
+                                    reinterpret_cast<u8*>(block->data()), O, p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows), O}, in);
+        },
+        "table"_a, "states"_a, "schema"_a, "prefix"_a.none(), "depth"_a, "task_ids"_a = nb::none(), nb::kw_only(),
+        "num_objects"_a = nb::none(), "pool"_a = nb::none(),
+        "Objects extending prefix at depth to an applicable full binding, [N, O] bool without an expansion. "
+        "schema is an int or int32 [N]; prefix is int32 [N, >= depth] (None at depth 0). Objects are instance-local; "
+        "O defaults to the table's maximum object count. Invalid labels give zero rows; the scalar depth "
+        "must be below its arity. CPU inputs only.");
+    m.def(
+        "is_applicable",
+        [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema, ArrayArg binding,
+           TaskIdsArg task_ids, PoolArg pool) {
+            mask_host_arrays({states, task_ids, schema, binding});
+            const SuiteRef ref = suite_of(table);
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            rlimp::Imports imports(-1, dl::k_stream_default, false);
+            const MaskSchema sch(schema, in.view.rows, imports);
+            std::vector<i64> shape;
+            const i32* bind = imports.get<const i32>(binding, "binding", {rlimp::i32t},
+                                                    {static_cast<i64>(in.view.rows), -1}, false, &shape);
+            if (binding.is_none())
+                throw nb::type_error("mymyr: binding must be an int32 array [N, L]");
+            PyPool* p = pool_arg(pool);
+            auto block = Block::make(std::max<u64>(1, in.view.rows));
+            {
+                nb::gil_scoped_release release;
+                rl::is_applicable(*ref.suite, in.view, ids.ptr, sch.data, bind, static_cast<u32>(shape[1]),
+                                  reinterpret_cast<u8*>(block->data()), p ? p->pool.get() : nullptr);
+            }
+            return mask_output(block, {static_cast<i64>(in.view.rows)}, in);
+        },
+        "table"_a, "states"_a, "schema"_a, "binding"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
+        "Full-label applicability [N] bool without an expansion, including numeric effect applicability. "
+        "schema is an int or int32 [N]; binding is int32 [N, L], with instance-local objects and ignored padding "
+        "past the schema's arity. L below a valid selected schema's arity raises ValueError. "
+        "Invalid labels are false. CPU inputs only.");
+    m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
             const SuiteRef ref = suite_of(table);
@@ -2086,6 +2350,39 @@ void bind_rl(nb::module_& parent)
         "one of them; negative literals, deletes and numeric conditions are relaxed, static literals are exact). "
         "Grounds each instance once; raises ValueError when an instance's grounding exceeds the relaxation budget.");
 
+    m.def("_visited_capacity", [](Arg<std::variant<bool, int>> value, SizeArg max_steps) {
+        return visited_capacity_arg(value, opt_int_arg<u32>(max_steps, "max_steps", 1).value_or(0));
+    }, "value"_a, "max_steps"_a = nb::none(), "Resolve and validate an episode visited-table capacity.");
+
+    m.def("visited_mask", [](ArrayArg table, ArrayArg count, ArrayArg succ_hash, ArrayArg parent,
+                             ArrayArg rows, ArrayArg out) {
+        using namespace rlimp;
+        Imports in(-1, dl::k_stream_default, false);
+        if (table.is_none() || count.is_none() || succ_hash.is_none() || parent.is_none() || out.is_none())
+            throw nb::type_error("mymyr: visited_mask requires table, count, succ_hash, parent and out arrays");
+        std::vector<i64> ext, hashes, mapping;
+        const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
+        const i64 n = ext[0], H = ext[1];
+        if (H < 2 || H > (1 << 20) || (H & (H - 1)))
+            throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+        const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
+        const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &hashes);
+        const i64 size = hashes[0];
+        const i32* p = in.get<const i32>(parent, "parent", {i32t}, {size}, false);
+        const i32* map = in.get<const i32>(rows, "rows", {i32t}, {-1}, false, &mapping);
+        u8* dst = in.get<u8>(out, "out", {boolt}, {size}, true);
+        const i64 parents = rows.is_none() ? n : mapping[0];
+        {
+            nb::gil_scoped_release release;
+            for (i64 j = 0; j < size; ++j)
+                if (p[j] < -1 || p[j] >= parents || (p[j] >= 0 && map && (map[p[j]] < -1 || map[p[j]] >= n)))
+                    throw std::invalid_argument("mymyr: visited_mask: parent or mapped row is outside the table");
+            rl::visited_mask(tab, cnt, static_cast<u32>(H), hash, p, map, static_cast<u64>(size), dst);
+        }
+    }, "table"_a, "count"_a, "succ_hash"_a, "parent"_a, nb::kw_only(), "rows"_a = nb::none(), "out"_a,
+       "Writes one bool per successor hash into out. parent indexes table rows, or rows when supplied; -1 is padding. "
+       "Host NumPy and torch arrays; equal 64-bit hashes share an entry.");
+
     // --- CpuEnvPool
     using OptArray = Arg<std::optional<ann::Any>>;
     auto opt = [](bool present, auto&& make) -> OptArray {
@@ -2139,6 +2436,9 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("truncated", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->truncated, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool (None after a reset)")
+        .def_prop_ro("revisited", [opt](const PyPoolBatch& p) {
+            return opt(p.stepped(), [&] { return p.array(p.b->revisited, rl::DType::Bool, {p.rows()}); });
+        }, "Whether each reached state was visited earlier in its episode (False with tracking disabled).")
         .def_prop_ro("invalid", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->invalid, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool: the given action was outside [0, count) (None after a reset)")
@@ -2180,7 +2480,7 @@ void bind_rl(nb::module_& parent)
             [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
                bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in,
-               Arg<ann::SamplerArg> sampler) {
+               Arg<ann::SamplerArg> sampler, Arg<std::variant<bool, int>> track_visited) {
                 const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
                 const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
@@ -2198,6 +2498,7 @@ void bind_rl(nb::module_& parent)
                 c.canonical_order = canonical;
                 c.witness_pruning = witness;
                 rl::PoolOptions o;
+                o.visited_capacity = visited_capacity_arg(track_visited, max_steps);
                 o.threads = threads;
                 o.goals = goals;
                 o.words = words.value_or(0);
@@ -2210,7 +2511,7 @@ void bind_rl(nb::module_& parent)
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 1, "goals"_a = false, "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
-            "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto",
+            "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto", "track_visited"_a = false,
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
             "results come as `framework` arrays (None: NumPy). sampler (\"auto\" and \"uniform\": uniform, or an "
             "rl.InstanceSampler) places every env in a sampled instance and restarts it in its next one on each reset "
@@ -2222,6 +2523,12 @@ void bind_rl(nb::module_& parent)
             "words fixes the width of every batch instead (at least table.words).")
         .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); },
                      "The TaskTable or TaskSuite the environments run on.")
+        .def_prop_ro("visited_capacity", [](const PyCpuPool& p) { return p.pool().visited_capacity(); },
+                     "Slots per visited table, or zero with tracking disabled.")
+        .def_prop_ro("visited_status", [](const PyCpuPool& p) { return p.pool().visited_status(); },
+                     "Sticky overflow status: bit 0 means some episode exceeded its table's load limit.")
+        .def("clear_visited", [](PyCpuPool& p, TaskIdsArg env_ids) { p.clear_visited(env_ids); },
+             "env_ids"_a = nb::none(), "Clear selected idle environments' tables and insert their current states.")
         .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); },
                      "The number of environments.")
         .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); },
@@ -2288,5 +2595,184 @@ void bind_rl(nb::module_& parent)
             return "CpuEnvPool(num_envs=" + std::to_string(p.pool().num_envs()) + ", threads=" +
                    std::to_string(p.pool().threads()) + ")";
         });
+
+    // --- lifted goal templates
+    nb::class_<PyGoalTemplates>(
+        m, "GoalTemplates",
+        "Lifted goal templates per instance (rl.lifted_goal_templates, GoalTemplates.from_conditions): conjunctions of "
+        "lifted literals, largest first, packed into flat arrays (arrays()). Immutable and picklable.")
+        .def_static(
+            "from_conditions",
+            [](SuiteArg source, ConditionLists conditions) {
+                const SuiteRef r = suite_of(source);
+                const u32 n = r.suite->size();
+                if (nb::len(conditions) != n)
+                    throw nb::value_error(("mymyr: GoalTemplates: conditions for " + std::to_string(nb::len(conditions)) +
+                                           " instances, the source has " + std::to_string(n))
+                                              .c_str());
+                std::vector<std::vector<ConjunctiveCondition>> lists(n);
+                u32 g = 0;
+                for (nb::handle per : conditions)
+                {
+                    const PyTaskCore& core = r.core_of(g);
+                    for (nb::handle h : nb::borrow<nb::sequence>(per))
+                    {
+                        if (!nb::isinstance<PyConjunctiveCondition>(h))
+                            throw nb::type_error("mymyr: GoalTemplates: expected ConjunctiveConditions");
+                        const PyConjunctiveCondition& c = *nb::inst_ptr<PyConjunctiveCondition>(h);
+                        if (c.o.data.get() != core.data.get())
+                            throw nb::value_error(("mymyr: GoalTemplates: a condition of instance " + std::to_string(g) +
+                                                   " belongs to another task")
+                                                      .c_str());
+                        lists[g].push_back(*c.c);
+                    }
+                    ++g;
+                }
+                rl::GoalTemplates t = [&]
+                {
+                    nb::gil_scoped_release release;
+                    return rl::GoalTemplates::from_conditions(r.suite, lists);
+                }();
+                return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+            },
+            "source"_a, "conditions"_a,
+            "Templates given as conditions: conditions[i] lists instance i's ConjunctiveConditions in match order (largest "
+            "first by convention). Each needs literals, untyped variables, no numeric constraints, and either no "
+            "equalities or one disequality per pair of variables (distinct; GroundCondition.lift(True) makes such "
+            "a condition). Terms may be objects.")
+        .def_static(
+            "_restore",
+            [](SuiteArg source, std::optional<TemplateOptionsDict> options, TemplateStateDict state) {
+                const SuiteRef r = suite_of(source);
+                rl::GoalTemplates::Arrays a;
+                a.instance_offsets = bytes_array<i32>(state, "instance_offsets");
+                a.template_size = bytes_array<i32>(state, "template_size");
+                a.num_vars = bytes_array<i32>(state, "num_vars");
+                a.distinct = bytes_array<u8>(state, "distinct");
+                a.literal_offsets = bytes_array<i32>(state, "literal_offsets");
+                a.predicate = bytes_array<i32>(state, "predicate");
+                a.polarity = bytes_array<u8>(state, "polarity");
+                a.kind = bytes_array<i32>(state, "kind");
+                a.arity = bytes_array<i32>(state, "arity");
+                a.terms = bytes_array<i32>(state, "terms");
+                a.goal_literal = bytes_array<i32>(state, "goal_literal");
+                a.max_arity = int_arg<u32>(state["max_arity"], "max_arity");
+                std::optional<rl::TemplateOptions> o;
+                if (options)
+                {
+                    const nb::dict& d = *options;
+                    o = options_of(d["max_subgoals_per_size"], d["max_size"], d["max_subsets_per_size"],
+                                   d["max_component_samples"], d["max_products"], d["distinct"], d["seed"]);
+                }
+                rl::GoalTemplates t = [&]
+                {
+                    nb::gil_scoped_release release;
+                    return rl::GoalTemplates::from_arrays(r.suite, a, o ? &*o : nullptr);
+                }();
+                return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+            },
+            "source"_a, "options"_a.none(), "state"_a)
+        .def_prop_ro("source", [](const PyGoalTemplates& t) { return SuiteArg(t.source); },
+                     "The TaskSuite, TaskTable, Task or TaskHandle the templates are over.")
+        .def_prop_ro("num_instances", [](const PyGoalTemplates& t) { return t.t->num_instances(); }, "Instances (I).")
+        .def_prop_ro("num_templates", [](const PyGoalTemplates& t) { return t.t->num_templates(); },
+                     "Templates of every instance (K).")
+        .def_prop_ro("max_vars", [](const PyGoalTemplates& t) { return t.t->max_vars(); },
+                     "The most variables a template has (the width of order).")
+        .def_prop_ro("max_arity", [](const PyGoalTemplates& t) { return t.t->max_arity(); },
+                     "The largest literal arity (the width of terms).")
+        .def_prop_ro("nbytes", [](const PyGoalTemplates& t) { return t.t->arrays().bytes(); },
+                     "Bytes of the packed arrays.")
+        .def_prop_ro("options", [](const PyGoalTemplates& t) { return template_options(*t.t); },
+                     "The options of lifted_goal_templates (a dict), or None for templates from conditions.")
+        .def(
+            "arrays",
+            [](const PyGoalTemplates& t, FrameworkArg framework) {
+                const Framework fw = parse_framework(framework, nb::none());
+                return nb::borrow<BundleDict>(export_bundle(t.t->shared_arrays(), fw, default_words(fw)));
+            },
+            "framework"_a = nb::none(),
+            "The packed form (zero-copy, read-only views): instance_offsets [I + 1] (instance i's templates are "
+            "[instance_offsets[i], instance_offsets[i + 1]), largest first), template_size / num_vars / distinct [K], "
+            "literal_offsets [K + 1], order [K, max_vars] (the variables in binding order, -1 padding), and per literal "
+            "predicate (the instance's domain table's predicate id), polarity, kind (0 static, 1 fluent, 2 derived), "
+            "arity, terms [L, max_arity] (>= 0 a variable, < 0 the object -(t + 1), -2**31 padding) and goal_literal (the "
+            "index in the instance's task.goal_condition.literals, -1 for templates from conditions); scalars "
+            "num_instances, num_templates, num_literals, max_vars, max_arity.")
+        .def(
+            "conditions",
+            [](const PyGoalTemplates& t, InstanceArg instance) {
+                const u32 g = template_instance(t, instance);
+                const FormulaOwner o = task_owner(suite_of(t.source).owner(g));
+                nb::typed<nb::list, PyConjunctiveCondition> out{nb::list()};
+                for (ConjunctiveCondition& c : t.t->conditions(g))
+                    out.append(make_conjunctive_condition(o, std::move(c)));
+                return out;
+            },
+            "instance"_a,
+            "An instance's templates (an index into the source, or one of its Tasks) as ConjunctiveConditions over its "
+            "task, largest first: variables ?x<i>, the literals, and with distinct one disequality per pair of variables. "
+            "Task.bindings(c, state, limit=1) gives a template's first binding, in the order of c.binding_order(task).")
+        .def(
+            "goal_literals",
+            [](const PyGoalTemplates& t, InstanceArg instance) {
+                const u32 g = template_instance(t, instance);
+                nb::typed<nb::list, nb::typed<nb::tuple, int, nb::ellipsis>> out{nb::list()};
+                for (u32 k = t.t->first(g); k < t.t->first(g + 1); ++k)
+                {
+                    nb::list l;
+                    for (u32 i : t.t->goal_literals(k))
+                        l.append(i);
+                    out.append(nb::tuple(l));
+                }
+                return out;
+            },
+            "instance"_a,
+            "Per template of an instance, the indices of its literals in the instance's task.goal_condition.literals "
+            "(empty for templates from conditions).")
+        .def("__len__", [](const PyGoalTemplates& t) { return t.t->num_templates(); })
+        .def("__reduce__",
+             [](nb::handle self) {
+                 const PyGoalTemplates& t = *nb::inst_ptr<PyGoalTemplates>(self);
+                 const rl::ArrayBundle& b = t.t->arrays();
+                 TemplateStateDict state{nb::dict()};
+                 for (const char* name : k_template_arrays)
+                     state[name] = array_bytes(b, name);
+                 state["max_arity"] = t.t->max_arity();
+                 const std::optional<TemplateOptionsDict> options = template_options(*t.t);
+                 return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_goal_templates"),
+                                       nb::make_tuple(t.source, options ? nb::object(*options) : nb::none(), state));
+             })
+        .def("__repr__", [](const PyGoalTemplates& t) {
+            return "GoalTemplates(" + std::to_string(t.t->num_instances()) + " instances, " +
+                   std::to_string(t.t->num_templates()) + " templates, max_vars=" + std::to_string(t.t->max_vars()) + ")";
+        });
+    m.def(
+        "lifted_goal_templates",
+        [](SuiteArg source, IntArg max_subgoals_per_size, IntArg max_size, IntArg max_subsets_per_size,
+           IntArg max_component_samples, IntArg max_products, DistinctArg distinct, IntArg seed) {
+            const SuiteRef r = suite_of(source);
+            const rl::TemplateOptions o = options_of(max_subgoals_per_size, max_size, max_subsets_per_size,
+                                                     max_component_samples, max_products, distinct, seed);
+            rl::GoalTemplates t = [&]
+            {
+                nb::gil_scoped_release release;
+                return rl::GoalTemplates::generate(r.suite, o);
+            }();
+            return Arg<PyGoalTemplates>(make_templates(std::move(t), r.obj));
+        },
+        "source"_a, nb::kw_only(), "max_subgoals_per_size"_a = 2, "max_size"_a = 10, "max_subsets_per_size"_a = 100,
+        "max_component_samples"_a = 5, "max_products"_a = 1000, "distinct"_a = true, "seed"_a = 0,
+        "Lifted goal templates of every instance of a TaskSuite, TaskTable or Task: the goals of lifted hindsight "
+        "relabelling, a GoalTemplates. Per instance, from its goal literals (task.goal_condition.literals; numeric "
+        "constraints are skipped): the graph joining literals that share an object; per connected component the first "
+        "max_subsets_per_size connected subsets of each size 1..max_size in lexicographic order; for c = 1..max_size "
+        "components, up to max_component_samples uniform draws of c components (counter-based RNG keyed by seed and the "
+        "instance index), each contributing the first max_products concatenations of one subset per drawn component; "
+        "subgoals of at most max_size literals, the first max_subgoals_per_size per size, sizes largest first. Each "
+        "subgoal is lifted (every object, constants included, becomes a variable ?x<i> by first appearance); distinct "
+        "(True) makes distinct variables bind distinct objects, False lets them share one, 'equality' does the former "
+        "when the domain declares :equality. Deterministic in (task, instance index, options): other instances do not "
+        "change an instance's templates.");
 }
 }  // namespace mymyr::python

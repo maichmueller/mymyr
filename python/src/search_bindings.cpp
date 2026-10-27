@@ -15,6 +15,7 @@
 #include "py_formula.hpp"
 #include "py_landmarks.hpp"
 #include "py_task.hpp"
+#include "py_search_tree.hpp"
 
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -43,6 +44,7 @@
 #include <type_traits>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
@@ -168,6 +170,29 @@ struct PyCancelToken
 };
 
 // ------------------------------------------------------------------------------------------------ callbacks
+
+/// Native search workers are joined before the binding returns. Keep their Python thread state until thread exit,
+/// detached between callbacks so that the GIL and garbage collection can proceed while native work runs. Creating
+/// and clearing a state per event would repeatedly abandon its allocator heaps into the shared segment pool.
+nb::gil_scoped_acquire acquire_callback()
+{
+    if (!PyGILState_GetThisThreadState())
+    {
+        struct ThreadState
+        {
+            PyGILState_STATE token = PyGILState_Ensure();
+            PyThreadState* state = PyEval_SaveThread();
+
+            ~ThreadState()
+            {
+                PyEval_RestoreThread(state);
+                PyGILState_Release(token);
+            }
+        };
+        thread_local ThreadState retained;
+    }
+    return {};
+}
 
 /// Collects the first exception of any callback, and cancels the search when one occurs.
 struct CallbackErrors
@@ -326,7 +351,7 @@ public:
             return false;
         if (!m_progress.is_valid())
             return true;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::object r = m_progress(so_far);
@@ -354,7 +379,7 @@ private:
     {
         if (!fn.is_valid() || m_errors.failed.load(std::memory_order_relaxed))
             return;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::tuple args = make_args();
@@ -423,7 +448,7 @@ std::function<bool(StateView)> goal_test(std::shared_ptr<PyGoalTest> w)
     return [w = std::move(w)](StateView s) -> bool {
         if (w->errors->failed.load(std::memory_order_relaxed))
             return false;
-        nb::gil_scoped_acquire acquire;
+        auto acquire = acquire_callback();
         try
         {
             nb::object r = w->fn(make_state(w->owner, State(s)));
@@ -563,6 +588,23 @@ auto run_detached(ControlScope& cs, F&& fn)
 }
 
 // ------------------------------------------------------------------------------------------------ results
+
+struct PySiwSubproblem
+{
+    search::SiwSubproblem p;
+    Owner o;
+};
+
+template<class T>
+nb::ndarray<nb::numpy, const T> tree_array(const PySearchTree& x, const std::vector<T>& values,
+                                         std::initializer_list<usize> shape)
+{
+    auto* hold = new std::shared_ptr<const search::SearchTree>(x.tree);
+    nb::capsule owner(hold, [](void* p) noexcept { delete static_cast<std::shared_ptr<const search::SearchTree>*>(p); });
+    // Empty arrays still need a non-null data address for NumPy to retain the capsule without allocating storage.
+    static const T empty{};
+    return nb::ndarray<nb::numpy, const T>(values.empty() ? &empty : values.data(), shape, owner);
+}
 
 struct PyIwResult
 {
@@ -898,12 +940,131 @@ search::SearchStatistics dec_stats(nb::handle h)
     return s;
 }
 
-nb::tuple enc(const search::IwPassStatistics& p)
+nb::tuple enc_tree(const Owner& o, const std::shared_ptr<const search::SearchTree>& tree)
+{
+    const PySearchTree x{tree, o};
+    const auto& t = *tree;
+    const usize N = t.num_nodes(), T = t.num_transitions(), L = t.label_width, R = t.words + t.numeric_words;
+    return nb::make_tuple(t.width, t.words, t.numeric_words, t.label_width,
+                          tree_array(x, t.rows, {t.row_goal.size(), R}), tree_array(x, t.parent, {N}),
+                          tree_array(x, t.depth, {N}), tree_array(x, t.schema, {N}), tree_array(x, t.binding, {N, L}),
+                          tree_array(x, t.node_flags, {N}), tree_array(x, t.offsets, {t.offsets.size()}),
+                          tree_array(x, t.t_schema, {T}), tree_array(x, t.t_binding, {T, L}),
+                          tree_array(x, t.t_row, {T}), tree_array(x, t.t_child, {T}),
+                          tree_array(x, t.t_outcome, {T}), tree_array(x, t.row_goal, {t.row_goal.size()}));
+}
+
+template<class T>
+usize dec_tree_array(Fields& f, std::vector<T>& values, std::initializer_list<usize> shape)
+{
+    nb::ndarray<nb::numpy, const T, nb::c_contig, nb::device::cpu> a;
+    if (!nb::try_cast(f.next(), a, false) || a.ndim() != shape.size())
+        f.corrupt();
+    usize d = 0;
+    for (usize n : shape)
+    {
+        if (n != ~usize{0} && a.shape(d) != n)
+            f.corrupt();
+        ++d;
+    }
+    if (a.size())
+        values.assign(a.data(), a.data() + a.size());
+    return a.shape(0);
+}
+
+std::shared_ptr<const search::SearchTree> dec_tree(const Owner& o, nb::handle h)
+{
+    Fields f(h, "search tree");
+    auto t = std::make_shared<search::SearchTree>();
+    t->width = f.get<u32>();
+    t->words = f.get<u32>();
+    t->numeric_words = f.get<u32>();
+    t->label_width = f.get<u32>();
+    const Task& task = *o.core->task;
+    const u32 max_words = task.numeric_words() ? std::max<u32>(1, task.words()) : task.words();
+    if (t->numeric_words != task.numeric_words() || t->words > max_words ||
+        t->label_width != o.core->label_width || t->width > novelty::k_max_arity)
+        f.corrupt();
+    const usize R = dec_tree_array(f, t->rows, {~usize{0}, usize{t->words} + t->numeric_words});
+    dec_tree_array(f, t->parent, {~usize{0}});
+    const usize stride = usize{t->words} + t->numeric_words;
+    const usize N = t->num_nodes(), L = t->label_width;
+    if (N == 0 || N > static_cast<usize>(std::numeric_limits<i32>::max()) || R < N || t->parent[0] != -1)
+        f.corrupt();
+    dec_tree_array(f, t->depth, {N});
+    dec_tree_array(f, t->schema, {N});
+    dec_tree_array(f, t->binding, {N, L});
+    dec_tree_array(f, t->node_flags, {N});
+    dec_tree_array(f, t->offsets, {~usize{0}});
+    dec_tree_array(f, t->t_schema, {~usize{0}});
+    const usize T = t->t_schema.size();
+    dec_tree_array(f, t->t_binding, {T, L});
+    dec_tree_array(f, t->t_row, {T});
+    dec_tree_array(f, t->t_child, {T});
+    dec_tree_array(f, t->t_outcome, {T});
+    dec_tree_array(f, t->row_goal, {R});
+    f.done();
+    auto label = [&](i32 schema, const std::vector<i32>& bindings, usize i, bool root)
+    {
+        const u32 arity = root ? 0 : schema >= 0 && static_cast<u32>(schema) < task.num_schemas()
+                                                  ? task.data().schemas[schema].arity() : ~u32{0};
+        if (arity > L || (root && schema != -1))
+            f.corrupt();
+        for (usize j = 0; j < L; ++j)
+        {
+            const i32 b = bindings[i * L + j];
+            if (j < arity ? b < 0 || static_cast<usize>(b) >= task.data().objects.size() : b != -1)
+                f.corrupt();
+        }
+    };
+    for (usize i = 0; i < N; ++i)
+    {
+        if (i ? t->parent[i] < 0 || static_cast<usize>(t->parent[i]) >= i ||
+                t->depth[i] != t->depth[t->parent[i]] + 1 : t->depth[i] != 0)
+            f.corrupt();
+        if ((t->node_flags[i] & ~u8{31}) || !!(t->node_flags[i] & 2) != !!t->row_goal[i])
+            f.corrupt();
+        label(t->schema[i], t->binding, i, i == 0);
+    }
+    if (t->offsets.empty() ? T != 0 || R != N : t->offsets.size() != N + 1 || t->offsets[0] != 0 ||
+        t->offsets.back() != static_cast<i64>(T) || !std::is_sorted(t->offsets.begin(), t->offsets.end()))
+        f.corrupt();
+    for (usize i = 0; i < T; ++i)
+    {
+        label(t->t_schema[i], t->t_binding, i, false);
+        if (t->t_row[i] < 0 || static_cast<usize>(t->t_row[i]) >= R || t->t_child[i] < -1 ||
+            (t->t_child[i] >= 0 && (static_cast<usize>(t->t_child[i]) >= N || t->t_child[i] != t->t_row[i])) ||
+            t->t_outcome[i] > static_cast<u8>(search::TransitionOutcome::SelfLoop))
+            f.corrupt();
+        const auto outcome = static_cast<search::TransitionOutcome>(t->t_outcome[i]);
+        if (outcome != search::TransitionOutcome::Opened && outcome != search::TransitionOutcome::Duplicate &&
+            outcome != search::TransitionOutcome::Pruned && outcome != search::TransitionOutcome::Blocked &&
+            outcome != search::TransitionOutcome::SelfLoop)
+            f.corrupt();
+        if ((outcome == search::TransitionOutcome::Opened && t->t_child[i] < 0) ||
+            (t->t_child[i] >= 0 && outcome != search::TransitionOutcome::Opened && outcome != search::TransitionOutcome::Duplicate))
+            f.corrupt();
+    }
+    const u32 slots = task.atoms().fluent_slots();
+    for (usize i = 0; i < R; ++i)
+    {
+        const u64* row = stride ? t->rows.data() + i * stride : nullptr;
+        for (u32 j = 0; j < t->words; ++j)
+            if (usize{j} * 64 >= slots ? row[j] != 0 : slots / 64 == j && slots % 64 && (row[j] >> (slots % 64)) != 0)
+                f.corrupt();
+    }
+    for (u8 g : t->row_goal)
+        if (g > 1)
+            f.corrupt();
+    return t;
+}
+
+nb::tuple enc(const Owner& o, const search::IwPassStatistics& p)
 {
     return nb::make_tuple(p.width, status_int(p.status), p.expanded, p.generated, p.generated_in_tree, p.skipped, p.blocked,
-                          p.seconds, p.placeholder);
+                          p.seconds, p.placeholder, p.tree ? nb::object(enc_tree(o, p.tree)) : nb::object(nb::none()));
 }
-search::IwPassStatistics dec_pass(nb::handle h)
+search::IwPassStatistics dec_pass(const Owner& o, nb::handle h)
 {
     Fields f(h, "IW pass statistics");
     search::IwPassStatistics p;
@@ -916,16 +1077,19 @@ search::IwPassStatistics dec_pass(nb::handle h)
     p.blocked = f.get<u64>();
     p.seconds = f.get<double>();
     p.placeholder = f.get<bool>();
+    const nb::handle tree = f.next();
+    if (!tree.is_none())
+        p.tree = dec_tree(o, tree);
     f.done();
     return p;
 }
 
-nb::tuple enc(const search::SiwSubproblem& p)
+nb::tuple enc(const Owner& o, const search::SiwSubproblem& p)
 {
     return nb::make_tuple(status_int(p.status), p.unsatisfied_at_start, p.plan_length, p.effective_width,
-                          enc_list(p.passes, [](const auto& x) { return enc(x); }));
+                          enc_list(p.passes, [&](const auto& x) { return enc(o, x); }));
 }
-search::SiwSubproblem dec_subproblem(nb::handle h)
+search::SiwSubproblem dec_subproblem(const Owner& o, nb::handle h)
 {
     Fields f(h, "SIW subproblem");
     search::SiwSubproblem p;
@@ -933,7 +1097,7 @@ search::SiwSubproblem dec_subproblem(nb::handle h)
     p.unsatisfied_at_start = f.get<u32>();
     p.plan_length = f.get<u32>();
     p.effective_width = f.get<u32>();
-    p.passes = dec_list<search::IwPassStatistics>(f.next(), "SIW subproblem", dec_pass);
+    p.passes = dec_list<search::IwPassStatistics>(f.next(), "SIW subproblem", [&](nb::handle x) { return dec_pass(o, x); });
     f.done();
     return p;
 }
@@ -1055,7 +1219,7 @@ search::RolloutIwStatistics dec_rollout_stats(nb::handle h)
 nb::tuple enc(const Owner& o, const search::IwResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state),
-                          enc_list(r.passes, [](const auto& x) { return enc(x); }), enc(r.stats), r.effective_width, r.message,
+                          enc_list(r.passes, [&](const auto& x) { return enc(o, x); }), enc(r.stats), r.effective_width, r.message,
                           r.fluent_slots);
 }
 search::IwResult dec_iw(const Owner& o, nb::handle h)
@@ -1067,7 +1231,7 @@ search::IwResult dec_iw(const Owner& o, nb::handle h)
     r.plan = dec_plan(*o.core->task, f.next(), what);
     r.cost = f.get<double>();
     r.goal_state = dec_state(o, f.next());
-    r.passes = dec_list<search::IwPassStatistics>(f.next(), what, dec_pass);
+    r.passes = dec_list<search::IwPassStatistics>(f.next(), what, [&](nb::handle x) { return dec_pass(o, x); });
     r.stats = dec_stats(f.next());
     r.effective_width = f.get<u32>();
     r.message = f.get<std::string>();
@@ -1079,7 +1243,7 @@ search::IwResult dec_iw(const Owner& o, nb::handle h)
 nb::tuple enc(const Owner& o, const search::SiwResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), enc_plan(r.partial_plan), r.cost,
-                          state_or_none(o, r.goal_state), enc_list(r.subproblems, [](const auto& x) { return enc(x); }),
+                          state_or_none(o, r.goal_state), enc_list(r.subproblems, [&](const auto& x) { return enc(o, x); }),
                           enc(r.stats), r.max_effective_width, r.message, r.fluent_slots);
 }
 search::SiwResult dec_siw(const Owner& o, nb::handle h)
@@ -1092,7 +1256,7 @@ search::SiwResult dec_siw(const Owner& o, nb::handle h)
     r.partial_plan = dec_plan(*o.core->task, f.next(), what);
     r.cost = f.get<double>();
     r.goal_state = dec_state(o, f.next());
-    r.subproblems = dec_list<search::SiwSubproblem>(f.next(), what, dec_subproblem);
+    r.subproblems = dec_list<search::SiwSubproblem>(f.next(), what, [&](nb::handle x) { return dec_subproblem(o, x); });
     r.stats = dec_stats(f.next());
     r.max_effective_width = f.get<u32>();
     r.message = f.get<std::string>();
@@ -1342,6 +1506,12 @@ nb::object restore_result(std::string_view kind, nb::handle task, u64 fingerprin
     const Owner o = owner_of(task);
     if (o.core->task->fingerprint() != fingerprint)
         throw nb::value_error("mymyr: the search result was pickled from a different task (content fingerprint mismatch)");
+    if (kind == "search_tree")
+        return nb::cast(PySearchTree{dec_tree(o, fields), o});
+    if (kind == "iw_pass")
+        return nb::cast(PyIwPass{dec_pass(o, fields), o});
+    if (kind == "siw_subproblem")
+        return nb::cast(PySiwSubproblem{dec_subproblem(o, fields), o});
     if (kind == "iw")
         return nb::cast(PyIwResult{dec_iw(o, fields), o});
     if (kind == "siw")
@@ -2017,6 +2187,20 @@ PyBestFirstResult bf_call(BfFn fn, nb::handle task, nb::handle heuristic, nb::ha
 
 // ------------------------------------------------------------------------------------------------ IW / SIW
 
+search::TreeRecord tree_record(nb::handle h)
+{
+    if (h.is_none())
+        return search::TreeRecord::None;
+    if (!nb::isinstance<nb::str>(h))
+        throw nb::type_error("mymyr: tree must be None, 'nodes' or 'transitions'");
+    const std::string value = nb::cast<std::string>(h);
+    if (value == "nodes")
+        return search::TreeRecord::Nodes;
+    if (value == "transitions")
+        return search::TreeRecord::Transitions;
+    throw nb::value_error("mymyr: tree must be None, 'nodes' or 'transitions'");
+}
+
 search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_width, nb::handle width_zero, bool optimize_iw1,
                              bool witness_pruning, bool canonical_order, nb::handle start,
                              nb::handle transition_ordering = nb::none())
@@ -2080,7 +2264,7 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 #define MYMYR_IW_ARGS                                                                                                  \
     "task"_a, nb::kw_only(), "max_width"_a = 2, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true,          \
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,          \
-        "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG
+        "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "tree"_a = nb::none()
 
 #define MYMYR_LANDMARK_ARGS                                                                                            \
     "landmarks"_a = nb::none(), "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),     \
@@ -2141,9 +2325,18 @@ const char* k_heuristic_doc =
     "called on the thread running the search, with the thread state attached; an exception cancels the search "
     "and is re-raised.";
 
-const char* k_iw_family_doc =
-    "The IW family variants also call the observer's on_transition(parent, action, child, state, outcome) for "
-    "every transition (outcome: a TransitionOutcome; child None when pruned). Numeric tasks raise ValueError.";
+const char* k_tree_doc =
+    "tree: None (default), 'nodes' or 'transitions'. Retains each pass as a SearchTree of read-only NumPy arrays. "
+    "Node recording keeps the fast novelty path; transition recording materializes and deduplicates every successor. "
+    "Every row's goal flag uses this search's goal; a custom goal is also called for rows the search did not test. "
+    "Partial trees survive budget and cancellation stops. Recorded beams use the serial step.";
+
+const char* k_transition_doc =
+    "The observer's on_transition(parent, action, child, state, outcome) is called for every transition, with the "
+    "most specific TransitionOutcome (BLOCKED and SELF_LOOP before the other reasons; child None when the successor "
+    "got no id).";
+
+const char* k_iw_family_doc = "Numeric tasks raise ValueError.";
 
 const char* k_parallel_doc =
     "Parallel hooks (the make_worker protocol): an observer with make_worker(k) -> observer | None, or a goal "
@@ -2212,12 +2405,19 @@ void bind_search(nb::module_& parent)
 
     nb::enum_<search::TransitionOutcome>(m, "TransitionOutcome",
                                          "What became of a transition's successor (observer.on_transition).")
-        .value("OPENED", search::TransitionOutcome::Opened)
-        .value("REOPENED", search::TransitionOutcome::Reopened)
-        .value("DUPLICATE", search::TransitionOutcome::Duplicate)
-        .value("PRUNED", search::TransitionOutcome::Pruned)
-        .value("DEAD_END", search::TransitionOutcome::DeadEnd)
-        .value("GOAL", search::TransitionOutcome::Goal);
+        .value("OPENED", search::TransitionOutcome::Opened, "Entered the search as a new node or open state.")
+        .value("REOPENED", search::TransitionOutcome::Reopened,
+               "Reached on a cheaper path and re-entered the open list (astar_iw).")
+        .value("DUPLICATE", search::TransitionOutcome::Duplicate,
+               "Already known, nothing changed: a width-0 duplicate queue entry, a state already in the tree or among "
+               "the next layer's candidates, a stored state not reached on a cheaper path.")
+        .value("PRUNED", search::TransitionOutcome::Pruned,
+               "Rejected for another reason: not novel, beyond a depth or incumbent bound, or cut by a budget.")
+        .value("DEAD_END", search::TransitionOutcome::DeadEnd, "An infinite heuristic value (astar_iw).")
+        .value("GOAL", search::TransitionOutcome::Goal, "A goal found on generation (rollout_iw).")
+        .value("BLOCKED", search::TransitionOutcome::Blocked, "One of blocked_states; checked before anything else.")
+        .value("SELF_LOOP", search::TransitionOutcome::SelfLoop,
+               "Equal to the state it was generated from; reported before the other reasons except BLOCKED.");
 
     bind_landmarks(m);
 
@@ -2254,44 +2454,157 @@ void bind_search(nb::module_& parent)
                    ", memory_bytes=" + std::to_string(s.memory_bytes) + ")";
         });
 
-    auto iw_pass = nb::class_<search::IwPassStatistics>(m, "IwPass", "The counts of one IW(k) pass of a ladder.");
-    bind_stats_pickle(iw_pass, [](const search::IwPassStatistics& x) { return enc(x); }, dec_pass);
-    iw_pass.def_ro("width", &search::IwPassStatistics::width, "The pass's novelty width k.")
-        .def_ro("status", &search::IwPassStatistics::status, "How the pass ended (Status).")
-        .def_ro("expanded", &search::IwPassStatistics::expanded, "Non-goal states popped and expanded.")
-        .def_ro("generated", &search::IwPassStatistics::generated, "Transitions generated from expanded states.")
-        .def_ro("generated_in_tree", &search::IwPassStatistics::generated_in_tree,
-                "Successors admitted to the search tree (novel ones).")
-        .def_ro("skipped", &search::IwPassStatistics::skipped,
-                "States counted as expanded whose successors were not generated (the optimized IW(1), "
-                "max_depth).")
-        .def_ro("blocked", &search::IwPassStatistics::blocked, "Successors rejected because they are blocked.")
-        .def_ro("seconds", &search::IwPassStatistics::seconds, "Wall time of the pass, in seconds.")
-        .def_ro("placeholder", &search::IwPassStatistics::placeholder,
-                "The empty width-0 entry of an optimized IW(1) ladder (the pass did not run).")
-        .def_prop_ro("stats", [](const search::IwPassStatistics& p) { return p.stats(); },
-                     "The pass's counts as Statistics.")
-        .def("__repr__", [](const search::IwPassStatistics& p) {
-            return "IwPass(width=" + std::to_string(p.width) + ", status=" + search::to_string(p.status) +
-                   ", expanded=" + std::to_string(p.expanded) + ", generated=" + std::to_string(p.generated) +
-                   ", generated_in_tree=" + std::to_string(p.generated_in_tree) + ")";
+    auto tree = nb::class_<PySearchTree>(
+        m, "SearchTree",
+        "One IW pass as flat arrays: N nodes (the root is node 0, node i is row i), R distinct state rows and, "
+        "recorded with tree='transitions', T transitions grouped by their parent node (offsets). Every array is a "
+        "read-only, zero-copy NumPy view that keeps the tree's storage alive.");
+    tree.def_prop_ro("task", [](const PySearchTree& x) { return task_object(x.o.obj); },
+                     "The Task whose slot numbering and ids interpret the rows and labels.")
+        .def_prop_ro("num_nodes", [](const PySearchTree& x) { return x.tree->num_nodes(); },
+                     "N: the nodes of the tree, the root included.")
+        .def_prop_ro("num_transitions", [](const PySearchTree& x) { return x.tree->num_transitions(); },
+                     "T: the recorded transitions (0 when recorded with tree='nodes').")
+        .def("states", [](const PySearchTree& x) {
+            nb::typed<nb::list, PyState> out{nb::list()};
+            const auto& t = *x.tree;
+            const usize R = t.words + t.numeric_words;
+            for (usize i = 0; i < t.row_goal.size(); ++i)
+            {
+                const u64* r = R ? t.rows.data() + i * R : nullptr;
+                out.append(make_state(x.o, State(StateView{r, t.words, t.numeric_words ? r + t.words : nullptr, t.numeric_words})));
+            }
+            return out;
+        }, "All recorded rows as States, nodes first.")
+        .def("labels", [](const PySearchTree& x) {
+            nb::typed<nb::list, std::optional<PyAction>> out{nb::list()};
+            const auto& t = *x.tree;
+            out.append(nb::none());
+            for (usize i = 1; i < t.num_nodes(); ++i)
+            {
+                const u32 schema = static_cast<u32>(t.schema[i]);
+                std::vector<ObjectId> b;
+                for (u32 j = 0; j < x.o.core->task->data().schemas[schema].arity(); ++j)
+                    b.push_back(ObjectId{static_cast<u32>(t.binding[i * t.label_width + j])});
+                out.append(action_object(x.o, Action(SchemaId{schema}, std::move(b))));
+            }
+            return out;
+        }, "Incoming node Actions; the root label is None.")
+        .def("__reduce__", [](const PySearchTree& x) { return result_reduce("search_tree", x.o, enc_tree(x.o, x.tree)); });
+    tree.def_prop_ro("width", [](const PySearchTree& x) { return x.tree->width; }, "The novelty width of the pass.");
+    tree.def_prop_ro("words", [](const PySearchTree& x) { return x.tree->words; },
+                     "The fluent words of a row (the task's word width when the search ended).");
+    tree.def_prop_ro("numeric_words", [](const PySearchTree& x) { return x.tree->numeric_words; },
+                     "The numeric words of a row, after its fluent words.");
+    tree.def_prop_ro("label_width", [](const PySearchTree& x) { return x.tree->label_width; },
+                     "The largest action arity of the task: the columns of binding and t_binding.");
+    tree.def_prop_ro("rows", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->rows, {x.tree->row_goal.size(), usize{x.tree->words} + x.tree->numeric_words});
+    }, nb::rv_policy::reference,
+       "uint64 [R, words + numeric_words]: the distinct states, nodes first (row i is node i), then "
+       "the other successors in the order they were first generated; numeric words last.");
+    tree.def_prop_ro("parent", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->parent, {x.tree->num_nodes()});
+    }, nb::rv_policy::reference,
+       "int32 [N]: the parent node of each node; -1 for the root.");
+    tree.def_prop_ro("depth", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->depth, {x.tree->num_nodes()});
+    }, nb::rv_policy::reference,
+       "int32 [N]: the depth of each node; 0 for the root.");
+    tree.def_prop_ro("schema", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->schema, {x.tree->num_nodes()});
+    }, nb::rv_policy::reference,
+       "int32 [N]: the action schema id of each node's incoming action; -1 for the root.");
+    tree.def_prop_ro("binding", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->binding, {x.tree->num_nodes(), x.tree->label_width});
+    }, nb::rv_policy::reference,
+       "int32 [N, label_width]: the object ids of each node's incoming action, padded with -1; all "
+       "-1 for the root.");
+    tree.def_prop_ro("node_flags", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->node_flags, {x.tree->num_nodes()});
+    }, nb::rv_policy::reference,
+       "uint8 [N]: bit flags of each node: 1 successors generated, 2 goal, 4 counted as expanded "
+       "without generating successors, 8 dropped by a beam's layer selection, 16 entered the queue "
+       "more than once.");
+    tree.def_prop_ro("offsets", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->offsets, {x.tree->offsets.size()});
+    }, nb::rv_policy::reference,
+       "int64 [N + 1]: the transitions of node i are offsets[i]:offsets[i + 1]; empty when recorded "
+       "with tree='nodes'.");
+    tree.def_prop_ro("t_schema", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->t_schema, {x.tree->num_transitions()});
+    }, nb::rv_policy::reference,
+       "int32 [T]: the action schema id of each transition.");
+    tree.def_prop_ro("t_binding", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->t_binding, {x.tree->num_transitions(), x.tree->label_width});
+    }, nb::rv_policy::reference,
+       "int32 [T, label_width]: the object ids of each transition's action, padded with -1.");
+    tree.def_prop_ro("t_row", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->t_row, {x.tree->num_transitions()});
+    }, nb::rv_policy::reference,
+       "int32 [T]: the row of each transition's successor.");
+    tree.def_prop_ro("t_child", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->t_child, {x.tree->num_transitions()});
+    }, nb::rv_policy::reference,
+       "int32 [T]: the node each transition entered (an existing one for a duplicate queue entry); "
+       "-1 when its successor got no node.");
+    tree.def_prop_ro("t_outcome", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->t_outcome, {x.tree->num_transitions()});
+    }, nb::rv_policy::reference,
+       "uint8 [T]: the TransitionOutcome value of each transition, as an observer gets it.");
+    tree.def_prop_ro("row_goal", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->row_goal, {x.tree->row_goal.size()});
+    }, nb::rv_policy::reference,
+       "uint8 [R]: 1 for each row that satisfies the pass's goal, else 0.");
+    auto iw_pass = nb::class_<PyIwPass>(m, "IwPass", "The counts and optional tree of one IW pass.");
+    iw_pass.def("__reduce__", [](const PyIwPass& x) { return result_reduce("iw_pass", x.o, enc(x.o, x.p)); });
+    iw_pass.def_prop_ro("width", [](const PyIwPass& x) { return x.p.width; },
+                        "The pass's novelty width k.");
+    iw_pass.def_prop_ro("status", [](const PyIwPass& x) { return x.p.status; },
+                        "How the pass ended (Status).");
+    iw_pass.def_prop_ro("expanded", [](const PyIwPass& x) { return x.p.expanded; },
+                        "Non-goal states popped and counted as expanded.");
+    iw_pass.def_prop_ro("generated", [](const PyIwPass& x) { return x.p.generated; },
+                        "Transitions generated from expanded states.");
+    iw_pass.def_prop_ro("generated_in_tree", [](const PyIwPass& x) { return x.p.generated_in_tree; },
+                        "Successors admitted, including width-0 duplicate queue entries and excluding beam drops.");
+    iw_pass.def_prop_ro("skipped", [](const PyIwPass& x) { return x.p.skipped; },
+                        "Counted expansions whose successors were not generated.");
+    iw_pass.def_prop_ro("blocked", [](const PyIwPass& x) { return x.p.blocked; },
+                        "Successors rejected because they are blocked.");
+    iw_pass.def_prop_ro("seconds", [](const PyIwPass& x) { return x.p.seconds; },
+                        "Wall time of the pass, in seconds.");
+    iw_pass.def_prop_ro("placeholder", [](const PyIwPass& x) { return x.p.placeholder; },
+                        "The empty width-0 entry of an optimized IW(1) ladder.");
+    iw_pass.def_prop_ro("stats", [](const PyIwPass& x) { return x.p.stats(); }, "The pass's counts as Statistics.")
+        .def_prop_ro("tree", [](const PyIwPass& x) -> nb::typed<nb::object, std::optional<PySearchTree>> {
+            if (!x.p.tree)
+                return nb::none();
+            return nb::cast(PySearchTree{x.p.tree, x.o});
+        }, "The recorded tree, or None when recording was disabled or the pass is a placeholder.")
+        .def("__repr__", [](const PyIwPass& x) {
+            return "IwPass(width=" + std::to_string(x.p.width) + ", status=" + search::to_string(x.p.status) +
+                   ", expanded=" + std::to_string(x.p.expanded) + ", generated=" + std::to_string(x.p.generated) +
+                   ", generated_in_tree=" + std::to_string(x.p.generated_in_tree) + ")";
         });
-
-    auto subproblem = nb::class_<search::SiwSubproblem>(
+    auto subproblem = nb::class_<PySiwSubproblem>(
         m, "SiwSubproblem", "One subproblem of SIW: reach a state with fewer unsatisfied goal literals.");
-    bind_stats_pickle(subproblem, [](const search::SiwSubproblem& x) { return enc(x); }, dec_subproblem);
-    subproblem.def_ro("status", &search::SiwSubproblem::status, "How its IW ladder ended (Status).")
-        .def_ro("unsatisfied_at_start", &search::SiwSubproblem::unsatisfied_at_start,
-                "Goal literals unsatisfied in the subproblem's start state.")
-        .def_ro("plan_length", &search::SiwSubproblem::plan_length, "Actions of its subplan.")
-        .def_ro("effective_width", &search::SiwSubproblem::effective_width,
-                "The width of the pass that solved it.")
-        .def_ro("passes", &search::SiwSubproblem::passes, "Its IW passes (a list of IwPass), one per width.")
-        .def("__repr__", [](const search::SiwSubproblem& s) {
-            return std::string("SiwSubproblem(status=") + search::to_string(s.status) +
-                   ", unsatisfied_at_start=" + std::to_string(s.unsatisfied_at_start) +
-                   ", plan_length=" + std::to_string(s.plan_length) +
-                   ", effective_width=" + std::to_string(s.effective_width) + ")";
+    subproblem.def("__reduce__", [](const PySiwSubproblem& x) { return result_reduce("siw_subproblem", x.o, enc(x.o, x.p)); });
+    subproblem.def_prop_ro("status", [](const PySiwSubproblem& x) { return x.p.status; },
+                           "How its IW ladder ended (Status).");
+    subproblem.def_prop_ro("unsatisfied_at_start", [](const PySiwSubproblem& x) { return x.p.unsatisfied_at_start; },
+                           "Goal literals unsatisfied in the subproblem's start state.");
+    subproblem.def_prop_ro("plan_length", [](const PySiwSubproblem& x) { return x.p.plan_length; },
+                           "Actions of its subplan.");
+    subproblem.def_prop_ro("effective_width", [](const PySiwSubproblem& x) { return x.p.effective_width; },
+                           "The width of the pass that solved it.");
+    subproblem.def_prop_ro("passes", [](const PySiwSubproblem& x) { return pass_list(x.o, x.p.passes); },
+                           "Its IW passes (a list of IwPass), one per width.")
+        .def("__repr__", [](const PySiwSubproblem& x) {
+            return std::string("SiwSubproblem(status=") + search::to_string(x.p.status) +
+                   ", unsatisfied_at_start=" + std::to_string(x.p.unsatisfied_at_start) +
+                   ", plan_length=" + std::to_string(x.p.plan_length) +
+                   ", effective_width=" + std::to_string(x.p.effective_width) + ")";
         });
 
     auto heuristic_stats = nb::class_<heuristics::HeuristicStats>(
@@ -2317,7 +2630,7 @@ void bind_search(nb::module_& parent)
     bind_result_fields(iw_result, [](const PyIwResult& x) -> const search::IwResult& { return x.r; },
                        [](const PyIwResult& x) { return x.r.stats; });
     iw_result
-        .def_prop_ro("passes", [](const PyIwResult& x) { return x.r.passes; },
+        .def_prop_ro("passes", [](const PyIwResult& x) { return pass_list(x.o, x.r.passes); },
                      "The passes run (a list of IwPass), index = width.")
         .def_prop_ro("effective_width", [](const PyIwResult& x) { return x.r.effective_width; },
                      "The width of the pass that solved the task (0 unless solved).")
@@ -2340,7 +2653,12 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("partial_plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.partial_plan); },
                      "Unless solved: the subplans of the subproblems solved before the one that failed, from the "
                      "start state to where that one started (empty when solved).")
-        .def_prop_ro("subproblems", [](const PySiwResult& x) { return x.r.subproblems; },
+        .def_prop_ro("subproblems", [](const PySiwResult& x) {
+            nb::typed<nb::list, PySiwSubproblem> out{nb::list()};
+            for (const auto& p : x.r.subproblems)
+                out.append(PySiwSubproblem{p, x.o});
+            return out;
+        },
                      "The subproblems (a list of SiwSubproblem), in order.")
         .def_prop_ro("max_effective_width", [](const PySiwResult& x) { return x.r.max_effective_width; },
                      "The largest width a subproblem needed.")
@@ -2528,7 +2846,7 @@ void bind_search(nb::module_& parent)
                        [](const PyRolloutResult& x) { return x.get().search.stats; });
     rollout_result
         .def_prop_ro("seed", [](const PyRolloutResult& x) { return x.seed; }, "The rollout's seed.")
-        .def_prop_ro("passes", [](const PyRolloutResult& x) { return x.get().search.passes; },
+        .def_prop_ro("passes", [](const PyRolloutResult& x) { return pass_list(x.o, x.get().search.passes); },
                      "The passes of its IW ladder (a list of IwPass), index = width.")
         .def_prop_ro("effective_width", [](const PyRolloutResult& x) { return x.get().search.effective_width; },
                      "The width of the pass that solved it (0 unless solved).")
@@ -3071,7 +3389,7 @@ void bind_search(nb::module_& parent)
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3081,6 +3399,7 @@ void bind_search(nb::module_& parent)
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -3091,7 +3410,9 @@ void bind_search(nb::module_& parent)
                      "transition_ordering: a LandmarkTransitionOrdering that orders each layer of the width-1 pass "
                      "(a transition ordering strategy). ",
                     k_layer_doc,
-                    k_control_doc})
+                    k_tree_doc,
+                    k_control_doc,
+                    k_transition_doc})
             .c_str());
 
     m.def(
@@ -3102,7 +3423,7 @@ void bind_search(nb::module_& parent)
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             const u32 k = int_arg<u32>(width, "width");
             ControlScope cs;
@@ -3114,6 +3435,7 @@ void bind_search(nb::module_& parent)
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw_pass(t, k, opts); });
             return PyIwResult{std::move(r), o};
@@ -3121,7 +3443,7 @@ void bind_search(nb::module_& parent)
         "task"_a, "width"_a, nb::kw_only(), "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false,
         "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
         "transition_ordering"_a = nb::none(),
-        MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "One IW(width) pass alone, without the ladder. See iw() for the keyword arguments.");
+        MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "tree"_a = nb::none(), "One IW(width) pass alone, without the ladder. See iw() for the keyword arguments.");
 
     m.def(
         "siw",
@@ -3131,7 +3453,7 @@ void bind_search(nb::module_& parent)
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3141,6 +3463,7 @@ void bind_search(nb::module_& parent)
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::SiwResult r = run_detached(cs, [&] { return search::siw(t, opts); });
             return PySiwResult{std::move(r), o};
@@ -3150,7 +3473,9 @@ void bind_search(nb::module_& parent)
                      "fewer goal literals are unsatisfied. Unsolved, the plan is empty and partial_plan holds the "
                      "subplans of the subproblems solved before the one that failed. ",
                     k_layer_doc,
-                    k_control_doc})
+                    k_tree_doc,
+                    k_control_doc,
+                    k_transition_doc})
             .c_str());
 
     m.def(
@@ -3333,7 +3658,8 @@ void bind_search(nb::module_& parent)
                      "and weights return FAILED with a message. Novelty statistics are in result.novelty. "
                      "heuristic and costs: as for astar; novelty pruning does not guarantee optimality. ",
                     k_heuristic_doc,
-                    k_control_doc}).c_str());
+                    k_control_doc,
+                    k_transition_doc}).c_str());
 
     m.def(
         "gbfs",
@@ -3659,7 +3985,7 @@ void bind_search(nb::module_& parent)
            StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval) {
+           IntArg progress_interval, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3672,19 +3998,22 @@ void bind_search(nb::module_& parent)
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::liw(t, opts); });
             return PyIwResult{std::move(r), o};
         },
         "task"_a, nb::kw_only(), "max_width"_a = 2, MYMYR_LANDMARK_ARGS, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false, "canonical_order"_a = true,
-        "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
         paragraphs({"LIW(k): the width-0 pass, then "
                      "LIW(1..max_width) over (landmark coordinate, tuple of size <= k) novelty, each pass from the start "
                      "with a fresh table, until one solves the task (an exhausted ladder is EXHAUSTED). No optimized IW(1). The result is an IwResult with the per-pass statistics.",
                     k_landmark_doc,
                     k_layer_doc,
+                    k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -3697,7 +4026,7 @@ void bind_search(nb::module_& parent)
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3710,6 +4039,7 @@ void bind_search(nb::module_& parent)
             opts.width = int_arg<u32>(width, "width");
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::abstracted_iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -3717,7 +4047,7 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "width"_a = 1, "base_abstracted"_a = false, "preserve_goal_atoms"_a = true,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
-        MYMYR_CONTROL_ARGS,
+        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
         paragraphs({"Abstracted IW(width): one breadth-first pass whose "
                      "novelty features are abstracted atoms, one per object position with the other objects' type "
                      "signature (base_abstracted: BAIW, no signatures); preserve_goal_atoms keeps positive goal atoms "
@@ -3726,7 +4056,9 @@ void bind_search(nb::module_& parent)
                      "atoms whole). The IwResult holds the one pass (IwPass.width = width); an exhausted pass is EXHAUSTED.",
                     k_landmark_doc,
                     k_layer_doc,
+                    k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -3739,7 +4071,7 @@ void bind_search(nb::module_& parent)
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3752,6 +4084,7 @@ void bind_search(nb::module_& parent)
                             beam_chunk, threads, witness_pruning, canonical_order, start);
             opts.typed_projection = typed_projection;
             opts.keep_goal_nonunary_atoms = keep_goal_nonunary_atoms;
+            opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::projective_iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -3759,12 +4092,14 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "typed_projection"_a = false, "keep_goal_nonunary_atoms"_a = false,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
-        MYMYR_CONTROL_ARGS,
+        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
         paragraphs({"The projective_iw alias: abstracted IW(1) with base_abstracted = not typed_projection "
                      "and preserve_goal_atoms = keep_goal_nonunary_atoms. See abstracted_iw.",
                     k_landmark_doc,
                     k_layer_doc,
+                    k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -3810,6 +4145,7 @@ void bind_search(nb::module_& parent)
                      "incumbent_bound: a plan of this length is known elsewhere. max_states counts generated tree "
                      "nodes; there is no max_expanded. ",
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc})
             .c_str());
 
@@ -3820,7 +4156,7 @@ void bind_search(nb::module_& parent)
            bool witness_pruning, bool canonical_order, StateArg start, IntArg max_states,
            IntArg max_expanded,
            IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states,
-           ObserverArg observer, IntArg progress_interval) {
+           ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3834,6 +4170,7 @@ void bind_search(nb::module_& parent)
                 opts.max_next_layer_states = *v;
             opts.report_landing_states = report_landing_states;
             opts.report_co_occurrence = report_co_occurrence;
+            opts.iw.tree = tree_record(tree);
             const Task& t = *o.core->task;
             search::ParallelRolloutsResult r = run_detached(cs, [&] { return search::find_rollouts_parallel(t, opts); });
             return PyParallelRollouts{std::make_shared<const search::ParallelRolloutsResult>(std::move(r)),
@@ -3842,14 +4179,16 @@ void bind_search(nb::module_& parent)
         "task"_a, "seeds"_a, nb::kw_only(), "max_width"_a = 2, "threads"_a = 1,
         "max_next_layer_states"_a = nb::none(), "report_landing_states"_a = false, "report_co_occurrence"_a = false,
         "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,
-        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
         paragraphs({"Parallel IW rollouts: one IW(max_width) ladder per seed with a randomized layer order seeded by it, on "
                      "`threads` threads (0: one per hardware thread, capped at len(seeds)) over the one task. For a seed a "
                      "rollout's result is the same at every thread count. Per rollout: the ladder, the reached atoms, "
                      "the number of distinct states created and, when reported, the landing states (per fluent atom "
                      "the first created state holding it) and co-occurrence (per fluent atom the atoms of the created "
                      "states holding it). max_seconds spans the whole batch, the other budgets apply per rollout.",
+                    k_tree_doc,
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc,
                     k_parallel_doc,
                     " A worker is a rollout (an index into seeds)."})
@@ -3930,6 +4269,7 @@ void bind_search(nb::module_& parent)
                      "goal=[['(on a b)']]); max_expanded caps the expansions of all workers together, max_states "
                      "applies per worker, max_seconds to the call.",
                     k_control_doc,
+                    k_transition_doc,
                     k_iw_family_doc,
                     k_parallel_doc,
                     " A worker is 0 (the certifier) or 1..K."})

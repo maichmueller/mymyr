@@ -33,6 +33,8 @@ SiwResult siw(const Task& task, const SiwOptions& options)
             r.cost = 0;
             r.partial_plan = std::exchange(r.plan, {});
         }
+        for (auto& subproblem : r.subproblems)
+            detail::normalize_trees(subproblem.passes, task.words());
         r.fluent_slots = task.atoms().fluent_slots();
         if (c.observer)
         {

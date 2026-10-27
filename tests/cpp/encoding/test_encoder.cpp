@@ -645,8 +645,8 @@ test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
 
 TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
 {
-    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 9666753341531803529ull},
-                                                               {"philosophers__p03-phil4", 8295029642410720015ull}};
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 7519147456470550542ull},
+                                                           {"philosophers__p03-phil4", 2548283153954645567ull}};
     for (const auto& [name, digest] : expected)
     {
         const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");
@@ -656,3 +656,34 @@ TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
     }
 }
 }  // namespace
+
+TEST(EncoderBatches, SlotMappedStatesUseTheDestinationLayout)
+{
+    const auto fixed = test::pddl_task("blocks", "probBLOCKS-8-0");
+    TaskOptions options;
+    options.atoms = TaskOptions::Atoms::Lazy;
+    const auto lazy = Task::create(fixed->data(), options);
+    const auto twin = lazy->frozen();
+    const auto map = lazy->slot_map_to(*twin)->snapshot();
+    const State source = lazy->initial_state();
+    const State destination = twin->initial_state();
+    for (Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        FlatOptions encoding_options;
+        encoding_options.layout = layout;
+        const auto encoder = FlatEncoder::create(lazy, encoding_options);
+        EncodeInput in;
+        in.states = {destination.words().data(), 1, destination.size_words(), 0};
+        const auto expected = encoder->encode(in);
+        in.states = {source.words().data(), 1, source.size_words(), 0};
+        in.slot_map = map->data();
+        in.slot_map_size = static_cast<u32>(map->size());
+        expect_equal_bundles(*expected, *encoder->encode(in));
+        in.slot_map_size = 0;
+        EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+        std::vector<u32> missing(map->size(), AtomIndex::k_empty);
+        in.slot_map = missing.data();
+        in.slot_map_size = static_cast<u32>(missing.size());
+        EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+    }
+}

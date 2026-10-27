@@ -95,22 +95,36 @@ def python_lines(file_suffix, call):
 # loaded one under ``-W error`` would die on the interpreter's warning about enabling the GIL.
 
 ISOLATED_REPORT = "MYMYR_TEST_ISOLATED_REPORT"
+# the markers of tests that run in a child process, one per test file and marker, and the child's environment
+ISOLATED_MARKERS = {
+    "needs_gil": {"PYTHON_GIL": "1"},
+    # an initialized XLA GPU client polls its streams, which invalidates a torch CUDA graph capture held meanwhile
+    "jax_on_cpu": {"JAX_PLATFORMS": "cpu"},
+}
 _isolated_outcomes: dict[str, dict] = {}
-_isolated_groups: dict[str, list[str]] = {}
+_isolated_groups: dict[tuple[str, str], list[str]] = {}
 
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "needs_gil: loads a module that enables the GIL; runs in a child process (tests/python/conftest.py)"
     )
+    config.addinivalue_line(
+        "markers", "jax_on_cpu: holds a CUDA graph capture while it waits; runs in a child process whose JAX uses only "
+        "the CPU (tests/python/conftest.py)"
+    )
+
+
+def _isolated_marker(item):
+    return next((name for name in ISOLATED_MARKERS if item.get_closest_marker(name)), None)
 
 
 def pytest_collection_modifyitems(config, items):
     if ISOLATED_REPORT in os.environ:
         return
     for item in items:
-        if item.get_closest_marker("needs_gil"):
-            _isolated_groups.setdefault(str(item.path), []).append(item.nodeid)
+        if marker := _isolated_marker(item):
+            _isolated_groups.setdefault((str(item.path), marker), []).append(item.nodeid)
 
 
 def pytest_runtest_logreport(report):
@@ -126,7 +140,7 @@ def pytest_runtest_logreport(report):
         f.write(json.dumps(entry) + "\n")
 
 
-def _run_isolated(config, path):
+def _run_isolated(config, path, marker):
     fd, report = tempfile.mkstemp(suffix=".jsonl")
     os.close(fd)
     from python_children import run_code
@@ -142,9 +156,10 @@ def _run_isolated(config, path):
         args += ["-o", override]
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
-    targets = [path + "::" + nodeid.split("::", 1)[1] for nodeid in _isolated_groups[path]]
+    group = _isolated_groups[(path, marker)]
+    targets = [path + "::" + nodeid.split("::", 1)[1] for nodeid in group]
     proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *targets,
-                    env={**os.environ, ISOLATED_REPORT: report, "PYTHON_GIL": "1"}, timeout=None,
+                    env={**os.environ, ISOLATED_REPORT: report, **ISOLATED_MARKERS[marker]}, timeout=None,
                     capture_output=True, check=False)
     try:
         for line in pathlib.Path(report).read_text().splitlines():
@@ -154,16 +169,17 @@ def _run_isolated(config, path):
                 _isolated_outcomes[entry["nodeid"]] = entry
     finally:
         os.unlink(report)
-    for nodeid in _isolated_groups[path]:
+    for nodeid in group:
         _isolated_outcomes.setdefault(nodeid, {"outcome": "failed", "text": proc.stdout[-4000:] + proc.stderr[-4000:]})
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_pyfunc_call(pyfuncitem):
-    if ISOLATED_REPORT in os.environ or not pyfuncitem.get_closest_marker("needs_gil"):
+    marker = None if ISOLATED_REPORT in os.environ else _isolated_marker(pyfuncitem)
+    if marker is None:
         return None
     if pyfuncitem.nodeid not in _isolated_outcomes:
-        _run_isolated(pyfuncitem.config, str(pyfuncitem.path))
+        _run_isolated(pyfuncitem.config, str(pyfuncitem.path), marker)
     entry = _isolated_outcomes[pyfuncitem.nodeid]
     if entry["outcome"] == "failed":
         pytest.fail(f"in the child process:\n{entry['text']}", pytrace=False)

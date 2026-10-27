@@ -552,6 +552,7 @@ def test_device_task_ids_outside_the_table_raise():
         env.check_errors()
     env.reset(task_ids=torch.tensor([0, 1, 0, 1], dtype=torch.int32, device=dev))
     env.check_errors()
+    pytest.importorskip("torchrl")
     penv = rt.PlanningEnv(table, 4, device=dev)
     td = penv.reset()
     td["next_task_id"] = torch.tensor([0, 1, 0, 99], device=dev)

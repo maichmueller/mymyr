@@ -114,6 +114,17 @@ private:
 
 using encoding::BatchShape;
 
+/// Resolves literals on the acquisition's stream, without allocation or synchronization. task_ids is per literal
+/// (null: instance 0). Writes u8 kinds and i32 slots [N] (-1 without a slot); ORs value 4 into a zeroed u64 status
+/// for invalid literals. Hold the acquisition and all buffers through the last CUDA graph replay.
+void literal_slots(const EncodingAcquisition& context, const DeviceLiteralInput& input, u8* kinds, i32* slots,
+                   u64* status);
+/// Atomically ORs slot bits into zeroed masks on the acquisition's stream. Fixed literals that fail set
+/// unsatisfiable to 1. task_ids is per output row (null: instance 0); invalid entries set status and are skipped.
+/// All output widths equal the table's fluent and derived word counts. No allocation or synchronization.
+void literal_masks(const EncodingAcquisition& context, const DeviceLiteralInput& input,
+                   const DeviceLiteralPlacement& placement, const DeviceLiteralMasks& output);
+
 /// How the derived words of an encode's rows come, for the size of its scratch: evaluated on the device when a graph
 /// reads derived atoms and DeviceEncodeInput::derived is null, or always supplied (no room for an evaluation, which
 /// such an encode then refuses).

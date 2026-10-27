@@ -33,7 +33,7 @@ from ._env import Env, EnvState, FlatExpansion, Observation, PaddedExpansion, Su
 from ._ffi import register, registered
 from ._flashbax import transition_example, transition_item, transition_spec
 from ._mctx import goal_count_value, mctx_recurrent_fn, mctx_root
-from ._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
+from ._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks, visited_mask
 from . import rng
 
 __all__ = [
@@ -59,4 +59,5 @@ __all__ = [
     "transition_example",
     "transition_item",
     "transition_spec",
+    "visited_mask",
 ]

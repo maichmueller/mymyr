@@ -18,6 +18,7 @@
 #include "dlpack.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
+#include "translate_bindings.hpp"
 
 #include "mymyr/cuda/arena.hpp"
 #include "mymyr/cuda/brfs.hpp"
@@ -28,6 +29,7 @@
 #include "mymyr/cuda/kernels.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/runtime.hpp"
+#include "mymyr/cuda/translate.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 #include "mymyr/search/control.hpp"
 #include "mymyr/search/validate.hpp"
@@ -52,6 +54,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <type_traits>
 #include <vector>
 
 namespace mymyr::python::ann
@@ -577,9 +580,12 @@ void retain_workspace(cudaGraph_t graph, const std::shared_ptr<ExpansionWorkspac
 
 /// Per-table CUDA state (a Task's on its core, a TaskTable's on the table, a TaskSuite's on the suite): a default
 /// context per device and idle device expanders per context (they keep their context alive until the table goes).
+struct TranslateUpload;
+
 struct TaskCuda
 {
     std::map<int, PyContextPtr> contexts;
+    std::map<std::vector<u64>, std::shared_ptr<TranslateUpload>> translations;
     std::map<const cuda::DeviceContext*, std::vector<std::shared_ptr<ExpansionWorkspace>>> idle;
     std::map<std::pair<const cuda::DeviceContext*, unsigned long long>, std::weak_ptr<ExpansionWorkspace>> captures;
 };
@@ -1350,6 +1356,219 @@ using ArrayPair = nb::typed<nb::tuple, ann::Any, ann::Any>;
 using ArrayDict = nb::typed<nb::dict, std::string, ann::Any>;
 using ActionList = nb::typed<nb::list, PyAction>;
 }  // namespace
+
+namespace
+{
+struct TranslateUpload
+{
+    cuda::ContextPtr context;
+    cuda::TranslateView view;
+    std::vector<std::shared_ptr<cuda::DeviceBuffer>> buffers;
+    cuda::Event ready;
+    std::mutex use_mutex;
+    std::map<cudaStream_t, std::shared_ptr<cuda::LastUse>> uses;
+};
+}
+
+nb::object translate_device(PySlotMap& map, nb::handle rows, nb::handle task_ids, bool drop, nb::handle status,
+                            nb::handle stream, nb::handle ctx)
+{
+    const dl::Device dev = dl::dlpack_device(rows);
+    const bool table = nb::isinstance<PyTable>(map.source);
+    PyTaskCore* core = table ? nullptr : owner_of(map.source).core;
+    PyTable* py = table ? nb::inst_ptr<PyTable>(map.source) : nullptr;
+    auto& mutex = table ? py->cuda_mutex : core->cuda_mutex;
+    auto& slot = table ? py->cuda : core->cuda;
+    PyContextPtr c = slot_context(mutex, slot, ctx, dev.device_id);
+    cuda::DeviceGuard guard(dev.device_id);
+    const OpStream os = c->stream_of(stream);
+    cudaStreamCaptureStatus capture;
+    cuda::check(cudaStreamIsCapturing(os.s, &capture), "translate capture status");
+    if (capture != cudaStreamCaptureStatusNone && (status.is_none() || stream.is_none()))
+        throw nb::value_error("mymyr: translate under CUDA graph capture needs status= and stream=");
+    if (capture == cudaStreamCaptureStatusNone)
+        c->drain();
+    std::vector<std::shared_ptr<const std::vector<u32>>> snapshots;
+    std::vector<u64> key{reinterpret_cast<std::uintptr_t>(c->ctx.get())};
+    for (u32 i = 0; i < map.maps.size(); ++i)
+    {
+        if (!map.targets[i]->atoms().frozen())
+            throw nb::value_error("mymyr: translate: a device target must have fixed atom slots (device rows cannot "
+                                  "intern lazy slots; translate into target.frozen() or translate host rows)");
+        snapshots.push_back(map.maps[i]->snapshot());
+        key.push_back(map.targets[i]->uid());
+        key.push_back(snapshots.back()->size());
+    }
+    std::shared_ptr<TranslateUpload> upload;
+    {
+        std::lock_guard lock(mutex);
+        auto& cache = slot_cuda(slot).translations;
+        auto it = cache.find(key);
+        if (it != cache.end())
+            upload = it->second;
+        else
+        {
+            if (capture != cudaStreamCaptureStatusNone)
+                throw nb::value_error("mymyr: translate: warm the slot map on this context before capture");
+            upload = std::make_shared<TranslateUpload>();
+            upload->context = c->ctx;
+            std::vector<cuda::TranslateInstance> instances;
+            std::vector<u32> slots, numeric;
+            std::vector<u64> constants, initial;
+            for (u32 i = 0; i < map.maps.size(); ++i)
+            {
+                const auto& src = *map.sources[i];
+                const auto& dst = *map.targets[i];
+                cuda::TranslateInstance inst;
+                inst.slots_begin = static_cast<u32>(slots.size());
+                inst.slots = static_cast<u32>(snapshots[i]->size());
+                inst.numeric_begin = static_cast<u32>(numeric.size());
+                inst.numeric_slots = src.numeric_slots();
+                inst.constant_begin = static_cast<u32>(constants.size());
+                inst.initial_begin = static_cast<u32>(initial.size());
+                inst.target_slots = dst.atoms().fluent_slots();
+                inst.target_numeric_slots = dst.numeric_slots();
+                inst.missing_constants = static_cast<u32>(map.maps[i]->missing_constants().size());
+                inst.source_words = bits::words_for(inst.slots);
+                inst.target_words = dst.words();
+                inst.source_i32 = src.numeric_storage() == NumericStorage::I32;
+                inst.target_i32 = dst.numeric_storage() == NumericStorage::I32;
+                inst.quantum = dst.numeric().quantum;
+                inst.tolerant = dst.numeric().tolerant;
+                instances.push_back(inst);
+                slots.insert(slots.end(), snapshots[i]->begin(), snapshots[i]->end());
+                const auto& ns = map.maps[i]->numeric_slots();
+                numeric.insert(numeric.end(), ns.begin(), ns.end());
+                constants.resize(constants.size() + dst.words(), 0);
+                const auto& fixed = map.maps[i]->constant_words();
+                std::copy(fixed.begin(), fixed.end(), constants.begin() + inst.constant_begin);
+                const State init = dst.initial_state();
+                initial.insert(initial.end(), init.numeric().begin(), init.numeric().end());
+            }
+            const auto copy = [&](const auto& data) -> const void* {
+                const u64 bytes = data.size() * sizeof(typename std::decay_t<decltype(data)>::value_type);
+                auto buffer = std::make_shared<cuda::DeviceBuffer>(c->ctx, std::max<u64>(bytes, 1));
+                if (bytes)
+                    cuda::check(cudaMemcpyAsync(buffer->data(), data.data(), bytes, cudaMemcpyHostToDevice, c->ctx->stream()),
+                                "translate map upload");
+                const void* ptr = buffer->data();
+                upload->buffers.push_back(std::move(buffer));
+                return ptr;
+            };
+            upload->view.instances = static_cast<const cuda::TranslateInstance*>(copy(instances));
+            upload->view.slots = static_cast<const u32*>(copy(slots));
+            upload->view.numeric = static_cast<const u32*>(copy(numeric));
+            upload->view.constants = static_cast<const u64*>(copy(constants));
+            upload->view.initial = static_cast<const u64*>(copy(initial));
+            upload->view.count = static_cast<u32>(instances.size());
+            upload->ready.record(c->ctx->stream());
+            upload->ready.synchronize();
+            // Outputs retain older uploads while captured graphs still reference them.
+            for (auto prior = cache.begin(); prior != cache.end();)
+            {
+                bool same_pair = prior->first.size() == key.size() && prior->first[0] == key[0];
+                for (usize k = 1; same_pair && k < key.size(); k += 2)
+                    same_pair = prior->first[k] == key[k];
+                if (same_pair)
+                    prior = cache.erase(prior);
+                else
+                    ++prior;
+            }
+            cache.emplace(key, upload);
+        }
+    }
+    DeviceInput in = import_device(rows, *c, os, "states");
+    const WordsLayout w = device_words(in);
+    const u32 sn = table ? map.source_numeric : map.sources[0]->numeric_words();
+    const u32 sw = table ? map.source_words : bits::words_for(static_cast<u32>(snapshots[0]->size()));
+    if (w.words < sn || w.words - sn < sw || w.rows > 0x7fffffff)
+        throw nb::value_error("mymyr: translate: source rows have the wrong width or too many rows");
+    if (map.maps.size() > 1 && task_ids.is_none())
+        throw nb::value_error("mymyr: translate: task_ids is required for a table with multiple instances");
+    std::vector<std::shared_ptr<void>> keep{in.im.keep, upload};
+    const i32* ids = device_task_ids(task_ids, *c, os, w.rows, keep);
+    const u32 tw = table ? map.target_words : std::max<u32>(1, map.targets[0]->words());
+    const u32 tn = table ? map.target_numeric : map.targets[0]->numeric_words();
+    const u32 rw = tw + tn;
+    auto output = device_output(*c, checked_mul({w.rows, rw, 8}, "translated device rows"), os);
+    auto mask = device_output(*c, w.rows, os);
+    auto internal_status = status.is_none() ? device_output(*c, 3 * sizeof(i32), os) : nullptr;
+    i32* error = internal_status ? static_cast<i32*>(internal_status->data()) : nullptr;
+    if (!status.is_none())
+    {
+        DeviceInput im = import_device(status, *c, os, "status");
+        error = device_dest<i32>(im, "status", {{dl::k_int, 32}, {dl::k_uint, 32}}, 1);
+        if (im.im.shape[0] != 3)
+            throw nb::value_error("mymyr: translate: status must have shape [3]");
+        keep.push_back(im.im.keep);
+    }
+    cuda::check(cuda::translate_rows(upload->view, w.data, w.rows, w.stride, w.words - sn, ids,
+                                      static_cast<u64*>(output->data()), tw, rw,
+                                      static_cast<u8*>(mask->data()), error, os.s), "translate_rows");
+    {
+        std::lock_guard lock(upload->use_mutex);
+        auto& last = upload->uses[os.s];
+        if (!last)
+            last = std::make_shared<cuda::LastUse>(dev.device_id);
+        last->record(os.s);
+        for (auto& buffer : upload->buffers)
+            buffer->retire_stream(os.s, last);
+    }
+    if (internal_status)
+    {
+        std::array<i32, 3> flags{};
+        cuda::check(cudaMemcpyAsync(flags.data(), error, sizeof(flags), cudaMemcpyDeviceToHost, os.s), "translate status");
+        cuda::check(cudaStreamSynchronize(os.s), "translate status wait");
+        if (flags[0] & 2)
+        {
+            if (flags[2] < 0)
+                throw nb::value_error(("mymyr: translate: task_ids[" + std::to_string(flags[1]) +
+                                       "] is outside the source table").c_str());
+            throw nb::value_error(("mymyr: translate: row " + std::to_string(flags[1]) + " sets an unknown source slot " +
+                                   std::to_string(flags[2])).c_str());
+        }
+        if (flags[0] && !drop)
+        {
+            i32 id = 0;
+            if (ids && flags[1] >= 0)
+            {
+                cuda::check(cudaMemcpyAsync(&id, ids + flags[1], sizeof(id), cudaMemcpyDeviceToHost, os.s), "translate error instance");
+                cuda::check(cudaStreamSynchronize(os.s), "translate error instance wait");
+            }
+            std::string name = "a source value";
+            if (id >= 0 && static_cast<usize>(id) < map.sources.size() && flags[2] >= 0)
+            {
+                const auto& src = *map.sources[static_cast<usize>(id)];
+                const u32 slot_id = static_cast<u32>(flags[2]);
+                const u32 fluent_slots = static_cast<u32>(snapshots[static_cast<usize>(id)]->size());
+                if (slot_id < fluent_slots)
+                    name = src.format(SlotId{slot_id});
+                else if (slot_id - fluent_slots < src.numeric_slots())
+                    name = src.numeric_name(slot_id - fluent_slots);
+                else if (slot_id - fluent_slots - src.numeric_slots() < map.maps[static_cast<usize>(id)]->missing_constants().size())
+                    name = map.maps[static_cast<usize>(id)]->missing_constants()[slot_id - fluent_slots - src.numeric_slots()];
+            }
+            throw nb::value_error(("mymyr: translate: row " + std::to_string(flags[1]) + ": " + name +
+                                    " has no representable value in the target").c_str());
+        }
+    }
+    struct ResultOwner
+    {
+        std::shared_ptr<cuda::DeviceBuffer> buffer;
+        std::vector<std::shared_ptr<void>> keep;
+    };
+    const auto emit = [&](const std::shared_ptr<cuda::DeviceBuffer>& buffer, rl::DType dtype,
+                           std::vector<i64> shape, bool words) {
+        auto owner = std::make_shared<ResultOwner>(buffer, keep);
+        ArraySpec spec{owner, buffer->data(), dtype, std::move(shape), {}, false, words};
+        DeviceExport device{dl::k_cuda, dev.device_id, std::make_shared<BufferSync>(buffer, os.s)};
+        return export_device_array(std::move(spec), std::move(device), in.fw, w.enc);
+    };
+    nb::object result = emit(output, rl::DType::U64, {static_cast<i64>(w.rows), rw}, true);
+    if (drop)
+        return nb::make_tuple(result, emit(mask, rl::DType::Bool, {static_cast<i64>(w.rows)}, false));
+    return result;
+}
 
 // Multi-search IW, device rollouts and batched IW(1) (cuda_search_bindings.cpp); `lookup` is task_context's
 // device context.

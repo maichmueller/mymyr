@@ -3,6 +3,7 @@
 // pop, budget and observer conventions are those of the queued pass in iw.cpp.
 
 #include "iw_detail.hpp"
+#include "tree_sink.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/hash.hpp"
@@ -37,21 +38,21 @@ public:
         m_woff.push_back(m_words.size());
         m_wlen.push_back(n);
         m_words.insert(m_words.end(), w, w + n);
-        m_parent.push_back(parent);
-        m_schema.push_back(schema);
+        m_parent.push_back(static_cast<i32>(parent));
+        m_schema.push_back(static_cast<i32>(schema));
         m_boff.push_back(m_binding.size());
         m_binding.insert(m_binding.end(), binding.begin(), binding.end());
-        m_depth.push_back(depth);
+        m_depth.push_back(static_cast<i32>(depth));
         m_skip.push_back(skip ? 1 : 0);
     }
 
     [[nodiscard]] std::vector<Action> plan(u32 id, const Successors& succ) const
     {
         std::vector<Action> out;
-        for (u32 v = id; m_parent[v] != k_none; v = m_parent[v])
+        for (u32 v = id; m_parent[v] != -1; v = m_parent[v])
         {
             const ObjectId* b = m_binding.data() + m_boff[v];
-            out.emplace_back(SchemaId{m_schema[v]}, std::vector<ObjectId>(b, b + succ.arity(m_schema[v])));
+            out.emplace_back(SchemaId{static_cast<u32>(m_schema[v])}, std::vector<ObjectId>(b, b + succ.arity(m_schema[v])));
         }
         std::reverse(out.begin(), out.end());
         return out;
@@ -64,9 +65,18 @@ public:
                m_binding.capacity() * sizeof(ObjectId);
     }
 
+    void release(TreeSink& sink, u32 words)
+    {
+        std::vector<u64> rows(static_cast<usize>(size()) * words, 0);
+        for (u32 i = 0; i < size(); ++i)
+            std::copy_n(view(i).w, view(i).nw, rows.data() + static_cast<usize>(i) * words);
+        sink.nodes(std::move(rows), words, std::move(m_parent), std::move(m_depth), std::move(m_schema), m_boff, m_binding);
+    }
+
 private:
     std::vector<u64> m_words, m_woff, m_boff;
-    std::vector<u32> m_wlen, m_parent, m_schema, m_depth;
+    std::vector<u32> m_wlen;
+    std::vector<i32> m_parent, m_schema, m_depth;
     std::vector<u8> m_skip;
     std::vector<ObjectId> m_binding;
 };
@@ -81,6 +91,7 @@ struct Candidate
     u32 wlen;
     u64 aoff;     // add slots false in the parent, into adds
     u32 alen;
+    bool reported = false;
 };
 }  // namespace
 
@@ -100,6 +111,9 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
     if (task.numeric_slots() > 0)
         throw std::invalid_argument("mymyr: IW transition ordering does not support tasks with numeric fluents");
 
+    std::optional<TreeSink> sink;
+    if (o.tree != TreeRecord::None)
+        sink.emplace(o.tree, task, 1);
     Nodes nodes;
     const u32 rn = bits::trimmed_size(root.w, root.nw);
     nodes.push(root.w, rn, k_none, k_none, {}, 0, false);
@@ -127,6 +141,27 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
     std::vector<u8> taken;
     u32 layer_begin = 0, layer_end = 1;
     bool stop = false;
+
+    auto discard_pending = [&]()
+    {
+        if (!sink && !obs)
+            return;
+        for (const Candidate& x : cands)
+            if (!x.reported)
+            {
+                const StateView child{words.data() + x.woff, x.wlen, nullptr, 0};
+                const ObjectId* b = binding.data() + x.boff;
+                if (sink)
+                    sink->transition(x.parent, x.schema, b, succ.arity(x.schema), child, k_none, TransitionOutcome::Pruned);
+                if (obs)
+                {
+                    const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b, b + succ.arity(x.schema)));
+                    obs->on_generate(x.parent, a, ~u64{0}, child, false);
+                    obs->on_prune(x.parent, a, child);
+                    obs->on_transition(x.parent, a, ~u64{0}, child, TransitionOutcome::Pruned);
+                }
+            }
+    };
 
     while (!stop && layer_begin < layer_end)
     {
@@ -160,7 +195,10 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 succ.prepare(cv);
                 prepared = true;
             }
-            if (goal.test(succ, cv, prepared))
+            const bool is_goal = goal.test(succ, cv, prepared);
+            if (sink)
+                sink->goal(id, is_goal);
+            if (is_goal)
             {
                 finish(SearchStatus::Solved);
                 out.plan = nodes.plan(id, succ);
@@ -192,10 +230,14 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             if (nodes.skip(id) || nodes.depth(id) >= budget.max_depth)
             {
                 ++st.skipped;
+                if (sink)
+                    sink->flag(id, TreeNodeFlag::Skipped);
                 continue;
             }
             if (!prepared)
                 succ.prepare(cv);
+            if (sink)
+                sink->flag(id, TreeNodeFlag::Expanded);
             succ.generate<true>(
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
@@ -225,7 +267,10 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 break;
         }
         if (stop)
+        {
+            discard_pending();
             break;
+        }
 
         // 2. order the layer
         const u32 m = static_cast<u32>(cands.size());
@@ -253,23 +298,32 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
         const u32 next_begin = nodes.size();
         for (u32 i : perm)
         {
-            const Candidate& x = cands[i];
+            Candidate& x = cands[i];
             const StateView pv = nodes.view(x.parent);
             const StateView child{words.data() + x.woff, x.wlen, nullptr, 0};
             const std::span<const ObjectId> b(binding.data() + x.boff, succ.arity(x.schema));
-            auto reject = [&]()
+            auto reject = [&](TransitionOutcome outcome = TransitionOutcome::Pruned)
             {
+                x.reported = true;
+                if (sink)
+                    sink->transition(x.parent, x.schema, b.data(), static_cast<u32>(b.size()), child, k_none, outcome);
                 if (obs)
                 {
                     const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end()));
                     obs->on_generate(x.parent, a, ~u64{0}, child, false);
                     obs->on_prune(x.parent, a, child);
+                    obs->on_transition(x.parent, a, ~u64{0}, child, outcome);
                 }
             };
             if (!c.blocked.empty() && c.blocked.contains(child))
             {
                 ++st.blocked;  // checked first: a blocked state marks no tuple
-                reject();
+                reject(TransitionOutcome::Blocked);
+                continue;
+            }
+            if (bits::equal(child.w, child.nw, pv.w, pv.nw))
+            {
+                reject(TransitionOutcome::SelfLoop);
                 continue;
             }
             adds.assign(adds_buf.begin() + static_cast<std::ptrdiff_t>(x.aoff), adds_buf.begin() + static_cast<std::ptrdiff_t>(x.aoff + x.alen));
@@ -283,11 +337,6 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             {
                 // the optimized IW(1) root: every new successor other than the root enters, the non-novel ones
                 // are not expanded
-                if (bits::equal(child.w, child.nw, pv.w, pv.nw))
-                {
-                    reject();
-                    continue;
-                }
                 const u64 h = hash::state_words(child.w, child.nw);
                 bool dup = false;
                 for (auto [it, end] = root_seen.equal_range(h); it != end && !dup; ++it)
@@ -297,7 +346,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 }
                 if (dup)
                 {
-                    reject();
+                    reject(TransitionOutcome::Duplicate);
                     continue;
                 }
                 skip = adds.empty() || !table.test<true>(pv.w, pv.nw, child.w, child.nw, adds);
@@ -314,8 +363,15 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 stop = true;
                 break;
             }
+            x.reported = true;
+            if (sink)
+                sink->transition(x.parent, x.schema, b.data(), static_cast<u32>(b.size()), child, nodes.size(), TransitionOutcome::Opened);
             if (obs)
-                obs->on_generate(x.parent, Action(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end())), nodes.size(), child, true);
+            {
+                const Action a(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end()));
+                obs->on_generate(x.parent, a, nodes.size(), child, true);
+                obs->on_transition(x.parent, a, nodes.size(), child, TransitionOutcome::Opened);
+            }
             nodes.push(child.w, child.nw, x.parent, x.schema, b, nodes.depth(x.parent) + 1, skip);
             ++st.generated_in_tree;
             if (nodes.size() >= budget.max_states)
@@ -325,13 +381,21 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 break;
             }
         }
+        if (stop)
+            discard_pending();
         layer_begin = next_begin;
         layer_end = nodes.size();
     }
     if (!status_set)
         st.status = SearchStatus::Exhausted;
-    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
     out.table_bytes = table.bytes();
     out.node_bytes = nodes.bytes();
+    if (sink)
+    {
+        nodes.release(*sink, std::max<u32>(task.words(), 1));
+        st.tree = sink->finish(succ, goal);
+        out.node_bytes = std::max(out.node_bytes, tree_bytes(*st.tree));
+    }
+    st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
 }
 }  // namespace mymyr::search::detail

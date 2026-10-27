@@ -17,6 +17,20 @@
 
 namespace mymyr::cuda
 {
+void literal_slots(const EncodingAcquisition& context, const DeviceLiteralInput& input, u8* kinds, i32* slots,
+                   u64* status)
+{
+    check(detail::launch_literal_slots(context.view, input, kinds, slots, status, context.stream()),
+          "literal slot lookup");
+}
+
+void literal_masks(const EncodingAcquisition& context, const DeviceLiteralInput& input,
+                   const DeviceLiteralPlacement& placement, const DeviceLiteralMasks& output)
+{
+    check(detail::launch_literal_masks(context.view, input, placement, output, context.stream()),
+          "literal masks");
+}
+
 namespace
 {
 u64 add(u64 a, u64 b)
@@ -98,7 +112,9 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     GraphBounds& bounds = facts.bounds;
     const bool levels = schema.has_subgoals();
     const bool history = schema.has_history();
-    bounds.levels = levels ? schema.options().max_goal_level : 0;
+    bounds.levels = levels ? schema.options().max_goal_level +
+                               (schema.options().repeated_literals == encoding::RepeatedLiterals::Highest ? 1u : 0u)
+                           : 0;
     bounds.history = history;
     bounds.numeric_words = host.table().numeric_words();
     bounds.schemas = v.num_schemas;

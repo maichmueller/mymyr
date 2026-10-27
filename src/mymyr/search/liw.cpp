@@ -62,6 +62,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);
     env.witness = o.witness_pruning;
+    env.tree = o.tree;
     env.canonical = o.canonical_order;
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;
@@ -83,7 +84,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const State root = o.start ? *o.start : task.initial_state();
     if (env.root)
         env.root->on_start(root);
-    IwResult r = detail::novelty_ladder(env, 0, o.max_width, false,
+    IwResult r = detail::novelty_ladder(env, root, 0, o.max_width, false,
                                         [&](u32 k, detail::PassOut& po)
                                         {
                                             if (k == 0)

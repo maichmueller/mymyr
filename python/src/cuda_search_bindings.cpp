@@ -9,6 +9,7 @@
 #include "py_formula.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
+#include "py_search_tree.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/multi_iw.hpp"
@@ -411,8 +412,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         .def(
             "passes",
             [](const PyIwBatch& x, i64 i) {
-                const std::span<const search::IwPassStatistics> p = x.b.passes(checked_index(x, i));
-                return std::vector<search::IwPassStatistics>(p.begin(), p.end());
+                const u32 k = checked_index(x, i);
+                return pass_list(owner_of_search(x, k), x.b.passes(k));
             },
             "i"_a,
             "The IW passes of search i (mymyr.search.IwPass; as mymyr.search.IwResult.passes).")

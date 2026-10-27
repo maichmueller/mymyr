@@ -38,7 +38,7 @@ def schema_to_dict(schema: EncodingSchema) -> dict[str, Any]:
     """The serialized form of a schema, a dictionary that ``json`` writes and reads back unchanged:
 
     - ``version``: the version of the catalog rules (``schema.version``);
-    - ``options``: the schema's options in normal form (``schema.options``);
+    - ``options``: the schema's options in normal form (``schema.options``), including ``repeated_literals``;
     - ``fingerprint``: ``schema.schema_fingerprint`` as 16 hex digits (the unsigned 64-bit value);
     - ``catalog``: the relations in id order, one list per column: ``names``, ``arities``, ``logical_arities``,
       ``lanes``, ``signs``, ``levels``, ``derivations`` and ``slot_roles`` (a list of role codes per relation, named

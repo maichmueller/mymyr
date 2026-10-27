@@ -90,6 +90,7 @@ add_library(mymyr_core STATIC
     src/mymyr/formalism/pddl_writer.cpp
     src/mymyr/formalism/text_format.cpp
     src/mymyr/task/atom_index.cpp
+    src/mymyr/task/slot_map.cpp
     src/mymyr/task/compile.cpp
     src/mymyr/task/task.cpp
     src/mymyr/task/workspace.cpp
@@ -107,6 +108,7 @@ add_library(mymyr_core STATIC
     # task fingerprint, rl.expand, task arrays
     src/mymyr/formalism/fingerprint.cpp
     src/mymyr/rl/expand.cpp
+    src/mymyr/rl/masks.cpp
     src/mymyr/rl/task_arrays.cpp
     src/mymyr/rl/device_search.cpp
     # task tables (many instances of one domain) and the CPU env pool
@@ -118,6 +120,8 @@ add_library(mymyr_core STATIC
     src/mymyr/rl/env.cpp
     # RL helpers: novelty rewards, prefix masks, hindsight relabels
     src/mymyr/rl/ops.cpp
+    # lifted goal templates (lifted hindsight relabelling)
+    src/mymyr/rl/goal_templates.cpp
     # heuristics and best-first search
     src/mymyr/heuristics/action_costs.cpp
     src/mymyr/heuristics/relaxed_task.cpp
@@ -177,7 +181,7 @@ target_sources(mymyr_core PRIVATE
 )
 
 add_library(mymyr_encoding STATIC src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
-    src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/horizon.cpp src/mymyr/encoding/horizon_graphs.cpp
+    src/mymyr/encoding/context.cpp src/mymyr/encoding/literals.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/horizon.cpp src/mymyr/encoding/horizon_graphs.cpp
     src/mymyr/encoding/validate.cpp src/mymyr/encoding/stream.cpp src/mymyr/encoding/hgraph.cpp
     src/mymyr/encoding/collate.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)

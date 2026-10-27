@@ -37,7 +37,7 @@
 //
 // blocked_states: a blocked successor becomes a SOLVED child, never goal-tested nor registered. Observer events:
 // on_start; on_expand per materialized node; per new child on_generate (is_new = true), on_transition (Goal, Opened for
-// case 1, Pruned otherwise) and on_prune when it is not walked into; on_progress every progress_interval
+// case 1, Blocked, SelfLoop for a child equal to its parent, Pruned otherwise) and on_prune when it is not walked into; on_progress every progress_interval
 // materializations; on_solution and on_end. Node ids are tree node indices (the root is 0).
 //
 // The plan is normalized as in the other IW searches (search/iw.hpp): between two consecutive plan states the cheapest

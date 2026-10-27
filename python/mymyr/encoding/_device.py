@@ -617,6 +617,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
         specs = layout.specs(torch, rows.graphs, entities, args, targets, steps, numeric=numeric,
                              static_instances=static_instances, static_args=static_args)
         out = _outputs(torch, specs, device)
+        out["_entity_capacity"] = entities
         _relation_scratch(torch, out, layout, rows.graphs, args, device)
         scratch = _scratch(torch, native, stream, scratch_rows, device, rows.fields[_ROW_DERIVED] != 0)
         native.encode(stream, rows.fields, _pointers(out),
@@ -639,6 +640,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
                                     f"history {steps}): use index_dtype='int64'")
             specs = layout.specs(torch, rows.graphs, entities, args, targets, steps, tuples=tuples, numeric=numeric,
                                  static_instances=static_instances, static_args=static_args)
+            out["_entity_capacity"] = entities
             for name, (shape, dtype) in specs.items():
                 if name != "sizes":
                     out[name] = torch.empty(shape, dtype=dtype, device=device)
@@ -826,6 +828,7 @@ class DeviceFlatBatch:
         self._sizes = None if exact else arrays["sizes"]
         self._static_sizes = arrays["static_sizes"]
         self._graphs = self._arrays["task_ids"].shape[0]
+        self._entity_capacity = arrays.get("_entity_capacity")
 
     @property
     def nbytes_by_array(self) -> dict[str, int]:
@@ -969,12 +972,18 @@ class DeviceFlatBatch:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     @classmethod
-    def from_arrays(cls, encoder: Any, arrays: Any, exact: bool = False) -> "DeviceFlatBatch":
+    def from_arrays(cls, encoder: Any, arrays: Any, exact: bool = False, *,
+                    entity_capacity: Optional[int] = None) -> "DeviceFlatBatch":
         """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its 29 tensors (the arrays in the
-        order of ``mymyr.encoding.DeviceFlatBatch.array_names``, sizes last), for ``encoder``."""
+        order of ``mymyr.encoding.DeviceFlatBatch.array_names``, sizes last), for ``encoder``.
+        Supply ``entity_capacity`` for per-entity metadata when the entity arrays are implicit: their omitted tensors
+        do not retain the entity extent. This is a Python integer and does not read device counters.
+        """
         if len(arrays) != len(_OUTPUTS):
             raise _error(f"expected the {len(_OUTPUTS)} outputs of encode_flat, got {len(arrays)}")
-        return cls(encoder, dict(zip(_OUTPUTS, arrays, strict=True)), exact)
+        columns = dict(zip(_OUTPUTS, arrays, strict=True))
+        columns["_entity_capacity"] = entity_capacity
+        return cls(encoder, columns, exact)
 
     array_names = _OUTPUTS
 
@@ -987,7 +996,7 @@ class DeviceFlatBatch:
                 present)
 
     @classmethod
-    def _of(cls, template: tuple, outputs: Any) -> "DeviceFlatBatch":
+    def _of(cls, template: tuple, outputs: Any, entity_capacity: Optional[int] = None) -> "DeviceFlatBatch":
         """The capacity batch of the outputs of ``encode_flat`` (in ``array_names`` order) for a :meth:`_template`,
         made with attribute writes only (so that torch.compile traces it without a break)."""
         batch = object.__new__(cls)
@@ -999,6 +1008,7 @@ class DeviceFlatBatch:
         batch._static_sizes = outputs[len(_ARRAYS)]
         batch._sizes = outputs[len(_ARRAYS) + 1]
         batch._graphs = outputs[0].shape[0]
+        batch._entity_capacity = entity_capacity
         return batch
 
 
@@ -1135,6 +1145,7 @@ def _flush_rows(torch: Any, native: Any, stream: int, rows: "_Rows", status: Any
     native.flush(stream, rows.fields, status.data_ptr(), _pointers(out), [capacity, *caps[1:]], graphs.data_ptr(),
                  scratch.data_ptr(), scratch.numel(), zero_unused=zero_unused)
     batch = DeviceFlatBatch(encoder, out, exact=False)
+    batch._entity_capacity = caps[1]
     batch._device_graphs = graphs
     return batch, scratch
 
@@ -1207,6 +1218,7 @@ class DeviceCollator:
                     raise _error("cannot collate an overflowed batch")
                 specs = layout.specs(torch, graphs, entities, args, targets, tuples=tuples, numeric=numeric,
                                      static_instances=static_instances, static_args=static_args)
+                out["_entity_capacity"] = entities
                 for name, (shape, dtype) in specs.items():
                     if name != "sizes":
                         out[name] = torch.empty(shape, dtype=dtype, device=first.device)
@@ -1219,6 +1231,7 @@ class DeviceCollator:
             # collated batches have no history steps: the history capacity plays no part
             out = _outputs(torch, layout.specs(torch, graphs, *caps[1:5], numeric=caps[5], static_instances=caps[6],
                                                static_args=caps[7]), first.device)
+            out["_entity_capacity"] = caps[1]
             native.encode(_pointers(out), [graphs, *caps[1:]], scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(encoder, out, exact=caps is None)
         result._keepalive = (native, scratch, batches, arrays)

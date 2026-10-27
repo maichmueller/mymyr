@@ -50,10 +50,18 @@ width when all instances have that width; otherwise omit each instance's numeric
 ``noops=True`` compares atom and numeric words bit for bit with the parent (signed zeros and NaN payloads
 count as changes). ``drop_noops=True`` stably removes no-ops per parent unless all successors are no-ops, in which
 case it keeps them all. ``index`` maps kept rows to positions in the full parent expansion; every requested array is
-compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; outputs are undefined on capacity
-overflow. ``expand_into`` accepts ``succ_hash=``, ``noop=`` and ``index=``; digests need no ``succ=`` destination,
-and dropping requires ``index=``. The padded hashes/no-ops have zero padding; with dropping its ``index`` holds the
-canonical positions (-1 padding), otherwise flat row indices.
+compacted alike. ``generated`` counts before filtering, ``total`` and offsets after; on capacity overflow
+with dropping, ``generated`` stays exact but ``total``, offsets and the kept rows are undefined.
+``expand_into`` accepts ``succ_hash=``, ``noop=`` and ``index=``; digests need no ``succ=`` destination, and dropping
+requires ``index=`` when any per-successor array is written. The padded hashes/no-ops have zero padding; with dropping,
+``pad().canonical`` holds the positions (-1 padding); ``pad().index`` is always the flat row.
+
+Action masks without an expansion: :func:`applicable_schemas` returns bool [N, S], and
+:func:`applicable_objects` returns bool [N, O] for the next object given a schema and a parameter prefix.
+A bit is true iff an applicable full binding extends it, including numeric effect applicability rules.
+:func:`is_applicable` checks full labels in bool [N]. These functions accept CPU state arrays or States,
+return the input framework's bool arrays, release the GIL and split rows with ``pool=ThreadPool(T)``.
+They search for witnesses without constructing successor rows; CUDA inputs raise ValueError.
 
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read
@@ -109,7 +117,8 @@ asynchronous environments on the CPU (send / recv from any number of Python thre
 RL helpers: :func:`prefix_masks` / :func:`schema_masks` (factored action masks from an expansion's labels),
 :func:`novelty_update` (width-1 novelty rewards over per-environment atom tables) and :func:`her_relabel` (hindsight
 relabels with atom-set goals, counter-based RNG), in the inputs' framework: NumPy and torch (CPU and CUDA) run the
-native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`.
+native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`. :func:`lifted_goal_templates` makes the goals of
+lifted hindsight relabelling: per instance a few lifted conjunctions of its goal literals (:class:`GoalTemplates`).
 
 For custom encoders and environments (see also :mod:`mymyr.encoding`): ``table.atom_metadata()`` (the instances'
 atoms with ``atom_offsets``, table predicate ids), :func:`object_offsets` (PyG ``ptr``), :func:`goal_masks`,
@@ -128,26 +137,32 @@ from mymyr._core import Task, TaskHandle
 from mymyr._core._rl import (
     CpuEnvPool,
     Expansion,
+    GoalTemplates,
     PaddedExpansion,
     PoolBatch,
     TaskSuite,
     TaskTable,
     ThreadPool,
+    applicable_objects,
+    applicable_schemas,
+    is_applicable,
     expand,
     expand_into,
     goal_count,
     goal_test,
     is_goal,
+    lifted_goal_templates,
     numeric_values,
     random_walks,
     successor_bounds,
 )
-from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
+from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks, visited_mask
 from mymyr.rl._sampling import InstanceSampler
 
 __all__ = [
     "CpuEnvPool",
     "Expansion",
+    "GoalTemplates",
     "HerBatch",
     "InstanceSampler",
     "PaddedExpansion",
@@ -155,6 +170,9 @@ __all__ = [
     "TaskSuite",
     "TaskTable",
     "ThreadPool",
+    "applicable_objects",
+    "applicable_schemas",
+    "is_applicable",
     "as_table",
     "decode",
     "expand",
@@ -164,6 +182,7 @@ __all__ = [
     "goal_test",
     "her_relabel",
     "is_goal",
+    "lifted_goal_templates",
     "novelty_update",
     "numeric_values",
     "object_offsets",
@@ -172,6 +191,7 @@ __all__ = [
     "schema_masks",
     "successor_bounds",
     "task_domains",
+    "visited_mask",
 ]
 
 TableLike = Union[TaskSuite, TaskTable, Task, TaskHandle]
@@ -289,7 +309,7 @@ def decode(table: TableLike, rows: Any, task_ids: Optional[Any] = None) -> list:
                              f"{task.words} atom words plus the table's {numeric} numeric words")
         part = words[where]
         if numeric:
-            part = np.concatenate([part[:, : task.words], part[:, width : width + task.numeric_words]], axis=1)
+            part = np.concatenate([part[:, : max(1, task.words)], part[:, width : width + task.numeric_words]], axis=1)
         else:
             part = part[:, :width]
         for i, state in zip(where.tolist(), task.decode(np.ascontiguousarray(part))):

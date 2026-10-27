@@ -814,38 +814,24 @@ MYMYR_HD u64 horizon_clip_word(u64 x, u32 w, u32 lo, u32 hi)
 /// Word `w` of the goal tuples a goal cell takes from its slot range at a node: the cell's mask word (positive or
 /// negative literals, fluent or derived), for the satisfied and unsatisfied variants masked by the node's state word: a
 /// positive literal holds iff its bit is set, a negative one iff it is clear. A cell of a subgoal level (1 to 3) takes
-/// the mask of the row's layer of that level (none: no tuples), minus the literals of the same sign at the levels below
-/// it, the goal's included. The row is the graph's goals and layers with the node's atoms and derived words; unlike the
-/// flat graphs, whose satisfaction masks of the levels are worked out once for their one state, every node has its own.
-MYMYR_HD u64 horizon_goal_word(const Cell& c, const GoalWords& g, const RowInput& in, u32 w)
+/// the mask of the row's layer of that level (none: no tuples). The placement policy filters each level, the goal
+/// included, against the other listing levels. The row is the graph's goals and layers with the node's atoms and
+/// derived words; unlike the flat graphs, whose satisfaction masks of the levels are worked out once for their one state, every node has its own.
+MYMYR_HD u64 horizon_goal_word(const Cell& c, const GoalWords& g, const RowInput& in, u32 w,
+                               RepeatedLiterals policy)
 {
     const bool derived = goal_op_derived(c.op);
     const bool negative = goal_op_negative(c.op);
     const GoalMode mode = goal_op_mode(c.op);
     const u32 level = goal_op_level(c.op);
     const u64* mask = derived ? (negative ? g.derived_neg : g.derived_pos) : (negative ? g.neg : g.pos);
-    u64 m;
-    if (level == 0)
-    {
-        if (!mask)
-            return 0;
-        m = range_word(mask, w, c.a, c.b);
-    }
-    else
-    {
-        if (!in.layers || level > in.layers->subgoals.layers)
-            return 0;
-        const MaskLayers& layers = in.layers->subgoals;
-        const u64* base = derived ? (negative ? layers.derived_neg : layers.derived_pos) : (negative ? layers.neg : layers.pos);
-        if (!base)
-            return 0;
-        const u32 stride = derived ? layers.derived_words : layers.words;
-        m = range_word(base + static_cast<u64>(level - 1u) * stride, w, c.a, c.b);
-        u64 lower = mask ? mask[w] : u64{0};
-        for (u32 l = 0; l + 1u < level; ++l)
-            lower |= base[static_cast<u64>(l) * stride + w];
-        m &= ~lower;
-    }
+    const MaskLayers layers = in.layers ? in.layers->subgoals : MaskLayers{};
+    if (level > layers.layers)
+        return 0;
+    const u64* base = derived ? (negative ? layers.derived_neg : layers.derived_pos) : (negative ? layers.neg : layers.pos);
+    const u32 stride = derived ? layers.derived_words : layers.words;
+    const u64 m = horizon_clip_word(placed_level_word(policy, base, stride, level_count(layers), level, mask, w),
+                                    w, c.a, c.b);
     if (mode == GoalMode::Plain || mode == GoalMode::PlainTarget)
         return m;
     const u64* x = derived ? in.derived : in.atoms;
@@ -880,7 +866,7 @@ MYMYR_HD u64 horizon_cell_word(const Cell& c, const HorizonGraph& h, u32 node, u
         {
             Cell flat = c;
             flat.op = low;
-            return horizon_goal_word(flat, h.goal, horizon_node_input(h, node), w);
+            return horizon_goal_word(flat, h.goal, horizon_node_input(h, node), w, h.v->repeated_literals);
         }
         case HorizonKind::Added:
         {
@@ -897,7 +883,7 @@ MYMYR_HD u64 horizon_cell_word(const Cell& c, const HorizonGraph& h, u32 node, u
                 return 0;
             Cell flat = c;
             flat.op = low;
-            return changed & horizon_goal_word(flat, h.goal, h.row, w);
+            return changed & horizon_goal_word(flat, h.goal, h.row, w, h.v->repeated_literals);
         }
         default: return 0;
     }
@@ -911,7 +897,7 @@ MYMYR_HD bool horizon_cell_empty(const Cell& c, const HorizonGraph& h)
     Cell flat = c;
     flat.op = horizon_low(c.op);
     for (u32 w = c.a >> 6; c.a < c.b && w <= ((c.b - 1u) >> 6); ++w)
-        if (horizon_goal_word(flat, h.goal, h.row, w) != 0)
+        if (horizon_goal_word(flat, h.goal, h.row, w, h.v->repeated_literals) != 0)
             return false;
     return true;
 }

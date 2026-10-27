@@ -7,8 +7,8 @@
 //
 // A task holds the normalized TaskData, the static relations (unary bitsets, binary row tables, k-ary sets and
 // projections), the two-level atom index, the compiled schemas, axioms and goal, and the initial state. The only
-// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp; TaskOptions::Atoms::
-// Lazy only).
+// mutations after construction are guarded caches and the CAS-guarded append of lazily assigned slots
+// (atom_index.hpp; TaskOptions::Atoms::Lazy only).
 //
 // Mutable scratch (the matching engine, the axiom evaluator, the successor generator) lives in Workspaces, which the
 // task lends out: every search, enumeration or evaluation holds a WorkspaceLease while it runs, and every live lease
@@ -33,16 +33,19 @@
 #include "mymyr/task/plan.hpp"
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace mymyr
 {
 class Task;
 class Workspace;
+class SlotMap;
 namespace detail
 {
 struct WorkspacePool;
@@ -152,7 +155,7 @@ struct AtomArgs
     std::span<const ObjectId> objects;
 };
 
-class Task
+class Task : public std::enable_shared_from_this<Task>
 {
     struct Private
     {
@@ -177,6 +180,15 @@ public:
     [[nodiscard]] const TaskInfo& info() const noexcept { return m_info; }
     [[nodiscard]] const plan::Compiled& compiled() const noexcept { return m_compiled; }
     [[nodiscard]] const AtomIndex& atoms() const noexcept { return m_atoms; }
+    /// Cached task over the same normalized problem and options with fixed atom slots. Lazy is not a frozen mode.
+    [[nodiscard]] std::shared_ptr<const Task> frozen(TaskOptions::Atoms atoms = TaskOptions::Atoms::Auto) const;
+    /// Cached map to a fixed-slot task with the same problem fingerprint and numeric layout, or null if incompatible.
+    /// The target must outlive every use of the returned map.
+    [[nodiscard]] std::shared_ptr<SlotMap> slot_map_to(const Task& target) const;
+    /// Name-based map, cached while the target lives. The target must outlive every use of the returned map.
+    [[nodiscard]] std::shared_ptr<SlotMap> translation_map_to(const Task& target) const;
+    /// Translate a state into target's slot and numeric layout. Missing true atoms/values raise unless drop is true.
+    [[nodiscard]] State translate(StateView state, const Task& target, bool drop = false, bool* lossless = nullptr) const;
 
     [[nodiscard]] u32 num_objects() const noexcept { return m_compiled.num_objects; }
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_compiled.schemas.size()); }
@@ -186,9 +198,9 @@ public:
     [[nodiscard]] u32 words() const noexcept { return bits::words_for(m_atoms.fluent_slots()); }
     /// Largest width any state of this task can have (words() for frozen slots).
     [[nodiscard]] u32 max_words() const noexcept { return bits::words_for(m_atoms.max_fluent_slots()); }
-    /// Hash of the state encoding: the atom mode, the fluent and derived slots' canonical ids in slot order, and the
-    /// numeric storage. Equal encodings give equal values in every process; rows of a task decode correctly with
-    /// another task exactly when both have the same fingerprint() and encoding_fingerprint(). Lazy slots: the hash of
+    /// Hash of the state encoding: fluent and derived atoms' predicate and ordered object names in slot order,
+    /// numeric function and argument names, and numeric storage. Equal hashes identify equal row layouts across
+    /// parses (subject to hash collisions). Lazy slots have a distinct tag and hash
     /// the slots assigned so far.
     [[nodiscard]] u64 encoding_fingerprint() const;
 
@@ -259,6 +271,16 @@ private:
     plan::Compiled m_compiled;
     AtomIndex m_atoms;
     State m_initial;
+    mutable std::mutex m_frozen_mutex;
+    mutable std::array<std::shared_ptr<const Task>, 3> m_frozen;
+    mutable std::array<std::shared_ptr<SlotMap>, 3> m_slot_maps;
+    /// Name-based maps by target uid. Entries hold their targets weakly; each insertion drops the expired ones.
+    struct Translation
+    {
+        std::weak_ptr<const Task> target;
+        std::shared_ptr<SlotMap> map;
+    };
+    mutable std::unordered_map<u64, Translation> m_translations;
     friend class WorkspaceLease;
     void give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept;
 

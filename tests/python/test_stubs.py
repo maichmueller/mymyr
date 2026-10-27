@@ -43,6 +43,9 @@ def test_stubs_parse_and_are_typed():
     assert "def perfect(space: mymyr._core._datasets.StateSpace, *, costs: str = 'auto') -> Heuristic:" in search
     assert "def plan(self) -> list[mymyr._core.Action]" in search
     assert "def goal_state(self) -> mymyr._core.State | None" in search
+    assert "class SearchTree:" in search
+    assert "def tree(self) -> SearchTree | None" in search
+    assert search.count("tree: Literal['nodes', 'transitions'] | None = None") == 7
     # the IW family variants, landmarks and relaxed reachability (search_bindings.cpp, landmarks_bindings.cpp)
     task = "task: mymyr._core.Task | mymyr._core.TaskHandle"
     landmarks = "landmarks: FactLandmarkGraph | Literal['approximate', 'lifted'] | None = None"
@@ -93,6 +96,11 @@ def test_stubs_parse_and_are_typed():
         assert arg in brfs, arg
     assert ": object" not in search.replace("def __eq__(self, other: object, /)", "")
     assert "-> object" not in search and "-> list:" not in search and "-> dict:" not in search
+    encoding = (d / "_encoding.pyi").read_text()
+    constructors = [line for line in encoding.splitlines() if line.startswith("    def __init__(self, table:")]
+    assert len(constructors) >= 7
+    for signature in constructors:
+        assert "repeated_literals: Literal['every', 'lowest', 'highest'] = 'every'" in signature
     core = (d / "__init__.pyi").read_text()
     assert "__version__: str" in core
     assert "_C_API: types.CapsuleType" in core
@@ -133,6 +141,10 @@ def test_stubs_parse_and_are_typed():
     # CUDA streams (typing.hpp StreamArg); contexts are typing.Any here, since CPU builds have no mymyr.cuda
     rl = (d / "_rl.pyi").read_text()
     assert "stream: int | mymyr._typing.SupportsCudaStream | None = None, ctx: Any | None = None" in rl
+    assert "def applicable_schemas(table: TaskSuite | TaskTable | mymyr._core.Task | mymyr._core.TaskHandle," in rl
+    assert "schema: int | mymyr._typing.SupportsDLPack, prefix: mymyr._typing.SupportsDLPack | None, depth: int," in rl
+    assert "schema: int | mymyr._typing.SupportsDLPack, binding: mymyr._typing.SupportsDLPack," in rl
+    assert "*, num_objects: int | None = None, pool: ThreadPool | None = None) -> Any" in rl
     # the environments of mymyr.rl.torch
     env = (d / "_rl_torch.pyi").read_text()
     table = "table: mymyr._core._rl.TaskSuite | mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle"
@@ -141,13 +153,16 @@ def test_stubs_parse_and_are_typed():
     ids = "task_ids: mymyr._typing.SupportsDLPack | None = None"
     assert f"def step(self, states: mymyr._typing.SupportsDLPack, {ids}, steps: mymyr._typing.SupportsDLPack | None = None," in env
     assert "dead_end: Literal['no_successors', 'none'] = 'no_successors'" in env
+    assert "actions: Literal['index', 'label'] = 'index'" in env
+    assert "action: mymyr._typing.SupportsDLPack | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | None" in env
     assert "def _step_ptrs(self, rows: int, ptrs: Sequence[int], label_width: int, first_env: int = 0," in env
     assert "def successor_indices(seed: int, envs: mymyr._typing.SupportsDLPack" in env
     assert ": object" not in env and "-> object" not in env
     # the XLA FFI environments, the RL helpers and the random policy's actions
     assert "def random_actions(self, draws: mymyr._typing.SupportsDLPack, count: mymyr._typing.SupportsDLPack," in env
     jx = (d / "_rl_jax.pyi").read_text()
-    assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto') -> None" in jx
+    assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto', track_visited: bool | int = False) -> None" in jx
+    assert "def visited_capacity(self) -> int" in jx
     assert "def ffi_targets() -> list[tuple[str, str, dict[str, types.CapsuleType], bool]]" in jx
     assert "def initial_states(self) -> list[int]" in jx and "def initial_counts(self) -> list[int]" in jx
     ejx = (d / "_encoding_jax.pyi").read_text()
@@ -194,8 +209,17 @@ def test_stubs_parse_and_are_typed():
     assert f"def fast_unsupported({table}, *, canonical_order: bool = True," in env
     assert "def recv(self, min_rows: int = 0) -> PoolBatch" in rl and "class CpuEnvPool:" in rl
     assert f"def __init__(self, {table}, *, device: int | None = None," in jx
+    # lifted goal templates
+    assert (f"def lifted_goal_templates({suite.replace('table:', 'source:')}, *, max_subgoals_per_size: int = 2, "
+            "max_size: int = 10, max_subsets_per_size: int = 100, max_component_samples: int = 5, max_products: int = 1000, "
+            "distinct: bool | Literal['equality'] = True, seed: int = 0) -> GoalTemplates:") in rl
+    assert "def conditions(self, instance: int | mymyr._core.Task | mymyr._core.TaskHandle) -> list[mymyr._core._formalism.ConjunctiveCondition]" in rl
+    assert "def options(self) -> dict[str, int | bool | str] | None" in rl
+    formalism = (d / "_formalism.pyi").read_text()
+    assert "def binding_order(self, task: mymyr._core.Task | mymyr._core.TaskHandle, partial: " in formalism
+    assert ") -> tuple[int, ...]:" in formalism
     assert ": object" not in rl and "-> object" not in rl and "-> list:" not in rl and "-> dict:" not in rl
-    ops = (d / "_rl_ops.pyi").read_text()
+    ops =(d / "_rl_ops.pyi").read_text()
     assert "strategy: Literal['future', 'final', 'episode'] = 'future'" in ops
     assert "prefix: mymyr._typing.SupportsDLPack | None, depth: int, mask: mymyr._typing.SupportsDLPack" in ops
     for text in (jx, ops):
@@ -208,6 +232,9 @@ def test_cuda_stubs_are_typed():
     if not (d / "_cuda.pyi").is_file():
         pytest.skip("a CPU build: no mymyr._core._cuda")
     cuda = (d / "_cuda.pyi").read_text()
+    encoding = (d / "_encoding.pyi").read_text()
+    assert "def literal_slots(self, stream: int, count: int, width: int, inputs: Sequence[int], outputs: Sequence[int]) -> None" in encoding
+    assert "def literal_masks(self, stream: int, count: int, width: int, rows: int, layers: int, inputs: Sequence[int], outputs: Sequence[int]) -> None" in encoding
     stream = "stream: int | mymyr._typing.SupportsCudaStream | None = None"
     assert "def brfs(task: mymyr._core.Task | mymyr._core.TaskHandle, *, ctx: Context | None = None," in cuda
     assert f"def validate(self, {stream}) -> tuple[int, int]" in cuda

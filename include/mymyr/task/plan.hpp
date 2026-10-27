@@ -13,11 +13,13 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/ids.hpp"
+#include "mymyr/core/once.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/task/atom_index.hpp"
 #include "mymyr/task/numeric.hpp"
 
+#include <memory>
 #include <vector>
 
 namespace mymyr::plan
@@ -161,11 +163,18 @@ struct NumRef
     u32 index = 0;  // into Schema::ces or Schema::uncond_num
 };
 
+struct MaskMatcher
+{
+    Once once;
+    std::unique_ptr<Matcher> matcher;
+};
+
 struct Schema
 {
     u32 arity = 0;
     u32 bind_size = 0;  // arity plus the largest forall block
     Matcher pre[2];     // [0] witness pruning on, [1] off
+    std::unique_ptr<MaskMatcher[]> masks;  // lazy: existence, then one entry per parameter
     std::vector<Pattern> adds, dels;  // unconditional effects
     std::vector<CondEffect> ces;
     std::vector<Check> pre_lits;  // every precondition literal (applicability of a full binding)

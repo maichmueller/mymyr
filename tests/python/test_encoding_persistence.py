@@ -428,3 +428,32 @@ def test_the_scalars_of_a_batch_are_those_of_its_schema():
     values = dict(numeric.encode([drone.initial_state]).as_dict())
     with pytest.raises(ValueError, match="numeric_relations"):
         encoding.FlatBatch.from_arrays(numeric.schema, dict(values, numeric_relations=values["numeric_relations"] + 1))
+
+
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("levels", [0, 3])
+def test_repeated_literal_schema_records_keep_the_normalized_policy(policy, levels):
+    task = text_task("gripper__prob05")
+    schema = encoding.EncodingSchema(task, max_goal_level=levels, repeated_literals=policy)
+    record = json.loads(json.dumps(encoding.schema_to_dict(schema)))
+    normalized_policy = policy if levels else "every"
+    assert record["options"]["repeated_literals"] == normalized_policy
+    restored = encoding.schema_from_dict(record, task)
+    assert restored.options == schema.options
+    assert restored.schema_fingerprint == schema.schema_fingerprint
+    fingerprints = {encoding.EncodingSchema(task, max_goal_level=levels, repeated_literals=p).schema_fingerprint
+                    for p in ("every", "lowest", "highest")}
+    assert len(fingerprints) == (3 if levels else 1)
+    record["options"].pop("repeated_literals")
+    if normalized_policy == "every":
+        assert encoding.schema_from_dict(record, task).schema_fingerprint == schema.schema_fingerprint
+        without_placement_fingerprints = {0: "ceee4f842eb5101f", 3: "603a9506fe4b6245"}
+        record["fingerprint"] = without_placement_fingerprints[levels]
+        if levels == 0:
+            assert encoding.schema_from_dict(record, task).schema_fingerprint == schema.schema_fingerprint
+        else:
+            with pytest.raises(ValueError, match="fingerprint"):
+                encoding.schema_from_dict(record, task)
+    else:
+        with pytest.raises(ValueError, match="fingerprint"):
+            encoding.schema_from_dict(record, task)

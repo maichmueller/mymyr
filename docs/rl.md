@@ -38,6 +38,64 @@ costs its own instance's width, and the words past it are zero padding. `rl.nume
 and `rl.decode(table, rows, task_ids)` turns rows back into States (`Task.decode` reads rows in the task's own
 layout, with only its own numeric words last).
 
+## Action masks without an expansion
+
+`rl.applicable_schemas(table, states, task_ids=None, *, pool=None)` returns bool `[N, S]`, where
+`S` is the maximum schema count across the table's domains. A schema is true when it has an applicable full binding.
+`rl.applicable_objects(table, states, schema, prefix, depth, task_ids=None, *, num_objects=None, pool=None)`
+returns bool `[N, O]`: object `o` is true exactly when `(schema, prefix[:depth], o, ...)` has an applicable completion.
+`O` defaults to the maximum object count of the table; `num_objects` can increase it with false padding.
+`rl.is_applicable(table, states, schema, binding, task_ids=None, *, pool=None)` returns bool `[N]` for full labels.
+
+```python
+schemas = rl.applicable_schemas(task, states)
+objects = rl.applicable_objects(task, states, schema=0, prefix=None, depth=0)
+# Choose objects, extend an int32 prefix [N, depth], then ask for the next parameter.
+```
+
+Schemas are domain-local indices, passed as an integer for all rows or int32 `[N]`. Objects are instance-local
+indices. Prefixes are int32 `[N, >= depth]` (`None` at depth zero); bindings are int32 `[N, >= arity]`, with
+ignored padding past each schema's arity. Invalid schemas (including `-1` padding), objects and bindings produce
+false rows. The scalar depth must be below the arity of every valid selected schema, or the call raises
+`ValueError`. A binding width below any valid selected schema's arity also raises `ValueError`.
+Zero-parameter schemas participate in `applicable_schemas` and
+`is_applicable` with binding shape `[N, 0]`.
+
+These functions take a Task, TaskTable or TaskSuite and the same CPU state inputs as `expand`: NumPy, torch or JAX
+arrays, a State, or a list of States. Outputs use the state array's framework (States produce NumPy arrays).
+Calls release the GIL, accept `pool=ThreadPool(T)` and support concurrent callers. They are eager CPU operations;
+CUDA inputs raise `ValueError` with “runs on the CPU; pass host rows”.
+
+The masks equal `schema_masks(rl.expand(...))` and `prefix_masks(rl.expand(...), ...)` with witness pruning off.
+Full-label checks equal membership in that expansion's labels, including derived and numeric preconditions and
+numeric effect applicability. Matchers compile lazily per schema and parameter; each candidate needs one witness
+for its remaining parameters. Numeric effects may require several witnesses before a candidate is accepted. Each
+workspace caches its most recently prepared row, reusing its view and axiom closure for consecutive equal rows.
+This supports parameter-by-parameter decoding with one-row calls.
+The witness search can backtrack exponentially in the number of remaining parameters; it avoids storing or
+visiting the full applicable set when a witness can be found early.
+
+### Stepping by label
+
+`mymyr.rl.torch.BatchedEnv(table, N, actions="label")` accepts
+`env.step((schema, binding))`: `schema` is int32 `[N]` and `binding` is int32 `[N, L]`, with at least the suite's
+largest schema arity. Schema ids belong to each row's domain and object ids to its instance; columns past an
+action's arity are ignored. The result's `schema` and `binding` report the applied action, with `-1` padding and
+all `-1` for a row that did not move. An inapplicable or malformed label in a nonterminal state with applicable
+actions leaves the state unchanged, sets `invalid`, and earns `step_reward`.
+
+Label mode checks and applies the chosen action directly. Its `count` is int32 0/1: whether the observation has
+any applicable action, found with witness pruning. This also applies to reset, refresh, and `core.initial_counts`.
+Dead ends, absorbing goals, rewards, truncation, goal masks, `next_task_ids`, same-step autoreset, and
+`final_states` have the same semantics as `actions="index"` (the default). Labels include every applicable binding,
+regardless of `witness_pruning` and `canonical_order`. `step(None)` and `random_actions()` raise `ValueError` in
+label mode, since a uniform random action requires enumerating the action space.
+
+Label stepping runs on the host and torch CPU, including `torch.compile`. Requesting `actions="label"` with a
+CUDA device raises `ValueError`. The C++ API selects `EnvConfig::actions = rl::ActionSpace::Label` and passes
+`rl::Labels{schema, binding, stride}` to `HostEnv::step`; `stride` is the binding row width in int32 elements.
+Index mode uses `rl::ActionSpace::Index` and `rl::Actions`.
+
 ## Derived words
 
 Derived atoms are never stored in states. `rl.expand(..., derived=True)` also returns, for every successor, the bitset of
@@ -84,8 +142,8 @@ On host and CUDA arrays, `rl.expand(..., hashes=True, noops=True)` returns `succ
 and `noop` (bool), one per successor. The hash is the native state hash: trimmed atom words seeded by the numeric
 words. For instances with the same numeric width it equals
 `mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. For mixed numeric widths, use each instance's numeric
-prefix, omitting its padding, when hashing rows separately. It excludes derived atoms and differs from Python's
-task-aware `hash(state)`. No-op equality includes the numeric words bit for bit: changing the sign of
+prefix, omitting its padding, when hashing rows separately. `mymyr.hash_rows(states)` over a list of States hashes
+each with its own numeric words. It excludes derived atoms and differs from Python's task-aware `hash(state)`. No-op equality includes the numeric words bit for bit: changing the sign of
 zero or a NaN payload is a change. Derived words do not enter equality.
 
 `drop_noops=True` removes no-op successors separately for each parent, keeping all successors when every one is a
@@ -105,20 +163,26 @@ assert np.array_equal(full.succ_hash, mymyr.hash_rows(full.succ, numeric_words=f
 kept = rl.expand(task, [task.initial_state], hashes=True, drop_noops=True)
 assert np.array_equal(kept.succ, full.succ[full.offsets[kept.parent] + kept.index])
 assert kept.generated == full.total
-assert np.array_equal(kept.pad().succ_hash[kept.pad().mask], kept.succ_hash)
+padded = kept.pad()
+assert np.array_equal(padded.succ_hash[padded.mask], kept.succ_hash)
+assert np.array_equal(padded.canonical[padded.mask], kept.index)
 ```
 
 `generated` counts successors before filtering; `total` and `offsets` count kept successors. A fixed `capacity` bounds
-`generated`, so filtering cannot hide an overflow (`generated > capacity`); outputs on overflow are undefined.
-`expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations and `drop_noops=True` requires `index=`.
-Digests work with `succ=None`, without storing successor rows. A single `Task` may use lazy atom slots: expansion
+`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering,
+`generated` stays exact, but `total`, `offsets` and the kept rows are undefined: size `capacity` from `generated`.
+`expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations; `drop_noops=True` requires `index=` when it
+writes any per-successor array (counting with `offsets=` alone needs none). Digests work with `succ=None`, without
+storing successor rows; they are exact for every stored row, also one too wide for `words` (`words_needed`), and the
+width bounds stored rows only, so a label-only call never reports a width overflow. A single `Task` may use lazy atom slots: expansion
 uses its live slot layout, counts new atoms as changes, and grows output rows automatically unless `words=` fixes
 the width. Tables require fixed atom slots. Every requested array is filtered alike, including goal
-flags and derived words. The padded view adds zero-padded hashes and no-op flags; its `index` contains canonical
-successor positions when filtering, with -1 padding (without filtering it contains flat row indices).
+flags and derived words. The padded view adds zero-padded hashes and no-op flags and, when filtering, `canonical`:
+each kept successor's position in its parent's full order, -1 padding. Its `index` is always the flat row.
 
-JAX `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit`; hashes use uint32
-pairs (low word first), and `generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
+JAX `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit` and `vmap`; hashes
+use uint32 pairs (low word first), the padded result names the positions `canonical` and the flat one `index`, and
+`generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
 Absent digests are `None` and cost no digest work.
 
 CUDA digests also work without storing successor rows, including the bounded observation-action path. With
@@ -136,6 +200,37 @@ label-only output, and `capacity=` keeps counts and status on the device. The pa
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under
 `jax.jit`, `jax.vmap` and `jax.lax.scan`. JAX device arrays can use the CUDA path. `mymyr.rl.torch.BatchedEnv` provides
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
+
+On the CPU, `mymyr.rl.jax.Env(..., track_visited=H)` carries per-episode tables in `state.visited` (uint32 `[N, 2H]`,
+low/high halves of 64-bit hashes), `state.visited_count` (int32 `[N]`) and `state.visited_status` (int32 `[N]`, sticky
+bit 0 once the row's table overflowed; every state array leads with the rows, so states split and join by rows). `H` and
+`track_visited=True` follow the capacity rules in [Revisit avoidance](#revisit-avoidance). `info["revisited"]` tests the
+reached state before insertion and autoreset. Reset clears selected histories and inserts initial states;
+`env.clear_visited(state, mask=None)` returns a state with selected histories cleared and current states inserted,
+retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses `[N, 0]` table/status arrays and
+reports false revisit flags. CUDA tracking raises a clear construction error because device visit tables are
+unavailable. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
+hashes with JAX x64 enabled (64-bit inputs raise `TypeError` without it; `x.view(np.uint32)` gives the halves), and
+equals the NumPy membership operation under jit without host reads. The successor hashes in that layout are
+`env.expand_flat(state.states, capacity, hashes=True).succ_hash`, and `flat.parent` their parents.
+
+```python needs-jax
+import jax
+import jax.numpy as jnp
+from mymyr.rl.jax import Env
+
+jax_visit_data = Path("tests/data/pddl/blocks")
+jax_visit_task = mymyr.Task.from_pddl(jax_visit_data / "domain.pddl", jax_visit_data / "probBLOCKS-8-0.pddl")
+jax_visits = Env(jax_visit_task, device="cpu", max_steps=20, track_visited=True)
+jax_state, _ = jax_visits.reset(0, 4)
+jax_next, _, _, _, _, jax_info = jax.jit(jax_visits.step)(0, jax_state, jnp.full(4, -1, jnp.int32))
+assert jax_info["revisited"].all()
+jax_state = jax.jit(jax_visits.clear_visited)(jax_next)
+assert (jax_state.visited_count == 1).all()
+jax_flat = jax_visits.expand_flat(jax_state.states, 64, hashes=True)
+jax_seen = mymyr.rl.jax.visited_mask(jax_state.visited, jax_state.visited_count, jax_flat.succ_hash, jax_flat.parent)
+assert jax_seen.shape == jax_flat.parent.shape
+```
 
 Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
 counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
@@ -191,6 +286,150 @@ The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, veri
 XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
 CPU framework bundle used for validation; those packages remain optional runtime dependencies for users.
 
+## Revisit avoidance
+
+`CpuEnvPool(..., track_visited=H)` and torch CPU `BatchedEnv(..., track_visited=H)` keep one fixed-capacity hash table
+per environment. `H` is a power of two from 2 to 2²⁰. With `track_visited=True`, set `max_steps`: the capacity is the
+next power of two at least `2 * (max_steps + 1)`, up to 2²⁰. Tracking is disabled by default.
+
+Reset inserts the initial state. Each step reports `revisited`, whether the reached state was present before that
+step, then inserts it. This includes invalid actions that stay in place. Absorbing rows without autoreset report
+false and insert nothing. An autoreset first records the reached state's membership, then clears its table and inserts
+the new initial state. Tables are independent across environment rows, including rows from different domains.
+
+The keys are the state content hashes, numeric words included: the successor hashes `succ_hash` of `rl.expand(...,
+hashes=True)`, equal to `mymyr.hash_rows(rows, numeric_words=k)` with the rows' numeric width `k` (`hash_rows` without
+`numeric_words` keys classical rows only). Equal 64-bit hashes count as one entry; zero shares the reserved key
+`0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and sets bit 0 of the
+sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot invent one, apart from
+hash collisions. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
+`env.visited_status` (int32 `[1]`) expose the live storage; treat the table and counts as read-only. The pool exposes
+the same status as an integer `pool.visited_status`. Resets and clears leave status set; torch callers can acknowledge
+it with `env.visited_status.zero_()`.
+
+`refresh()` keeps visit history. After writing state rows directly, use `env.clear_visited(mask=None)` to clear all
+or selected rows and insert their current states. The pool's `clear_visited(env_ids=None)` accepts selected idle
+environments, like `reset`. Table storage uses `8 * N * H` bytes plus counts and status (8 MiB for N = H = 1024).
+
+`rl.visited_mask(table, count, succ_hash, parent, rows=None)` returns a boolean per successor. `parent` is int32;
+`-1` denotes padding. With a subset expansion, `rows` maps its parent ids to environment rows (mapped `-1` is also
+padding). NumPy and torch CPU inputs are supported, including `mymyr::visited_mask` under `torch.compile`.
+
+For a soft policy, suppress visited successors' scores. The example takes the successor hashes of the expansion:
+
+```python needs-torch
+import torch
+from mymyr.rl.torch import BatchedEnv
+
+visit_task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+visit_env = BatchedEnv(visit_task, 4, max_steps=20, track_visited=True, autoreset=False)
+visit_exp = rl.expand(visit_task, visit_env.states, framework="torch", hashes=True)
+action_visited = rl.visited_mask(visit_env.visited, visit_env.visited_count, visit_exp.succ_hash, visit_exp.parent)
+q = torch.zeros(len(action_visited))
+soft_scores = q.masked_fill(action_visited, -1e6)
+assert soft_scores.shape == action_visited.shape
+```
+
+For hard avoidance, take the highest-ranked unvisited action in each parent's canonical successor order. A row with
+none is trapped; the caller decides how to end that rollout:
+
+```python needs-torch
+chosen = torch.full((4,), -1, dtype=torch.int64)
+trapped = torch.zeros(4, dtype=torch.bool)
+for i in range(4):
+    lo, hi = int(visit_exp.offsets[i]), int(visit_exp.offsets[i + 1])
+    available = (~action_visited[lo:hi]).nonzero().flatten()
+    trapped[i] = len(available) == 0
+    if not trapped[i]:
+        chosen[i] = available[q[lo:hi][available].argmax()]
+assert torch.all((chosen >= 0) | trapped)
+```
+
+Cycle detection can use the reached-state flag directly, without expanding successors. Compute any successor masks
+for the next policy observation after the step: its table already includes the reached state, or its new initial
+state following autoreset.
+
+```python needs-torch
+visit_result = visit_env.step()  # random policy
+cycle = visit_result.revisited & ~visit_result.goal
+assert cycle.shape == (4,)
+visit_env.clear_visited()
+assert torch.all(visit_env.visited_count == 1)
+visit_env.close()
+```
+
+## Lifted hindsight relabelling
+
+Lifted hindsight relabelling uses parts of an instance's goal, with the objects replaced by variables, as goals for
+the states a trajectory reaches. `rl.lifted_goal_templates(source)` makes these goal templates for every instance of a
+Task, TaskTable or TaskSuite. An instance's templates come from its goal literals, `task.goal_condition.literals`
+(both polarities and all predicate kinds; numeric constraints are skipped):
+
+1. Two literals are joined when their atoms share an object. The components of this graph are ordered by their
+   smallest literal index.
+2. Each component lists its first `max_subsets_per_size` connected subsets of each size up to `max_size`, in
+   lexicographic order of their literal indices.
+3. For c = 1 up to `max_size` components, up to `max_component_samples` uniform draws of c components are taken, and
+   each draw contributes the first `max_products` combinations of one subset per drawn component. The draws use a
+   counter-based random generator keyed by `seed` and the instance's index in the source.
+4. Subgoals with more than `max_size` literals are dropped. The first `max_subgoals_per_size` of each size are kept,
+   largest first.
+5. Each subgoal is lifted. Every object, constants included, becomes a variable `?x<i>`, numbered by first appearance.
+
+With `distinct=True` (the default) distinct variables must bind distinct objects, and the condition carries one
+disequality per pair of variables. `distinct=False` lets variables share an object, and `distinct="equality"` behaves
+like `True` when the domain declares `:equality` and like `False` otherwise. The templates of an instance depend only
+on its task, its index in the source and the options, not on the other instances.
+
+```python
+from pathlib import Path
+import pickle
+
+import mymyr
+from mymyr import rl
+
+data = Path("tests/data/pddl/gripper")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p02.pddl")
+templates = rl.lifted_goal_templates(task, seed=0)
+for literals, condition in zip(templates.goal_literals(0), templates.conditions(0)):
+    print(literals, condition)
+# (0, 1) (?x0 ?x1 ?x2) (and (at ?x0 ?x1) (at ?x2 ?x1) (!= ?x0 ?x1) (!= ?x0 ?x2) (!= ?x1 ?x2))
+# (0,) (?x0 ?x1) (and (at ?x0 ?x1) (!= ?x0 ?x1))
+# (1,) (?x0 ?x1) (and (at ?x0 ?x1) (!= ?x0 ?x1))
+
+largest = templates.conditions(0)[0]
+assert largest.binding_order(task) == (0, 1, 2)
+binding = next(iter(task.bindings(largest, task.initial_state, limit=1)))
+assert [obj.name for obj in binding] == ["ball1", "rooma", "ball2"]
+assert str(rl.lifted_goal_templates(task, distinct=False).conditions(0)[0]) == "(?x0 ?x1 ?x2) (and (at ?x0 ?x1) (at ?x2 ?x1))"
+
+arrays = templates.arrays()
+assert arrays["instance_offsets"].tolist() == [0, 3]
+assert arrays["template_size"].tolist() == [2, 1, 1]
+assert arrays["order"].tolist() == [[0, 1, 2], [0, 1, -1], [0, 1, -1]]
+assert arrays["terms"].tolist() == [[0, 1], [2, 1], [0, 1], [0, 1]]
+
+fixed = rl.GoalTemplates.from_conditions(task, [[largest]])
+assert fixed.options is None and fixed.goal_literals(0) == [()]
+restored = pickle.loads(pickle.dumps(templates))
+assert [str(c) for c in restored.conditions(0)] == [str(c) for c in templates.conditions(0)]
+```
+
+`templates.conditions(i)` returns instance i's templates as `ConjunctiveCondition`s, and `templates.goal_literals(i)`
+returns the goal literal indices each template came from. `condition.binding_order(task)` lists the free variables in
+the order `task.bindings` binds them: the bindings come in lexicographic order over those variables by object index,
+so a state's first binding is the smallest in that order. `templates.arrays(framework=None)` is the packed form, with
+the templates of instance i at `[instance_offsets[i], instance_offsets[i + 1])`. Each template has a `template_size`,
+`num_vars`, `distinct` flag, `literal_offsets` and an `order` row (its binding order, padded with -1). Each literal has
+a `predicate` (the domain table's predicate id), `polarity`, `kind` (0 static, 1 fluent, 2 derived), `arity`, a `terms`
+row (variable indices, padded with -2**31) and `goal_literal`.
+
+`GoalTemplates.from_conditions(source, conditions)` packs your own templates, one list per instance in match order.
+Each condition needs literals, untyped variables and no numeric constraints. It carries either no equalities or one
+disequality per pair of variables, as `GroundCondition.lift(True)` makes them. Terms may be objects. Templates pickle
+with their source, options and arrays; nothing is generated again. Like tables, templates refuse tasks with lazy
+atom slots (load with `atoms="auto"`, `"reachable"` or `"dense"`).
+
 ## Instance sampling and curricula
 
 Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at
@@ -220,7 +459,9 @@ send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)
 
 The [relational encoder](encoding.md) reads the arrays of a `CpuEnvPool` batch where they are. A pool created with
 `goals=True` carries the goal of every environment as masks (`goal_pos`, `goal_neg`), and the expansion of the batch's
-states, which `rl.expand` makes, is what the policy's actions index. One call encodes all of it:
+states, which `rl.expand` makes, is what the policy's actions index. Goals of the caller's own, such as a manager's
+subgoals decoded as literals, become such masks with `encoding.goal_masks(table, literals, task_ids)`
+([Goals](encoding.md#goals)). One call encodes all of it:
 
 ```python
 import numpy as np
@@ -263,6 +504,10 @@ action targets chooses entities, and `mymyr.encoding` maps a chosen entity back 
   `CpuEnvPool.step` (and every environment of `mymyr.rl`) takes as the action;
 - without `entities` both cover every action entity of the batch, in entity order
   (`encoding.action_entities(batch)` lists their ids).
+
+The targets of behaviour cloning are positions of this kind: `datasets.plan_rows` replays a plan into its states and,
+per step, the canonical successor index of the plan's action, the entity whose `action_indices` equals it
+([Plans for behaviour cloning](datasets.md#plans-for-behaviour-cloning)).
 
 An expansion lists an action once per action schema that produces it (a disjunctive precondition splits a schema), and
 an entity stands for the first of those rows. The small loop below encodes the pool's states, lets a random policy
@@ -686,3 +931,10 @@ does not wait for the device (see [the encoding](encoding.md)).
 An environment's device observation rows can be passed directly to `encoder.encode(obs.states, obs.task_ids)`.
 The table may mix row widths; each instance reads only its own words. `statics="shared"` keeps one static block per
 instance in the resulting CUDA batch. The same observation tensors can back `datasets.StateRows` for encoding on load.
+
+States and rows from another parse must be translated before use. `source.translate(states_or_rows, target)` matches
+predicate, function and object names and returns target-owned States or target-layout rows. For a table, use
+`source_table.translate(rows, task_ids, target_table)`; instance i maps into instance i. `mymyr.SlotMap` reuses the
+mapping across batches. `missing='drop'` also returns a per-row lossless mask; the default raises on a missing true
+atom or numeric value. CUDA arrays support `status=` and graph capture; see
+[Moving states between parses](parsing-and-tasks.md#state-encodings) for the status layout and buffer lifetimes.

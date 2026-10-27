@@ -28,6 +28,7 @@ wheel.packages = ["python/mymyr"]
 [tool.scikit-build.cmake.define]
 MYMYR_PYTHON = "ON"
 MYMYR_TESTS = "OFF"
+MYMYR_BENCH = "OFF"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python", "tests/parity/python"]

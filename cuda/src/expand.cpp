@@ -347,6 +347,7 @@ struct DeviceExpander::Impl
         if (hctl()[k_error])
             throw std::logic_error("mymyr: device expand: a sorted segment found no scratch (internal error)");
         out.total = total;
+        out.generated = total;  // the device keeps every successor
         out.words_needed = std::max(hctl()[k_words_needed], extra_need);
         kept = chunks.size() == 1;  // one chunk: a second write() reuses its views and offsets
     }
@@ -839,6 +840,7 @@ struct DeviceExpander::Impl
         up(out.noop, noops.data(), noops.size());
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // the pageable sources
         out.total = e.total;
+        out.generated = e.total;
         out.words_needed = e.words_needed;
     }
 
@@ -1068,6 +1070,7 @@ struct DeviceExpander::Impl
         else
             write_single(e);
         out.total = e.total;
+        out.generated = e.total;
         out.words_needed = e.words_needed;
         if (!any)
             return;

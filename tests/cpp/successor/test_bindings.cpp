@@ -12,8 +12,9 @@
 // predicate kind with variables and objects, either polarity, equalities, declared types, numeric constraints) have
 // exactly the bindings of a brute-force evaluation over all object tuples that shares no code with the compiled
 // matchers (oracle atom sets, the axioms closed by test::Oracle, numeric values by slot), with and without partial
-// bindings; ground conjunctions instantiate the literals. Concurrent enumeration over one shared task from 8 threads
-// gives the single-threaded results.
+// bindings; ground conjunctions instantiate the literals; the bindings come in lexicographic order over the free
+// variables in binding_order. Concurrent enumeration over one shared task from 8 threads gives the single-threaded
+// results.
 //
 // Ground conditions: random conditions grounded under their bindings and under random tuples hold exactly when the
 // brute-force oracle says so (as a whole and literal by literal), and lift back; the goal as a ground condition holds
@@ -200,6 +201,33 @@ std::vector<Tuple> sorted(std::vector<Tuple> v)
     std::sort(v.begin(), v.end(), [](const Tuple& a, const Tuple& b)
               { return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), [](ObjectId x, ObjectId y) { return x.v < y.v; }); });
     return v;
+}
+
+/// Whether the bindings ascend lexicographically over `order` (object indices) and `order` lists exactly the variables
+/// that `p` leaves free.
+bool ascends_in(const std::vector<Tuple>& found, const std::vector<u32>& order, const Partial& p, u32 arity)
+{
+    std::vector<u32> free;
+    for (u32 v = 0; v < arity; ++v)
+        if (v >= p.size() || !p[v])
+            free.push_back(v);
+    std::vector<u32> listed = order;
+    std::ranges::sort(listed);
+    if (listed != free)
+        return false;
+    for (usize i = 1; i < found.size(); ++i)
+    {
+        bool less = false;
+        for (u32 v : order)
+            if (found[i - 1][v].v != found[i][v].v)
+            {
+                less = found[i - 1][v].v < found[i][v].v;
+                break;
+            }
+        if (!less)
+            return false;
+    }
+    return true;
 }
 
 std::string show(const Task& task, const Tuple& b)
@@ -721,7 +749,10 @@ TEST_P(BindingsRandom, ConditionsMatchBruteForce)
             const ConjunctiveCondition c = random_condition(*task, rng, max_vars, r % 2 ? &truths : nullptr);
             ASSERT_NO_THROW(c.validate(*task)) << c.str(*task);
             const std::vector<Tuple> want = brute.solve(c);
-            const std::vector<Tuple> got = sorted(bindings(*task, ws, c, s.view()));
+            const std::vector<Tuple> found = bindings(*task, ws, c, s.view());
+            if (!ascends_in(found, binding_order(*task, ws, c), {}, c.arity()) && shown++ < 5)
+                ADD_FAILURE() << GetParam() << ": " << c.str(*task) << ": the bindings do not follow binding_order";
+            const std::vector<Tuple> got = sorted(found);
             ++conditions;
             nonempty += !want.empty();
             if (got != want && shown++ < 5)
@@ -739,8 +770,11 @@ TEST_P(BindingsRandom, ConditionsMatchBruteForce)
                     if (agrees(b, p))
                         wp.push_back(b);
                 ++partials;
-                if (sorted(bindings(*task, ws, c, s.view(), p)) != wp && shown++ < 5)
+                const std::vector<Tuple> fp = bindings(*task, ws, c, s.view(), p);
+                if (sorted(fp) != wp && shown++ < 5)
                     ADD_FAILURE() << GetParam() << ": " << c.str(*task) << " with a partial binding";
+                if (!ascends_in(fp, binding_order(*task, ws, c, p), p, c.arity()) && shown++ < 5)
+                    ADD_FAILURE() << GetParam() << ": " << c.str(*task) << ": a partial binding's order";
             }
             // ground conjunctions instantiate the literals
             for_each_ground_conjunction(*task, ws, c, s.view(), {},

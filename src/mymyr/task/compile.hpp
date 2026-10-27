@@ -11,4 +11,7 @@ namespace mymyr::detail
 void check_supported(const formalism::TaskData& t);
 
 void compile_task(const formalism::TaskData& t, const TaskOptions& options, plan::Compiled& out);
+
+/// Specializes a schema's resolved constraints for a prefix and witness search. depth == arity asks for existence.
+[[nodiscard]] plan::Matcher compile_mask(const plan::Compiled& compiled, u32 schema, u32 depth);
 }  // namespace mymyr::detail

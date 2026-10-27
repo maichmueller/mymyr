@@ -216,6 +216,74 @@ for batch in loader:
 Dataset files hold no encodings: `datasets.save` writes the rows and arrays named in the [file format](#file-format),
 and `datasets.load` followed by `StateRows` and an encoder gives the batches again, with any options.
 
+## Plans for behaviour cloning
+
+`datasets.plan_rows(source, plan)` replays a plan and returns what behaviour cloning trains on: the rows of the states
+the plan visits and, for each step, the action it takes there, as a label and as the step's position in the canonical
+successor order of its state. That position is the action an [environment](rl.md) takes, so a policy that imitates the
+plan predicts it. `plan` is IPC plan text (read by `search.parse_plan`) or a list of the task's Actions; `source` is a
+Task, or a `TaskTable` or `TaskSuite` with the plan's instance `task_id`, whose row layout the rows then have.
+
+```python
+from pathlib import Path
+
+import numpy as np
+
+import mymyr
+from mymyr import datasets, encoding, rl
+
+train = Path("tests/data/ipc/blocksworld-ipc/train")
+problems = [train / "p13.pddl", train / "p25.pddl"]
+table = rl.TaskTable.from_pddl(train / "domain.pddl", problems, atoms="dense")
+plans = [datasets.plan_rows(table, p.with_suffix(".plan").read_text(), task_id=i, goal_state=True)
+         for i, p in enumerate(problems)]
+
+first = plans[0]
+print(first.num_steps, first.rows.shape, first.index[:4], first.goal_reached)
+exp = rl.expand(table, first.rows[:1], [0])           # the first step's state
+k = first.index[0]
+assert exp.schema[k] == first.schema[0] and np.array_equal(exp.binding[k], first.binding[0])
+assert np.array_equal(exp.succ[k], first.rows[1])     # the step leads to the plan's next state
+
+pool = rl.CpuEnvPool(table, num_envs=1, sampler=None, autoreset=False)
+pool.reset(task_ids=[0])
+for action in first.index:                            # the indices are environment actions
+    step = pool.step([0], [int(action)])
+assert step.terminated[0]
+
+dataset = datasets.StateRows.from_plans(plans)        # labels: action, schema, binding, noop
+collate = datasets.EncodingCollate(encoding.FlatRelationEncoder(table, target_sources=("action",)), actions=True)
+batch = collate(dataset.take(np.flatnonzero(dataset.labels["action"] >= 0)))
+print(len(dataset), batch.labels["action"][:4])
+```
+
+A `PlanRows` holds `rows` (uint64 `[L, W]`, or `[L + 1, W]` with `goal_state=True`, which adds the state the plan
+reaches), `schema` and `binding` (each step's action label, as `rl.expand` lists it; bindings -1 padded), `index` (int32
+`[L]`, the canonical successor position), `noop` (the step leaves its state unchanged), `num_actions` (the successors of
+each row's state) and `goal_reached`. Each step is located in the host `rl.expand` of its state, so `index` agrees with
+the expansion row by row. With `rl.expand(..., drop_noops=True)` the step's row is kept, and its `exp.index` equals the
+step's `index` (in the padded expansion, `exp.pad().canonical`; `pad().index` is the flat row), unless the step is a
+no-op in a state that has other actions. With `witness_pruning=True` the positions are those of the pruned expansion, as
+in an environment with that option; a step whose action the pruning leaves out is at its witness, the first row of its
+schema with the same successor. A step whose action is not applicable in its state, an action of another task and a task
+with lazy atom slots raise `ValueError`, naming the step (replay a lazy task's plans on `task.frozen()`, its twin with
+fixed slots). Replaying costs one host expansion per step. `source` is the Task, TaskTable or TaskSuite the plan was
+replayed on.
+
+`equivalent=` takes, for every step, the actions a caller regards as interchangeable with the plan's (for instance
+those that object symmetries map onto it, read from a file next to the plan) as Actions, labels `(schema, binding)`
+or plan lines. mymyr maps them to canonical positions: `equivalent` is int32 `[L, K]`, -1 padded, the plan's own
+position first, and `equivalent_actions()` its multi-hot form over each state's successors.
+
+`StateRows.from_plans(plans)` concatenates replayed plans into a dataset whose labels are `action` (the step's index, -1
+on a goal-state row), `schema`, `binding`, `noop` and, when every plan has `equivalent`, the multi-hot
+`equivalent_actions` (bool `[N, A]`, `A` the most successors of any row's state). The rows are of their plans' `task_id`
+in the source, so the dataset encodes with an encoder over that table or suite; plans of different sources raise
+`ValueError`. `EncodingCollate(encoder, actions=True)` encodes the rows with their actions: the label of row `g` is the
+action entity of graph `g` whose `encoding.action_indices` equals `labels["action"][g]` ([action
+entities](rl.md#action-entities)). `from_plans(plans, device="cuda:0")` keeps the dataset in device memory, where
+`EncodingCollate` encodes it without a host copy.
+
 ## Saving and pickling
 
 State spaces, generalized state spaces, tuple graphs and knowledge bases pickle with what they computed, so they

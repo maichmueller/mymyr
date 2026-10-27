@@ -321,7 +321,7 @@ IwResult engine_pass(const Task& task, u32 k, bool continuation, const LayerOrde
     sd::LayerOrderer layers(task, lo);
     env.layers = &layers;
     const State root = task.initial_state();
-    return sd::novelty_ladder(env, k, k, false,
+    return sd::novelty_ladder(env, root, k, k, false,
                               [&](u32 a, sd::PassOut& po)
                               {
                                   if (a == 0)

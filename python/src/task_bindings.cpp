@@ -12,6 +12,8 @@
 #include "py_domain.hpp"
 #include "py_formula.hpp"
 #include "py_task.hpp"
+#include "translate_bindings.hpp"
+#include "py_pool.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/formalism/pddl_writer.hpp"
@@ -1596,7 +1598,18 @@ void bind_task_api(nb::class_<C>& cls)
 {
     using Self = nb::pointer_and_handle<C>;
     auto owner = [](const Self& self) { return Owner{self.p->core.get(), nb::borrow(self.h)}; };
-    cls.def_prop_ro(
+    cls.def("translate", [](Self self, StatesLike states, Arg<std::variant<PyTask, PyHandle>> other, std::string_view missing,
+                            Arg<PyPool> pool, Arg<ann::ArrayLike> status, StreamArg stream, Arg<ann::Any> ctx) {
+               return Arg<ann::Any>(translate_task(self.h, states, other, missing, pool, status, stream, ctx));
+           }, "states"_a, "other"_a, nb::kw_only(), "missing"_a = "raise", "pool"_a = nb::none(),
+              "status"_a = nb::none(), "stream"_a = nb::none(), "ctx"_a = nb::none(),
+              "Translate States or rows into another task by atom and function names. missing='drop' also returns a bool [N] mask.")
+        .def("frozen", [](nb::handle self, std::string_view atoms) {
+                 return Arg<PyTask>(frozen_task(self, atoms));
+             }, "atoms"_a = "auto",
+             "The cached task of this parse and options with fixed slots ('auto', 'reachable' or 'dense'). "
+             "Returns this task for its own mode. Auto uses this task's reachability_budget.")
+        .def_prop_ro(
            "initial_state", [owner](Self self) { return make_state(owner(self), State(self.p->core->task->initial_state())); },
            "The initial state.")
         .def(
@@ -1881,14 +1894,25 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
 /// numbers its atoms as the pickled one did when it was pickled.
 nb::tuple encoding_state(const Task& T)
 {
-    const std::vector<u64> lazy = lazy_slots(T);
-    return nb::make_tuple(T.encoding_fingerprint(),
+    std::vector<u64> lazy;
+    u64 fingerprint;
+    do
+    {
+        lazy = lazy_slots(T);
+        fingerprint = T.encoding_fingerprint();
+        // Append counts bracket the hash so that the numbering and fingerprint describe the same snapshot.
+    } while (!lazy.empty() && (lazy[0] != T.atoms().fluent_slots() || lazy[1] != T.atoms().derived_slots()));
+    return nb::make_tuple(fingerprint,
                           nb::bytes(reinterpret_cast<const char*>(lazy.data()), lazy.size() * sizeof(u64)));
 }
 
 nb::object task_reduce(nb::handle self)
 {
-    const PyTaskCore& core = *nb::inst_ptr<PyTask>(self)->core;
+    const PyTask& task = *nb::inst_ptr<PyTask>(self);
+    const PyTaskCore& core = *task.core;
+    if (task.frozen_source.is_valid())
+        return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_frozen_task"),
+                              nb::make_tuple(task.frozen_source, atoms_option_name(core.task->options().atoms)));
     nb::object restore = nb::module_::import_("mymyr._pickle").attr("_restore_task");
     const nb::tuple opts = options_tuple(core.task->options());
     const u64 fp = core.task->fingerprint();
@@ -2063,6 +2087,47 @@ i64 py_hash(u64 h)
 }
 }  // namespace
 
+GroundLiteral ground_literal_of(PyTaskCore& core, nb::handle literal)
+{
+    const LiteralSpec l = literal_spec(core, literal);
+    if (!l.ground())
+        throw nb::value_error(("mymyr: the literal " + nb::cast<std::string>(nb::repr(literal)) +
+                               " has variables: literals must be ground")
+                                  .c_str());
+    return GroundLiteral{ground_atom(l), l.positive};
+}
+
+nb::object frozen_task(nb::handle source, std::string_view atoms)
+{
+    const TaskOptions::Atoms mode = atoms == "auto" ? TaskOptions::Atoms::Auto :
+                                    atoms == "reachable" ? TaskOptions::Atoms::Reachable :
+                                    atoms == "dense" ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
+    if (mode == TaskOptions::Atoms::Lazy)
+        throw nb::value_error("mymyr: frozen atoms must be 'auto', 'reachable' or 'dense'");
+    const Owner owner = owner_of(source);
+    TaskPtr twin;
+    {
+        nb::gil_scoped_release release;
+        twin = owner.core->task->frozen(mode);
+    }
+    if (twin.get() == owner.core->task.get())
+        return nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
+    nb::object original = nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
+    nb::ft_lock_guard lock(owner.core->frozen_mutex);
+    auto& cached = owner.core->frozen_cores[twin->uid()];
+    if (cached.wrapper.is_valid())
+    {
+        nb::object wrapper = cached.wrapper();
+        if (!wrapper.is_none())
+            return wrapper;
+    }
+    if (!cached.core)
+        cached.core = std::make_shared<PyTaskCore>(twin, owner.core->data, owner.core->source);
+    nb::object wrapper = nb::cast(PyTask{cached.core, std::move(original)});
+    cached.wrapper = nb::weakref(wrapper);
+    return wrapper;
+}
+
 std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
                                                        nb::handle partial)
 {
@@ -2141,7 +2206,7 @@ void bind_task(nb::module_& m)
         .def("__next__", [](PyGroundConjunctionsIter& it) { return ConjunctionItem(bindings_next(it)); });
 
     // --- Task
-    nb::class_<PyTask> task(m, "Task",
+    nb::class_<PyTask> task(m, "Task", nb::is_weak_referenceable(),
                             "An immutable compiled planning task, shared by any number of threads. Per-state methods "
                             "run on the calling thread's workspace; use task.local() for a per-thread handle in hot "
                             "loops.");

@@ -24,6 +24,7 @@ enum Purpose : u32
 {
     k_successor = 0,  // the successor a random-policy step takes
     k_her = 1,        // the source step and the goal atoms of a hindsight relabel (rl/her.hpp)
+    k_templates = 2,  // the component samples of lifted goal templates (rl/goal_templates.hpp; env = the instance)
 };
 
 /// The four 32-bit outputs of one Philox block.

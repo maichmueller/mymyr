@@ -4,10 +4,12 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -59,6 +61,8 @@ inline bool mask_goal(const u64* s, const u64* gpos, const u64* gneg, u32 W)
 /// Successors of the prepared state of `succ`.
 inline u32 count_prepared(Successors& succ, const EnvConfig& c)
 {
+    if (c.actions == ActionSpace::Label)
+        return succ.any() ? 1 : 0;
     u32 n = 0;
     succ.generate<false>(
         [&](u32, const ObjectId*, const Delta&) -> bool
@@ -83,6 +87,11 @@ StateView row_view(const EnvBatch& b, u64 i, const Task& task)
 
 void check_env(const TaskSuite& table, const EnvBatch& b, const StepOutputs* out)
 {
+    if (b.visited_capacity && (b.visited_capacity < 2 || b.visited_capacity > (1u << 20) ||
+                               (b.visited_capacity & (b.visited_capacity - 1))))
+        throw std::invalid_argument("mymyr: env: visited capacity must be a power of two in [2, 2^20]");
+    if (b.visited_capacity && b.rows && (!b.visited || !b.visited_count || !b.visited_status))
+        throw std::invalid_argument("mymyr: env: visited tracking needs table, count and status arrays");
     if (b.rows && !b.states)
         throw std::invalid_argument("mymyr: env: null state array");
     if (b.rows > static_cast<u64>(std::numeric_limits<i32>::max()))
@@ -117,6 +126,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
         throw std::invalid_argument("mymyr: HostEnv: null task suite");
     m_init_count.resize(m_suite->size());
     m_init_goal.resize(m_suite->size());
+    m_init_hash.resize(m_suite->size());
     m_tasks.resize(m_suite->size());
     m_label_width = std::max<u32>(1, m_suite->label_width());
     for (u32 i = 0; i < m_suite->size(); ++i)
@@ -126,6 +136,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
         const WorkspaceLease lease = task.workspace();
         Successors& succ = lease->successors();
         succ.prepare(view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()));
+        m_init_hash[i] = view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()).hash();
         m_init_count[i] = count_prepared(succ, m_config);
         m_init_goal[i] = succ.goal_holds() ? 1 : 0;
     }
@@ -152,7 +163,29 @@ u32 HostEnv::reset_row(EnvBatch& b, u64 i, u32 instance, bool keep_goals, u32 di
         std::copy_n(in.goal_neg.begin(), w, gn);
         std::fill(gn + w, gn + z, u64{0});
     }
+    if (b.visited_capacity)
+    {
+        u64* table = b.visited + i * b.visited_capacity;
+        visited_clear(table, b.visited_capacity, b.visited_count[i]);
+        visited_insert(table, b.visited_capacity, b.visited_count[i], m_init_hash[instance]);
+    }
     return m_init_count[instance];
+}
+
+void HostEnv::clear_visited(EnvBatch& b, const u8* mask) const
+{
+    check_env(*m_suite, b, nullptr);
+    if (!b.visited_capacity)
+        return;
+    for (u64 i = 0; i < b.rows; ++i)
+    {
+        if (mask && !mask[i])
+            continue;
+        m_suite->check_task_ids(b.task_ids ? b.task_ids + i : nullptr, 1);
+        u64* table = b.visited + i * b.visited_capacity;
+        visited_clear(table, b.visited_capacity, b.visited_count[i]);
+        visited_insert(table, b.visited_capacity, b.visited_count[i], row_view(b, i, *m_tasks[b.instance(i)]).hash());
+    }
 }
 
 void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) const
@@ -238,7 +271,7 @@ void HostEnv::check_step(const EnvBatch& b, const StepOutputs& out, Actions acti
     m_suite->check_task_ids(b.task_ids, b.rows);
     if (action.v64 && action.v32)
         throw std::invalid_argument("mymyr: env: actions given as int64 and as int32");
-    if (!action.given() && b.rows && !b.draws)
+    if (m_config.actions == ActionSpace::Index && !action.given() && b.rows && !b.draws)
         throw std::invalid_argument("mymyr: env: the random policy needs the draw counters");
     if (m_config.max_steps && b.rows && !b.steps)
         throw std::invalid_argument("mymyr: env: truncation (max_steps) needs the step counters");
@@ -254,6 +287,14 @@ void HostEnv::check_step(const EnvBatch& b, const StepOutputs& out, Actions acti
 void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 action, bool random,
                        i32 next_instance, Scratch& S) const
 {
+    if (m_config.actions != ActionSpace::Index)
+        throw std::invalid_argument("mymyr: env: label mode requires explicit labels");
+    step_row_impl(b, i, out, o, action, random, next_instance, S, nullptr);
+}
+
+void HostEnv::step_row_impl(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 action, bool random,
+                            i32 next_instance, Scratch& S, const Labels* labels) const
+{
     const u32 inst = b.instance(i);
     const Task& task = *m_tasks[inst];
     // w: the instance's own words, all a step reads or writes of the row (the rest is padding); successors are kept
@@ -266,7 +307,7 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     const WorkspaceLease lease = task.workspace();
     Successors& succ = lease->successors();
 
-    // 1. the successors of the current state, in canonical order
+    // 1. the chosen label's successor, or the current state's indexed successors
     const u32 nw = bits::trimmed_size(row, w);
     succ.prepare(StateView{row, nw, nn ? row + W : nullptr, nn});
     const bool already_goal = b.at_goal ? b.at_goal[i] != 0
@@ -276,7 +317,30 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     S.schema.clear();
     S.binding.clear();
     u32 c = 0;
-    if (!already_goal)
+    if (labels)
+    {
+        c = count_prepared(succ, m_config);
+        const i32 schema = labels->schema[i];
+        if (!already_goal && c && schema >= 0 && static_cast<u32>(schema) < succ.num_schemas())
+        {
+            const u32 arity = succ.arity(static_cast<u32>(schema));
+            S.label.resize(arity);
+            for (u32 k = 0; k < arity; ++k)
+                S.label[k] = ObjectId{static_cast<u32>(labels->binding[i * labels->stride + k])};
+            const ActionLabel label{SchemaId{static_cast<u32>(schema)}, S.label};
+            const StateView current{row, nw, nn ? row + W : nullptr, nn};
+            if (succ.is_applicable(current, label))
+            {
+                const Delta d = succ.apply_with_delta(current, label, S.next);
+                S.succ.resize(SW);
+                write_row(S.succ.data(), w, NN, row, nw, d);
+                S.schema.push_back(schema);
+                for (u32 k = 0; k < L; ++k)
+                    S.binding.push_back(k < arity ? static_cast<i32>(S.label[k].v) : -1);
+            }
+        }
+    }
+    else if (!already_goal)
     {
         succ.generate<false>(
             [&](u32 schema, const ObjectId* binding, const Delta& d) -> bool
@@ -297,18 +361,23 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     // 2. the choice
     u8 st = already_goal ? k_goal : k_ok;
     u64 a = 0;
-    if (already_goal)
+    if (already_goal && !labels)
         c = count_prepared(succ, m_config);
-    else if (c == 0)
+    else if (!already_goal && c == 0)
         st = k_stuck;
-    else if (!random)
+    else if (!already_goal && labels)
+    {
+        if (S.schema.empty())
+            st = k_invalid;
+    }
+    else if (!already_goal && !random)
     {
         if (action < 0 || static_cast<u64>(action) >= c)
             st = k_invalid;
         else
             a = static_cast<u64>(action);
     }
-    else
+    else if (!already_goal)
         a = rng::successor_index(b.seeds ? b.seeds[i] : m_config.seed, b.env_ids ? u64{b.env_ids[i]} : b.first_env + i,
                                  b.draws[i], c);
     if (b.draws)
@@ -359,6 +428,21 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
         std::copy_n(s2n, NN, f + FW);
     }
 
+    bool revisited = false;
+    const bool episode_over = !m_config.autoreset &&
+        (absorbed || (m_config.max_steps && b.steps && b.steps[i] >= static_cast<i32>(m_config.max_steps)));
+    if (b.visited_capacity && !episode_over)
+    {
+        const u32 H = b.visited_capacity;
+        revisited = visited_insert(b.visited + i * H, H, b.visited_count[i],
+                                   StateView{s2, bits::trimmed_size(s2, w), nn ? s2n : nullptr, nn}.hash());
+        if (b.visited_count[i] == static_cast<i32>(H))
+            std::atomic_ref<i32>(b.visited_status[b.visited_status_per_row ? i : 0])
+                .fetch_or(1, std::memory_order_relaxed);
+    }
+    if (out.revisited)
+        out.revisited[o] = revisited ? 1 : 0;
+
     // 5. the move, or the autoreset
     if (m_config.autoreset && (term || trunc))
     {
@@ -385,15 +469,36 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
 
 void HostEnv::step(EnvBatch& b, const StepOutputs& out, Actions action, const i32* next_task_ids, ThreadPool* pool)
 {
+    if (m_config.actions != ActionSpace::Index)
+        throw std::invalid_argument("mymyr: env: label mode requires explicit labels; the random policy is unavailable");
     check_step(b, out, action, next_task_ids);
-    const bool random = !action.given();
+    step_impl(b, out, action, nullptr, next_task_ids, pool);
+}
+
+void HostEnv::step(EnvBatch& b, const StepOutputs& out, Labels labels, const i32* next_task_ids, ThreadPool* pool)
+{
+    if (m_config.actions != ActionSpace::Label)
+        throw std::invalid_argument("mymyr: env: explicit labels require actions=Label");
+    check_step(b, out, {}, next_task_ids);
+    if (b.rows && (!labels.schema || (m_suite->label_width() && !labels.binding)))
+        throw std::invalid_argument("mymyr: env: label mode needs schema and binding arrays");
+    if (labels.stride < m_suite->label_width())
+        throw std::invalid_argument("mymyr: env: label binding stride is below the suite's largest schema arity");
+    step_impl(b, out, {}, &labels, next_task_ids, pool);
+}
+
+void HostEnv::step_impl(EnvBatch& b, const StepOutputs& out, Actions action, const Labels* labels,
+                        const i32* next_task_ids, ThreadPool* pool)
+{
+    const bool random = !labels && !action.given();
     const u32 T = pool ? pool->size() : 1;
     if (m_scratch.size() < T)
         m_scratch.resize(T);
     auto rows = [&](u64 lo, u64 hi, Scratch& S)
     {
         for (u64 i = lo; i < hi; ++i)
-            step_row(b, i, out, i, random ? 0 : action.at(i), random, next_task_ids ? next_task_ids[i] : -1, S);
+            step_row_impl(b, i, out, i, labels || random ? 0 : action.at(i), random,
+                          next_task_ids ? next_task_ids[i] : -1, S, labels);
     };
     if (T == 1 || b.rows < 2)
         rows(0, b.rows, m_scratch[0]);
