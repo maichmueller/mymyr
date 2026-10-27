@@ -376,7 +376,7 @@ struct Flat
     std::vector<u64> succ;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
-    u64 total = 0;
+    u64 total = 0, generated = 0;
     u32 words_needed = 0;
     bool operator==(const Flat&) const = default;
 };
@@ -415,6 +415,7 @@ struct DeviceFlat
         f.goal = to_host<u8>(x.goal, cap, s);
         f.offsets = to_host<i32>(x.offsets, rows + 1, s);
         f.total = x.total;
+        f.generated = x.generated;
         f.words_needed = x.words_needed;
         return f;
     }
@@ -444,6 +445,7 @@ Flat cpu_expand(const TaskPtr& task, const std::vector<u64>& states, u64 rows, u
     x.offsets = f.offsets.data();
     rl::expand(*rl::TaskTable::single(task), {states.data(), rows, in_words, 0}, nullptr, x, o);
     f.total = x.total;
+    f.generated = x.generated;
     f.words_needed = x.words_needed;
     return f;
 }
@@ -502,6 +504,8 @@ TEST_P(CudaExpandSuite, ByteEqualToRlExpand)
                     const Flat dev = df.host(N, s);
                     const Flat cpu = cpu_expand(task, states, N, Win, cap, W, L, o);
                     ASSERT_EQ(dev.total, cpu.total);
+                    ASSERT_EQ(dev.generated, cpu.generated);
+                    ASSERT_EQ(cpu.generated, total);
                     ASSERT_EQ(dev.words_needed, cpu.words_needed);
                     ASSERT_EQ(dev.offsets, cpu.offsets);
                     ASSERT_EQ(dev.parent, cpu.parent);
@@ -539,6 +543,8 @@ TEST_P(CudaExpandSuite, ByteEqualToRlExpand)
                         hx.goal = const_cast<u8*>(cpu.goal.data());
                         hx.offsets = const_cast<i32*>(cpu.offsets.data());
                         hx.total = cpu.total;
+                        hx.generated = cpu.generated;
+                        hx.words_needed = cpu.words_needed;
                         rl::PaddedExpansion hp{k, pc_.index.data(), pc_.mask.data(), pc_.count.data(), PW, pc_.succ.data(),
                                                pc_.schema.data(), PL, pc_.binding.data(), pc_.goal.data(), false};
                         rl::pad(hx, N, hp);

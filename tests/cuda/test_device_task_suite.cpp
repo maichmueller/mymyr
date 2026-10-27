@@ -149,7 +149,7 @@ struct Flat
     std::vector<u64> succ;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
-    u64 total = 0;
+    u64 total = 0, generated = 0;
     u32 words_needed = 0;
 };
 
@@ -176,6 +176,7 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
     x.offsets = f.offsets.data();
     rl::expand(S, rl::StateBatchView{rows.data(), N, W, 0}, ids.data(), x);
     f.total = x.total;
+    f.generated = x.generated;
     f.words_needed = x.words_needed;
     return f;
 }
@@ -210,6 +211,7 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     f.goal = to_host<u8>(goal.data(), c, s);
     f.offsets = to_host<i32>(offsets.data(), N + 1, s);
     f.total = x.total;
+    f.generated = x.generated;
     f.words_needed = x.words_needed;
     return f;
 }
@@ -217,6 +219,7 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
 void expect_flat_equal(const Flat& d, const Flat& h)
 {
     ASSERT_EQ(d.total, h.total);
+    ASSERT_EQ(d.generated, h.generated);
     ASSERT_EQ(d.words_needed, h.words_needed);
     ASSERT_EQ(d.offsets, h.offsets);
     ASSERT_EQ(d.parent, h.parent);
@@ -580,6 +583,9 @@ TEST(DeviceTaskSuiteExpand, SuiteEqualsHost)
                     hx.binding = const_cast<i32*>(h.binding.data());
                     hx.goal = const_cast<u8*>(h.goal.data());
                     hx.offsets = const_cast<i32*>(h.offsets.data());
+                    hx.total = h.total;
+                    hx.generated = h.generated;
+                    hx.words_needed = h.words_needed;
                     std::vector<i32> index(N * K), count(N), schema(N * K), binding(N * K * L);
                     std::vector<u8> mask(N * K), goal(N * K);
                     std::vector<u64> succ(N * K * W);

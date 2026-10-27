@@ -29,7 +29,8 @@ struct Flat
     std::vector<u64> succ, derived;
     std::vector<i32> parent, offsets;
     std::vector<u8> goal;
-    u64 total = 0;
+    u64 total = 0, generated = 0;
+    u32 words_needed = 0;
 };
 
 /// Seeded random walks over a suite, `steps` states per instance, rows at the suite's width.
@@ -94,6 +95,8 @@ Flat host_run(const rl::TaskSuite& suite, const Batch& b, u64 cap, u32 dw)
     x.offsets = f.offsets.data();
     rl::expand(suite, {b.rows.data(), N, W, 0, 0}, b.ids.data(), x);
     f.total = x.total;
+    f.generated = x.generated;
+    f.words_needed = x.words_needed;
     return f;
 }
 
@@ -123,6 +126,8 @@ Flat device_run(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, cons
     ex.expand({static_cast<const u64*>(rows.data()), N, W, 0, 0}, static_cast<const i32*>(ids.data()), x);
     Flat f;
     f.total = x.total;
+    f.generated = x.generated;
+    f.words_needed = x.words_needed;
     f.succ = test::to_host<u64>(succ.data(), c * W, s);
     f.derived = test::to_host<u64>(derived.data(), c * std::max<u32>(dw, 1), s);
     f.parent = test::to_host<i32>(parent.data(), c, s);
@@ -152,6 +157,8 @@ void expect_equal(const rl::TaskSuitePtr& suite, u64 cap_divisor, u32 extra_word
     {
         const Flat d = device_run(ctx, suite, b, cap, dw, launch);
         ASSERT_EQ(d.total, h.total);
+        EXPECT_EQ(d.generated, h.generated);
+        EXPECT_EQ(d.words_needed, h.words_needed);
         EXPECT_EQ(d.offsets, h.offsets);
         EXPECT_EQ(d.succ, h.succ);
         EXPECT_EQ(d.parent, h.parent);
@@ -222,6 +229,7 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
     const Flat f = host_run(*suite, b, 1 << 14, dw);
     // host padded
     std::vector<u64> hp(u64{N} * K * dw, 0x77);
+    bool host_overflow = false;
     {
         rl::Expansion x;
         x.capacity = 1 << 14;
@@ -231,11 +239,14 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
         x.derived = const_cast<u64*>(f.derived.data());
         x.offsets = const_cast<i32*>(f.offsets.data());
         x.total = f.total;
+        x.generated = f.generated;
+        x.words_needed = f.words_needed;
         rl::PaddedExpansion p;
         p.k = K;
         p.derived_words = dw;
         p.derived = hp.data();
         rl::pad(x, N, p);
+        host_overflow = p.overflow;
     }
     cuda::DeviceExpander ex(ctx, suite->table(0));
     const cudaStream_t s = ex.stream();
@@ -249,11 +260,14 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
     x.derived = static_cast<u64*>(derived.data());
     x.offsets = static_cast<i32*>(offsets.data());
     x.total = f.total;
+    x.generated = f.generated;
+    x.words_needed = f.words_needed;
     rl::PaddedExpansion p;
     p.k = K;
     p.derived_words = dw;
     p.derived = static_cast<u64*>(out.data());
     ex.pad(x, N, p);
+    EXPECT_EQ(p.overflow, host_overflow);
     EXPECT_EQ(test::to_host<u64>(out.data(), hp.size(), s), hp);
 }
 

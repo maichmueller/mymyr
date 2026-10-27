@@ -355,6 +355,9 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
                 hx.binding = const_cast<i32*>(h.binding.data());
                 hx.goal = const_cast<u8*>(h.goal.data());
                 hx.offsets = const_cast<i32*>(h.offsets.data());
+                hx.total = h.total;
+                hx.generated = h.generated;
+                hx.words_needed = h.words_needed;
                 std::vector<i32> index(N * K), count(N), schema(N * K), binding(N * K * L);
                 std::vector<u8> mask(N * K), goal(N * K);
                 std::vector<u64> succ(N * K * W);

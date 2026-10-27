@@ -179,6 +179,7 @@ uses its live slot layout, counts new atoms as changes, and grows output rows au
 the width. Tables require fixed atom slots. Every requested array is filtered alike, including goal
 flags and derived words. The padded view adds zero-padded hashes and no-op flags and, when filtering, `canonical`:
 each kept successor's position in its parent's full order, -1 padding. Its `index` is always the flat row.
+Padding preserves the flat expansion's capacity and atom-word width overflow, even when `K` fits every parent's count.
 
 JAX CPU `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit` and `vmap`; hashes
 use uint32 pairs (low word first), the padded result names the positions `canonical` and the flat one `index`, and
