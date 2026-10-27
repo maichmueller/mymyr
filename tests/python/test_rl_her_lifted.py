@@ -703,7 +703,8 @@ def test_match_first_device_literal_kinds(first):
 
 
 @pytest.mark.parametrize("first", [False, True])
-def test_match_first_torch_op_fake_and_compile(first):
+@pytest.mark.parametrize("max_steps", [0, 1_000_000])
+def test_match_first_torch_op_fake_and_compile(first, max_steps):
     torch = pytest.importorskip("torch", exc_type=ImportError)
     from mymyr.rl.torch._ops import match_first as op, register, unregister
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -713,12 +714,12 @@ def test_match_first_torch_op_fake_and_compile(first):
     rows = torch.tensor(np.asarray(task.encode(walk(task, steps=3, walks=1))).view(np.int64))
     handle = register(templates)
     try:
-        expected = rl.match_first(rows.numpy(), None, templates, first=first)
-        eager = op(handle, rows, first=first)
+        expected = rl.match_first(rows.numpy(), None, templates, first=first, max_steps=max_steps)
+        eager = op(handle, rows, first=first, max_steps=max_steps)
         with FakeTensorMode() as mode:
-            fake = op(handle, mode.from_tensor(rows), first=first)
+            fake = op(handle, mode.from_tensor(rows), first=first, max_steps=max_steps)
             assert [(v.shape, v.dtype) for v in fake] == [(v.shape, v.dtype) for v in eager]
-        compiled = torch.compile(lambda x: op(handle, x, first=first), backend="eager", fullgraph=True)(rows)
+        compiled = torch.compile(lambda x: op(handle, x, first=first, max_steps=max_steps), backend="eager", fullgraph=True)(rows)
         for host, eager_tensor, compiled_tensor in zip(expected, eager, compiled):
             np.testing.assert_array_equal(host, eager_tensor.numpy())
             assert torch.equal(eager_tensor, compiled_tensor)
@@ -862,5 +863,116 @@ def test_match_first_upload_accepts_stream_handles_and_stream_protocol():
     for source in (stream, stream.cuda_stream, StreamReference()):
         uploaded = templates.upload(source)
         actual = rl.match_first(x, None, uploaded, first=True)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("typed", ["none", "static", "fluent"])
+def test_match_first_rejects_impossible_injective_domains(on_device, typed):
+    limited_type = typed != "none"
+    action = "(:action add :parameters (?x) :precondition (and) :effect (member ?x))" if typed == "fluent" else ""
+    domain = mymyr.Domain.from_string(f"""(define (domain domains)
+        (:requirements :adl :equality) (:predicates (ok) (member ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)) {action})""")
+    objects = " ".join(f"o{i}" for i in range(70 if limited_type else 63))
+    members = " ".join(f"(member o{i})" for i in range(63))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem domains) (:domain domains)
+        (:objects {objects}) (:init (ok) {members}) (:goal (ok)))"""))
+    variables = [f"?v{i}" for i in range(64)]
+    literals = [f"(member {v})" for v in variables] if limited_type else ["(ok)"]
+    condition = task.condition(variables, literals,
+                               equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    # Prove the rejection on the host before submitting the same condition to the device.
+    expected = rl.match_first(rows, None, templates, max_steps=3 if limited_type else 0)
+    assert not expected.found.any() and expected.count.tolist() == [0]
+    assert (expected.binding == -1).all() and (expected.template == -1).all()
+    assert int(expected.status) == 0
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), max_steps=3 if limited_type else 0)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_search_budget_exhaustion_and_reset(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain budget)
+        (:requirements :adl :equality) (:predicates (ok))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem budget) (:domain budget)
+        (:objects a b c d) (:init (ok)) (:goal (ok)))"""))
+    variables = ["?a", "?b", "?c", "?d"]
+    condition = task.condition(variables, ["(ok)"],
+                               equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition, condition]])
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    status = np.array(99, np.int64)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=7, status=status, pool=rl.ThreadPool(2))
+    assert int(expected.status) == 8 and not expected.found.any() and not expected.count.any()
+    assert (expected.binding == -1).all() and (expected.template == -1).all()
+    expected = rl.MatchResult(*(value.copy() for value in expected))
+    complete = rl.match_first(rows, None, templates, first=first, max_steps=8, status=status)
+    assert int(complete.status) == 0 and complete.found.all()
+    assert complete.count.tolist() == ([1, 1] if first else [2, 2])
+    if on_device:
+        torch = cuda_match_runtime()
+        from mymyr.rl.torch import register, unregister
+
+        device = templates.to("cuda:0")
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        device_status = torch.tensor(99, device="cuda:0")
+        handle = register(device)
+        try:
+            for budget, want in [(7, expected), (8, complete)]:
+                actual = rl.match_first(x, None, device, first=first, max_steps=budget, status=device_status)
+                via_op = torch.ops.mymyr.match_first(handle, x, first=first, max_steps=budget)
+                for host, gpu, op in zip(want, actual, via_op):
+                    np.testing.assert_array_equal(host, gpu.cpu().numpy())
+                    assert torch.equal(gpu, op)
+        finally:
+            unregister(handle)
+
+
+@pytest.mark.parametrize("max_steps", [-1, 2**63, 1.5])
+def test_match_first_rejects_invalid_search_budget(max_steps):
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+    with pytest.raises((TypeError, ValueError)):
+        rl.match_first(rows, None, templates, max_steps=max_steps)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_exhausted_template_continues_and_combines_status(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain continued)
+        (:requirements :adl) (:predicates (ok))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem continued) (:domain continued)
+        (:objects a b) (:init (ok)) (:goal (ok)))"""))
+    expensive = task.condition(["?a", "?b"], ["(ok)"])
+    ground = task.condition([], ["(ok)"])
+    templates = rl.GoalTemplates.from_conditions(task, [[expensive, ground]])
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    ids = np.array([0, -1], np.int32)
+    expected = rl.match_first(rows, ids, templates, first=first, capacity=1, max_steps=1)
+    assert int(expected.status) == (12 if first else 13)
+    assert expected.count.tolist() == [1, 0]
+    assert expected.found.tolist() == ([True, False] if first else [[False], [False]])
+    if first:
+        assert expected.template.tolist() == [1, -1]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"),
+                                torch.tensor(ids, device="cuda:0"), templates.to("cuda:0"),
+                                first=first, capacity=1, max_steps=1)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())

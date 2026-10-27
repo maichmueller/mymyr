@@ -584,3 +584,106 @@ TEST(DeviceRlOps, MatchFirstGroundOnlyNeedsNoBindingStorage)
     EXPECT_EQ(download<i32>(dc, 1, stream)[0], count);
     EXPECT_EQ(download<u64>(ds, 1, stream)[0], status);
 }
+
+TEST(DeviceRlOps, MatchFirstPigeonholeAndSearchBudgetEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    namespace ed = encoding::detail;
+    for (u32 mode = 0; mode < 5; ++mode)
+    {
+        SCOPED_TRACE(mode);
+        const bool typed = mode == 1;
+        const u32 vars = mode < 2 || mode == 4 ? 64 : 4;
+        std::vector<u64> inst(ed::k_instance_columns), states(1);
+        inst[ed::k_num_objects] = typed ? 70 : mode < 2 || mode == 4 ? 63 : 4;
+        std::vector<u32> ranges(ed::k_literal_columns);
+        ranges[ed::k_literal_predicate_kind] = ed::k_literal_static_predicate;
+        ranges[ed::k_literal_static_end] = typed ? 63 : 1;
+        std::vector<i32> instance_offsets{0, 1}, num_vars{static_cast<i32>(vars)};
+        std::vector<i32> literal_offsets{0, typed ? 64 : 1}, order(64), terms(64), args(63);
+        for (i32 v = 0; v < 64; ++v)
+            order[v] = terms[v] = v;
+        for (i32 v = 0; v < 63; ++v)
+            args[v] = v;
+        std::vector<i32> predicate(typed ? 64 : 1), arity(predicate.size(), typed ? 1 : 0);
+        std::vector<u8> polarity(predicate.size(), 1), distinct{static_cast<u8>(mode != 4)};
+        rl::MatchTemplates t;
+        t.num_instances = t.capacity = t.max_arity = 1;
+        t.max_vars = 64;
+        t.instance_offsets = instance_offsets.data();
+        t.num_vars = num_vars.data();
+        t.literal_offsets = literal_offsets.data();
+        t.order = order.data();
+        t.terms = terms.data();
+        t.predicate = predicate.data();
+        t.arity = arity.data();
+        t.polarity = polarity.data();
+        t.distinct = distinct.data();
+        t.literals.inst = inst.data();
+        t.literals.num_instances = t.literals.num_predicates = t.literals.max_arity = 1;
+        t.literals.literal_ranges = ranges.data();
+        t.literals.static_args = args.data();
+        std::vector<u8> found(1, 99);
+        std::vector<i32> binding(64, 99), which(1, 99), count(1, 99);
+        u64 status = 99;
+        rl::MatchBatch b;
+        b.states = states.data();
+        b.rows = b.row_words = b.capacity = 1;
+        b.max_steps = mode == 0 ? 0 : typed ? 3 : mode == 2 ? 7 : mode == 3 ? 8 : 128;
+        b.found = found.data();
+        b.binding = binding.data();
+        b.template_id = which.data();
+        b.count = count.data();
+        b.status = &status;
+        rl::match_first(t, b);
+        ASSERT_EQ(status, mode == 2 ? 8 : 0);
+        ASSERT_EQ(found[0], mode >= 3 ? 1 : 0);
+        ASSERT_EQ(count[0], mode >= 3 ? 1 : 0);
+        ASSERT_EQ(which[0], mode >= 3 ? 0 : -1);
+        for (u32 v = 0; v < 64; ++v)
+            ASSERT_EQ(binding[v], mode == 4 ? 0 : mode == 3 && v < vars ? static_cast<i32>(v) : -1);
+        auto di = upload(ctx, inst, stream), dr = upload(ctx, ranges, stream);
+        auto dio = upload(ctx, instance_offsets, stream), dnv = upload(ctx, num_vars, stream);
+        auto dlo = upload(ctx, literal_offsets, stream), dor = upload(ctx, order, stream);
+        auto dte = upload(ctx, terms, stream), da = upload(ctx, args, stream);
+        auto dp = upload(ctx, predicate, stream), dar = upload(ctx, arity, stream);
+        auto dpo = upload(ctx, polarity, stream), dd = upload(ctx, distinct, stream);
+        t.instance_offsets = ptr<const i32>(dio);
+        t.num_vars = ptr<const i32>(dnv);
+        t.literal_offsets = ptr<const i32>(dlo);
+        t.order = ptr<const i32>(dor);
+        t.terms = ptr<const i32>(dte);
+        t.predicate = ptr<const i32>(dp);
+        t.arity = ptr<const i32>(dar);
+        t.polarity = ptr<const u8>(dpo);
+        t.distinct = ptr<const u8>(dd);
+        t.literals.inst = ptr<const u64>(di);
+        t.literals.literal_ranges = ptr<const u32>(dr);
+        t.literals.static_args = ptr<const i32>(da);
+        auto ds = upload(ctx, states, stream), df = upload(ctx, found, stream), db = upload(ctx, binding, stream);
+        auto dt = upload(ctx, which, stream), dc = upload(ctx, count, stream);
+        auto dst = upload(ctx, std::vector<u64>{99}, stream);
+        b.states = ptr<const u64>(ds);
+        b.found = ptr<u8>(df);
+        b.binding = ptr<i32>(db);
+        b.template_id = ptr<i32>(dt);
+        b.count = ptr<i32>(dc);
+        b.status = ptr<u64>(dst);
+        cuda::check(cuda::launch_match_first(t, b, stream), "bounded matches");
+        EXPECT_EQ(download<u8>(df, 1, stream), found);
+        EXPECT_EQ(download<i32>(db, 64, stream), binding);
+        EXPECT_EQ(download<i32>(dt, 1, stream), which);
+        EXPECT_EQ(download<i32>(dc, 1, stream), count);
+        EXPECT_EQ(download<u64>(dst, 1, stream)[0], status);
+    }
+}
+
+TEST(DeviceRlOps, MatchFirstRequiresStatus)
+{
+    rl::MatchTemplates t;
+    rl::MatchBatch b;
+    EXPECT_THROW(rl::match_first(t, b), std::invalid_argument);
+    EXPECT_EQ(cuda::launch_match_first(t, b, nullptr), cudaErrorInvalidValue);
+}

@@ -160,7 +160,7 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
     return mask;
 }
 
-/// Positive static unary predicates supply type domains. Variables sharing a domain need at least that many
+/// Positive unary predicates supply candidate domains, including type membership. Variables sharing a domain need at least that many
 /// unused objects, even when the instance has enough objects in total. Each domain is checked once per prefix.
 template<class Group>
 MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects,
@@ -175,9 +175,6 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
         if (variable < 0 || binding[variable] >= 0)
             continue;
         const i32 predicate = t.predicate[l];
-        const u32* r = t.literals.literal_ranges + (u64{g} * t.literals.num_predicates + predicate) * ed::k_literal_columns;
-        if (r[ed::k_literal_predicate_kind] != ed::k_literal_static_predicate)
-            continue;
         bool seen = false;
         for (u32 before = begin; before < l; ++before)
         {

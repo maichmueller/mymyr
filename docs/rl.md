@@ -453,6 +453,8 @@ condition = match_templates.conditions(0)[int(matched.template[0])]
 expected = next(iter(match_task.bindings(condition, match_task.initial_state, limit=1)))
 assert matched.binding[0, :condition.arity].tolist() == [o.index for o in expected]
 assert int(matched.status) == 0
+bounded = rl.match_first(match_rows, None, match_templates, max_steps=0)
+assert not bounded.found.any() and int(bounded.status) & 8
 ```
 
 Counts include successful matches beyond capacity. Status is cleared each call: bit 0 (value 1) reports truncated
@@ -462,7 +464,7 @@ rows across workers. The destination-passing C++ form
 `rl::match_first(MatchTemplates, MatchBatch, ThreadPool*)` also accepts caller-owned output buffers and a thread pool;
 `GoalTemplates::view(block)` resolves the packed pointers on either host or device memory.
 
-Search has exponential worst-case work. Total object counts and shared static unary candidate domains prune
+Search has exponential worst-case work. Total object counts and shared unary candidate domains prune
 impossible injective bindings. `max_steps` (default 1,000,000; integer in `[0, 2**63)`) limits work independently for
 each row/template on host and device. One step is a candidate tile scan (including domain pruning) or a binding
 trial; a tile scans the template's literals and their indexed tuples. Ground checks and cardinality rejection need
