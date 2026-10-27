@@ -13,7 +13,7 @@ class MatchResult(NamedTuple):
     """Padded matches: found bool [N, C], binding int32 [N, C, V], template int32 [N, C], count int32 [N],
     status int64 scalar. With first=True, the C axis is removed (C=1). Bindings are indexed by variable id;
     unused entries and failed template ids are -1. Count includes matches beyond capacity. Status bits are
-    0 truncation, 1 device variable limit, 2 invalid instance. Outputs stay on the input device.
+    0 truncation, 1 device variable limit, 2 invalid instance, 3 search budget exhausted. Outputs stay on the input device.
     """
 
     found: Any
@@ -79,7 +79,10 @@ def upload(host, stream=None):
         return DeviceGoalTemplates(host, stream.device)
 
 
-def _match(rows, task_ids, templates, first, derived, capacity, status=None, pool=None):
+def _match(rows, task_ids, templates, first, derived, capacity, status=None, pool=None, max_steps=1_000_000):
+    max_steps = operator.index(max_steps)
+    if not 0 <= max_steps < 2**63:
+        raise ValueError("mymyr: match_first max_steps must be in [0, 2**63)")
     fw = _framework(rows)
     if fw not in ("numpy", "torch"):
         raise TypeError("mymyr: match_first supports NumPy and torch arrays")
@@ -128,14 +131,15 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None, poo
     if status is None:
         status = empty((), "int64")
     _rl_ops.match_first(rows, task_ids, host, block, found, binding, template, count, status,
-                        first=first, derived=derived, stream=stream, pool=pool)
+                        first=first, derived=derived, stream=stream, pool=pool, max_steps=max_steps)
     if first:
         found, binding, template = found[:, 0], binding[:, 0], template[:, 0]
     return MatchResult(found, binding, template, count, status)
 
 
 def match_first(rows: Any, task_ids: Any, templates: Any, *, first: bool = False, derived: Any = None,
-                status: Any = None, capacity: int | None = None, pool: Any = None) -> MatchResult:
+                status: Any = None, capacity: int | None = None, pool: Any = None,
+                max_steps: int = 1_000_000) -> MatchResult:
     """The first canonical binding of each instance's lifted templates in each state row.
 
     Templates carry distinctness (True by default; also 'equality' and False). The first binding equals
@@ -147,5 +151,10 @@ def match_first(rows: Any, task_ids: Any, templates: Any, *, first: bool = False
     slot j holds instance-local template j, padded to capacity (default templates.capacity); returned template ids
     are global packed ids. Count includes truncated successes; status is cleared each call. No device counts are
     read on the host. CUDA uses uploaded templates and captures after warm-up. No JAX form is provided.
+
+    Search is exponential in the worst case. max_steps bounds candidate tiles and binding trials per row/template
+    (default 1,000,000, nonnegative); each tile scans the template's literals and indexed tuples. Exhaustion sets
+    status bit 3 (value 8), leaves that template unmatched, and continues with other templates. Counts and first=True
+    then describe only completed searches. Increase the budget and retry to resolve exhausted searches.
     """
-    return _match(rows, task_ids, templates, first, derived, capacity, status, pool)
+    return _match(rows, task_ids, templates, first, derived, capacity, status, pool, max_steps)

@@ -25,7 +25,8 @@ struct MatchTemplates
 /// capacity is one and the template search stops at its first success. Otherwise slot j is instance-local template j.
 /// template_id holds global packed template ids, -1 for failures/padding; binding holds variable-indexed object ids,
 /// -1 for failures/padding. Count is the number found, including those beyond capacity. Status is cleared per call:
-/// bit 0 output truncation, bit 1 device variable limit, bit 2 invalid instance. No input words are read for invalid ids.
+/// bit 0 output truncation, bit 1 device variable limit, bit 2 invalid instance, bit 3 search budget exhausted.
+/// Exhausted templates have no result; other templates are still searched. No input words are read for invalid ids.
 struct MatchBatch
 {
     const u64* states = nullptr;
@@ -34,6 +35,7 @@ struct MatchBatch
     u64 rows = 0;
     u32 row_words = 0, derived_words = 0, capacity = 0;
     bool first = false;
+    u64 max_steps = 1000000;  ///< Per row/template: candidate tiles and binding trials, including domain pruning.
     u8* found = nullptr;
     i32 *binding = nullptr, *template_id = nullptr, *count = nullptr;
     u64* status = nullptr;
@@ -42,6 +44,21 @@ struct MatchBatch
 namespace match_detail
 {
 namespace ed = encoding::detail;
+struct Budget
+{
+    u64 remaining;
+    bool exhausted = false;
+    MYMYR_HD bool take()
+    {
+        if (remaining)
+        {
+            --remaining;
+            return true;
+        }
+        exhausted = true;
+        return false;
+    }
+};
 struct Objects
 {
     const i32* terms;
@@ -87,13 +104,13 @@ MYMYR_HD bool ready(const Group& grp, const MatchTemplates& t, u32 g, u32 k, con
 
 template<class Group>
 MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k, i32 variable, u32 base,
-                         u32 objects, const i32* binding, const u64* state, const u64* derived)
+                         u32 objects, const i32* binding, const u64* state, const u64* derived, i32 unary_predicate = -1)
 {
     u32 mask = objects - base >= 32 ? ~u32{0} : (u32{1} << (objects - base)) - 1;
     const u64* inst = t.literals.inst + u64{g} * ed::k_instance_columns;
     for (u32 l = t.literal_offsets[k]; l < static_cast<u32>(t.literal_offsets[k + 1]); ++l)
     {
-        if (!t.polarity[l])
+        if (!t.polarity[l] || (unary_predicate >= 0 && (t.arity[l] != 1 || t.predicate[l] != unary_predicate)))
             continue;
         i32 position = -1;
         const i32* terms = t.terms + u64{l} * t.max_arity;
@@ -143,19 +160,83 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
     return mask;
 }
 
+/// Positive static unary predicates supply type domains. Variables sharing a domain need at least that many
+/// unused objects, even when the instance has enough objects in total. Each domain is checked once per prefix.
+template<class Group>
+MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects,
+                                const i32* binding, const u64* state, const u64* derived, Budget& budget)
+{
+    const u32 begin = static_cast<u32>(t.literal_offsets[k]), end = static_cast<u32>(t.literal_offsets[k + 1]);
+    for (u32 l = begin; l < end; ++l)
+    {
+        if (!t.polarity[l] || t.arity[l] != 1)
+            continue;
+        const i32 variable = t.terms[u64{l} * t.max_arity];
+        if (variable < 0 || binding[variable] >= 0)
+            continue;
+        const i32 predicate = t.predicate[l];
+        const u32* r = t.literals.literal_ranges + (u64{g} * t.literals.num_predicates + predicate) * ed::k_literal_columns;
+        if (r[ed::k_literal_predicate_kind] != ed::k_literal_static_predicate)
+            continue;
+        bool seen = false;
+        for (u32 before = begin; before < l; ++before)
+        {
+            const i32 term = t.terms[u64{before} * t.max_arity];
+            seen |= t.polarity[before] && t.arity[before] == 1 && t.predicate[before] == predicate &&
+                    term >= 0 && binding[term] < 0;
+        }
+        if (seen)
+            continue;
+        u32 needed = 0;
+        for (u32 v = 0; v < static_cast<u32>(t.num_vars[k]); ++v)
+        {
+            if (binding[v] >= 0)
+                continue;
+            for (u32 other = l; other < end; ++other)
+                if (t.polarity[other] && t.arity[other] == 1 && t.predicate[other] == predicate &&
+                    t.terms[u64{other} * t.max_arity] == static_cast<i32>(v))
+                {
+                    ++needed;
+                    break;
+                }
+        }
+        if (needed < 2)
+            continue;
+        u32 available = 0;
+        for (u32 tile = 0; tile < objects && available < needed; tile += 32)
+        {
+            if (!budget.take())
+                return false;
+            u32 mask = candidates(grp, t, g, k, variable, tile, objects, binding, state, derived, predicate);
+            while (mask)
+            {
+                ++available;
+                mask &= mask - 1;
+            }
+        }
+        if (available < needed)
+            return false;
+    }
+    return true;
+}
+
 /// Scratch binding, base and mask each have num_vars[k] entries, private to the lane; no recursion or allocation.
+/// Worst-case work is exponential. The budget bounds candidate tiles and binding trials per row/template;
+/// each tile scan is linear in the template's literals and their indexed tuples. All lanes consume equal steps.
 template<class Group>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
-                      i32* binding, u32* base, u32* masks)
+                      i32* binding, u32* base, u32* masks, Budget& budget)
 {
     const u32 vars = static_cast<u32>(t.num_vars[k]);
+    const u32 objects = static_cast<u32>(t.literals.inst[u64{g} * ed::k_instance_columns + ed::k_num_objects]);
+    if (t.distinct[k] && vars > objects)
+        return false;
     for (u32 v = 0; v < vars; ++v)
         binding[v] = -1;
     if (!ready(grp, t, g, k, binding, state, derived, -1))
         return false;
     if (!vars)
         return true;
-    const u32 objects = static_cast<u32>(t.literals.inst[u64{g} * ed::k_instance_columns + ed::k_num_objects]);
     i32 depth = 0;
     bool enter = true;
     while (depth >= 0)
@@ -164,12 +245,24 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         binding[variable] = -1;
         if (enter)
         {
+            if (t.distinct[k] && !domains_possible(grp, t, g, k, objects, binding, state, derived, budget))
+            {
+                --depth;
+                enter = false;
+                if (budget.exhausted)
+                    return false;
+                continue;
+            }
+            if (!budget.take())
+                return false;
             base[depth] = 0;
             masks[depth] = objects ? candidates(grp, t, g, k, variable, 0, objects, binding, state, derived) : 0;
             enter = false;
         }
         while (!masks[depth] && base[depth] < objects && objects - base[depth] > 32)
         {
+            if (!budget.take())
+                return false;
             base[depth] += 32;
             masks[depth] = candidates(grp, t, g, k, variable, base[depth], objects, binding, state, derived);
         }
@@ -178,6 +271,8 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
             --depth;
             continue;
         }
+        if (!budget.take())
+            return false;
         const u32 pick = ed::lowest_bit64(masks[depth]);
         masks[depth] &= masks[depth] - 1;
         binding[variable] = static_cast<i32>(base[depth] + pick);

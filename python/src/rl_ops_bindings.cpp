@@ -189,7 +189,7 @@ void schema_masks(ArrayArg parent, ArrayArg schema, ArrayArg mask, StreamArg str
 
 void match_first(ArrayArg states, ArrayArg task_ids, Arg<ann::GoalTemplates> templates, ArrayArg block,
                  ArrayArg found, ArrayArg binding, ArrayArg template_id, ArrayArg count, ArrayArg status,
-                 bool first, ArrayArg derived, StreamArg stream, Arg<PyPool> pool)
+                 bool first, ArrayArg derived, StreamArg stream, Arg<PyPool> pool, u64 max_steps)
 {
     PyPool* workers = pool_arg(pool);
     const auto t = goal_templates_of(templates);
@@ -201,6 +201,7 @@ void match_first(ArrayArg states, ArrayArg task_ids, Arg<ann::GoalTemplates> tem
     const i64 n = lead.at(0);
     b.rows = static_cast<u64>(n);
     b.first = first;
+    b.max_steps = max_steps;
     if (b.row_words < t->suite()->words())
         throw nb::value_error("mymyr: match_first: rows are narrower than the template source");
     b.task_ids = in.get<const i32>(task_ids, "task_ids", {i32t}, {n}, false);
@@ -317,9 +318,11 @@ void bind_rl_ops(nb::module_& parent)
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
           "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
-          "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(),
+          "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(), "max_steps"_a = 1000000,
           "Destination-passing lifted matching; outputs are padded [N, C], bindings [N, C, V], counts [N], status scalar. "
-          "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, 2 invalid instance.");
+          "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, "
+          "2 invalid instance, 3 search budget exhausted. "
+          "max_steps bounds candidate tiles and binding trials per row/template.");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),
           "stream"_a = nb::none(),
           "Width-1 novelty update in place: reward[i] = popcount(states[i] & ~seen[i]) over the first S "

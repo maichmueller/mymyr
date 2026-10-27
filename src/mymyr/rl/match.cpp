@@ -2,14 +2,16 @@
 #include "mymyr/core/thread_pool.hpp"
 #include <algorithm>
 #include <atomic>
+#include <stdexcept>
 #include <vector>
 
 namespace mymyr::rl
 {
 void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
 {
-    if (b.status)
-        *b.status = 0;
+    if (!b.status)
+        throw std::invalid_argument("mymyr: match_first requires a status scalar");
+    *b.status = 0;
     auto work = [&](u32 worker)
     {
         const auto [begin, end] = ThreadPool::slice(b.rows, worker, pool ? pool->size() : 1);
@@ -35,9 +37,12 @@ void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
             }
             for (i32 k = t.instance_offsets[g]; k < t.instance_offsets[g + 1]; ++k)
             {
+                match_detail::Budget budget{b.max_steps};
                 const bool found = match_detail::search(encoding::detail::SoloGroup{}, t, static_cast<u32>(g),
                     static_cast<u32>(k), b.states + row * b.row_words,
-                    b.derived ? b.derived + row * b.derived_words : nullptr, binding.data(), base.data(), masks.data());
+                    b.derived ? b.derived + row * b.derived_words : nullptr, binding.data(), base.data(), masks.data(), budget);
+                if (budget.exhausted)
+                    flags |= 8;
                 if (!found)
                     continue;
                 ++b.count[row];

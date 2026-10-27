@@ -59,9 +59,13 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
                 }
                 i32 binding[64];
                 u32 base[64], masks[64];
-                if (!rl::match_detail::search(grp, t, static_cast<u32>(g), static_cast<u32>(k),
+                rl::match_detail::Budget budget{b.max_steps};
+                const bool found = rl::match_detail::search(grp, t, static_cast<u32>(g), static_cast<u32>(k),
                         b.states + row * b.row_words, b.derived ? b.derived + row * b.derived_words : nullptr,
-                        binding, base, masks))
+                        binding, base, masks, budget);
+                if (budget.exhausted)
+                    flags |= 8;
+                if (!found)
                     continue;
                 const u32 j = b.first ? 0 : local;
                 if (j >= b.capacity)
@@ -90,17 +94,16 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
 
 cudaError_t launch_match_first(const rl::MatchTemplates& t, const rl::MatchBatch& b, cudaStream_t stream)
 {
-    if (b.status)
-    {
-        const auto err = cudaMemsetAsync(b.status, 0, sizeof(u64), stream);
-        if (err != cudaSuccess)
-            return err;
-    }
+    if (!b.status)
+        return cudaErrorInvalidValue;
+    auto err = cudaMemsetAsync(b.status, 0, sizeof(u64), stream);
+    if (err != cudaSuccess)
+        return err;
     if (!b.rows)
         return cudaSuccess;
     const u32 blocks = static_cast<u32>((b.rows + 127) / 128 > 65535 ? 65535 : (b.rows + 127) / 128);
     initialize<<<blocks, 128, 0, stream>>>(t, b);
-    auto err = cudaGetLastError();
+    err = cudaGetLastError();
     if (err != cudaSuccess)
         return err;
     const u64 jobs = b.rows * (b.first || !t.capacity ? 1 : t.capacity);
