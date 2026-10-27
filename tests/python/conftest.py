@@ -205,3 +205,93 @@ def _gil_stays_disabled():
     yield
     if sys._is_gil_enabled():
         pytest.fail("this test enabled the GIL (it loaded a module that needs it); mark it @pytest.mark.needs_gil")
+
+
+def wide_task(tmp_path, objects=80, atoms="dense", initial_atoms=1, extra_effects=False):
+    """A four-state task whose two high-slot goals require IW(2) from the initial state."""
+    import mymyr
+
+    text = f"O {objects}\nP 1\nF 2 cell\nSI 0\nFI {initial_atoms}\n"
+    text += "".join(f"0 {i // objects} {i % objects}\n" for i in range(initial_atoms))
+    text += f"G 2\n0 1 {objects - 1} {objects - 1}\n0 1 {objects - 1} {objects - 2}\nA 3\n"
+    for i in range(2):
+        a, b = -objects, -objects + i
+        text += f"set{i} 0\nL 1\n0 0 {a} {b}\nE 1\n0\nL 0\nF {2 if extra_effects else 1}\n0 1 {a} {b}\n"
+        if extra_effects:
+            text += f"0 1 {a + 1} {b}\n"
+    text += "touch 2\nL 1\n0 1 0 1\nE 1\n0\nL 0\nF 1\n0 1 0 1\n"
+    path = tmp_path / "wide.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path, atoms=atoms)
+
+
+@pytest.fixture(params=["p01-medium", "p05-medium"])
+def rovers_task(request):
+    import mymyr
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/ipc/rovers-ipc/test"
+    return mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{request.param}.pddl", atoms="dense")
+
+
+@pytest.fixture(scope="session")
+def blocksworld_wide():
+    """Blocksworld with 69 blocks: dense rows of more than 64 words."""
+    import mymyr
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    directory = ROOT / "tests/data/ipc/blocksworld-ipc/test"
+    return mymyr.Task.from_pddl(directory / "domain.pddl", directory / "p10-medium.pddl", atoms="dense")
+
+
+def successor_refusal(search, successors, max_bytes):
+    """The pattern of a device search's refusal of a state whose successors exceed the context's memory."""
+    room = rf"\d+ bytes \(max_bytes={max_bytes}\)"
+    return (rf"^mymyr: {search}: a state has {successors} successors, which need (\d+ bytes of device memory; the CUDA "
+            rf"context can still allocate {room}|more device memory than the CUDA context can still allocate \({room}\))\. "
+            r"Raise the Context's max_bytes, or use the CPU search\.$")
+
+
+def fan_task(tmp_path, objects):
+    """A task whose initial state has objects * objects successors, one per pair of objects, all dead ends; the goal
+    is the last pair's."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 3\nF 1 left\nF 1 right\nF 0 free\nSI 0\nFI 1\n2\nG 2\n0 1 {n - 1}\n1 1 {n - 1}\n"
+    text += "A 1\npick 2\nL 1\n2 1\nE 1\n0\nL 0\nF 3\n2 0\n0 1 0\n1 1 1\n"
+    path = tmp_path / "fan.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path)
+
+
+def symfan_task(tmp_path, objects, drop=True):
+    """pick(?x ?y) adds left(x) and left(y): the initial state has objects * objects successors, of which
+    objects * (objects + 1) / 2 are distinct ((a, b) and (b, a) lie far apart in the successor order); drop(?x) turns
+    left(x) into done(x), a second layer with duplicates across parents. Goal: done(o[-1]) and left(o[-2])."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 3\nF 1 left\nF 0 free\nF 1 done\nSI 0\nFI 1\n1\nG 2\n2 1 {n - 1}\n0 1 {n - 2}\n"
+    text += f"A {2 if drop else 1}\npick 2\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n0 1 1\n"
+    if drop:
+        text += "drop 1\nL 1\n0 1 0\nE 1\n0\nL 0\nF 2\n0 0 0\n2 1 0\n"
+    path = tmp_path / f"symfan-{n}-{int(drop)}.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path)
+
+
+def wide_fan_task(tmp_path, objects=1100):
+    """Rows of objects * objects / 64 words or more: the initial state has `objects` successors; the goal follows
+    the last of them."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 4\nF 1 picked\nF 0 free\nF 2 pad\nF 0 done\nSI 0\nFI 1\n1\nG 1\n3 1\n"
+    text += "A 2\npick 1\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n2 1 0 0\n"
+    text += f"finish 0\nL 1\n0 1 {-n}\nE 1\n0\nL 0\nF 1\n3 1\n"
+    path = tmp_path / "wide-fan.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path, atoms="dense")

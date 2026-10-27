@@ -7,6 +7,7 @@
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
 #include "py_formula.hpp"
+#include "py_landmarks.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 #include "py_search_tree.hpp"
@@ -71,6 +72,8 @@ using Slots = nb::typed<nb::sequence, int>;
 using GoalArg = std::variant<PyGroundCondition, nb::typed<nb::tuple, Slots, Slots>>;
 using GoalsArg = Arg<nb::typed<nb::sequence, GoalArg>>;
 using SeedsArg = nb::typed<nb::sequence, int>;
+using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, nb::typed<nb::sequence, PyFactLandmarkGraph>>>;
+using UnsharedArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 /// Start states: host states (a State, a sequence of States, a host word array) or, for batched_iw1, a CUDA device
 /// word array [N, W] uint64 / [N, 2W] uint32 read in place.
 using StartsArg = StatesLike;
@@ -87,6 +90,46 @@ struct PyIwBatch
 
 /// The owner of search i's labels and states (its instance's task).
 const Owner& owner_of_search(const PyIwBatch& x, u32 i) { return x.owners.at(x.ids.empty() ? 0 : x.ids.at(i)); }
+
+std::vector<search::LandmarkNovelty> landmark_options(const PyIwBatch& x, nb::handle graphs, bool disjunctive,
+                                                       bool all_private, nb::handle unshared, u32 count = ~u32{0})
+{
+    if (count == ~u32{0})
+        count = static_cast<u32>(x.starts.size());
+    const bool shared = graphs.is_none() || nb::isinstance<PyFactLandmarkGraph>(graphs);
+    nb::sequence sequence;
+    if (!shared)
+    {
+        sequence = nb::cast<nb::sequence>(graphs);
+        if (nb::len(sequence) != count)
+            throw nb::value_error("mymyr: landmarks must be one graph or one per search");
+    }
+    nb::list unshared_values;
+    if (!unshared.is_none())
+        for (nb::handle atom : unshared)
+            unshared_values.append(atom);
+    std::vector<search::LandmarkNovelty> out;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const Owner& owner = x.owners[x.ids.empty() ? 0 : x.ids[i]];
+        search::LandmarkNovelty lm;
+        lm.disjunctive = disjunctive;
+        lm.all_private = all_private;
+        const nb::handle graph = shared ? graphs : sequence[i];
+        if (!graph.is_none())
+        {
+            const auto& g = nb::cast<const PyFactLandmarkGraph&>(graph);
+            same_task(owner, g.o, "the landmark graph");
+            lm.graph = g.g;
+        }
+        for (nb::handle atom : unshared_values)
+            if (auto c = canonical_atom(owner, atom, false))
+                lm.unshared_atoms.push_back(*c);
+        if (!shared || out.empty())
+            out.push_back(std::move(lm));
+    }
+    return out;
+}
 
 u32 checked_index(const PyIwBatch& x, i64 i)
 {
@@ -112,7 +155,8 @@ search::WidthZero width_zero_of(nb::handle v)
 /// The options shared by the three entry points.
 cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optimize_iw1, bool witness_pruning,
                                 bool canonical_order, bool exact, nb::handle max_states, nb::handle max_expanded,
-                                nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states)
+                                nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states,
+                                nb::handle table_bytes, nb::handle unfit_tables)
 {
     cuda::MultiIwOptions o;
     o.max_width = max_width;
@@ -137,6 +181,16 @@ cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optim
         if (o.chunk_states == 0)
             throw nb::value_error("mymyr: chunk_states must be positive");
     }
+    if (!table_bytes.is_none())
+    {
+        o.table_bytes = int_arg<u64>(table_bytes, "table_bytes");
+        if (o.table_bytes == 0)
+            throw nb::value_error("mymyr: table_bytes must be positive");
+    }
+    const std::string unfit = nb::cast<std::string>(unfit_tables);
+    if (unfit != "raise" && unfit != "fail")
+        throw nb::value_error("mymyr: unfit_tables must be 'raise' or 'fail'");
+    o.fail_unfit_tables = unfit == "fail";
     return o;
 }
 
@@ -345,6 +399,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                           "rollouts, the reached fluent atoms.")
         .def("__len__", [](const PyIwBatch& x) { return x.b.n; })
         .def_prop_ro("status", [](const PyIwBatch& x) { return x.b.status; }, "per search")
+        .def_prop_ro("message", [](const PyIwBatch& x) { return x.b.message; },
+                     "Why the searches with status FAILED could not run (empty when none failed).")
         .def_prop_ro("solved",
                      [](const PyIwBatch& x) {
                          std::vector<bool> out(x.b.n);
@@ -465,6 +521,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                          d["seconds"] = s.seconds;
                          d["host_ms"] = s.host_ms;
                          d["groups"] = s.groups;
+                         d["regroups"] = s.regroups;
                          d["passes"] = s.passes;
                          d["layers"] = s.layers;
                          d["chunks"] = s.chunks;
@@ -491,22 +548,24 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                    ", solved=" + std::to_string(solved) + ")";
         });
 
+#define MYMYR_IW_SEARCH_ARGS                                                                                                  \
+    "witness_pruning"_a = false, "canonical_order"_a = true, "exact"_a = true, "max_states"_a = nb::none(),              \
+        "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),                        \
+        "max_searches"_a = nb::none(), "chunk_states"_a = nb::none(), "table_bytes"_a = nb::none(),                     \
+        "unfit_tables"_a = "raise"
 #define MYMYR_MULTI_IW_COMMON_ARGS                                                                                            \
-    "max_width"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,        \
-        "canonical_order"_a = true, "exact"_a = true, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(),       \
-        "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(),                        \
-        "chunk_states"_a = nb::none()
+    "max_width"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, MYMYR_IW_SEARCH_ARGS
 
     m.def(
         "multi_iw",
         [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
            bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
-           TaskIdsArg task_ids) {
+           IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                          exact, max_states, max_expanded, max_depth, max_seconds,
-                                                         max_searches, chunk_states);
+                                                         max_searches, chunk_states, table_bytes, unfit_tables);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -550,23 +609,89 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
         "max_seconds spans the call.\n\n"
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError (unfit_tables='raise'), or every search that width 0 "
+        "does not solve ends there with status FAILED (unfit_tables='fail'); a wider pass whose one table exceeds it "
+        "ends the searches that reach it with status FAILED (the refusal in IwBatch.message).\n\n"
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
+
+    m.def(
+        "liw",
+        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
+           bool witness_pruning, bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded,
+           IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes,
+           StrArg unfit_tables, TaskIdsArg task_ids, LandmarksArg landmarks, bool disjunctive, bool all_private,
+           UnsharedArg unshared_atoms) {
+            const u32 max_width = int_arg<u32>(max_width_in, "max_width");
+            cuda::MultiIwOptions opts = options_of(max_width, width_zero, false, witness_pruning, canonical_order, exact,
+                                                   max_states, max_expanded, max_depth, max_seconds, max_searches,
+                                                   chunk_states, table_bytes, unfit_tables);
+            PyIwBatch x;
+            if (nb::isinstance<PyTable>(task))
+            {
+                // over a table: search i on instance task_ids[i]
+                const TableRef ref = table_of(task);
+                const cuda::ContextPtr c = table_device_context(ref.obj, ctx, 0);
+                for (u32 i = 0; i < ref.table->size(); ++i)
+                    x.owners.push_back(ref.owner(i));
+                x.starts = table_starts(starts, *ref.table);
+                x.ids = search_task_ids(task_ids, x.starts.size(), *ref.table, c->stream(),
+                                        reinterpret_cast<std::intptr_t>(c->stream()));
+                check_start_owners(starts, *ref.table, x.ids);
+                trim_table_starts(x.starts, *ref.table, x.ids);
+                const std::vector<search::GoalSpec::AtomGoal> g = table_goals(goals, *ref.table, x.ids);
+                opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms);
+                nb::gil_scoped_release release;
+                cuda::DeviceTableIw run(c, ref.table, opts);
+                x.b = run.run(x.starts, x.ids, g);
+                return x;
+            }
+            if (!task_ids.is_none())
+                throw nb::value_error("mymyr: task_ids go with a TaskTable (a task runs every search itself)");
+            const Owner o = owner_of(task);
+            const TaskPtr& t = o.core->task;
+            const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
+            x.owners.push_back(o);
+            x.starts = host_starts(starts, *t);
+            const std::vector<search::GoalSpec::AtomGoal> g = goals_of(goals, *t, x.starts.size());
+            opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms);
+            {
+                nb::gil_scoped_release release;
+                cuda::DeviceMultiIw run(c, t, opts);
+                x.b = run.run(x.starts, g);
+            }
+            return x;
+        },
+        "task"_a, "starts"_a, nb::kw_only(), "ctx"_a = nb::none(), "goals"_a = nb::none(), "max_width"_a = 1,
+        "width_zero"_a = "expand_depth_one", MYMYR_IW_SEARCH_ARGS, "task_ids"_a = nb::none(), "landmarks"_a.none(),
+        "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),
+        "Landmark-restricted IW(1) from every start: search i equals mymyr.search.liw(max_width=1) for every group "
+        "and chunk size in exact mode (status, plan, goal state and per-pass counts). Runs width zero then LIW(1) "
+        "(LIW has no optimized IW(1)). landmarks: one FactLandmarkGraph shared by all searches, or one per search; "
+        "None gives every state the BOT coordinate. disjunctive, all_private and unshared_atoms select the landmark "
+        "grouping as in search.liw. max_width above 1 raises ValueError (LIW(2) runs on the host: search.liw); so do "
+        "tasks with numeric fluents. table_bytes bounds the novelty tables of a group; when every search's table "
+        "exceeds it, the call raises ValueError (unfit_tables='raise'; 'fail': every search fails there), and "
+        "otherwise a search whose own table exceeds it, or what the "
+        "context can still allocate, ends with status FAILED (the refusal in IwBatch.message). Over a TaskTable, "
+        "search i runs on instance task_ids[i].");
 
     m.def(
         "rollouts",
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
            IntArg max_next_layer_states, IntArg max_width_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
-           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states) {
+           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes, StrArg unfit_tables,
+           LandmarksArg landmarks, bool disjunctive, bool all_private, UnsharedArg unshared_atoms) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
             const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
             cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                    exact, max_states, max_expanded, max_depth, max_seconds, max_searches,
-                                                   chunk_states);
+                                                   chunk_states, table_bytes, unfit_tables);
             if (!max_next_layer_states.is_none())
             {
                 opts.max_next_layer_states = int_arg<u32>(max_next_layer_states, "max_next_layer_states");
@@ -584,6 +709,11 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
             if (!start.is_none() && state_of(start).core->task->uid() != t->uid())
                 throw nb::value_error("mymyr: start belongs to another task");
             x.starts.push_back(start.is_none() ? t->initial_state() : state_of(start).s);
+            if (!landmarks.is_none())
+            {
+                opts.landmarks = landmark_options(x, landmarks, disjunctive, all_private, unshared_atoms,
+                                                  static_cast<u32>(s.size()));
+            }
             std::vector<search::GoalSpec::AtomGoal> g;
             if (!goal.is_none())
                 g.assign(s.size(), goal_of(goal, *t));
@@ -596,20 +726,30 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         },
         "task"_a, "seeds"_a, nb::kw_only(), "ctx"_a = nb::none(), "start"_a = nb::none(), "goal"_a = nb::none(),
         "max_next_layer_states"_a = nb::none(), MYMYR_MULTI_IW_COMMON_ARGS,
+        "landmarks"_a = nb::none(), "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),
         "Randomized IW rollouts on the device, one per seed: rollout k equals the CPU rollout of the same seed "
         "(every next layer shuffled by the rollout's SplitMix64 stream, "
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
         "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Not reported: "
-        "derived atoms, landing states, co-occurrence.");
+        "derived atoms, landing states, co-occurrence. "
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError (unfit_tables='raise'), or every search that width 0 "
+        "does not solve ends there with status FAILED (unfit_tables='fail'); a wider pass whose one table exceeds it "
+        "ends the searches that reach it with status FAILED (the refusal in IwBatch.message). "
+        "landmarks: randomized LIW(1) rollouts "
+        "(search.liw(max_width=1, layer_order='randomized', seed=k)) with one FactLandmarkGraph shared by every "
+        "rollout or one per seed, grouped by disjunctive, all_private and unshared_atoms as in search.liw; "
+        "optimize_iw1 does not apply to them.");
 
     m.def(
         "batched_iw1",
         [](TableArg task, StartsArg starts, ContextArg ctx, StreamArg stream, GoalsArg goals, bool exact,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches,
-           IntArg chunk_states, TaskIdsArg task_ids) {
+           IntArg chunk_states, IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids) {
             cuda::MultiIwOptions opts = options_of(1, nb::str("expand_depth_one"), true, false, true, exact, max_states,
-                                                   max_expanded, max_depth, max_seconds, max_searches, chunk_states);
+                                                   max_expanded, max_depth, max_seconds, max_searches, chunk_states,
+                                                   table_bytes, unfit_tables);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -716,13 +856,22 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "task"_a, "starts"_a, nb::kw_only(), "ctx"_a = nb::none(), "stream"_a = nb::none(), "goals"_a = nb::none(),
         "exact"_a = true, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(),
         "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(), "chunk_states"_a = nb::none(),
-        "task_ids"_a = nb::none(),
+        "table_bytes"_a = nb::none(), "unfit_tables"_a = "raise", "task_ids"_a = nb::none(),
         "Exact batched IW(1): optimized IW(1) from each start state, all at once on the "
         "device. starts: host states, or a CUDA word array [N, W] uint64 / [N, 2W] uint32 (torch, JAX, DLPack) read in "
         "place after the work on `stream` (None: the context's stream). Per search: status, plan_length, goal_state "
         "(IwBatch); equal to mymyr.search.iw(task, max_width=1, start=...). Over a mymyr.rl.TaskTable: "
         "search i runs on instance task_ids[i] (host ints, or an int32 CUDA array read after the work on `stream`); "
-        "device starts are rows of at most the table's width.");
+        "device starts are rows of at most the table's width. "
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError (unfit_tables='raise'), or every search that width 0 "
+        "does not solve ends there with status FAILED (unfit_tables='fail'); a wider pass whose one table exceeds it "
+        "ends the searches that reach it with status FAILED (the refusal in IwBatch.message).");
+    m.def(
+        "_novelty_table_bytes",
+        [](u32 arity, u32 words) { return cuda::novelty_table_bytes(arity, words); }, "arity"_a, "words"_a,
+        "Bytes of one IW search's novelty table of that arity over rows of `words` atom words (what table_bytes "
+        "bounds per search; TaskSuite searches size their domains with it).");
 #undef MYMYR_MULTI_IW_COMMON_ARGS
 }
 }  // namespace mymyr::python

@@ -7,6 +7,7 @@
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
+#include "row_layout.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -97,8 +98,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
     const f64 g0 = costs.initial(start.view());
     const u32 slots = task->numeric_slots(), L = gen.label_width();
     u32 W = std::max<u32>(1, std::max(task->words(), start.size_words()) + slots);
-    if (W > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device numeric search: state rows exceed the device width limit");
+    check_numeric_row(W);
     std::vector<Node> nodes(1);
     nodes[0].g = g0;
     std::priority_queue<Entry, std::vector<Entry>, Later> open;
@@ -111,8 +111,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
     auto sync = [&] { check(cudaStreamSynchronize(s), "cudaStreamSynchronize (numeric search)"); };
     auto ensure = [&](u64 capacity, u32 width)
     {
-        if (width > lifted::k_max_words)
-            throw std::invalid_argument("mymyr: device numeric search: states grew beyond the device width limit");
+        check_numeric_row(width);
         if (capacity > state_set::k_max_states)
             throw std::length_error("mymyr: device numeric search exceeds the state id limit");
         bool rehash = false;

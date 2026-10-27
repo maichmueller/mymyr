@@ -15,16 +15,23 @@
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "../cpp/support/wide_task.hpp"
 #include "mymyr/core/random.hpp"
 #include "mymyr/cuda/device_rng.hpp"
 #include "mymyr/cuda/multi_iw.hpp"
+#include "mymyr/cuda/multi_iw_kernels.hpp"
 #include "mymyr/cuda/rollouts.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
+#include "mymyr/search/liw.hpp"
 #include "mymyr/search/parallel_rollouts.hpp"
 #include "mymyr/successor/conditions.hpp"
 #include "mymyr/successor/successors.hpp"
+
+#ifdef MYMYR_HAS_FRONTEND
+#include "mymyr/frontend/domain.hpp"
+#endif
 
 #include <gtest/gtest.h>
 
@@ -33,6 +40,7 @@
 #include <numeric>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace mymyr;
@@ -92,6 +100,8 @@ search::IwOptions cpu_options(const cuda::MultiIwOptions& d, const State& start)
     o.witness_pruning = d.witness_pruning;
     o.canonical_order = d.canonical_order;
     o.control.budget = d.budget;
+    if (d.max_next_layer_states != ~u32{0})
+        o.layers = {.kind = search::LayerOrdering::Kind::InOrder, .max_next_layer_states = d.max_next_layer_states};
     o.start = start;
     return o;
 }
@@ -668,6 +678,60 @@ TEST(CudaMultiIw, BatchedIw1FromDeviceRows)
     }
 }
 
+#ifdef MYMYR_HAS_FRONTEND
+TEST(CudaMultiIw, WideLayerAndStateLimitsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const std::string directory = std::string(MYMYR_SOURCE_DIR) + "/tests/data/ipc/blocksworld-ipc/test/";
+    const auto domain = frontend::Domain::from_file(directory + "domain.pddl");
+    TaskOptions options;
+    options.atoms = TaskOptions::Atoms::Dense;
+    const auto task = Task::create(*domain->instantiate_file(directory + "p10-medium.pddl"), options);
+    ASSERT_EQ(task->words(), 78u);
+    const std::vector<State> starts = device_ref_walks(*task, 1, 1, 13);
+    ASSERT_EQ(starts.size(), 2u);
+    const auto ctx = context();
+    const u32 W = task->words();
+    std::vector<u64> rows(starts.size() * W, 0);
+    for (usize i = 0; i < starts.size(); ++i)
+        std::copy_n(starts[i].data(), starts[i].size_words(), rows.begin() + static_cast<std::ptrdiff_t>(i * W));
+    cuda::DeviceBuffer dev(ctx, rows.size() * sizeof(u64), ctx->stream());
+    cuda::check(cudaMemcpyAsync(dev.data(), rows.data(), rows.size() * sizeof(u64), cudaMemcpyHostToDevice, ctx->stream()), "H2D");
+    cuda::check(cudaStreamSynchronize(ctx->stream()), "sync");
+    const cuda::DeviceStarts ds{static_cast<const u64*>(dev.data()), W, W, static_cast<u32>(starts.size())};
+    bool layer_limit_changed_search = false;
+    for (u32 next : {1u, 8u, 64u, ~u32{0}})
+        for (u64 states : {8u, 96u})
+        {
+            SCOPED_TRACE("next " + std::to_string(next) + " states " + std::to_string(states));
+            cuda::MultiIwOptions o;
+            o.max_next_layer_states = next;
+            o.budget.max_states = states;
+            std::vector<search::IwResult> cpu;
+            for (const State& start : starts)
+            {
+                const search::IwOptions c = cpu_options(o, start);
+                cpu.push_back(search::iw(*task, c));
+                search::IwOptions unlimited = c;
+                unlimited.layers = {};
+                const search::IwResult other = search::iw(*task, unlimited);
+                layer_limit_changed_search |= other.stats.generated != cpu.back().stats.generated;
+            }
+            cuda::DeviceMultiIw run(ctx, task, o);
+            const cuda::MultiIwBatch batch = run.run(starts);
+            o.chunk_states = 1;
+            o.max_searches = 1;
+            const cuda::MultiIwBatch single = cuda::batched_iw1(ctx, task, ds, o, ctx->stream());
+            expect_same_batch(batch, single, "host starts and device rows with separate searches and one-row chunks");
+            for (u32 i = 0; i < starts.size(); ++i)
+                expect_same(batch.result(i, *task, starts[i], true), cpu[i], "start " + std::to_string(i));
+            if (HasFailure())
+                return;
+        }
+    EXPECT_TRUE(layer_limit_changed_search);
+}
+#endif
+
 TEST(CudaMultiIw, RelaxedNoveltyReturnsValidPlans)
 {
     SKIP_WITHOUT_GPU();
@@ -860,3 +924,411 @@ TEST(CudaRollouts, Iw2AndBudgetsEqualTheCpu)
             }
 }
 }  // namespace
+
+TEST(DeviceIw, WideRowsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    for (u32 objects : {65u, 80u, 129u, 192u})
+    {
+        SCOPED_TRACE(objects);
+        const auto task = wide_task(objects);
+        ASSERT_GT(task->words(), 64u);
+        const std::vector<State> starts(3, task->initial_state());
+        for (u32 width : {1u, 2u})
+        {
+            cuda::MultiIwOptions o;
+            o.max_width = width;
+            o.chunk_states = 2;
+            o.max_searches = 2;
+            cuda::DeviceMultiIw device(ctx, task, o);
+            for (u32 repeat = 0; repeat < 3; ++repeat)
+            {
+                const auto batch = device.run(starts);
+                for (u32 i = 0; i < starts.size(); ++i)
+                {
+                    const auto c = search::iw(*task, cpu_options(o, starts[i]));
+                    expect_same(batch.result(i, *task, starts[i], true), c, "wide rows");
+                    if (width == 2)
+                    {
+                        EXPECT_EQ(c.effective_width, 2u);
+                    }
+                }
+            }
+        }
+        cuda::DeviceRolloutOptions ro;
+        ro.iw.max_width = 2;
+        ro.seeds = {0, 1, 7, 12345};
+        const auto batch = cuda::rollouts_batch(ctx, task, ro);
+        search::ParallelRolloutOptions cpu;
+        cpu.iw.max_width = 2;
+        cpu.seeds = ro.seeds;
+        cpu.threads = 1;
+        const auto c = search::find_rollouts_parallel(*task, cpu);
+        for (u32 i = 0; i < ro.seeds.size(); ++i)
+        {
+            expect_same(batch.result(i, *task, starts[0], true), c.rollouts[i].search, "wide rollouts");
+            EXPECT_EQ(cuda::reached_atoms(batch, i, *task), c.rollouts[i].reached_fluent_atoms);
+        }
+    }
+}
+
+TEST(DeviceIw, WidePairTableFailsTheSearchesThatReachIt)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80);
+    cuda::MultiIwOptions o;
+    o.max_width = 2;
+    o.table_bytes = 4096;  // the IW(1) table (800 bytes), not the IW(2) one
+    cuda::DeviceMultiIw device(context(), task, o);
+    const std::vector<State> starts{task->initial_state()};
+    const auto batch = device.run(starts);
+    ASSERT_EQ(batch.status[0], search::SearchStatus::Failed);
+    const auto passes = batch.passes(0);
+    ASSERT_FALSE(passes.empty());
+    EXPECT_EQ(passes.back().width, 2u);
+    EXPECT_EQ(passes.back().status, search::SearchStatus::Failed);
+    for (usize k = 0; k + 1 < passes.size(); ++k)
+        EXPECT_EQ(passes[k].status, search::SearchStatus::Exhausted);
+    EXPECT_NE(batch.message.find("IW(2)"), std::string::npos);
+    EXPECT_NE(batch.message.find("2560400 bytes per search"), std::string::npos);
+    EXPECT_NE(batch.message.find("table_bytes is 4096"), std::string::npos);
+    EXPECT_EQ(batch.result(0, *task, starts[0], true).message, batch.message);
+}
+
+TEST(DeviceIw, WidthOneTableBeyondTableBytesRefusesTheCall)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80);
+    const std::vector<State> starts(2, task->initial_state());
+    for (u32 width : {1u, 2u})
+    {
+        cuda::MultiIwOptions o;
+        o.max_width = width;
+        o.table_bytes = 512;  // below the IW(1) table of 800 bytes
+        cuda::DeviceMultiIw device(context(), task, o);
+        try
+        {
+            (void)device.run(starts);
+            ADD_FAILURE() << "expected the call to be refused";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_EQ(std::string(e.what()), "mymyr: device IW(1): the novelty table requires 800 bytes per search for 6400 "
+                                             "atom slots, and table_bytes is 512 (raise table_bytes=)");
+        }
+        // fail_unfit_tables: the searches end at width 1 with status Failed, the refusal in the message
+        o.fail_unfit_tables = true;
+        cuda::DeviceMultiIw failing(context(), task, o);
+        const auto batch = failing.run(starts);
+        EXPECT_EQ(batch.message, "mymyr: device IW(1): the novelty table requires 800 bytes per search for 6400 atom "
+                                 "slots, and table_bytes is 512 (raise table_bytes=)");
+        EXPECT_EQ(cuda::novelty_table_bytes(1, task->words()), 800u);
+        for (u32 i = 0; i < 2; ++i)
+        {
+            EXPECT_EQ(batch.status[i], search::SearchStatus::Failed);
+            const auto r = batch.result(i, *task, starts[i], false);
+            ASSERT_FALSE(r.passes.empty());
+            EXPECT_EQ(r.passes.back().width, 1u);
+            EXPECT_EQ(r.message, batch.message);
+        }
+    }
+    cuda::MultiIwOptions o;
+    o.max_width = 0;  // width 0 needs no table
+    o.table_bytes = 512;
+    cuda::DeviceMultiIw zero(context(), task, o);
+    const auto batch = zero.run(starts);
+    EXPECT_TRUE(batch.message.empty());
+    EXPECT_NE(batch.status[0], search::SearchStatus::Failed);
+}
+
+TEST(DeviceIw, LazyGrowthShrinksTableGroups)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80, TaskOptions::Atoms::Lazy, 4093, true);
+    ASSERT_EQ(task->words(), 64u);
+    const std::vector<State> starts(2, task->initial_state());
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    o.table_bytes = 1024;
+    o.chunk_states = 1;
+    cuda::DeviceMultiIw device(context(), task, o);
+    const auto batch = device.run(starts);
+    EXPECT_GT(task->words(), 64u);
+    EXPECT_EQ(batch.stats.groups, 2u);
+    EXPECT_EQ(batch.stats.regroups, 1u);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, starts[i], true), search::iw(*task, cpu_options(o, starts[i])), "lazy table groups");
+    // the counts are those of the groups that ran to the end: a run over the widened rows, which never regroups
+    cuda::DeviceMultiIw again(context(), task, o);
+    const auto wide = again.run(starts);
+    EXPECT_EQ(wide.stats.regroups, 0u);
+    EXPECT_EQ(wide.stats.groups, 2u);
+    EXPECT_EQ(batch.stats.nodes, wide.stats.nodes);
+    EXPECT_EQ(batch.stats.candidates, wide.stats.candidates);
+    EXPECT_EQ(batch.stats.layers, wide.stats.layers);
+}
+
+TEST(DeviceIw, PairTableRelayoutAcrossChunkBoundary)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto stream = ctx->stream();
+    const std::vector<std::pair<u32, u32>> pairs{{0, 0}, {4095, 4095}, {1, 4094}, {63, 4095}};
+    u32 from = 64;
+    std::vector<u64> host(cuda::miw::table_words(2, from), 0);
+    for (const auto& [a, b] : pairs)
+    {
+        host[u64{a} * from + (b >> 6)] |= 1ull << (b & 63);
+        host[u64{b} * from + (a >> 6)] |= 1ull << (a & 63);
+    }
+    cuda::DeviceBuffer source(ctx, host.size() * sizeof(u64), stream);
+    cuda::check(cudaMemcpyAsync(source.data(), host.data(), source.size(), cudaMemcpyHostToDevice, stream), "pair table upload");
+    cuda::check(cudaStreamSynchronize(stream), "pair table upload sync");
+    for (u32 to : {65u, 67u})
+    {
+        cuda::DeviceBuffer target(ctx, cuda::miw::table_words(2, to) * sizeof(u64), stream);
+        cuda::check(cuda::miw::launch_table_relayout(static_cast<const u64*>(source.data()), static_cast<u64*>(target.data()),
+                                                    2, 1, from, to, stream), "pair table relayout");
+        host.resize(cuda::miw::table_words(2, to));
+        cuda::check(cudaMemcpyAsync(host.data(), target.data(), target.size(), cudaMemcpyDeviceToHost, stream), "pair table download");
+        cuda::check(cudaStreamSynchronize(stream), "pair table sync");
+        std::vector<u64> expected(host.size(), 0);
+        for (const auto& [a, b] : pairs)
+        {
+            const u64 lo = std::min(a, b), hi = std::max(a, b), index = hi * (hi + 1) / 2 + lo;
+            expected[index >> 6] |= 1ull << (index & 63);
+        }
+        EXPECT_EQ(host, expected);
+        source = std::move(target);
+        from = to;
+    }
+}
+
+TEST(DeviceIw, HighAtomSlotsKeepSearchesSeparate)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(300);
+    ASSERT_GT(task->atoms().fluent_slots(), 65536u);
+    const std::vector<State> starts(3, task->initial_state());
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    cuda::DeviceMultiIw device(context(), task, o);
+    const auto batch = device.run(starts);
+    const auto cpu = search::iw(*task, cpu_options(o, starts[0]));
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, starts[i], true), cpu, "high atom slots");
+}
+
+TEST(DeviceIw, VeryWideRowsRespectByteReservations)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(2048);
+    ASSERT_EQ(task->words(), 65536u);
+    cuda::ContextOptions co;
+    co.max_bytes = u64{256} << 20;
+    const auto ctx = cuda::DeviceContext::create(0, co);
+    const std::vector<State> starts{task->initial_state()};
+    cuda::MultiIwOptions o;
+    o.max_width = 1;
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const auto batch = device.run(starts);
+    expect_same(batch.result(0, *task, starts[0], true), search::iw(*task, cpu_options(o, starts[0])), "very wide rows");
+}
+
+TEST(DeviceLiw, LandmarkGroupsAndWideRowsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    for (bool lazy : {false, true})
+    {
+        const auto task = wide_task(80, lazy ? TaskOptions::Atoms::Lazy : TaskOptions::Atoms::Dense,
+                                    lazy ? 4093 : 80, lazy);
+        std::vector<CanonicalAtom> facts;
+        for (u32 slot = 0; slot < 75; ++slot)
+            facts.push_back(task->atoms().canonical(AtomKind::Fluent, slot));
+        const auto graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+            landmarks::FactLandmarkGraph::create(facts, {{facts[0], facts[1]}, {facts[1], facts[2]}}));
+        const std::vector<State> starts(3, task->initial_state());
+        for (u32 grouping = 0; grouping < 3; ++grouping)
+        {
+            cuda::MultiIwOptions o;
+            o.landmarks.emplace(3);
+            (*o.landmarks)[1].graph = graph;
+            (*o.landmarks)[1].disjunctive = true;
+            (*o.landmarks)[1].all_private = grouping == 1;
+            if (grouping == 2)
+                (*o.landmarks)[1].unshared_atoms = {facts[1]};
+            (*o.landmarks)[2] = (*o.landmarks)[1];
+            o.chunk_states = 1;
+            o.max_searches = 2;
+            cuda::DeviceMultiIw device(ctx, task, o);
+            for (u32 repeat = 0; repeat < 2; ++repeat)
+            {
+                const auto batch = device.run(starts);
+                for (u32 i = 0; i < starts.size(); ++i)
+                {
+                    search::LiwOptions cpu;
+                    cpu.max_width = 1;
+                    cpu.start = starts[i];
+                    cpu.landmarks = (*o.landmarks)[i];
+                    expect_same(batch.result(i, *task, starts[i], true), search::liw(*task, cpu), "landmark groups");
+                }
+            }
+        }
+    }
+}
+
+TEST(DeviceLiw, SeededRolloutsReplayCapturedChunks)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    const auto root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(facts));
+    o.budget.max_states = 100;
+    o.max_next_layer_states = 8;
+    cuda::DeviceRollouts device(ctx, task, o);
+    const std::vector<u64> seeds{0, 1, 7};
+    u64 replays = 0;
+    for (u32 repeat = 0; repeat < 6; ++repeat)
+    {
+        const auto batch = device.run(seeds);
+        replays += batch.stats.replays;
+        for (u32 i = 0; i < seeds.size(); ++i)
+        {
+            search::LiwOptions cpu;
+            cpu.max_width = 1;
+            cpu.landmarks = o.landmarks->front();
+            cpu.control.budget = o.budget;
+            cpu.layers.kind = search::LayerOrdering::Kind::Randomized;
+            cpu.layers.seed = seeds[i];
+            cpu.layers.max_next_layer_states = o.max_next_layer_states;
+            expect_same(batch.result(i, *task, root, true), search::liw(*task, cpu), "seeded landmark rollout");
+        }
+    }
+    if (cuda::GraphExec::enabled())
+    {
+        EXPECT_GT(replays, 0u);
+    }
+}
+
+TEST(DeviceLiw, LandmarkResolutionSizesLazyRowsBeforeSearch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = wide_task(80, TaskOptions::Atoms::Lazy, 4093);
+    const State root = task->initial_state();
+    ASSERT_FALSE(cuda::lifted::wide_row(task->words()));
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create({6399, 6398, 6319, 6318}));
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const std::vector<State> starts(2, root);
+    const auto batch = device.run(starts);
+    EXPECT_TRUE(cuda::lifted::wide_row(task->words()));
+    search::LiwOptions cpu;
+    cpu.max_width = 1;
+    cpu.start = root;
+    cpu.landmarks = o.landmarks->front();
+    const auto expected = search::liw(*task, cpu);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, root, true), expected, "landmark slot resolution");
+}
+
+TEST(DeviceLiw, TablesBeyondTableBytesFailTheirSearchesOrRefuseTheCall)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    const State root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    ASSERT_GE(facts.size(), 8u);
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(2);
+    (*o.landmarks)[0].graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create({facts[0]}));
+    (*o.landmarks)[1].graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(std::vector<CanonicalAtom>(facts.begin(), facts.begin() + 8)));
+    const u64 words = task->words();
+    o.table_bytes = 8 * 2 * (words + 1);  // the tables of one landmark and BOT
+    o.budget.max_states = 60;
+    const std::vector<State> starts(2, root);
+    const std::string refusal = "mymyr: device LIW(1): the novelty table requires " + std::to_string(8 * 9 * (words + 1)) +
+                                " bytes per search for " + std::to_string(64 * words) +
+                                " atom slots and 9 landmark ranks, and table_bytes is " + std::to_string(o.table_bytes) +
+                                " (raise table_bytes=)";
+    for (u32 group : {1u, 2u})
+    {
+        o.max_searches = group;
+        cuda::DeviceMultiIw device(ctx, task, o);
+        const auto batch = device.run(starts);
+        search::LiwOptions cpu;
+        cpu.max_width = 1;
+        cpu.start = root;
+        cpu.control.budget = o.budget;
+        cpu.landmarks = (*o.landmarks)[0];
+        const auto fits = batch.result(0, *task, root, true);
+        expect_same(fits, search::liw(*task, cpu), "the search whose table fits");
+        EXPECT_TRUE(fits.message.empty()) << fits.message;
+        ASSERT_EQ(batch.status[1], search::SearchStatus::Failed);
+        const auto passes = batch.passes(1);
+        ASSERT_EQ(passes.size(), 2u);
+        EXPECT_EQ(passes[1].width, 1u);
+        EXPECT_EQ(passes[1].status, search::SearchStatus::Failed);
+        EXPECT_EQ(batch.message, refusal);
+        EXPECT_EQ(batch.result(1, *task, root, true).message, refusal);
+    }
+    // no search's table fits: the call is refused before a search runs
+    o.table_bytes = 8;
+    cuda::DeviceMultiIw device(ctx, task, o);
+    try
+    {
+        (void)device.run(starts);
+        ADD_FAILURE() << "expected a refusal";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_EQ(std::string(e.what()), "mymyr: device LIW(1): the novelty table requires " +
+                                             std::to_string(8 * 2 * (words + 1)) + " bytes per search for " +
+                                             std::to_string(64 * words) +
+                                             " atom slots and 2 landmark ranks, and table_bytes is 8 (raise table_bytes=)");
+    }
+}
+
+TEST(DeviceLiw, RankMaskViewsFollowNodeReservations)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    const State root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(1);
+    o.landmarks->front().graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(facts));
+    o.budget.max_states = 60;
+    o.chunk_states = 256;
+    o.graphs = false;
+    const std::vector<State> starts(64, root);
+    cuda::DeviceMultiIw device(ctx, task, o);
+    const auto batch = device.run(starts);
+    search::LiwOptions cpu;
+    cpu.max_width = 1;
+    cpu.landmarks = o.landmarks->front();
+    cpu.control.budget = o.budget;
+    const auto expected = search::liw(*task, cpu);
+    for (u32 i = 0; i < starts.size(); ++i)
+        expect_same(batch.result(i, *task, root, true), expected, "node reservations");
+}

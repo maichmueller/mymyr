@@ -66,7 +66,10 @@ struct DeviceBrfsStats
     u64 loops = 0;          // device loops over small layers (each one host read; counted in groups)
     u64 captures = 0;       // their captured graphs
     u64 cuts = 0;           // loop chunks cut to the parents whose candidates fit the capacity
+    u64 windows = 0;        // successor windows of states whose successors exceed the device's room (in chunks)
     u32 rehashes = 0;       // table growths (each rehashes the stored states)
+    u64 growths = 0;        // new device generations of the states' and the nodes' arenas (each copies them)
+    u64 mirror_growths = 0;  // new pinned mirrors of the states' arena (CPU-fallback work; each copies it)
     u32 uploads = 0;        // device task uploads (1 + refreshes under lazy slots)
     u32 widenings = 0;      // state width growths (lazy slots)
     u32 host_schemas = 0;   // schemas run by the CPU fallback

@@ -361,3 +361,22 @@ def test_iw_over_tables_errors(ctx, sets):
         mc.multi_iw(tasks[0], [s0], task_ids=[0], ctx=ctx)
     one = mc.multi_iw(rl.TaskTable(tasks[:1]), [s0], ctx=ctx)  # a table of one needs no ids
     assert one.task_ids == [0]
+
+
+@pytest.mark.parametrize("objects", [65, 80, 129, 192])
+def test_wide_state_space_equals_cpu(ctx, tmp_path, objects):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects)
+    assert task.words > 64
+    cpu = cpu_space(task)
+    dev = mc.state_space(task, ctx=ctx, remove_if_unsolvable=False, chunk_states=1)
+    assert_same_space(dev, cpu)
+
+
+def test_ipc_state_space_budget_equals_cpu(ctx, rovers_task):
+    task = rovers_task
+    cpu = datasets.generate(task, max_states=32)
+    dev = mc.generate_state_space(task, ctx=ctx, max_states=32, chunk_states=1)
+    assert dev.status == cpu.status
+    assert dev.stats.states == cpu.stats.states

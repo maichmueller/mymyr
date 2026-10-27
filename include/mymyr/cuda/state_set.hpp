@@ -82,6 +82,7 @@ struct Compact
     u32 words = 0;
     const u32* offset = nullptr;        // a device count of stored states (null: 0)
     const u32* parent_offset = nullptr; // a device id of the chunk's first parent (null: 0)
+    u32 first_row = 0;                  // the chunk's row of candidate 0 (a window of one state's successors)
 };
 cudaError_t launch_compact(Table t, Compact c, u64 n, cudaStream_t s, Live live = {});
 

@@ -286,3 +286,120 @@ def test_h2_proposition_limit_names_the_size_and_limit(ctx, tmp_path):
     with pytest.raises(ValueError) as caught:
         mc.Heuristic(task, "h2", ctx=ctx)
     assert "8192" in str(caught.value) and "8191" in str(caught.value)
+
+
+@pytest.mark.parametrize("objects", [65, 80, 129, 192])
+@pytest.mark.parametrize("heuristic", ["blind", "max"])
+def test_wide_best_first_equals_cpu(ctx, tmp_path, objects, heuristic):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects)
+    assert task.words > 64
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic=heuristic)
+        dev = device_search(task, ctx=ctx, heuristic=heuristic, batch=1, chunk_states=1)
+        assert dev.status == cpu.status and dev.plan == cpu.plan
+        assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+        assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+@pytest.mark.parametrize("heuristic", ["blind", "max"])
+def test_ipc_astar_equals_cpu(ctx, rovers_task, heuristic):
+    task = rovers_task
+    cpu = mymyr.search.astar(task, heuristic=heuristic, max_expanded=2)
+    dev = mc.astar(task, ctx=ctx, heuristic=heuristic, batch=1, max_expanded=2)
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+def test_very_wide_astar_respects_byte_reservations(tmp_path):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, objects=2048)
+    assert task.words == 65536
+    budget = 512 << 20
+    small = mc.Context(0, max_bytes=budget)
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    dev = mc.astar(task, ctx=small, heuristic="blind")
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+    assert dev.counters["device_bytes"] <= budget
+    small.synchronize()
+
+
+def test_lazy_astar_crosses_wide_boundary(ctx, tmp_path):
+    from conftest import wide_task
+
+    task = wide_task(tmp_path, atoms="lazy", initial_atoms=4093, extra_effects=True)
+    assert task.words == 64
+    dev = mc.astar(task, ctx=ctx, heuristic="blind", batch=1)
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    assert task.words > 64 and dev.counters["widenings"] > 0
+    assert dev.status == cpu.status and dev.plan == cpu.plan
+    assert dev.goal_state == cpu.goal_state and dev.cost == cpu.cost
+    assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+
+
+@pytest.mark.parametrize("batch", [1, 64])
+def test_wide_ipc_best_first_equals_cpu(ctx, blocksworld_wide, batch):
+    task = blocksworld_wide
+    assert task.words > 64
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic="blind", max_expanded=300)
+        dev = device_search(task, ctx=ctx, heuristic="blind", batch=batch, max_expanded=300)
+        assert dev.status == cpu.status
+        if batch == 1:
+            assert dev.plan == cpu.plan and dev.goal_state == cpu.goal_state
+            assert (dev.stats.expanded, dev.stats.generated) == (cpu.stats.expanded, cpu.stats.generated)
+        elif device_search is mc.astar:
+            assert dev.cost == cpu.cost
+
+
+def test_wide_best_first_keeps_the_requested_batch(ctx, tmp_path):
+    """Rows of 18,924 words: a step still pops `batch` states (the rows are gathered a chunk at a time). The initial
+    state has 1100 successors; the goal follows the last of them."""
+    from conftest import wide_fan_task
+
+    task = wide_fan_task(tmp_path)
+    assert task.words > 16 << 10
+    for device_search, cpu_search in ((mc.astar, mymyr.search.astar), (mc.gbfs, mymyr.search.gbfs)):
+        cpu = cpu_search(task, heuristic="blind")
+        dev = device_search(task, ctx=ctx, heuristic="blind", batch=512)
+        assert dev.status == cpu.status and len(dev.plan) == len(cpu.plan) == 2
+        assert dev.counters["max_batch"] == 512
+
+
+def test_best_first_refuses_successors_beyond_memory(tmp_path):
+    from conftest import fan_task, successor_refusal
+
+    task = fan_task(tmp_path, 400)
+    small = mc.Context(0, max_bytes=32 << 20)
+    for device_search, name in ((mc.astar, r"device A\*"), (mc.gbfs, "device GBFS")):
+        with pytest.raises(ValueError, match=successor_refusal(name, 160000, 32 << 20)):
+            device_search(task, ctx=small, heuristic="blind", batch=1)
+    small.synchronize()
+
+
+def test_best_first_in_a_tiny_context_equals_cpu_or_names_its_bytes(tmp_path):
+    """A 256 KiB context: the search's tables and buffers start within it, so that fans of 16 and 400 successors give
+    the CPU's plan, and a fan of 1600 is refused with the bytes they need beside the bytes the context can still
+    allocate."""
+    import re
+
+    from conftest import fan_task, successor_refusal
+
+    tiny = mc.Context(0, max_bytes=256 << 10)
+    searches = ((mc.astar, mymyr.search.astar, r"device A\*"), (mc.gbfs, mymyr.search.gbfs, "device GBFS"))
+    for objects in (4, 20):
+        task = fan_task(tmp_path, objects)
+        for device_search, cpu_search, _ in searches:
+            cpu = cpu_search(task, heuristic="blind")
+            dev = device_search(task, ctx=tiny, heuristic="blind", batch=1)
+            assert dev.status == cpu.status and dev.plan == cpu.plan
+    task = fan_task(tmp_path, 40)
+    for device_search, _, name in searches:
+        with pytest.raises(ValueError, match=successor_refusal(name, 1600, 256 << 10)) as refused:
+            device_search(task, ctx=tiny, heuristic="blind", batch=1)
+        need, room = map(int, re.search(r"need (\d+) bytes.*allocate (\d+) bytes", str(refused.value)).groups())
+        assert 0 < room < need
+    tiny.synchronize()

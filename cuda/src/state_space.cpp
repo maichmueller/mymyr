@@ -1,5 +1,7 @@
 // The device state spaces (include/mymyr/cuda/state_space.hpp).
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/state_space.hpp"
 #include "mymyr/cuda/numeric.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
@@ -124,15 +126,8 @@ u32 bits_for(u64 n)
     return b;
 }
 
-/// Row width of a lazy task's rows (fixed buckets; lazy slots widen by relayout).
-u32 bucket(u32 words)
-{
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device state space: the states grew wider than " +
-                                    std::to_string(lifted::k_max_words) + " words (the device kernels' limit)");
-    return w;
-}
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(const Task& task) { return search_row_words(task.words(), task.numeric_slots()); }
 
 u32 max_arity(const Task& task)
 {
@@ -893,7 +888,7 @@ private:
         {
             const Task& t = *m_tasks[first];
             w.W = t.atoms().frozen() ? std::max<u32>(1, t.words()) + t.numeric_slots()
-                                                      : bucket(t.words() + t.numeric_slots());
+                                                      : bucket(t);
             m_gen = std::make_unique<ChunkGenerator>(m_ctx, m_tasks[first], m_s);
         }
         const u64 expected = m_o.expected_states;
@@ -932,7 +927,6 @@ private:
         admit_more();
         const auto tg = Clock::now();
         u64 b = 0;
-        u32 chunk_cap = chunk_capacity();
         for (;;)
         {
             if (b == w.count)
@@ -947,7 +941,7 @@ private:
                 all_dead = all_dead && w.dead[m];
             if (all_dead && next >= I)
                 break;
-            const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_cap}));
+            const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_capacity(w.W)}));
             const u32 done = expand(w, b, ns);
             b += done;
             ++m_st.chunks;
@@ -1017,7 +1011,7 @@ private:
     }
 
     /// Parents per chunk at most: their views fit the budget (as cuda::DeviceBrfs).
-    [[nodiscard]] u32 chunk_capacity() const
+    [[nodiscard]] u32 chunk_capacity(u32 words) const
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, m_ctx->device()), "cudaDeviceGetAttribute");
@@ -1030,10 +1024,10 @@ private:
             const u64 dw = m_gen->device_axioms() ? std::max<u32>(1, bits::words_for(t.atoms().max_derived_slots())) : 0;
             vw = m_gen->view_words() + dw;
         }
-        const u64 per = std::max<u64>(8, vw * 8);
+        const u64 per = std::max<u64>(8, (vw + (lifted::wide_row(words) ? words : 0)) * 8);
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         const u64 cap = m_o.view_bytes ? std::max<u64>(1, m_o.view_bytes / per)
-                                       : std::max<u64>({8192, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
+                                       : std::max<u64>({lifted::wide_row(words) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
         return static_cast<u32>(std::min<u64>(cap, 0x7FFFFFFFull));
     }
 
@@ -1042,9 +1036,12 @@ private:
     /// expanded.
     u32 expand(Wave& w, u64 b, u32 ns)
     {
-        const u64 budget = std::max<u64>(u64{1} << 20, k_candidate_bytes / (u64{w.W} * 8 + 16 + 4 * u64{m_L}));
         for (;;)  // one chunk (redone after a width growth, or cut)
         {
+            if (lifted::wide_row(w.W))
+                ns = std::min(ns, chunk_capacity(w.W));
+            const u64 budget = std::max<u64>(lifted::wide_row(w.W) ? 1 : u64{1} << 20,
+                                              k_candidate_bytes / (u64{w.W} * 8 + 16 + 4 * u64{m_L}));
             u64 M = m_multi ? count_multi(w, b, ns) : count_single(w, b, ns);
             if (M > budget && ns > 1)
             {
@@ -1158,9 +1155,9 @@ private:
         {
             if (!m_gen->resolve_missing())
                 return true;
-            if (bucket(task.words() + task.numeric_slots()) > w.W)
+            if (bucket(task) > w.W)
             {
-                widen(w, bucket(task.words() + task.numeric_slots()));
+                widen(w, bucket(task));
                 return false;
             }
             m_gen->write(lab, cand, w.W);

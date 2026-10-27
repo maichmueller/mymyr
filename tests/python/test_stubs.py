@@ -278,8 +278,18 @@ def test_cuda_stubs_are_typed():
     assert "def to_host(self) -> mymyr._core._datasets.StateSpace" in cuda
     assert "def host(self) -> mymyr._core._datasets.StateSpace | None" in cuda
     assert f"def multi_iw(task: {table}, starts: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack, *," in cuda
+    assert f"def liw(task: {table}," in cuda
+    graph = "mymyr._core._search.FactLandmarkGraph"
+    assert f"landmarks: {graph} | Sequence[{graph}] | None" in cuda
+    assert "disjunctive: bool = False, all_private: bool = False" in cuda
     assert f"def batched_iw1(task: {table}," in cuda and "def task_ids(self) -> list[int]" in cuda
-    assert f"chunk_states: int | None = None, {ids}) -> IwBatch:" in cuda
+    assert f"chunk_states: int | None = None, table_bytes: int | None = None, unfit_tables: str = 'raise', {ids}) -> IwBatch:" in cuda
+    rollouts = next(line for line in cuda.splitlines() if line.startswith("def rollouts("))
+    assert "chunk_states: int | None = None, table_bytes: int | None = None, unfit_tables: str = 'raise', landmarks: " in rollouts
+    assert rollouts.endswith("disjunctive: bool = False, all_private: bool = False, unshared_atoms: Iterable[mymyr._core._formalism.GroundAtom | str | int | tuple[str | int | Sequence[str | int], ...]] | None = None) -> IwBatch:")
+    assert f"landmarks: {graph} | Sequence[{graph}] | None = None, " in rollouts
+    assert f"landmarks: {graph} | Sequence[{graph}] | None, disjunctive" in cuda
+    assert "| None | None" not in cuda
     ds = (d / "_datasets.pyi").read_text()
     assert "def __init__(self, space: StateSpace | mymyr._core._cuda.DeviceStateSpace, seed: int = 0) -> None" in ds
     assert ": object" not in cuda and "-> object" not in cuda

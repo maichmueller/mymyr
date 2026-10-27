@@ -2226,9 +2226,12 @@ void bind_cuda(nb::module_& parent)
             d["groups"] = s.groups;
             d["resumed"] = s.resumed;
             d["redone"] = s.redone;
+            d["windows"] = s.windows;
             d["loops"] = s.loops;
             d["captures"] = s.captures;
             d["rehashes"] = s.rehashes;
+            d["growths"] = s.growths;
+            d["mirror_growths"] = s.mirror_growths;
             d["uploads"] = s.uploads;
             d["widenings"] = s.widenings;
             d["host_schemas"] = s.host_schemas;
@@ -2246,7 +2249,9 @@ void bind_cuda(nb::module_& parent)
            "conditional effects), ce_schemas (conditional effects on the device), device_axioms (1: the axioms run on the "
            "device), axiom_reruns (lazy slots: axiom evaluations redone after interning derived atoms); chunks, groups "
            "(host reads of the chunks' device-sized records), resumed / redone (chunks past their capacity, redone from "
-           "their rows / views), loops / captures (device loops over small layers, their graphs). The times are 0 "
+           "their rows / views), windows (a state's successors generated a window at a time: more than fit the device "
+           "at once), growths / mirror_growths (new generations of the arenas and of the states' pinned mirror, each "
+           "a copy of what they hold), loops / captures (device loops over small layers, their graphs). The times are 0 "
            "unless brfs() ran with timings=True")
         .def("state_words",
              [](const PyDeviceBrfs& x, FrameworkArg framework) -> ArrayOut {

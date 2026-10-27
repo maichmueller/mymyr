@@ -181,8 +181,8 @@ std::string ChunkGenerator::unsupported(const Task& task)
                std::to_string(lifted::k_max_ow) + ", i.e. " + std::to_string(64 * lifted::k_max_ow) + " objects)";
     // the numeric kernels hold whole rows
     if (task.numeric_slots() &&
-        (task.numeric_slots() > lifted::k_max_words ||
-         (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words)))
+        (lifted::wide_row(task.numeric_slots()) ||
+         (task.atoms().frozen() && lifted::wide_row(task.words() + task.numeric_slots()))))
         return "numeric states of " + std::to_string(task.words() + task.numeric_slots()) +
                " words (the numeric kernels take at most " + std::to_string(lifted::k_max_words) + ")";
     return {};
@@ -192,9 +192,6 @@ std::string ChunkGenerator::search_unsupported(const Task& task)
 {
     if (std::string why = unsupported(task); !why.empty())
         return why;
-    if (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words)
-        return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device searches take at most " +
-               std::to_string(lifted::k_max_words) + ")";
     return {};
 }
 
@@ -826,6 +823,8 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
     {
         if (out_words < m_task->numeric_slots())
             throw std::invalid_argument("mymyr: numeric successor rows have no room for fluent values");
+        if (labels.first)
+            throw std::invalid_argument("mymyr: numeric successor rows are written whole chunks at a time (no row window)");
         for (const lifted::SchemaSet& set : {fixed, fixed_ce, fc, fc_ce, deep, deep_fc})
             if (set.count)
                 check(numeric::launch_write(m_view, m_parents, views, set, seg_offsets(), labels, out,
@@ -988,7 +987,7 @@ void ChunkGenerator::goal_flags_impl(const u64* rows, u64 stride, u32 words, u64
     if (derived && !m_device_axioms)
         throw std::logic_error("mymyr: ChunkGenerator::goal_flags: the axioms of this task run on the CPU (" +
                                m_host_axioms_reason + ")");
-    if (m_task->numeric_slots() && words > lifted::k_max_words)
+    if (m_task->numeric_slots() && lifted::wide_row(words))
         throw std::invalid_argument("mymyr: ChunkGenerator::goal_flags: numeric rows of " + std::to_string(words) + " words");
     const bool gather = order || stride != words;
     if (!goals && !derived && !gather && !m_task->numeric_slots())
@@ -1060,7 +1059,7 @@ void ChunkGenerator::derived_rows(const u64* rows, u64 stride, u32 words, u64 n,
     if (out_words < own)
         throw std::invalid_argument("mymyr: ChunkGenerator::derived_rows: derived rows of " + std::to_string(out_words) +
                                     " words; the task has " + std::to_string(own));
-    if (m_task->numeric_slots() && words > lifted::k_max_words)
+    if (m_task->numeric_slots() && lifted::wide_row(words))
         throw std::invalid_argument("mymyr: ChunkGenerator::derived_rows: numeric rows of " + std::to_string(words) + " words");
     check(cudaMemsetAsync(out, 0, n * out_words * sizeof(u64), m_s), "cudaMemsetAsync");
     if (!m_task->has_axioms() || own == 0)

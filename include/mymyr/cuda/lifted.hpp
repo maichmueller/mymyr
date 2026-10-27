@@ -48,10 +48,15 @@ inline constexpr u32 k_max_depth = rl::dev::k_max_matcher_depth;
 /// bitsets up to (12, 16, 24 and 32 words: up to 2048 objects). Tasks with more objects run on the CPU.
 inline constexpr u32 k_max_ow = 32;
 /// The successor kernels' widest row held whole (words; a local array beyond 4 words). Wider rows take WB = k_wide:
-/// the successor is built k_max_words words at a time. The other device searches (BrFS, IW, A*, state spaces) and the
-/// numeric kernels hold whole rows and take rows of at most k_max_words words.
+/// the successor is built k_max_words words at a time. Classical search arenas round wider rows to whole chunks;
+/// hashing, equality, goals and gathers read their runtime width without a whole-row local array. Numeric kernels
+/// hold whole rows and take rows of at most k_max_words words.
 inline constexpr u32 k_max_words = 64;
 inline constexpr u32 k_wide = 0xFFFFFFFFu;
+/// Whether rows of `words` words take the wide layouts: arena rows in whole 64-word chunks, successor rows built a
+/// chunk at a time, sorted full-width novelty keys and packed pair tables. Every narrow/wide choice of the device
+/// searches uses it.
+[[nodiscard]] MYMYR_HD constexpr bool wide_row(u32 words) { return words > k_max_words; }
 /// The successor kernels' row width WB for rows of `words` words over object bitsets of `ow` words: 2, 4, 16,
 /// k_max_words or k_wide. The kernels of object bitsets past 8 words are instantiated for WB >= k_max_words only.
 [[nodiscard]] constexpr u32 row_class(u32 words, u32 ow)
@@ -117,13 +122,16 @@ struct SchemaSet
 inline constexpr u32 k_deep_ctl = 4;
 [[nodiscard]] constexpr u64 deep_work_words(u64 segments) noexcept { return k_deep_ctl + 4 * segments; }
 
-/// Label rows of a chunk: binding [capacity, label_width] (u32; 0xFFFFFFFF past the schema's arity), schema and
-/// parent (row of the parent in the chunk, plus parent_base) per row; each array may be null (not written). Rows at or
-/// past capacity are not written (their widths and missing atoms still count, see SuccessorRows). Segments sorted in
-/// global memory use the binding rows, or `scratch`: with scratch_indexed, scratch has scratch_rows rows indexed like
-/// the label rows; otherwise it holds scratch_rows rows for the one segment that straddles the capacity. `error` (one
-/// u32) gets bit 0 when a segment finds no room to sort. With `live` set, a write whose *live is 0 writes nothing
-/// (a chunk the device halted: its rows are redone; no widths or missing atoms either).
+/// Label rows of a chunk: binding [capacity - first, label_width] (u32; 0xFFFFFFFF past the schema's arity), schema
+/// and parent (row of the parent in the chunk, plus parent_base) per row; each array may be null (not written). The
+/// rows of the window [first, capacity) of the chunk's successor rows are written, row r at index r - first; rows
+/// outside it are not written (their widths and missing atoms still count, see SuccessorRows), so a state with more
+/// successors than fit the device is written a window at a time. Segments sorted in global memory use the binding
+/// rows, or `scratch`: with scratch_indexed, scratch has scratch_rows rows and row r of the chunk at index
+/// r - scratch_first (scratch_first <= first: a segment that starts before the window sorts there too); otherwise it
+/// holds scratch_rows rows for the one segment that straddles the capacity (only with first = 0). `error` (one u32)
+/// gets bit 0 when a segment finds no room to sort. With `live` set, a write whose *live is 0 writes nothing (a chunk
+/// the device halted: its rows are redone; no widths or missing atoms either).
 struct Labels
 {
     u32* binding = nullptr;
@@ -137,6 +145,8 @@ struct Labels
     u32* error = nullptr;
     u32 scratch_indexed = 0;
     const u32* live = nullptr;
+    u64 first = 0;
+    u64 scratch_first = 0;
 };
 
 /// Successor rows of launch_write.

@@ -7,6 +7,8 @@
 // goals, a heuristic that may meet states outside its grounding, lazy slots that met new atoms, a chunk past the
 // capacities, a pop window too small) it launches the same kernels with reads between them.
 
+#include "row_layout.hpp"
+
 #include "mymyr/cuda/astar.hpp"
 
 #include "cost_program_build.hpp"
@@ -52,15 +54,8 @@ DeviceBestFirstResult failed(bool greedy, std::string message)
     return out;
 }
 
-/// Row width of the device state rows: the fixed row-width buckets (as the device BrFS).
-u32 bucket(u32 words)
-{
-    const u32 w = std::bit_ceil(std::max<u32>(words, 1));
-    if (w > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device best-first search: the states grew wider than " +
-                                    std::to_string(lifted::k_max_words) + " words (the device kernels' limit); use the CPU search");
-    return w;
-}
+/// Arena rows use power-of-two buckets through 64 words, then whole 64-word chunks.
+u32 bucket(u32 words) { return search_row_words(words); }
 
 /// A grow-only typed device array; ensure(n, keep) preserves the first `keep` elements.
 template<class T>
@@ -191,8 +186,13 @@ struct Driver
     PinnedLease pin;
     bfk::Ctl* dctl = nullptr;
     bfk::Ctl* hc = nullptr;
-    // the step: B parents in K chunks of C rows; a pop window of window_cap entries; cap candidates per chunk
-    u32 B = 0, C = 0, K = 1, window_cap = 0;
+    // the step: B parents in K chunks of C rows; a pop window of window_cap entries; cap candidates per chunk. B is the
+    // requested batch (it decides which nodes a step expands); C only bounds a launch's memory: wide rows take chunks
+    // of at most 16 MiB of parent rows (row_reserve_floor) and a quarter of what the context can still allocate
+    // (start_rows), gathered one chunk at a time (chunk_gather()). A lazy task
+    // that grows wide mid-step finishes the step at its C; next_C applies at the next step.
+    u32 B = 0, C = 0, K = 1, window_cap = 0, next_C = 0;
+    static constexpr u32 k_max_graph_chunks = 16;  // a step of more chunks runs from the host
     u64 cap = 0;
     DevArray<u32> wprefix, pos, batch_id, batch_g, batch_depth;
     DevArray<u64> wbegin, batch_rows;
@@ -213,6 +213,8 @@ struct Driver
     Clock::time_point t0, deadline;
     bool timed = false;
     u64 states_at_goal = 0;  // the states stored when the goal's parent was expanded (0: count)
+    /// What the search was allocating (refusals of an allocation that failed).
+    const char* phase = "the task's device tables, the heuristic and the successor generator";
 
     Driver(ContextPtr c, TaskPtr t, const DeviceBestFirstOptions& opt, bool gr) : ctx(std::move(c)), task(std::move(t)), o(opt), greedy(gr) {}
 
@@ -258,11 +260,13 @@ struct Driver
         check(cudaMemsetAsync(&dctl->abort, 0, sizeof(u32), s), "cudaMemsetAsync");
     }
 
+    /// A table of `n` slots (the search is unchanged when the allocation fails: a device round then runs as a host step).
     void alloc_table(u64 n)
     {
+        DeviceBuffer t(ctx, n * sizeof(u64), s);
+        check(cudaMemsetAsync(t.data(), 0, n * sizeof(u64), s), "cudaMemsetAsync (state table)");
+        table = std::move(t);
         slots = n;
-        table = DeviceBuffer(ctx, slots * sizeof(u64), s);
-        check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
     }
     [[nodiscard]] u64 table_limit() const { return slots / 4 * 3; }
     /// Room in the table for `more` states beyond `count` (rehashed when it grows).
@@ -292,6 +296,8 @@ struct Driver
         best.ensure(ctx, n, s, count);
         node_cap = std::min({g.capacity(), h.capacity(), parent.capacity(), sidx.capacity(), depth.capacity(), flags.capacity(),
                              best.capacity()});
+        if (lifted::wide_row(W))
+            node_cap = std::min(node_cap, rows.capacity() / W);
         check(bfk::launch_fill_u64(best.data() + count, node_cap - count, bfk::k_no_key, s), "launch_fill_u64");
     }
     [[nodiscard]] u64 state_limit() const { return std::min(node_cap, table_limit()); }
@@ -365,6 +371,76 @@ struct Driver
             heur->prepare(n, s);
     }
     [[nodiscard]] bool sorts() const { return canonical && gen->sorts(witness) && dcosts.unit; }
+    /// Device bytes per candidate of a chunk: its scratch (size_chunk: two rows, labels, keys) and its room
+    /// (ensure_room: a node with its row, table slots at load 1/4, open entries and runs).
+    [[nodiscard]] u64 candidate_bytes() const { return u64{W} * 24 + u64{L} * 8 + 192; }
+    /// The chunk scratch a larger chunk reuses.
+    [[nodiscard]] u64 chunk_scratch_bytes() const
+    {
+        u64 n = 0;
+        for (const Scratch* x : {&l_parent, &l_schema, &l_binding, &l_sort, &cand, &result, &rank, &rank_temp, &c_id, &c_gc, &c_part,
+                                 &c_push, &p_keys, &p_entries, &s_keys, &s_entries, &r_keys, &r_counts, &sort_temp, &new_begin,
+                                 &fresh_rows, &h_fresh, &goal_u8})
+            n += x->size();
+        return n;
+    }
+    /// Refuses a chunk of `ns` parents whose M candidates the context has no room for (the device expands a state's
+    /// successors in one chunk).
+    void refuse_unless_room(u32 ns, u64 M) const
+    {
+        const u64 need = M * candidate_bytes(), reused = chunk_scratch_bytes();
+        if (need > reused && need > device_room(*ctx) + reused)
+            refuse(ns, M, need);
+    }
+    /// Sizes a host chunk of `ns` parents for its M candidates; refuses it when an allocation fails (what a chunk holds
+    /// beyond candidate_bytes() per candidate, and the arrays a grown buffer copies from, are not in the estimate).
+    void size_host_chunk(u32 ns, u64 M)
+    {
+        refuse_unless_room(ns, M);
+        const u64 cp = std::max<u64>(M, 1);
+        try
+        {
+            size_chunk(cp);
+            ensure_room(cp);
+        }
+        catch (const CudaError& e)
+        {
+            if (e.code() != cudaErrorMemoryAllocation)
+                throw;
+            (void)cudaGetLastError();
+            refuse(ns, M, 0);
+        }
+    }
+    /// Refuses a chunk of `ns` parents with M candidates that need `need` bytes (0: an allocation for them failed).
+    [[noreturn]] void refuse(u32 ns, u64 M, u64 need) const
+    {
+        const u64 room = device_room(*ctx) + chunk_scratch_bytes();
+        const std::string search = greedy ? "device GBFS" : "device A*";
+        if (ns == 1)
+            refuse_successors(*ctx, search, "a state", M, need, room, "Raise the Context's max_bytes, or use the CPU search.",
+                              candidate_bytes(), held());
+        refuse_successors(*ctx, search, "a chunk of " + std::to_string(ns) + " states", M, need, room,
+                          "Lower chunk_states, raise the Context's max_bytes, or use the CPU search.", candidate_bytes(), held());
+    }
+    /// What the search holds of the context's memory (refusals).
+    [[nodiscard]] std::string held() const
+    {
+        const u64 node_bytes = g.bytes() + h.bytes() + parent.bytes() + sidx.bytes() + depth.bytes() + flags.bytes() + best.bytes();
+        const u64 open_bytes = open.bytes() + run_key.bytes() + run_begin.bytes() + run_key2.bytes() + run_begin2.bytes() +
+                               run_count.bytes() + run_count2.bytes();
+        const u64 step_bytes = wprefix.bytes() + pos.bytes() + batch_id.bytes() + batch_g.bytes() + batch_depth.bytes() +
+                               wbegin.bytes() + batch_rows.bytes() + pop_flags.bytes() + pop_temp.size() + chunk_scratch_bytes();
+        return held_text(*ctx, {{"state rows", rows.bytes()},
+                                {"search nodes", node_bytes},
+                                {"state table", table.size()},
+                                {"open list", open_bytes},
+                                {"step and chunk buffers", step_bytes}});
+    }
+    [[noreturn]] void refuse_memory_failure(u64 bytes) const
+    {
+        refuse_allocation_failure(*ctx, greedy ? "device GBFS" : "device A*", phase, bytes, held(),
+                                  "Raise the Context's max_bytes, or use the CPU search.");
+    }
     /// The step's scratch (batch, pop window, the batch's rows).
     void size_step()
     {
@@ -372,7 +448,7 @@ struct Driver
         batch_id.ensure(ctx, nb, s);
         batch_g.ensure(ctx, nb, s);
         batch_depth.ensure(ctx, nb, s);
-        batch_rows.ensure(ctx, u64{K} * C * W, s);
+        batch_rows.ensure(ctx, u64{chunk_gather() ? 1 : K} * C * W, s);
         wprefix.ensure(ctx, u64{window_cap} + 1, s);
         wbegin.ensure(ctx, window_cap, s);
         pop_flags.ensure(ctx, u64{window_cap} + 1, s);
@@ -384,16 +460,48 @@ struct Driver
     void widen(u32 nw)
     {
         DevArray<u64> grown;
-        grown.ensure(ctx, std::max<u64>(rows.capacity() / W, u64{hc->count} + 1024) * nw, s);
+        const u64 cap = std::max<u64>(hc->count, row_reserve_floor(nw,
+                                       std::max<u64>(rows.capacity() / W, u64{hc->count} + 1024)));
+        grown.ensure(ctx, cap * nw, s);
         check(state_set::launch_relayout(rows.data(), W, grown.data(), nw, hc->count, s), "launch_relayout");
         rows = std::move(grown);
         W = nw;
+        if (lifted::wide_row(W))
+        {
+            node_cap = std::min(node_cap, rows.capacity() / W);
+            // a smaller C at once only while the step's parents fit its first chunk (the chunk cursor keeps its meaning);
+            // otherwise from the next step
+            const u32 c = static_cast<u32>(std::min<u64>(C, row_reserve_floor(W, B)));
+            if (c < C && hc->n <= c)
+                set_chunk(c);
+            else if (c < C)
+                next_C = c;
+        }
         check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
         check(state_set::launch_rehash(tab(), arena(), hc->count, s), "launch_rehash");
         size_step();
         size_chunk(cap);
         gather_batch();
         ++st.widenings;
+    }
+
+    /// Whether the step's chunks gather their parent rows one chunk at a time (wide rows), not the batch at once.
+    [[nodiscard]] bool chunk_gather() const { return lifted::wide_row(W); }
+    void set_chunk(u32 c)
+    {
+        C = c;
+        K = (B + C - 1) / C;
+        graphs = graphs && K <= k_max_graph_chunks;
+        loops = loops && graphs;
+    }
+    /// A chunk size a widening deferred, at a step boundary.
+    void apply_next_chunk()
+    {
+        if (next_C == 0)
+            return;
+        set_chunk(next_C);
+        next_C = 0;
+        size_step();
     }
 
     bool out_of_time()
@@ -440,11 +548,15 @@ struct Driver
     }
     void enqueue_gather()
     {
+        if (chunk_gather())
+            return;  // (chunk_gen gathers its chunk's rows)
         check(bfk::launch_gather_rows(rows.data(), W, batch_id.data(), B, &dctl->n, batch_rows.data(), s), "launch_gather_rows");
     }
     /// The batch's rows again (after a widening), and their host copy when the CPU fallback needs it.
     void gather_batch()
     {
+        if (chunk_gather())
+            return;  // (chunk_gen gathers and copies its chunk's rows)
         enqueue_gather();
         if (host)
         {
@@ -459,9 +571,20 @@ struct Driver
         check(bfk::launch_chunk_begin(dctl, k, C, s), "launch_chunk_begin");
         const auto th = Clock::now();
         const u64 b0 = u64{k} * C;
-        ChunkInput in{batch_rows.data() + b0 * W, W, W, ns ? ns : C, nullptr, W, static_cast<u32>(b0)};
+        const bool own = chunk_gather();
+        if (own)
+            check(bfk::launch_gather_rows(rows.data(), W, batch_id.data() + b0, C, &dctl->rows, batch_rows.data(), s),
+                  "launch_gather_rows (chunk)");
+        ChunkInput in{batch_rows.data() + (own ? 0 : b0 * W), W, W, ns ? ns : C, nullptr, W, static_cast<u32>(b0)};
         if (ns == 0)
             in.rows_dev = &dctl->rows;
+        else if (host && own)
+        {
+            host_batch.resize(u64{ns} * W);
+            to_host(host_batch.data(), batch_rows.data(), u64{ns} * W, s);
+            sync();
+            in.host_states = host_batch.data();
+        }
         else if (host)
             in.host_states = host_batch.data() + b0 * W;
         gen->begin(in, witness, canonical);
@@ -670,8 +793,7 @@ struct Driver
             const u64 M = *pm;
             remember(M);
             const u64 cp = std::max<u64>(M, 1);
-            size_chunk(cp);
-            ensure_room(cp);
+            size_host_chunk(ns, M);
             check(bfk::launch_chunk_check(dctl, gen->seg_offsets() + u64{ns} * S, k, limits(cp), s), "launch_chunk_check");
             const lifted::Labels lb = labels_for(k, cp);
             gen->write(lb, static_cast<u64*>(cand.data()), W);
@@ -753,15 +875,29 @@ struct Driver
     [[nodiscard]] u64 estimate() const
     {
         const u64 m = std::max<u64>(*std::ranges::max_element(recent), hc->next_M);
-        return quantize(m + m / 4 + 256);
+        const u64 n = m + m / 4 + row_reserve_floor(W, 256);
+        return !lifted::wide_row(W) ? quantize(n) : std::max(m, row_reserve_floor(W, std::bit_ceil(std::max<u64>(n, 1))));
     }
     /// Steps replayed from a captured graph, looped on the device: one read per loop. An abort hands the step to the
-    /// host.
-    void device_round()
+    /// host. Returns false, before any work, when the context cannot hold the round's reservations (sized by the
+    /// largest recent chunk): the host then runs the step at its exact sizes.
+    bool device_round()
     {
         cap = estimate();
-        size_chunk(cap);
-        ensure_room(u64{K} * cap * 4);  // (a loop runs until the next step might not fit)
+        try
+        {
+            size_chunk(cap);
+            const u64 room = u64{K} * cap * 4;
+            ensure_room(!lifted::wide_row(W) ? room : std::max(cap, row_reserve_floor(W, room)));  // (a loop runs until the next step might not fit)
+        }
+        catch (const CudaError& e)
+        {
+            if (e.code() != cudaErrorMemoryAllocation)
+                throw;
+            (void)cudaGetLastError();
+            ++st.host_rounds;
+            return false;
+        }
         gen->prepare(C);
         std::vector<u64> key = {cap,
                                 W,
@@ -826,7 +962,7 @@ struct Driver
             if (a & bfk::k_abort_pop)
             {
                 host_step(true, 0);  // (the pop's next rounds, then the step)
-                return;
+                return true;
             }
             if (a & bfk::k_abort_missing)
             {
@@ -836,6 +972,7 @@ struct Driver
             }
             host_step(false, k);
         }
+        return true;
     }
 
     bool start(const State& s0);
@@ -852,12 +989,18 @@ struct Driver
 bool Driver::start(const State& s0)
 {
     W = bucket(std::max(task->words(), s0.size_words()));
-    ensure_nodes(0, 1024);
+    // (node arrays, the table's slots and open entries of a node beside its row)
+    const u64 first_rows = start_rows(*ctx, W, 1024, u64{W} * 8 + 64);
+    ensure_nodes(0, first_rows);
     std::vector<u64> row(W, 0);
     std::copy_n(s0.data(), s0.size_words(), row.begin());
     to_device(rows.data(), row.data(), W, s);
     hc->count = 1;
-    alloc_table(o.expected_states ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * o.expected_states + 2)) : u64{1} << 20);
+    // the table starts within a quarter of what the context can still allocate (it grows as the states need)
+    u64 slots0 = o.expected_states ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * o.expected_states + 2)) : u64{1} << 20;
+    while (slots0 > 1024 && slots0 * sizeof(u64) > device_room(*ctx) / 4)
+        slots0 /= 2;
+    alloc_table(slots0);
     check(state_set::launch_rehash(tab(), arena(), 1, s), "launch_rehash");
     const u32 root[5] = {0, 0, bfk::k_none, 0, 0};  // g, h, parent, sidx, depth
     to_device(g.data(), root + 0, 1, s);
@@ -891,7 +1034,7 @@ bool Driver::start(const State& s0)
     hc->runs = 1;
     hc->count = 1;
     hc->open_entries = 1;
-    ensure_room(1024);
+    ensure_room(first_rows);
     to_device(open.data(), &entry, 1, s);
     to_device(run_key.data(), &key, 1, s);
     const u64 zero = 0;
@@ -1050,19 +1193,20 @@ DeviceBestFirstResult Driver::run()
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
-        const u64 per = std::max<u64>(8, gen->view_words() * 8);
-        const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(8192, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
+        const u64 per = std::max<u64>(8, (gen->view_words() + (lifted::wide_row(task->words()) ? task->words() : 0)) * 8);
+        const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(lifted::wide_row(task->words()) ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
         B = o.batch;
-        C = static_cast<u32>(std::min<u64>(chunk_cap, B));
+        const u32 w0 = bucket(std::max(task->words(), s0.size_words()));
+        C = static_cast<u32>(std::min<u64>(chunk_cap, start_rows(*ctx, w0, B, u64{w0} * 8)));
         K = (B + C - 1) / C;
         window_cap = static_cast<u32>(std::max<u64>(2 * u64{B}, 1024));
     }
     // steps without host work run as captured graphs, looped on the device without a time budget (a step of more than
     // k_max_graph_chunks chunks runs from the host)
-    constexpr u32 k_max_graph_chunks = 16;
     graphs = o.graphs && GraphExec::enabled() && async_h && !host_goal && gen->capturable(witness) && K <= k_max_graph_chunks;
     loops = graphs && GraphExec::loops_enabled() && !timed;
     r.setup_seconds = s_since(t_setup);
+    phase = "the search's nodes, open list and step buffers";
     t0 = Clock::now();
 
     auto finish = [&]
@@ -1120,10 +1264,9 @@ DeviceBestFirstResult Driver::run()
         }
         if (out_of_time())
             break;
+        apply_next_chunk();
         // the first steps run on the host (exact sizes) until the chunks' candidates settle
-        if (graphs && steady())
-            device_round();
-        else
+        if (!(graphs && steady() && device_round()))
             host_step(true, 0);
         if (hc->status != bfk::k_running)
             break;
@@ -1187,7 +1330,17 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
     try
     {
         Driver d(std::move(ctx), std::move(task), options, greedy);
-        return d.run();
+        try
+        {
+            return d.run();
+        }
+        catch (const CudaError& e)
+        {
+            // (an allocation the search did not size against the context's room: its phase and what it holds)
+            if (!out_of_memory(e))
+                throw;
+            d.refuse_memory_failure(e.bytes());
+        }
     }
     catch (const NegativeCost& e)
     {

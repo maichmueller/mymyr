@@ -20,7 +20,10 @@ DeviceArena::DeviceArena(ContextPtr ctx, u32 record_bytes, u64 capacity, bool ho
     const u64 bytes = checked_mul({m_capacity, m_rb}, "DeviceArena (capacity x record bytes)");
     m_gen = std::make_shared<DeviceBuffer>(m_ctx, bytes, m_ctx->stream());
     if (host_mirror)
+    {
         m_mirror = std::make_shared<PinnedBuffer>(bytes);
+        m_mirror_capacity = m_capacity;
+    }
 }
 
 DeviceArena::~DeviceArena()
@@ -43,29 +46,64 @@ Event DeviceArena::take_event()
     return e;
 }
 
-void DeviceArena::reserve(u64 more)
+u64 DeviceArena::grown_capacity(u64 more, u64 most) const
 {
     const u64 need = checked_add(m_device_size, more, "DeviceArena (records)");
     if (need <= m_capacity)
-        return;
+        return m_capacity;
+    return std::max(need, std::min(m_capacity <= ~u64{0} / 2 ? 2 * m_capacity : need, most));
+}
+
+u64 DeviceArena::growth_bytes(u64 more, u64 most) const
+{
+    const u64 cap = grown_capacity(more, most);
+    return cap == m_capacity ? 0 : checked_mul({cap, m_rb}, "DeviceArena (capacity x record bytes)");
+}
+
+void DeviceArena::reserve(u64 more, u64 most)
+{
     // the new generation's size is checked before anything changes: an impossible size leaves the arena as it is
-    const u64 cap = std::max(need, m_capacity <= ~u64{0} / 2 ? 2 * m_capacity : need);
+    const u64 cap = grown_capacity(more, most);
+    if (cap == m_capacity)
+        return;
     const u64 bytes = checked_mul({cap, m_rb}, "DeviceArena (capacity x record bytes)");
+    // the mirror at least doubles (host memory is not under the context's max_bytes): a device generation that grows
+    // in small steps near its memory limit does not reallocate and copy the whole mirror at every step
+    const bool remirror = m_mirror && m_mirror_capacity < cap;
+    const u64 mirror_cap = remirror && m_mirror_capacity <= ~u64{0} / 2 / m_rb ? std::max(cap, 2 * m_mirror_capacity) : cap;
     DeviceGuard g(m_ctx->device());
     wait();  // pending copies read the old generation and write the old mirror
     auto gen = std::make_shared<DeviceBuffer>(m_ctx, bytes, m_ctx->stream());
+    std::shared_ptr<PinnedBuffer> mirror;
+    u64 mirror_records = mirror_cap;
+    if (remirror)
+    {
+        try
+        {
+            mirror = std::make_shared<PinnedBuffer>(mirror_cap * m_rb);
+        }
+        catch (const PinnedAllocationError&)
+        {
+            if (mirror_cap == cap)
+                throw;
+            mirror_records = cap;  // the doubled mirror does not fit the host's pinned memory: the one it needs
+            mirror = std::make_shared<PinnedBuffer>(bytes);
+        }
+    }
     if (m_device_size)
         check(cudaMemcpyAsync(gen->data(), m_gen->data(), m_device_size * m_rb, cudaMemcpyDeviceToDevice, m_ctx->stream()),
               "cudaMemcpyAsync (arena growth)");
     m_gen = std::move(gen);  // the old generation is freed after the copy (its stream), unless an export holds it
-    if (m_mirror)
+    if (mirror)
     {
-        auto mirror = std::make_shared<PinnedBuffer>(bytes);
         if (m_host_size)
             std::memcpy(mirror->data(), m_mirror->data(), m_host_size * m_rb);
         m_mirror = std::move(mirror);
+        m_mirror_capacity = mirror_records;
+        ++m_mirror_growths;
     }
     m_capacity = cap;
+    ++m_growths;
 }
 
 std::byte* DeviceArena::tail(u64 n)

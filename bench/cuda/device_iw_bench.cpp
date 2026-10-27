@@ -8,7 +8,8 @@
 // max_next_layer_states K) against search::find_rollouts_parallel on the first S seeds with 1 thread (the one-core
 // rate) and with T threads (0: every core) on min(N, S * T) seeds. iw1: exact batched IW(1) (cuda::batched_iw1) from
 // N random-walk states (walks of --walk-steps steps from the initial state) uploaded once, against search::iw() from
-// the first S starts on one core and from min(N, S * T) starts on T threads. Device times are the median of R runs
+// the first S starts on one core and from min(N, S * T) starts on T threads, with the same next-layer limit K.
+// Device times are the median of R runs
 // (a fresh DeviceMultiIw each: the task upload is included, the context creation is not). The CPU rates are
 // extrapolated to N (per-search time x N). The device results of the sampled searches are checked against the CPU's
 // (status, plan length, reached atoms): "equal" in the output. The load average and the core count are reported.
@@ -322,6 +323,8 @@ int main(int argc, char** argv)
                 search::IwOptions c;
                 c.max_width = 1;
                 c.control.budget.max_states = max_states;
+                c.layers.kind = search::LayerOrdering::Kind::InOrder;
+                c.layers.max_next_layer_states = next;
                 c.start = starts[i];
                 return search::iw(*task, c);
             };

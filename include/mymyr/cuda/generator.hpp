@@ -122,8 +122,8 @@ public:
     /// bitsets wider than lifted::k_max_ow words, numeric conditions or effects without numeric state values, or
     /// numeric states wider than lifted::k_max_words words.
     [[nodiscard]] static std::string unsupported(const Task& task);
-    /// unsupported(task), or the device searches' limit (BrFS, IW, A*, state spaces: they hold whole state rows):
-    /// states wider than lifted::k_max_words words.
+    /// The device searches' support check: classical rows have runtime width; numeric rows retain unsupported()'s
+    /// whole-row limit.
     [[nodiscard]] static std::string search_unsupported(const Task& task);
 
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }
@@ -206,8 +206,10 @@ public:
     void count_device();
     void count_host();
     [[nodiscard]] const u32* seg_offsets() const noexcept { return static_cast<const u32*>(m_offsets.data()); }
-    /// Writes the rows [0, labels.capacity): labels (the arrays that are set) and successor rows into `words`
-    /// (out_words wide; null: none), the device schemas' by the kernels, the CPU-fallback rows placed. words_needed
+    /// Writes the rows [labels.first, labels.capacity) at their index minus labels.first: labels (the arrays that are
+    /// set) and successor rows into `words` (out_words wide; null: none), the device schemas' by the kernels, the
+    /// CPU-fallback rows placed. A window past row 0 needs an indexed scratch when the generator sorts (sorts()), and
+    /// a classical task (numeric rows are written from row 0). words_needed
     /// (device u32, may be null) gets the widest successor that does not fit out_words (such rows are zero).
     void write(const lifted::Labels& labels, u64* words, u32 out_words, u32* words_needed = nullptr);
     /// Lazy slots: after write(), whether atoms without a slot were met (synchronizes the stream). If so they are

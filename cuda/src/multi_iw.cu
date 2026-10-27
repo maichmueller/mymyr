@@ -12,6 +12,11 @@
 #include "mymyr/cuda/device_rng.hpp"
 #include "mymyr/cuda/multi_iw_kernels.hpp"
 
+#include <cub/device/device_radix_sort.cuh>
+#include <cuda/std/tuple>
+
+#include <cmath>
+
 namespace mymyr::cuda::miw
 {
 namespace
@@ -70,11 +75,30 @@ __device__ __forceinline__ u64 tuple_key(u32 s, u32 a, u32 b)
     return (u64{s} << (2 * k_key_atom_bits)) | (u64{lo} << k_key_atom_bits) | hi;
 }
 
+/// Packed symmetric tuple index, including singletons on the diagonal.
+__device__ __forceinline__ u64 pair_index(u32 a, u32 b)
+{
+    const u64 lo = a < b ? a : b, hi = a < b ? b : a;
+    return hi * (hi + 1) / 2 + lo;
+}
+
+__device__ __forceinline__ u64 table_bit(const Table& t, u32 a, u32 b)
+{
+    if (t.ranks)
+        return b == k_none ? 1ull : 1ull << (b & 63);
+    return 1ull << ((t.arity == 2 && lifted::wide_row(t.row_words) ? pair_index(a, b) : u64{b}) & 63);
+}
+
 /// Word of tuple (lo, hi) in the table of search s, and its bit.
 __device__ __forceinline__ unsigned long long* table_word(const Table& t, u32 s, u32 a, u32 b)
 {
+    if (t.ranks)
+        return reinterpret_cast<unsigned long long*>(t.bits + (u64{s} * t.ranks + a) * (t.row_words + 1) +
+                                                     (b == k_none ? t.row_words : (b >> 6)));
     if (t.arity == 1)
         return reinterpret_cast<unsigned long long*>(t.bits + u64{s} * t.row_words + (a >> 6));
+    if (lifted::wide_row(t.row_words))
+        return reinterpret_cast<unsigned long long*>(t.bits + u64{s} * table_words(2, t.row_words) + (pair_index(a, b) >> 6));
     return reinterpret_cast<unsigned long long*>(t.bits + (u64{s} * 64 * t.row_words + a) * t.row_words + (b >> 6));
 }
 
@@ -84,12 +108,62 @@ __device__ __forceinline__ const u64* pair_row(const Table& t, u32 s, u32 a)
     return t.bits + (u64{s} * 64 * t.row_words + a) * t.row_words;
 }
 
+__device__ __forceinline__ bool rank_holds(const Table& t, u32 s, u32 rank, const u64* row)
+{
+    const u64 at = u64{s} * t.ranks + rank;
+    for (u64 k = t.rank_offsets[at]; k < t.rank_offsets[at + 1]; ++k)
+    {
+        const u32 a = t.rank_slots[k];
+        if (row[a >> 6] & (1ull << (a & 63)))
+            return true;
+    }
+    return false;
+}
+
+__device__ __forceinline__ void store_rank_mask(const Table& t, u32 s, u32 node, const u64* row)
+{
+    u64* mask = t.node_masks + u64{node} * t.mask_words;
+    for (u32 w = 0; w < t.mask_words; ++w)
+        mask[w] = 0;
+    const u32 bot = t.rank_counts[s] - 1;
+    bool any = false;
+    for (u32 rank = 0; rank < bot; ++rank)
+        if (rank_holds(t, s, rank, row))
+        {
+            mask[rank >> 6] |= 1ull << (rank & 63);
+            any = true;
+        }
+    if (!any)
+        mask[bot >> 6] |= 1ull << (bot & 63);
+}
+
 /// Calls f(a, b) for every tuple of the transition parent -> child that is unseen in the table: arity 1, the added
 /// atoms a (a == b); arity 2, {a, b} with a added and b in the child (b >= a when both are added: each pair once).
 template<class F>
-__device__ __forceinline__ void for_each_unseen(const Table& t, u32 s, const u64* pw, const u64* cw, F&& f)
+__device__ __forceinline__ void for_each_unseen(const Table& t, u32 s, const u64* pw, const u64* cw, u32 parent_node, F&& f)
 {
     const u32 rw = t.row_words;
+    if (t.ranks)
+    {
+        const u64* pmask = t.node_masks + u64{parent_node} * t.mask_words;
+        const u32 bot = t.rank_counts[s] - 1;
+        bool any = false;
+        for (u32 rank = 0; rank <= bot; ++rank)
+        {
+            const bool holds = rank == bot ? !any : rank_holds(t, s, rank, cw);
+            if (!holds)
+                continue;
+            any = true;
+            const bool flipped = !(pmask[rank >> 6] & (1ull << (rank & 63)));
+            if (flipped && !(*table_word(t, s, rank, k_none) & 1))
+                f(rank, k_none);
+            const u64* marked = t.bits + (u64{s} * t.ranks + rank) * (rw + 1);
+            for (u32 w = 0; w < rw; ++w)
+                for (u64 x = cw[w] & (flipped ? ~0ull : ~pw[w]) & ~marked[w]; x; x &= x - 1)
+                    f(rank, w * 64 + lowest(x));
+        }
+        return;
+    }
     if (t.arity == 1)
     {
         const u64* row = t.bits + u64{s} * rw;
@@ -98,6 +172,24 @@ __device__ __forceinline__ void for_each_unseen(const Table& t, u32 s, const u64
             {
                 const u32 a = w * 64 + lowest(x);
                 f(a, a);
+            }
+        return;
+    }
+    if (lifted::wide_row(rw))
+    {
+        for (u32 aw = 0; aw < rw; ++aw)
+            for (u64 ax = cw[aw] & ~pw[aw]; ax; ax &= ax - 1)
+            {
+                const u32 a = aw * 64 + lowest(ax);
+                for (u32 w = 0; w < rw; ++w)
+                    for (u64 x = cw[w]; x; x &= x - 1)
+                    {
+                        const u32 b = w * 64 + lowest(x);
+                        if (b < a && ((cw[w] & ~pw[w]) & (1ull << (b & 63))))
+                            continue;
+                        if (!(*table_word(t, s, a, b) & table_bit(t, a, b)))
+                            f(a, b);
+                    }
             }
         return;
     }
@@ -162,6 +254,25 @@ __global__ void k_init_roots(Nodes nodes, Searches s, Roots r, u32* order)
 __global__ void k_table_init(Table t, Nodes nodes, u32 roots)
 {
     const u32 rw = t.row_words;
+    if (t.ranks)
+    {
+        MIW_FOR(i, roots)
+        {
+            const u32 id = nodes.search[i];
+            const u64* root = nodes.rows + i * nodes.words;
+            store_rank_mask(t, id, static_cast<u32>(i), root);
+            const u64* mask = t.node_masks + i * t.mask_words;
+            for (u32 rank = 0; rank < t.rank_counts[id]; ++rank)
+                if (mask[rank >> 6] & (1ull << (rank & 63)))
+                {
+                    u64* row = t.bits + (u64{id} * t.ranks + rank) * (rw + 1);
+                    for (u32 w = 0; w < rw; ++w)
+                        row[w] = root[w];
+                    row[rw] = 1;
+                }
+        }
+        return;
+    }
     if (t.arity == 1)
     {
         MIW_FOR(k, u64{roots} * rw)
@@ -173,6 +284,25 @@ __global__ void k_table_init(Table t, Nodes nodes, u32 roots)
         return;
     }
     const u64 atoms = u64{64} * rw;
+    if (lifted::wide_row(rw))
+    {
+        MIW_FOR(k, u64{roots} * atoms)
+        {
+            const u64 i = k / atoms;
+            const u32 a = static_cast<u32>(k % atoms);
+            const u64* root = nodes.rows + i * nodes.words;
+            if ((a >> 6) >= nodes.words || !((root[a >> 6] >> (a & 63)) & 1))
+                continue;
+            for (u32 w = 0; w <= (a >> 6); ++w)
+                for (u64 x = root[w]; x; x &= x - 1)
+                {
+                    const u32 b = w * 64 + lowest(x);
+                    if (b <= a)
+                        atomicOr(table_word(t, nodes.search[i], a, b), table_bit(t, a, b));
+                }
+        }
+        return;
+    }
     MIW_FOR(k, u64{roots} * atoms)
     {
         const u64 i = k / atoms;
@@ -196,6 +326,38 @@ __global__ void k_stop_running(Searches s, u32 status)
 
 __global__ void k_table_relayout(const u64* src, u64* dst, u32 arity, u32 searches, u32 from, u32 to)
 {
+    if (arity == 2 && lifted::wide_row(to))
+    {
+        const u64 per = table_words(2, to), old_per = table_words(2, from);
+        const u64 slots = u64{64} * to, old_slots = u64{64} * from;
+        MIW_FOR(k, u64{searches} * per)
+        {
+            const u64 id = k / per, first = (k % per) * 64;
+            // sqrt supplies an estimate; integer corrections keep triangular boundaries exact.
+            u64 a = static_cast<u64>((sqrt(8.0 * static_cast<double>(first) + 1.0) - 1.0) / 2.0);
+            while (a * (a + 1) / 2 > first)
+                --a;
+            while ((a + 1) * (a + 2) / 2 <= first)
+                ++a;
+            u64 b = first - a * (a + 1) / 2, word = 0;
+            for (u32 bit = 0; bit < 64 && a < slots; ++bit)
+            {
+                if (a < old_slots)
+                {
+                    const u64 at = lifted::wide_row(from) ? a * (a + 1) / 2 + b : a * old_slots + b;
+                    if ((src[id * old_per + (at >> 6)] >> (at & 63)) & 1)
+                        word |= 1ull << bit;
+                }
+                if (++b > a)
+                {
+                    ++a;
+                    b = 0;
+                }
+            }
+            dst[k] = word;
+        }
+        return;
+    }
     const u64 rows_to = arity == 1 ? 1 : u64{64} * to, rows_from = arity == 1 ? 1 : u64{64} * from;
     MIW_FOR(k, u64{searches} * rows_to * to)
     {
@@ -322,7 +484,7 @@ __global__ void k_emit_count(Gathered g, Candidates c, Table t, Emission e)
         const u32 p = c.parent[i];
         const u32 id = g.search[p];
         u32 n = 0;
-        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words), [&](u32, u32) { ++n; });
+        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words), g.node[p], [&](u32, u32) { ++n; });
         e.count[i] = n;
     }
 }
@@ -369,8 +531,77 @@ __global__ void k_emit_insert(Gathered g, Candidates c, Table t, Emission e, Own
         const u32 p = c.parent[i];
         const u32 id = g.search[p];
         u32 at = e.offset[i];
-        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words),
+        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words), g.node[p],
                         [&](u32 a, u32 b) { e.slot[at++] = map_insert(m, mask, tuple_key(id, a, b), static_cast<u32>(i)); });
+    }
+}
+
+struct TupleDecomposer
+{
+    __host__ __device__ auto operator()(TupleKey& key) const { return ::cuda::std::tie(key.search, key.atoms); }
+};
+
+__global__ void k_wide_emit(Gathered g, Candidates c, Table t, Emission e, OwnerMap m)
+{
+    const u32 total = *e.total;
+    if (blockIdx.x == 0 && threadIdx.x == 0 && e.ctl)
+    {
+        e.ctl[k_ctl_emit] = total;
+        if (total > e.capacity)
+            atomicOr(e.ctl + k_ctl_abort, k_abort_emit);
+    }
+    // Initialize the tail even on abort: the captured sort always consumes its full capacity.
+    MIW_FOR(k, e.capacity)
+    {
+        if (k >= total || total > e.capacity || aborted(c.abort))
+        {
+            m.wide[k] = TupleKey{~0ull, ~0ull};
+            m.candidates[k] = k_none;
+        }
+    }
+    if (total > e.capacity)
+        return;
+    const u64 n_live = live(c);
+    MIW_FOR(i, n_live)
+    {
+        const u32 p = c.parent[i];
+        u32 at = e.offset[i];
+        for_each_unseen(t, g.search[p], g.rows + u64{p} * g.words, cand_row(c, i, g.words), g.node[p],
+                        [&](u32 a, u32 b)
+                        {
+                            const u32 lo = t.ranks || a < b ? a : b, hi = t.ranks || a < b ? b : a;
+                            m.wide[at] = TupleKey{(u64{lo} << 32) | hi, g.search[p]};
+                            m.candidates[at] = static_cast<u32>(i);
+                            e.slot[at] = at;
+                            ++at;
+                        });
+    }
+}
+
+__device__ __forceinline__ bool tuple_less(TupleKey a, TupleKey b)
+{
+    return a.search < b.search || (a.search == b.search && a.atoms < b.atoms);
+}
+
+__global__ void k_wide_owners(Candidates c, Emission e, OwnerMap m)
+{
+    if (aborted(c.abort) || *e.total > e.capacity)
+        return;
+    const u64 total = *e.total;
+    MIW_FOR(i, total)
+    {
+        const TupleKey key = m.wide[i];
+        u64 lo = 0, hi = total;
+        while (lo < hi)
+        {
+            const u64 mid = lo + (hi - lo) / 2;
+            if (tuple_less(m.sorted[mid], key))
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        // Emission offsets preserve candidate order; stable sorting preserves it among equal tuples.
+        m.vals[i] = m.sorted_candidates[lo];
     }
 }
 
@@ -428,13 +659,13 @@ __global__ void k_relaxed(Gathered g, Candidates c, Table t, const Step* step, u
         const u32 p = c.parent[i];
         const u32 id = g.search[p];
         bool novel = false;
-        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words),
+        for_each_unseen(t, id, g.rows + u64{p} * g.words, cand_row(c, i, g.words), g.node[p],
                         [&](u32 x, u32 y)
                         {
-                            const u64 bit = 1ull << (y & 63);
+                            const u64 bit = table_bit(t, x, y);
                             if (!(atomicOr(table_word(t, id, x, y), bit) & bit))
                                 novel = true;
-                            if (t.arity == 2 && x != y)
+                            if (t.arity == 2 && !lifted::wide_row(t.row_words) && x != y)
                                 atomicOr(table_word(t, id, y, x), 1ull << (x & 63));
                         });
         const u8 f = novel ? k_cand_novel : 0;
@@ -598,16 +829,28 @@ __device__ __forceinline__ void commit_owned(const Compact& m, u32 i, bool commi
             continue;
         if (commit)
         {
-            const u64 key = m.map.keys[slot];
-            const u32 id = static_cast<u32>(key >> (2 * k_key_atom_bits));
-            const u32 lo = static_cast<u32>(key >> k_key_atom_bits) & ((1u << k_key_atom_bits) - 1);
-            const u32 hi = static_cast<u32>(key) & ((1u << k_key_atom_bits) - 1);
-            atomicOr(table_word(t, id, lo, hi), 1ull << (hi & 63));
-            if (t.arity == 2 && lo != hi)
-                atomicOr(table_word(t, id, hi, lo), 1ull << (lo & 63));
+            if (m.map.wide)
+            {
+                const TupleKey key = m.map.wide[slot];
+                const u32 lo = static_cast<u32>(key.atoms >> 32), hi = static_cast<u32>(key.atoms);
+                atomicOr(table_word(t, static_cast<u32>(key.search), lo, hi), table_bit(t, lo, hi));
+            }
+            else
+            {
+                const u64 key = m.map.keys[slot];
+                const u32 id = static_cast<u32>(key >> (2 * k_key_atom_bits));
+                const u32 lo = static_cast<u32>(key >> k_key_atom_bits) & ((1u << k_key_atom_bits) - 1);
+                const u32 hi = static_cast<u32>(key) & ((1u << k_key_atom_bits) - 1);
+                atomicOr(table_word(t, id, lo, hi), 1ull << (hi & 63));
+                if (t.arity == 2 && lo != hi)
+                    atomicOr(table_word(t, id, hi, lo), 1ull << (lo & 63));
+            }
         }
-        m.map.keys[slot] = k_empty_key;
-        m.map.vals[slot] = k_none;
+        if (!m.map.wide)
+        {
+            m.map.keys[slot] = k_empty_key;
+            m.map.vals[slot] = k_none;
+        }
     }
 }
 
@@ -664,6 +907,8 @@ __global__ void k_compact(Nodes nodes, Gathered g, Candidates c, Compact m)
             u64* y = nodes.rows + u64{nid} * W;
             for (u32 w = 0; w < W; ++w)
                 y[w] = w < g.words ? x[w] : 0;
+            if (m.table.ranks)
+                store_rank_mask(m.table, g.search[p], nid, y);
             nodes.parent[nid] = g.node[p];
             nodes.search[nid] = g.search[p];
             u32* l = nodes.label + u64{nid} * LW;
@@ -1008,7 +1253,7 @@ cudaError_t launch_stop_running(Searches s, u32 status, cudaStream_t st)
 
 cudaError_t launch_table_relayout(const u64* src, u64* dst, u32 arity, u32 searches, u32 from, u32 to, cudaStream_t st)
 {
-    const u64 n = u64{searches} * (arity == 1 ? 1 : u64{64} * to) * to;
+    const u64 n = u64{searches} * table_words(arity, to);
     if (n)
         k_table_relayout<<<grid_for(n), k_block, 0, st>>>(src, dst, arity, searches, from, to);
     return cudaGetLastError();
@@ -1042,8 +1287,29 @@ cudaError_t launch_emit_count(Gathered g, Candidates c, Table t, Emission e, cud
     return cudaGetLastError();
 }
 
+cudaError_t wide_sort_bytes(u64 capacity, usize& bytes)
+{
+    return cub::DeviceRadixSort::SortPairs(nullptr, bytes, static_cast<const TupleKey*>(nullptr),
+                                          static_cast<TupleKey*>(nullptr), static_cast<const u32*>(nullptr),
+                                          static_cast<u32*>(nullptr), capacity, TupleDecomposer{}, 0, 96);
+}
+
 cudaError_t launch_emit_insert(Gathered g, Candidates c, Table t, Emission e, OwnerMap m, cudaStream_t st)
 {
+    if (m.wide)
+    {
+        k_wide_emit<<<grid_for(e.capacity > c.n ? e.capacity : c.n), k_block, 0, st>>>(g, c, t, e, m);
+        auto error = cudaGetLastError();
+        if (error != cudaSuccess)
+            return error;
+        usize bytes = m.scratch_bytes;
+        error = cub::DeviceRadixSort::SortPairs(m.scratch, bytes, m.wide, m.sorted, m.candidates,
+                                               m.sorted_candidates, e.capacity, TupleDecomposer{}, 0, 96, st);
+        if (error != cudaSuccess)
+            return error;
+        k_wide_owners<<<grid_for(e.capacity), k_block, 0, st>>>(c, e, m);
+        return cudaGetLastError();
+    }
     if (c.n)
         k_emit_insert<<<grid_for(c.n), k_block, 0, st>>>(g, c, t, e, m);
     return cudaGetLastError();
@@ -1355,7 +1621,7 @@ __global__ void k_broadcast(Gathered g, Dedup d, Broadcast b)
             if (b.emit_count)
             {
                 u32 n = 0;
-                for_each_unseen(b.table, row_id, g.rows + row * W, b.rows + src * W, [&](u32, u32) { ++n; });
+                for_each_unseen(b.table, row_id, g.rows + row * W, b.rows + src * W, g.node[row], [&](u32, u32) { ++n; });
                 b.emit_count[j] = n;
             }
         }

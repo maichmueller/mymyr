@@ -113,9 +113,9 @@ that knows the toolkit's PTX version (newer than the minimum for SASS), so build
 run on and keep PTX only as the forward-compatible fallback for GPUs newer than the build. A GPU that has neither
 matching SASS nor loadable PTX fails at the first device call.
 
-Device operations include task upload and smoke kernels, BrFS, multi-IW and rollouts; batched grounded h-max, h-add,
-h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for `mymyr.rl.expand`. Device arrays can exchange
-data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
+Device operations include task upload and smoke kernels, BrFS, multi-IW, LIW(1) and rollouts; batched grounded
+h-max, h-add, h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for
+`mymyr.rl.expand`. Device arrays can exchange data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
 cap it. Arrays and device tasks keep their context alive.
 
 The encoding helpers `literal_slots` and `literal_masks` resolve CUDA torch arrays of table predicate ids and
@@ -144,11 +144,74 @@ fallback. Numeric goal expressions use at most 64 stack values. Callable goals a
 search require CPU search; device A*/GBFS use the task goal. See [Formula values](formulas.md) for goal construction.
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
+Exact device IW reproduces each CPU search's status, plan, goal state and per-pass counts with matching options,
+including `max_states`, `max_expanded` and `max_depth`, unless a pass's novelty table exceeds `table_bytes` (see
+below). Python `multi_iw` and `batched_iw1` have no next-layer limit and equal `search.iw` with the default `"queue"`
+order. The C++ `MultiIwOptions::max_next_layer_states` corresponds to
+CPU `IwOptions::layers` with `Kind::InOrder` and the same limit (in Python `search.iw(layer_order="in_order",
+max_next_layer_states=...)`); for rollouts it corresponds to `Kind::Randomized` with the same seed, and `rollouts`
+and `search.find_rollouts_parallel` take the same `max_next_layer_states=`. Filling the next layer stops generation
+and discards the rest of the current layer; it can change the tree even when `max_states` is identical. An unlimited
+CPU queue is therefore a different search from a device search with a finite next-layer limit. Positive
+`max_seconds` limits depend on elapsed wall time and do not guarantee equal trees or counts between backends or launch
+configurations.
+
+`cuda.liw(task_or_table, starts, landmarks=graph, ...)` runs the width-0 pass and then LIW(1) from every start:
+search i has the status, plan, goal state and per-pass counts of `search.liw(task, start=starts[i], max_width=1, ...)`
+whatever the group and chunk sizes. `landmarks` is one `search.FactLandmarkGraph` shared by every search or a sequence
+with one graph per start (`None`: every state has the BOT coordinate); `disjunctive`, `all_private` and
+`unshared_atoms` group the landmarks into ranks as in `search.liw`. Over a TaskTable, `task_ids` selects each search's
+instance. `cuda.rollouts(..., landmarks=...)` runs randomized LIW(1) with one graph for every seed or one per seed;
+rollout k equals `search.liw(..., max_width=1, layer_order="randomized", seed=k)`. LIW(2) and tasks with numeric
+fluents run on the host (`search.liw`). A search's novelty table holds, per landmark rank (BOT included), one bit per
+atom slot and one word for the empty tuple. Groups shrink to `table_bytes` as for IW; a search whose table cannot
+fit ends with status `FAILED` at the LIW(1) pass, and the batch's `message` names the option to raise. When no
+search's table fits `table_bytes`, the call raises `ValueError` (with `unfit_tables="fail"`, every search fails there).
+
+```python skip-if-no-cuda
+from pathlib import Path
+import mymyr
+from mymyr import cuda, search
+
+pddl = Path("tests/data/pddl/blocks")
+liw_task = mymyr.Task.from_pddl(pddl / "domain.pddl", pddl / "probBLOCKS-8-0.pddl")
+graph = search.approximate_fact_landmarks(liw_task)
+starts = [liw_task.initial_state] * 2
+batch = cuda.liw(liw_task, starts, landmarks=graph, max_states=100)
+reference = search.liw(liw_task, landmarks=graph, max_width=1, max_states=100)
+assert batch.status[0] == reference.status
+assert batch.plan(0) == reference.plan
+assert batch.expanded[0] == sum(p.expanded for p in reference.passes)
+```
+
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks.
 Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
-up to 32 words). Successor rows wider than 64 words are built 64 words at a time; BrFS, IW, A*, state spaces and the
-numeric kernels hold whole rows and take states of at most 64 words. A `DeviceExpander` expands an instance the
+up to 32 words). Classical BrFS, IW, LIW(1), rollouts, A*/GBFS and state spaces accept rows of any width that fits memory.
+Arenas keep power-of-two widths through 64 words and round wider rows to 64-word chunks; successors are built
+one chunk at a time. Numeric kernels hold whole rows and take states of at most 64 words; a numeric search raises
+`ValueError` when its states reach more (also when a lazy task's rows grow there during the search).
+When a state's successors exceed what the context can still allocate, the device BrFS deduplicates and stores them
+a window at a time (the `windows` counter), with the ids, counts and plans of the CPU BrFS; device IW, rollouts and
+A*/GBFS expand a state's successors at once and raise `ValueError` naming the successor count, the bytes they need and
+what the context has left (raise the Context's `max_bytes`, or use the CPU search). The searches size their buffers by
+what the context can still allocate: the BrFS starts its arenas and state table within it, reserves the arenas for a
+windowed state's new states once and sizes each window by every buffer it allocates, and a chunk whose buffers do not
+fit runs with fewer parents. When the search's own buffers leave too little, or an allocation fails all the same, the
+`ValueError` names what holds the context's memory.
+IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
+into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
+`batched_iw1`, `liw` and `rollouts`). When the width-1 table of one search exceeds it, the call raises `ValueError`
+before it runs a search (every search that width 0 does not solve reaches width 1), or, with `unfit_tables="fail"`,
+ends those searches at width 1 with status `FAILED`. A wider pass whose table cannot fit even one search ends the
+searches that reach it with status `FAILED`, and the batch's `message` gives its required byte size and the budget; the
+searches solved at a lower width keep their results and an empty `message` in C++ `MultiIwBatch::result`. Over a
+`TaskSuite` the table sizes differ by domain: a domain whose width-1 table exceeds `table_bytes` fails its searches
+the same way (its part's `message` carries the refusal), and the call raises `ValueError`, before it runs any domain,
+only when no domain fits; `SuiteIwBatch.message` joins the domains' messages. Groups also shrink to the memory the
+context can still allocate; a single search's table beyond it ends that search the same way, the `message` naming
+what holds the context's memory. Wide exact novelty uses full 32-bit atom slots and stable radix sorting, preserving
+CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
 host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only
 those instances take the host and the others stay on the device, so the environments' general path serves every

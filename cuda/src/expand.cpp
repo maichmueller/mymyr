@@ -744,7 +744,7 @@ struct DeviceExpander::Impl
         if (mode == Mode::Host)
             return true;
         const u32 slots = mode == Mode::Single ? table->task(0)->numeric_slots() : 0;
-        return slots && in.words + slots > lifted::k_max_words;
+        return slots && lifted::wide_row(in.words + slots);
     }
 
     /// rl::expand of the host's copy of the batch on the host's threads (bit for bit the single-threaded call's).

@@ -20,6 +20,10 @@
 // group size and chunk size. The budgets are exact too: max_expanded and a goal stop at their row, max_states (tree
 // nodes, per pass) at the admission that reaches it. MultiIwOptions::exact = false is relaxed batch novelty (opt-in:
 // one atomicOr pass; IW(k)'s guarantees hold but the kept set depends on timing).
+// With max_next_layer_states set, the CPU equivalent uses LayerOrdering::Kind::InOrder and the same layer limit:
+// filling the next layer ends the current expansion and drops the remaining current-layer entries. With seeds,
+// use Kind::Randomized and the same per-search seed instead. Positive max_seconds limits depend on elapsed wall
+// time, so searches interrupted by them need not have equal trees or counts across backends or launch configurations.
 //
 // Rollouts (cuda/rollouts.hpp; search::find_rollouts_parallel): with per-search seeds, every next layer is shuffled by
 // the search's own SplitMix64 stream (cuda/device_rng.hpp) before it is popped, and max_next_layer_states truncates the
@@ -41,31 +45,47 @@
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/rl/task_table.hpp"
 #include "mymyr/search/iw.hpp"
+#include "mymyr/search/iw_family.hpp"
 #include "mymyr/task/task.hpp"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace mymyr::cuda
 {
+/// Bytes of one search's novelty table of `arity` over rows of `words` atom words (`ranks` > 0: LIW's tables of that
+/// many landmark ranks): what MultiIwOptions::table_bytes bounds per search.
+[[nodiscard]] u64 novelty_table_bytes(u32 arity, u32 words, u32 ranks = 0);
+
 struct MultiIwOptions
 {
     u32 max_width = 1;  // the ladder 0..max_width (the device runs widths 0, 1 and 2)
     bool optimize_iw1 = true;
+    /// Present: LIW(1), without optimized IW(1). One grouping shared by all searches, or one per search.
+    /// A null graph gives every state the BOT coordinate. Widths above 1 are refused.
+    std::optional<std::vector<search::LandmarkNovelty>> landmarks;
     search::WidthZero width_zero = search::WidthZero::ExpandDepthOne;
     bool witness_pruning = false;  // search::iw()'s default: every applicable action is a transition
     bool canonical_order = true;
     bool exact = true;             // exact batch novelty; false: relaxed (nondeterministic kept sets)
     search::Budget budget;         // per search and pass as in search::iw(); max_seconds spans the whole call
-    u32 max_next_layer_states = ~u32{0};  // truncated next layers (with seeds, as the CPU's ordered layers)
+    u32 max_next_layer_states = ~u32{0};  // CPU layers: InOrder, or Randomized with seeds; stop generation at this size
     bool track_reached = false;    // the fluent atoms of every state each search created (the rollouts' report)
     bool plans = true;             // plans and goal states of the solved searches
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
-    // launch configuration: in exact mode no result depends on it
+    // launch configuration: exact results are independent of it unless a wall-time limit interrupts the search
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
-    u64 table_bytes = u64{1} << 30;  // novelty tables of a group
+    // Novelty tables of a group. When no search's width-1 table fits it, run() throws std::invalid_argument (unless
+    // fail_unfit_tables: then every search that width 0 does not solve ends at width 1 with status Failed). A wider
+    // pass (or, with landmarks, a search's own width-1 table) beyond it is refused when a search reaches that pass:
+    // the searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep
+    // the results of the passes before it. Groups also shrink to what the context can still allocate, and a single
+    // search's table beyond that is refused the same way.
+    u64 table_bytes = u64{1} << 30;
+    bool fail_unfit_tables = false;
     u32 chunk_states = u32{1} << 20;  // layer entries per chunk at most
     u64 view_bytes = 0;            // per-chunk budget of the lifted views (0: half the device's L2 cache)
     u64 emit_budget = u64{1} << 24;  // unseen tuples per chunk (exact mode); larger chunks are split
@@ -86,6 +106,8 @@ struct MultiIwStats
     double seconds = 0;  // wall time of the call
     double host_ms = 0;  // CPU work: fallback schemas, axioms, lazy interning, uploads, host goal tests
     u64 groups = 0;
+    u64 regroups = 0;    // groups rerun with fewer searches after lazy growth outgrew their novelty tables; the other
+                         // counts exclude the discarded attempts
     u64 passes = 0;      // group passes
     u64 layers = 0;
     u64 chunks = 0;
@@ -131,7 +153,8 @@ struct MultiIwBatch
     [[nodiscard]] u64 generated(u32 i) const;
     /// The plan of search i as actions.
     [[nodiscard]] std::vector<Action> plan(u32 i, const Task& task) const;
-    /// search::iw()'s result for search i (plan cost when `costs`; start: the search's start state).
+    /// search::iw()'s result for search i (plan cost when `costs`; start: the search's start state); its message is
+    /// the batch's when the search failed, else empty.
     [[nodiscard]] search::IwResult result(u32 i, const Task& task, const State& start, bool costs) const;
 };
 
@@ -178,6 +201,11 @@ private:
 [[nodiscard]] std::vector<search::IwResult> multi_iw(ContextPtr ctx, TaskPtr task, std::span<const State> starts,
                                                      const MultiIwOptions& options = {},
                                                      std::span<const search::GoalSpec::AtomGoal> goals = {});
+
+/// Landmark-restricted IW(1) from each start. A missing landmark option uses BOT for every state.
+[[nodiscard]] std::vector<search::IwResult> liw(ContextPtr ctx, TaskPtr task, std::span<const State> starts,
+                                               MultiIwOptions options = {},
+                                               std::span<const search::GoalSpec::AtomGoal> goals = {});
 
 /// Exact batched IW(1) (an RL building block): optimized IW(1) from each of the device start rows; per search
 /// the status, plan length, goal row and counts (MultiIwBatch). options.max_width is forced to 1.
@@ -227,6 +255,11 @@ private:
 [[nodiscard]] std::vector<search::IwResult> multi_iw(ContextPtr ctx, rl::TaskTablePtr table, std::span<const u32> task_ids,
                                                      std::span<const State> starts, const MultiIwOptions& options = {},
                                                      std::span<const search::GoalSpec::AtomGoal> goals = {});
+
+/// LIW(1) over a task table, with landmark groupings in input search order.
+[[nodiscard]] std::vector<search::IwResult> liw(ContextPtr ctx, rl::TaskTablePtr table, std::span<const u32> task_ids,
+                                               std::span<const State> starts, MultiIwOptions options = {},
+                                               std::span<const search::GoalSpec::AtomGoal> goals = {});
 
 /// batched_iw1 over a table: optimized IW(1) from each device start row on its instance task_ids[i].
 [[nodiscard]] MultiIwBatch batched_iw1(ContextPtr ctx, rl::TaskTablePtr table, DeviceStarts starts, std::span<const u32> task_ids,

@@ -577,8 +577,51 @@ def test_iw_over_a_suite():
     for i, (st, g) in enumerate(zip(starts, ids)):
         one = mc.batched_iw1(s[g], [st], ctx=ctx)
         assert iw_record(host, i) == iw_record(one, 0) == iw_record(d, i), i
+    # IW(2) tables beyond table_bytes: the searches that reach width 2 fail, the message joins the domains' refusals
+    b = mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=2, table_bytes=8 * s.words)
+    failed = [i for i in range(len(b)) if b.status[i] == mymyr.search.Status.FAILED]
+    assert failed and all(b.passes(i)[-1].width == 2 for i in failed)
+    assert b.message == "; ".join(dict.fromkeys(p.message for p in b.parts if p.message))
+    assert b.message.startswith("mymyr: device IW(2): the novelty table requires ")
+    assert mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=1).message == ""
+    with pytest.raises(ValueError, match=r"^mymyr: device IW\(1\): .*table_bytes is 1 "):
+        mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=1, table_bytes=1)
     with pytest.raises(ValueError, match="task_ids"):
         mc.multi_iw(s, starts, ctx=ctx)
     with pytest.raises(ValueError, match="outside the suite"):
         mc.multi_iw(s, starts[:1], task_ids=[len(s)], ctx=ctx)
+    ctx.synchronize()
+
+
+def test_iw_over_a_suite_fails_the_domains_whose_tables_do_not_fit():
+    """Domains whose width-1 tables straddle table_bytes: the narrow domain's searches run, the wide domain's fail with
+    the refusal in their part's message; the call raises only when no domain fits."""
+    gpu_device()
+    import mymyr.cuda as mc
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    paths = [SMALL / "gripper/p-1-0.pddl", SMALL.parents[1] / "ipc/blocksworld-ipc/test/p10-medium.pddl"]
+    if not all(p.is_file() for p in paths):
+        pytest.skip("instances missing")
+    s = rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="dense") for p in paths])
+    need = [mymyr._core._cuda._novelty_table_bytes(1, t.words) for t in s.tables]
+    assert need[0] < need[1]
+    ctx = mc.Context(0, max_bytes=1 << 30)
+    starts, ids = [s[1].initial_state, s[0].initial_state, s[1].initial_state], [1, 0, 1]
+    for run in (lambda **kw: mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, **kw),
+                lambda **kw: mc.batched_iw1(s, starts, task_ids=ids, ctx=ctx, **kw)):
+        fits_one = need[1] - 8
+        b = run(table_bytes=fits_one)
+        alone = mc.multi_iw(s[0], [starts[1]], ctx=ctx, table_bytes=fits_one)
+        assert iw_record(b, 1) == iw_record(alone, 0)
+        assert [b.status[i] == mymyr.search.Status.FAILED for i in range(3)] == [True, False, True]
+        assert b.message == (f"mymyr: device IW(1): the novelty table requires {need[1]} bytes per search for "
+                             f"{64 * s.tables[1].words} atom slots, and table_bytes is {fits_one} (raise table_bytes=)")
+        assert b.parts[0].message == ""
+        fits_none = need[0] // 2
+        with pytest.raises(ValueError, match=rf"^mymyr: device IW\(1\): .*table_bytes is {fits_none} \(raise table_bytes=\)$"):
+            run(table_bytes=fits_none)
+        failed = run(table_bytes=fits_none, unfit_tables="fail")
+        assert all(st == mymyr.search.Status.FAILED for st in failed.status)
     ctx.synchronize()
