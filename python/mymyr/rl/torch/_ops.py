@@ -648,6 +648,13 @@ def expand_flat(
     )
     if not states.is_cuda or dynamic_labels:
         status.fill_(int(result["overflow"]) | (2 if result["words_needed"] > states.shape[1] - t.numeric_words else 0))
+    elif rows:
+        # the device's capturable form evaluates goal and axioms on the zero rows past the total: pad them as the
+        # host does, without a host read of the total
+        live = torch.arange(capacity, device=states.device) < offsets[-1]
+        goal.logical_and_(live)
+        if derived:
+            der.masked_fill_(~live[:, None], 0)
     if dynamic_labels:
         count = result["total"]
         return tuple(x if i in (5, 10) else x[:count] for i, x in enumerate(out))

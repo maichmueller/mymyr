@@ -761,7 +761,7 @@ def test_expand_ops_successor_digest_options(padded, rows, drop, capacity):
         reference = expected.pad(4)
         assert torch.equal(actual[7], reference.succ_hash) and torch.equal(actual[8], reference.noop)
         if drop:
-            assert torch.equal(actual[9], reference.index)
+            assert torch.equal(actual[9], reference.canonical)
     else:
         assert torch.equal(actual[7][:expected.total], expected.succ_hash)
         assert torch.equal(actual[8][:expected.total], expected.noop)
