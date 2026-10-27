@@ -4,7 +4,7 @@
 //
 //   mymyr::cuda::DeviceExpander x(ctx, table);
 //   rl::Expansion out{...device pointers, capacity, words, label_width...};
-//   x.expand({d_states, N, W, 0}, d_task_ids, out);   // out.total, out.words_needed as rl::expand sets them
+//   x.expand({d_states, N, W, 0}, d_task_ids, out);   // out.total, generated, words_needed as rl::expand does
 //   x.pad(out, N, padded);                             // rl::pad on the device
 //
 // The results are byte-equal to rl::expand on the same table: the same canonical order (per state by schema, then
@@ -90,7 +90,8 @@ public:
     /// outside the table or rows with unassigned atom slots (validate), std::length_error beyond 2^31 - 1 successors.
     u64 count(rl::StateBatchView in, const i32* task_ids, const rl::ExpandOptions& options = {});
     /// Writes the expansion of the counted batch (count() first; the batch and its task ids must still hold the same
-    /// values) into `out` and sets out.total and out.words_needed. May be called again with other destinations.
+    /// values) into `out` and sets out.total, out.generated (equal to the total) and out.words_needed. May be called
+    /// again with other destinations.
     void write(rl::Expansion& out);
     /// count() then write().
     void expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options = {});
@@ -126,9 +127,9 @@ public:
     /// out.words); an invalid batch writes no successor or label. Once the running total saturates at UINT32_MAX,
     /// successor widths past it are not counted: bit 1's width check is exact only while the batch fits; bit 0 is
     /// always exact. Successor rows past the total are zero, and goal flags and derived words cover every row below
-    /// the capacity (past the total: those of zero rows). out.total and out.words_needed are not set, and a later write()
-    /// needs a count() first. With rows_dev (device u32), only min(*rows_dev, in.rows) rows are present;
-    /// padding contributes neither successors nor validation errors, and its offsets equal the live total.
+    /// the capacity (past the total: those of zero rows). out.total, out.generated and out.words_needed are not set,
+    /// and a later write() needs a count() first. With rows_dev (device u32), only min(*rows_dev, in.rows) rows are
+    /// present; padding contributes neither successors nor validation errors, and its offsets equal the live total.
     /// Needs async_unsupported() empty (std::invalid_argument otherwise).
     void expand_async(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, u32* status,
                       const rl::ExpandOptions& options = {}, const u32* rows_dev = nullptr);
