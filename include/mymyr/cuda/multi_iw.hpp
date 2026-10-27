@@ -56,6 +56,10 @@
 
 namespace mymyr::cuda
 {
+/// Bytes of one search's novelty table of `arity` over rows of `words` atom words (`ranks` > 0: LIW's tables of that
+/// many landmark ranks): what MultiIwOptions::table_bytes bounds per search.
+[[nodiscard]] u64 novelty_table_bytes(u32 arity, u32 words, u32 ranks = 0);
+
 struct MultiIwOptions
 {
     u32 max_width = 1;  // the ladder 0..max_width (the device runs widths 0, 1 and 2)
@@ -74,12 +78,14 @@ struct MultiIwOptions
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
     // launch configuration: exact results are independent of it unless a wall-time limit interrupts the search
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
-    // Novelty tables of a group. When no search's width-1 table fits it, run() throws std::invalid_argument. A wider
+    // Novelty tables of a group. When no search's width-1 table fits it, run() throws std::invalid_argument (unless
+    // fail_unfit_tables: then every search that width 0 does not solve ends at width 1 with status Failed). A wider
     // pass (or, with landmarks, a search's own width-1 table) beyond it is refused when a search reaches that pass:
     // the searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep
     // the results of the passes before it. Groups also shrink to what the context can still allocate, and a single
     // search's table beyond that is refused the same way.
     u64 table_bytes = u64{1} << 30;
+    bool fail_unfit_tables = false;
     u32 chunk_states = u32{1} << 20;  // layer entries per chunk at most
     u64 view_bytes = 0;            // per-chunk budget of the lifted views (0: half the device's L2 cache)
     u64 emit_budget = u64{1} << 24;  // unseen tuples per chunk (exact mode); larger chunks are split

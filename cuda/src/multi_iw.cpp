@@ -75,7 +75,8 @@ std::string table_budget_refusal(u32 arity, u32 words, u64 per, u64 budget, u32 
     return table_search(arity, ranks) + ": the novelty table requires " + std::to_string(per) + " bytes per search for " +
            std::to_string(u64{64} * std::max(words, 1u)) + " atom slots" +
            (ranks ? " and " + std::to_string(ranks) + " landmark ranks" : std::string()) + ", and table_bytes is " +
-           std::to_string(budget) + (ranks ? " (raise table_bytes=)" : " (raise table_bytes=, or lower max_width)");
+           std::to_string(budget) +
+           (ranks || arity == 1 ? " (raise table_bytes=)" : " (raise table_bytes=, or lower max_width)");
 }
 
 u32 table_group(u32 arity, u32 words, u64 budget, u32 ranks = 0)
@@ -252,6 +253,8 @@ std::vector<Action> MultiIwBatch::plan(u32 i, const Task& task) const
     }
     return out;
 }
+
+u64 novelty_table_bytes(u32 arity, u32 words, u32 ranks) { return table_bytes_per_search(arity, words, ranks); }
 
 search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& start, bool costs) const
 {
@@ -948,7 +951,7 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
             for (const novelty::LandmarkCoordinates& c : coordinates)
                 ranks = std::min(ranks, c.num_ranks());
         }
-        if (const u64 per = table_bytes_per_search(1, words, ranks); per > o.table_bytes)
+        if (const u64 per = table_bytes_per_search(1, words, ranks); per > o.table_bytes && !o.fail_unfit_tables)
             throw std::invalid_argument(table_budget_refusal(1, words, per, o.table_bytes, ranks));
     }
     // group size: the novelty tables of a group fit table_bytes

@@ -84,8 +84,10 @@ def _rows(starts: Any) -> int:
 class SuiteIwBatch:
     """The results of device IW searches over a TaskSuite (mymyr.cuda.multi_iw / batched_iw1): search i ran on global
     instance ``task_ids[i]`` (of domain ``domains[i]``), with what an IwBatch reports per search. Each domain's searches
-    ran as one IwBatch over its table (``parts``), the domains one after the other; a domain whose call raises
-    (ValueError: no search of it can run its width-1 pass within table_bytes) raises for the suite."""
+    ran as one IwBatch over its table (``parts``), the domains one after the other. A domain whose width-1 table
+    exceeds table_bytes fails on its own: its searches that width 0 does not solve end with status FAILED, and its
+    part's message carries the refusal. The call raises ValueError, before it runs any domain, only when no domain's
+    width-1 table fits table_bytes (with unfit_tables='fail', never)."""
 
     def __init__(self, suite: TaskSuite, split: _Split, parts: list[Any]) -> None:
         self.suite = suite
@@ -218,33 +220,54 @@ def _one_domain(table: Any) -> Any:
     return table
 
 
+_DEFAULT_TABLE_BYTES = 1 << 30
+
+
+def _unfit_domains(suite: TaskSuite, split: _Split, width: int, kwargs: dict[str, Any]) -> set[int]:
+    """The domains of the split whose width-1 table exceeds table_bytes (none when the searches stop at width 0)."""
+    if width < 1:
+        return set()
+    from mymyr._core import _cuda  # type: ignore[attr-defined, unused-ignore]
+
+    budget = kwargs.get("table_bytes")
+    budget = _DEFAULT_TABLE_BYTES if budget is None else int(budget)
+    if budget <= 0:
+        return set()  # (the binding rejects it)
+    return {d for d, _, _ in split.parts if _cuda._novelty_table_bytes(1, max(suite.tables[d].words, 1)) > budget}
+
+
 def _searches(run: Callable[..., Any], task: Any, starts: Any, task_ids: Any, goals: Any, device_rows: bool,
-              kwargs: dict[str, Any]) -> Any:
+              width: int, kwargs: dict[str, Any]) -> Any:
     task = _one_domain(task)
     if not isinstance(task, TaskSuite):
         return run(task, starts, task_ids=task_ids, goals=goals, **kwargs)
     split = _Split(task, task_ids, _rows(starts))
     if goals is not None and len(goals) != len(split.ids):
         raise ValueError(f"mymyr: {len(goals)} goals for {len(split.ids)} searches (pass None, or one per search)")
+    # a domain whose width-1 table does not fit fails its searches, unless no domain fits: then the first domain's
+    # call raises, before any domain runs
+    unfit = _unfit_domains(task, split, width, kwargs) if kwargs.get("unfit_tables", "raise") == "raise" else set()
+    all_unfit = len(unfit) == len(split.parts)
     parts = []
     for d, idx, local in split.parts:
         table = task.tables[d]
         sub_goals = None if goals is None else [goals[i] for i in idx]
         sub = _starts_of(starts, idx, table.words if device_rows else None)
-        parts.append(run(table, sub, task_ids=local, goals=sub_goals, **kwargs))
+        own = kwargs if d not in unfit or all_unfit else {**kwargs, "unfit_tables": "fail"}
+        parts.append(run(table, sub, task_ids=local, goals=sub_goals, **own))
     return SuiteIwBatch(task, split, parts)
 
 
 def multi_iw(run: Callable[..., Any], task: Any, starts: Any, *, task_ids: Any = None, goals: Any = None,
              **kwargs: Any) -> Any:
     """mymyr.cuda.multi_iw over a TaskSuite: search i on global instance task_ids[i] (a SuiteIwBatch)."""
-    return _searches(run, task, starts, task_ids, goals, False, kwargs)
+    return _searches(run, task, starts, task_ids, goals, False, int(kwargs.get("max_width", 1)), kwargs)
 
 
 def batched_iw1(run: Callable[..., Any], task: Any, starts: Any, *, task_ids: Any = None, goals: Any = None,
                 **kwargs: Any) -> Any:
     """mymyr.cuda.batched_iw1 over a TaskSuite (device starts: rows of the suite's width, cut to each domain's)."""
-    return _searches(run, task, starts, task_ids, goals, True, kwargs)
+    return _searches(run, task, starts, task_ids, goals, True, 1, kwargs)
 
 
 def _spaces(run: Callable[..., Any], table: Any, kwargs: dict[str, Any]) -> list[Any]:

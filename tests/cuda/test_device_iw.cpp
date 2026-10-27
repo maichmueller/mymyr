@@ -1007,7 +1007,31 @@ TEST(DeviceIw, WidthOneTableBeyondTableBytesRefusesTheCall)
         o.max_width = width;
         o.table_bytes = 512;  // below the IW(1) table of 800 bytes
         cuda::DeviceMultiIw device(context(), task, o);
-        EXPECT_THROW((void)device.run(starts), std::invalid_argument);
+        try
+        {
+            (void)device.run(starts);
+            ADD_FAILURE() << "expected the call to be refused";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_EQ(std::string(e.what()), "mymyr: device IW(1): the novelty table requires 800 bytes per search for 6400 "
+                                             "atom slots, and table_bytes is 512 (raise table_bytes=)");
+        }
+        // fail_unfit_tables: the searches end at width 1 with status Failed, the refusal in the message
+        o.fail_unfit_tables = true;
+        cuda::DeviceMultiIw failing(context(), task, o);
+        const auto batch = failing.run(starts);
+        EXPECT_EQ(batch.message, "mymyr: device IW(1): the novelty table requires 800 bytes per search for 6400 atom "
+                                 "slots, and table_bytes is 512 (raise table_bytes=)");
+        EXPECT_EQ(cuda::novelty_table_bytes(1, task->words()), 800u);
+        for (u32 i = 0; i < 2; ++i)
+        {
+            EXPECT_EQ(batch.status[i], search::SearchStatus::Failed);
+            const auto r = batch.result(i, *task, starts[i], false);
+            ASSERT_FALSE(r.passes.empty());
+            EXPECT_EQ(r.passes.back().width, 1u);
+            EXPECT_EQ(r.message, batch.message);
+        }
     }
     cuda::MultiIwOptions o;
     o.max_width = 0;  // width 0 needs no table

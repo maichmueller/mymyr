@@ -29,7 +29,9 @@ Only in CUDA builds of mymyr (``CMAKE_ARGS="-DMYMYR_CUDA=ON"``); importing this 
   reached atoms included; ``batched_iw1`` runs optimized IW(1) from host states or from CUDA word arrays read in
   place. All return an :class:`IwBatch`. A search that reaches a pass whose novelty table exceeds ``table_bytes``
   (or what the context can still allocate) reports ``FAILED`` with the reason in ``IwBatch.message``; when no search
-  can run its width-1 pass within ``table_bytes``, the call raises ValueError.
+  can run its width-1 pass within ``table_bytes``, the call raises ValueError (``unfit_tables="fail"``: the searches
+  fail there instead). Over a TaskSuite a domain whose width-1 table does not fit fails its searches, and the call
+  raises only when no domain fits.
   Goals may be ground conjunctions of fluent/derived literals and numeric constraints, one per start; rollouts share
   one conjunction across their seeds. Callable goals and any-of alternatives within one search require CPU search.
 - :class:`Heuristic`, :func:`astar`, :func:`gbfs`: batched grounded h_max, h_add, h_FF, h² and set-additive on the device

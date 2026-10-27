@@ -367,7 +367,7 @@ def test_table_bytes_reaches_every_iw_search(ctx, tmp_path):
             mc.multi_iw(task, [task.initial_state], ctx=ctx, table_bytes=bad)
     # every search reaches width 1 unless width 0 solves it: an IW(1) table beyond table_bytes refuses the call
     refusal = (r"^mymyr: device IW\(1\): the novelty table requires 800 bytes per search for \d+ atom slots, and "
-               r"table_bytes is 512 \(raise table_bytes=, or lower max_width\)$")
+               r"table_bytes is 512 \(raise table_bytes=\)$")
     for width in (1, 2):
         with pytest.raises(ValueError, match=refusal):
             mc.multi_iw(task, [task.initial_state] * 2, ctx=ctx, max_width=width, table_bytes=512)
@@ -375,6 +375,15 @@ def test_table_bytes_reaches_every_iw_search(ctx, tmp_path):
         mc.batched_iw1(task, [task.initial_state], ctx=ctx, table_bytes=512)
     with pytest.raises(ValueError, match=refusal):
         mc.rollouts(task, [0, 1], ctx=ctx, max_width=1, table_bytes=512)
+    # unfit_tables="fail": the searches fail at width 1 instead, with the refusal in the message
+    for batch in (mc.multi_iw(task, [task.initial_state] * 2, ctx=ctx, max_width=2, table_bytes=512, unfit_tables="fail"),
+                  mc.batched_iw1(task, [task.initial_state], ctx=ctx, table_bytes=512, unfit_tables="fail"),
+                  mc.rollouts(task, [0, 1], ctx=ctx, max_width=1, table_bytes=512, unfit_tables="fail")):
+        assert re.match(refusal, batch.message), batch.message
+        for i in range(len(batch.status)):
+            assert batch.status[i] == mymyr.search.Status.FAILED and batch.passes(i)[-1].width == 1
+    with pytest.raises(ValueError, match="unfit_tables"):
+        mc.multi_iw(task, [task.initial_state], ctx=ctx, unfit_tables="skip")
     batch = mc.multi_iw(task, [task.initial_state], ctx=ctx, max_width=0, table_bytes=512)
     assert_equal(batch, 0, mymyr.search.iw(task, max_width=0))
     assert batch.message == ""

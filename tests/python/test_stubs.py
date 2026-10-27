@@ -256,9 +256,9 @@ def test_cuda_stubs_are_typed():
     assert f"landmarks: {graph} | Sequence[{graph}] | None" in cuda
     assert "disjunctive: bool = False, all_private: bool = False" in cuda
     assert f"def batched_iw1(task: {table}," in cuda and "def task_ids(self) -> list[int]" in cuda
-    assert f"chunk_states: int | None = None, table_bytes: int | None = None, {ids}) -> IwBatch:" in cuda
+    assert f"chunk_states: int | None = None, table_bytes: int | None = None, unfit_tables: str = 'raise', {ids}) -> IwBatch:" in cuda
     rollouts = next(line for line in cuda.splitlines() if line.startswith("def rollouts("))
-    assert "chunk_states: int | None = None, table_bytes: int | None = None, landmarks: " in rollouts
+    assert "chunk_states: int | None = None, table_bytes: int | None = None, unfit_tables: str = 'raise', landmarks: " in rollouts
     assert rollouts.endswith("disjunctive: bool = False, all_private: bool = False, unshared_atoms: Iterable[mymyr._core._formalism.GroundAtom | str | int | tuple[str | int | Sequence[str | int], ...]] | None = None) -> IwBatch:")
     assert f"landmarks: {graph} | Sequence[{graph}] | None = None, " in rollouts
     assert f"landmarks: {graph} | Sequence[{graph}] | None, disjunctive" in cuda
