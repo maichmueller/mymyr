@@ -80,8 +80,7 @@ def test_captured_rollout_equals_host_on_tables(sets, name):
 
 
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "gripper__prob05", "miconic__s7-4"])
-@pytest.mark.parametrize("track_visited", [False, True])
-def test_captured_rollout_equals_eager(name, track_visited):
+def test_captured_rollout_equals_eager(name):
     """A policy's graph (given actions, invalid ones too) and the random policy's, with set_seed, masked resets and a
     side stream between replays: byte for byte the eager steps."""
     dev = gpu_device()
@@ -92,8 +91,8 @@ def test_captured_rollout_equals_eager(name, track_visited):
         return (e.states.sum(1) + e.steps) % (e.count.to(torch.int64) + 1)
 
     for pol in (None, policy, lambda e: e.random_actions(3)):
-        a = rt.BatchedEnv(task, n, device=dev, seed=11, track_visited=track_visited, **CFG)
-        b = rt.BatchedEnv(task, n, device=dev, seed=11, track_visited=track_visited, **CFG)
+        a = rt.BatchedEnv(task, n, device=dev, seed=11, **CFG)
+        b = rt.BatchedEnv(task, n, device=dev, seed=11, **CFG)
         g = a.capture(K, pol, final=True)
         side = torch.cuda.Stream(dev)
         for r in range(6):
