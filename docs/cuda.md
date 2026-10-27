@@ -72,7 +72,7 @@ per architecture for the build tree, which it removes before the test environmen
 toolchain directory about 1.7 GB. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc
 compiles. Nearly all of that time is per architecture (cicc and ptxas; the front end that the architectures share is a
 few percent), so the three architectures of the release wheels take three times as long. `--stage compile --minutes N`
-stops the build cleanly N minutes after the script started, `--stage resume` on the same work directory and toolchain
+stops the build cleanly N minutes after the script started (`--deadline T` at the Unix time T instead), `--stage resume` on the same work directory and toolchain
 resumes it and stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
 the release workflow splits each wheel across up to three jobs this way.
 

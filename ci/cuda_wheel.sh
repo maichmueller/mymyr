@@ -15,7 +15,7 @@
 #      suite with no GPU visible, in a process that imports torch before mymyr.
 #
 # usage: ci/cuda_wheel.sh [--python ABI] [--archs LIST] [--out DIR] [--toolchain DIR] [--work DIR] [--jobs N]
-#                         [--cuda-jobs N] [--stage STAGE] [--minutes N]
+#                         [--cuda-jobs N] [--stage STAGE] [--minutes N | --deadline T]
 #   --python     CPython ABI from /opt/python: cp314t (default), cp315t, cp314 or cp315
 #   --archs      CMAKE_CUDA_ARCHITECTURES (default "86-real;89-real;90-real"); N-real is SASS, N-virtual PTX, N both
 #   --out        receives the wheel (default: wheelhouse/ in the source tree)
@@ -37,6 +37,8 @@
 #                compile and resume write "finished" or "stopped" to --work/build-status
 #   --minutes    the time limit of the build in minutes after the start of the script (default 270 for compile and
 #                resume, none for all and finish)
+#   --deadline   the time limit of the build as a Unix time in seconds, instead of --minutes (a CI job passes its
+#                own start plus its budget, so that the time before the script, such as an image pull, counts too)
 #
 # In a container, with the source tree at /src (see "Building a CUDA wheel" in docs/cuda.md):
 #   podman run --rm -v "$PWD":/src -v ~/.cache/mymyr-cuda-toolchain:/opt/mymyr-toolchain \
@@ -53,6 +55,7 @@ jobs=$(nproc)
 cuda_jobs=2
 stage=all
 minutes=
+deadline=
 
 usage() {
     sed -n '/^# usage:/,/^# In a container/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//' >&2
@@ -69,6 +72,7 @@ while [ $# -gt 0 ]; do
         --cuda-jobs) cuda_jobs=$2 ;;
         --stage) stage=$2 ;;
         --minutes) minutes=$2 ;;
+        --deadline) deadline=$2 ;;
         *) usage ;;
     esac
     [ $# -ge 2 ] || usage
@@ -88,11 +92,19 @@ if [ ! -x "$python" ]; then
     echo "error: no $python: run this in the manylinux_2_34 image named in pyproject.toml" >&2
     exit 1
 fi
-case "$stage" in compile | resume) minutes=${minutes:-270} ;; esac
-[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^([1-9][0-9]*)?$ ]] || {
-    echo "error: --jobs, --cuda-jobs and --minutes must be positive" >&2
+[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^([1-9][0-9]*)?$ &&
+   "$deadline" =~ ^([1-9][0-9]*)?$ ]] || {
+    echo "error: --jobs, --cuda-jobs, --minutes and --deadline must be positive" >&2
     exit 2
 }
+if [ -n "$minutes" ] && [ -n "$deadline" ]; then
+    echo "error: pass --minutes or --deadline, not both" >&2
+    exit 2
+fi
+if [ -z "$deadline" ]; then
+    case "$stage" in compile | resume) minutes=${minutes:-270} ;; esac
+    [ -z "$minutes" ] || deadline=$(($(date +%s) + minutes * 60))
+fi
 
 # the SASS and PTX that --archs asks for, named as cuobjdump lists them (sm_N), sorted and space-separated
 sass=() ptx=()
@@ -169,8 +181,8 @@ rm -rf "$work/dist" "$work/build-status"
 export CMAKE_BUILD_PARALLEL_LEVEL=$jobs
 # Ninja stops cleanly at the time limit (ci/run_until.py), and a resume or finish stage resumes it
 until=()
-if [ -n "$minutes" ]; then
-    until=("$python" -I "$repo/ci/run_until.py" "$(($(date +%s) + minutes * 60 - (SECONDS - start)))" --)
+if [ -n "$deadline" ]; then
+    until=("$python" -I "$repo/ci/run_until.py" "$deadline" --)
 fi
 status=0
 ${until[@]+"${until[@]}"} "$build_venv/bin/python" -m pip wheel -v --no-deps --no-build-isolation -w "$work/dist" \
@@ -182,15 +194,14 @@ ${until[@]+"${until[@]}"} "$build_venv/bin/python" -m pip wheel -v --no-deps --n
     -C cmake.define.CMAKE_CUDA_ARCHITECTURES="$archs" \
     -C cmake.define.CMAKE_JOB_POOLS="cuda_compile=$cuda_jobs;cuda_compile_heavy=1" \
     -C cmake.define.MYMYR_XLA_FFI_INCLUDE="$xla_include" \
-    -C cmake.define.MYMYR_BENCH=OFF \
     "$src" || status=$?
 if [ $status -eq 75 ]; then
     if [ "$stage" = compile ] || [ "$stage" = resume ]; then
         echo stopped > "$work/build-status"
-        step "done: build stopped at the time limit of $minutes min, resume it with --stage resume or finish"
+        step "done: build stopped at the time limit, resume it with --stage resume or finish"
         exit 0
     fi
-    echo "error: the build did not finish within the time limit of $minutes min; resume it with --stage finish," \
+    echo "error: the build did not finish within the time limit; resume it with --stage finish," \
          "or build fewer architectures (--archs)" >&2
     exit 1
 fi

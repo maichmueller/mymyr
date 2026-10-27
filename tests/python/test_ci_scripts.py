@@ -628,10 +628,11 @@ def test_cuda_wheel_jobs_stop_the_build_in_time_to_hand_it_on_or_test_it() -> No
     room = {"compile": 45, "resume": 45, "wheel": 60}
     for name, minutes in room.items():
         timeout = int(re.search(r"timeout-minutes: (\d+)", jobs[name])[1])
-        deadline = re.findall(r"--minutes \$\(\(\(JOB_START \+ (\d+) \* 60", jobs[name])
+        deadline = re.findall(r"--deadline \$\(\(JOB_START \+ (\d+) \* 60\)\)", jobs[name])
         assert len(deadline) == 1, name
         assert timeout - int(deadline[0]) >= minutes, name
-        assert jobs[name].index("JOB_START=$(date +%s)") < jobs[name].index("--minutes"), name
+        assert "--minutes" not in jobs[name], name
+        assert jobs[name].index("JOB_START=$(date +%s)") < jobs[name].index("--deadline"), name
 
 
 def test_cuda_build_state_artifacts_are_not_downloaded_as_wheels() -> None:

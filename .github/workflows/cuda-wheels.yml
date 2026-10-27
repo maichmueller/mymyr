@@ -180,7 +180,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
             --volume "$RUNNER_TEMP/cuda-wheel:/work" \
             "$image" \
-            bash /src/ci/cuda_wheel.sh --stage compile --minutes $(((JOB_START + 280 * 60 - $(date +%s)) / 60)) \
+            bash /src/ci/cuda_wheel.sh --stage compile --deadline $((JOB_START + 280 * 60)) \
               --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
           df -h /
       - uses: ./.github/actions/save-cuda-build
@@ -238,7 +238,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
             --volume "$RUNNER_TEMP/cuda-wheel:/work" \
             "$image" \
-            bash /src/ci/cuda_wheel.sh --stage resume --minutes $(((JOB_START + 280 * 60 - $(date +%s)) / 60)) \
+            bash /src/ci/cuda_wheel.sh --stage resume --deadline $((JOB_START + 280 * 60)) \
               --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
           df -h /
       - uses: ./.github/actions/save-cuda-build
@@ -285,7 +285,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
             --volume "$RUNNER_TEMP/cuda-wheel:/work" \
             "$image" \
-            bash /src/ci/cuda_wheel.sh --stage finish --minutes $(((JOB_START + 255 * 60 - $(date +%s)) / 60)) \
+            bash /src/ci/cuda_wheel.sh --stage finish --deadline $((JOB_START + 255 * 60)) \
               --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
           ls -l wheelhouse
           df -h /
