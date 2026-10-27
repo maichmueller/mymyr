@@ -870,7 +870,8 @@ def test_match_first_upload_accepts_stream_handles_and_stream_protocol():
 @needs_frontend
 @pytest.mark.parametrize("on_device", [False, True])
 @pytest.mark.parametrize("typed", ["none", "static", "fluent"])
-def test_match_first_rejects_impossible_injective_domains(on_device, typed):
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_rejects_impossible_injective_domains(on_device, typed, first):
     limited_type = typed != "none"
     action = "(:action add :parameters (?x) :precondition (and) :effect (member ?x))" if typed == "fluent" else ""
     domain = mymyr.Domain.from_string(f"""(define (domain domains)
@@ -887,14 +888,14 @@ def test_match_first_rejects_impossible_injective_domains(on_device, typed):
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
     rows = np.asarray(task.encode([task.initial_state]))
     # Prove the rejection on the host before submitting the same condition to the device.
-    expected = rl.match_first(rows, None, templates, max_steps=3 if limited_type else 0)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=3 if limited_type else 0)
     assert not expected.found.any() and expected.count.tolist() == [0]
     assert (expected.binding == -1).all() and (expected.template == -1).all()
     assert int(expected.status) == 0
     if on_device:
         torch = cuda_match_runtime()
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
-                                templates.to("cuda:0"), max_steps=3 if limited_type else 0)
+                                templates.to("cuda:0"), first=first, max_steps=3 if limited_type else 0)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
 
