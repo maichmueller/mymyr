@@ -187,7 +187,10 @@ public:
             if (contains(a.schema.v, a.binding.data()))
                 continue;
             std::copy(a.binding.begin(), a.binding.end(), m_succ.engine().bind());
-            const Delta d = m_succ.effects(a.schema.v);
+            bool ok;
+            const Delta d = m_succ.effects(a.schema.v, &ok);
+            if (!ok)
+                continue;
             if (!emit(a.schema.v, a.binding.data(), d))
                 return;
         }

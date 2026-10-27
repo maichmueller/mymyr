@@ -128,6 +128,42 @@ def test_derived_and_numeric_applicability():
         assert node_key(result) == node_key(baseline)
 
 
+@pytest.mark.parametrize('kind', ['pass', 'ladder', 'optimized', 'abstracted'])
+@pytest.mark.parametrize('effect,valid', [('(increase (total-cost) (/ 1 0))', False),
+                                        ('(scale-down (total-cost) 0)', False),
+                                        ('(increase (total-cost) 1)', True)])
+def test_cost_effect_applicability(kind, effect, valid):
+    if not hasattr(mymyr, 'Domain'):
+        pytest.skip('built without the loki front end')
+    domain = mymyr.Domain.from_string('''
+      (define (domain costs)
+        (:requirements :strips :numeric-fluents :action-costs)
+        (:predicates (p) (r) (goal)) (:functions (total-cost))
+        (:action enable :parameters () :precondition (p) :effect (r))
+        (:action finish :parameters () :precondition (r)
+          :effect (and (goal) ''' + effect + ''')))''')
+    task = mymyr.Task(domain.instantiate_string('''
+      (define (problem costs) (:domain costs)
+        (:init (p) (= (total-cost) 0)) (:goal (goal)) (:metric minimize (total-cost)))'''))
+    assert task.numeric_slots == task.numeric_words == 0
+    enabled = task.apply(task.initial_state, '(enable)')
+    assert ('(finish)' in map(str, task.applicable_actions(enabled))) == valid
+    if not valid:
+        with pytest.raises(ValueError, match='not applicable'):
+            task.apply(enabled, '(finish)')
+    for goal in ({'goal': lambda s: False}, {}):
+        kw = dict(tree='nodes', **goal)
+        baseline = run(task, kind, **kw)
+        assert baseline.status == (search.Status.SOLVED if valid and not goal else search.Status.EXHAUSTED)
+        for incremental, precheck in [(True, False), (False, True), (True, True)]:
+            result = run(task, kind, incremental_first_applicability=incremental,
+                         precheck_add_effects=precheck, **kw)
+            assert result.status == baseline.status
+            assert node_key(result) == node_key(baseline)
+            assert result.plan == baseline.plan
+            assert result.cost == baseline.cost
+
+
 def test_incremental_layer_restrictions():
     task = text_task('gripper__prob05')
     for fn, width in [(search.iw, dict(max_width=1)), (search.abstracted_iw, dict(width=1))]:
