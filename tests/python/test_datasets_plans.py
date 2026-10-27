@@ -207,8 +207,9 @@ def test_sources_and_task_ids_are_checked():
     with pytest.raises(TypeError, match="plan_rows takes"):
         datasets.plan_rows("gripper", [])
     lazy = text_task("gripper__prob05", atoms="lazy")
-    with pytest.raises(ValueError, match="lazy atom slots"):
+    with pytest.raises(ValueError, match=r"lazy atom slots.*task\.frozen\(\)"):
         datasets.plan_rows(lazy, [])
+    assert datasets.plan_rows(lazy.frozen(), []).num_steps == 0
 
 
 def test_an_empty_plan_is_the_initial_state():
@@ -336,6 +337,22 @@ def test_state_rows_from_plans_with_equivalent_actions():
         datasets.StateRows.from_plans([replays[0], datasets.plan_rows(task, plans[1])])
     with pytest.raises(ValueError, match="at least one plan"):
         datasets.StateRows.from_plans([])
+
+
+def test_state_rows_from_plans_refuse_plans_of_different_sources():
+    task = text_task("gripper__prob05")
+    other = text_task("gripper__prob05")
+    plan = "\n".join(str(a) for a in random_walk(task, 3, seed=0))
+    replay = datasets.plan_rows(task, plan)
+    assert replay.source is task
+    # a Task and its handles are one source
+    ds = datasets.StateRows.from_plans([replay, datasets.plan_rows(task.local(), plan)])
+    assert len(ds) == 2 * len(replay.rows)
+    table = rl.TaskTable([task])
+    for mixed in (datasets.plan_rows(other, plan), datasets.plan_rows(table, plan)):
+        with pytest.raises(ValueError, match="plans of one source; plan 1 was replayed on another source"):
+            datasets.StateRows.from_plans([replay, mixed])
+    assert len(datasets.StateRows.from_plans([datasets.plan_rows(table, plan)] * 2)) == 2 * len(replay.rows)
 
 
 @pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="needs torch")

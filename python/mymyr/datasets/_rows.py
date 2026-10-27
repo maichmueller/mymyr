@@ -228,11 +228,17 @@ class StateRows:
           successor positions (``A`` the most actions of any row's state), when every plan has ``equivalent``.
 
         A plan replayed with ``goal_state=True`` adds its last state, with ``action``, ``schema`` and ``binding`` -1 and
-        no equivalent action. The plans must be of one source (one table's or suite's instances, or one Task); the rows
-        are as wide as the widest plan's. ``device`` (a torch device) places the dataset on that device, where
-        ``EncodingCollate`` encodes it without a host copy."""
+        no equivalent action. The plans must be of one source (one table's or suite's instances, or one Task and its
+        handles; ValueError otherwise); the rows are as wide as the widest plan's. ``device`` (a torch device) places
+        the dataset on that device, where ``EncodingCollate`` encodes it without a host copy."""
+        from mymyr.datasets._plans import same_source
+
         if not plans:
             raise ValueError("mymyr: datasets: from_plans needs at least one plan")
+        for k, p in enumerate(plans):
+            if not same_source(p.source, plans[0].source):
+                raise ValueError(f"mymyr: datasets: from_plans takes plans of one source; plan {k} was replayed on "
+                                 "another source than plan 0")
         with_equivalent = [p.equivalent is not None for p in plans]
         if any(with_equivalent) and not all(with_equivalent):
             raise ValueError("mymyr: datasets: some plans have equivalent actions and some do not")

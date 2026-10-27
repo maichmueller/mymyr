@@ -28,14 +28,16 @@ class PlanRows:
     - ``schema``: int32 ``[L]`` and ``binding``: int32 ``[L, B]`` (``B`` the source's ``label_width``, -1 padded): each
       step's action label, as ``rl.expand`` lists it;
     - ``index``: int32 ``[L]``, each step's position in the canonical successor order of its state: the environment
-      action that takes the step, and ``rl.expand(..., drop_noops=True).index`` of its row when that row is kept;
+      action that takes the step, and ``rl.expand(..., drop_noops=True).index`` of its row when that row is kept (in
+      a padded expansion, ``pad().canonical``);
     - ``noop``: bool ``[L]``, the step's successor equals its state (a no-op, dropped by ``drop_noops`` unless every
       action of the state is one);
     - ``num_actions``: int32 ``[L(+1)]``, the number of successors of each row's state (the length of the order
       ``index`` points into);
     - ``equivalent``: int32 ``[L, K]`` (-1 padded), per step the canonical indices of the actions the caller declared
       equivalent to the plan's, the plan's own index first; ``None`` without ``equivalent=``;
-    - ``goal_reached``: the state after the last step satisfies the goal.
+    - ``goal_reached``: the state after the last step satisfies the goal;
+    - ``source``: the Task (a TaskHandle's Task), TaskTable or TaskSuite the plan was replayed on.
     """
 
     rows: np.ndarray
@@ -46,6 +48,7 @@ class PlanRows:
     noop: np.ndarray
     num_actions: np.ndarray
     goal_reached: bool
+    source: Any
     equivalent: np.ndarray | None = None
 
     @property
@@ -93,9 +96,19 @@ def _source(source: Any, task_id: int) -> tuple[Task | TaskHandle, list[int] | N
         raise TypeError("mymyr: datasets: plan_rows takes a Task, TaskHandle, TaskTable or TaskSuite")
     if task.options["atoms"] == "lazy":
         raise ValueError(
-            "mymyr: datasets: the task has lazy atom slots, whose row layout grows while states are expanded; build it "
-            "with atoms 'auto', 'reachable' or 'dense' for plan rows")
+            "mymyr: datasets: the task has lazy atom slots, whose row layout grows while states are expanded; replay "
+            "the plan on task.frozen() (fixed slots) or build the task with atoms 'auto', 'reachable' or 'dense'")
     return task, task_ids
+
+
+def same_source(a: Any, b: Any) -> bool:
+    """Whether two plan sources are one: the same Task, or the same TaskTable or TaskSuite object."""
+    from mymyr._core import Task
+
+    def key(source: Any) -> Any:
+        return ("task", source.uid) if isinstance(source, Task) else ("table", id(source))
+
+    return key(a) == key(b)
 
 
 def _plan_actions(task: Task | TaskHandle, plan: str | Sequence[Action]) -> list[Action]:
@@ -210,7 +223,10 @@ def plan_rows(
     (two with witness pruning).
     """
     from mymyr import rl
+    from mymyr._core import TaskHandle
 
+    if isinstance(source, TaskHandle):
+        source = source.task  # the replay is the same through the shared Task
     task, task_ids = _source(source, task_id)
     actions = _plan_actions(task, plan)
     if equivalent is not None and len(equivalent) != len(actions):
@@ -268,4 +284,4 @@ def plan_rows(
         eq = np.full((n, max((len(p) for p in picked), default=1)), -1, np.int32)
         for k, p in enumerate(picked):
             eq[k, : len(p)] = p
-    return PlanRows(stacked, task_id, schema, binding, index, noop, num_actions, goal_reached, eq)
+    return PlanRows(stacked, task_id, schema, binding, index, noop, num_actions, goal_reached, source, eq)

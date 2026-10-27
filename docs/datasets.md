@@ -258,29 +258,31 @@ print(len(dataset), batch.labels["action"][:4])
 ```
 
 A `PlanRows` holds `rows` (uint64 `[L, W]`, or `[L + 1, W]` with `goal_state=True`, which adds the state the plan
-reaches), `schema` and `binding` (each step's action label, as `rl.expand` lists it; bindings -1 padded), `index`
-(int32 `[L]`, the canonical successor position), `noop` (the step leaves its state unchanged), `num_actions` (the
-successors of each row's state) and `goal_reached`. Each step is located in the host `rl.expand` of its state, so
-`index` agrees with the expansion row by row. With `rl.expand(..., drop_noops=True)` the step's row is kept, and its
-`exp.index` equals the step's `index`, unless the step is a no-op in a state that has other actions. With
-`witness_pruning=True` the positions are those of the pruned expansion, as in an environment with that option; a step
-whose action the pruning leaves out is at its witness, the first row of its schema with the same successor. A step
-whose action is not applicable in its state, an action of another task and a task with lazy atom slots raise
-`ValueError`, naming the step. Replaying costs one host expansion per step.
+reaches), `schema` and `binding` (each step's action label, as `rl.expand` lists it; bindings -1 padded), `index` (int32
+`[L]`, the canonical successor position), `noop` (the step leaves its state unchanged), `num_actions` (the successors of
+each row's state) and `goal_reached`. Each step is located in the host `rl.expand` of its state, so `index` agrees with
+the expansion row by row. With `rl.expand(..., drop_noops=True)` the step's row is kept, and its `exp.index` equals the
+step's `index` (in the padded expansion, `exp.pad().canonical`; `pad().index` is the flat row), unless the step is a
+no-op in a state that has other actions. With `witness_pruning=True` the positions are those of the pruned expansion, as
+in an environment with that option; a step whose action the pruning leaves out is at its witness, the first row of its
+schema with the same successor. A step whose action is not applicable in its state, an action of another task and a task
+with lazy atom slots raise `ValueError`, naming the step (replay a lazy task's plans on `task.frozen()`, its twin with
+fixed slots). Replaying costs one host expansion per step. `source` is the Task, TaskTable or TaskSuite the plan was
+replayed on.
 
 `equivalent=` takes, for every step, the actions a caller regards as interchangeable with the plan's (for instance
 those that object symmetries map onto it, read from a file next to the plan) as Actions, labels `(schema, binding)`
 or plan lines. mymyr maps them to canonical positions: `equivalent` is int32 `[L, K]`, -1 padded, the plan's own
 position first, and `equivalent_actions()` its multi-hot form over each state's successors.
 
-`StateRows.from_plans(plans)` concatenates replayed plans into a dataset whose labels are `action` (the step's index,
--1 on a goal-state row), `schema`, `binding`, `noop` and, when every plan has `equivalent`, the multi-hot
+`StateRows.from_plans(plans)` concatenates replayed plans into a dataset whose labels are `action` (the step's index, -1
+on a goal-state row), `schema`, `binding`, `noop` and, when every plan has `equivalent`, the multi-hot
 `equivalent_actions` (bool `[N, A]`, `A` the most successors of any row's state). The rows are of their plans' `task_id`
-in the source, so the dataset encodes with an encoder over that table or suite. `EncodingCollate(encoder,
-actions=True)` encodes the rows with their actions: the label of row `g` is the action entity of graph `g` whose
-`encoding.action_indices` equals `labels["action"][g]` ([action entities](rl.md#action-entities)).
-`from_plans(plans, device="cuda:0")` keeps the dataset in device memory, where `EncodingCollate` encodes it without a
-host copy.
+in the source, so the dataset encodes with an encoder over that table or suite; plans of different sources raise
+`ValueError`. `EncodingCollate(encoder, actions=True)` encodes the rows with their actions: the label of row `g` is the
+action entity of graph `g` whose `encoding.action_indices` equals `labels["action"][g]` ([action
+entities](rl.md#action-entities)). `from_plans(plans, device="cuda:0")` keeps the dataset in device memory, where
+`EncodingCollate` encodes it without a host copy.
 
 ## Saving and pickling
 
