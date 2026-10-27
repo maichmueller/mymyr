@@ -1001,3 +1001,105 @@ TEST(IwVariantSearchTree, MatchesObserverForLandmarkAndAbstractedNovelty)
             expect_tree_events(*task, r.passes[i], obs.passes[i]);
     }
 }
+
+namespace
+{
+struct ExpansionProgress : SearchObserver
+{
+    std::vector<std::pair<u64, State>> expanded;
+    std::vector<u64> entered;
+    bool pending = false;
+    void on_expand(u64 id, StateView state) override
+    {
+        EXPECT_FALSE(pending);
+        pending = true;
+        expanded.emplace_back(id, State(state));
+    }
+    bool on_progress(const SearchStatistics& stats) override
+    {
+        EXPECT_TRUE(pending);
+        pending = false;
+        entered.push_back(stats.states);
+        return true;
+    }
+    void on_generate(u64, const Action&, u64, StateView, bool) override { EXPECT_FALSE(pending); }
+};
+
+void expect_same_nodes(const IwResult& a, const IwResult& b)
+{
+    ASSERT_EQ(a.status, b.status);
+    ASSERT_EQ(a.passes.size(), b.passes.size());
+    for (usize i = 0; i < a.passes.size(); ++i)
+    {
+        ASSERT_EQ(static_cast<bool>(a.passes[i].tree), static_cast<bool>(b.passes[i].tree));
+        if (a.passes[i].tree)
+        {
+            const SearchTree& x = *a.passes[i].tree;
+            const SearchTree& y = *b.passes[i].tree;
+            ASSERT_EQ(x.num_nodes(), y.num_nodes());
+            ASSERT_EQ(x.numeric_words, y.numeric_words);
+            EXPECT_EQ(x.parent, y.parent);
+            EXPECT_EQ(x.depth, y.depth);
+            EXPECT_EQ(x.schema, y.schema);
+            EXPECT_EQ(x.binding, y.binding);
+            EXPECT_EQ(x.node_flags, y.node_flags);
+            ASSERT_EQ(x.words, y.words);
+            const usize count = x.num_nodes() * (x.words + x.numeric_words);
+            EXPECT_TRUE(std::equal(x.rows.begin(), x.rows.begin() + count, y.rows.begin(), y.rows.begin() + count));
+        }
+    }
+}
+}
+
+TEST(Iw1Actions, TreesAndProgressWithSuccessorOrdering)
+{
+    for (const char* name : {"gripper__prob05", "rovers__p02", "logistics00__probLOGISTICS-6-1"})
+    {
+        const auto task = Task::from_text_file(task_path(name));
+        for (bool abstracted : {false, true})
+            for (bool reordered : {false, true})
+                for (TreeRecord record : {TreeRecord::Nodes, TreeRecord::Transitions})
+                {
+                    auto run = [&](u32 flags, ExpansionProgress& obs)
+                    {
+                        IwOptions o;
+                        o.max_width = 1;
+                        o.optimize_iw1 = false;
+                        o.tree = record;
+                        o.control.observer = &obs;
+                        o.control.progress_interval = 1;
+                        o.control.goal.kind = GoalSpec::Kind::Custom;
+                        o.control.goal.test = [](StateView) { return false; };
+                        o.incremental_first_applicability = (flags & 1) != 0;
+                        o.precheck_add_effects = (flags & 2) != 0;
+                        if (reordered)
+                            o.successor_order = [](StateView, std::span<const Action> a, std::vector<u32>& order)
+                            {
+                                for (u32 i = static_cast<u32>(a.size()); i-- > 0;)
+                                    order.push_back(i);
+                            };
+                        if (!abstracted)
+                            return iw(*task, o);
+                        AbstractedIwOptions a;
+                        a.control = o.control;
+                        a.tree = o.tree;
+                        a.successor_order = o.successor_order;
+                        a.keep_depth_one_novel = true;
+                        a.incremental_first_applicability = o.incremental_first_applicability;
+                        a.precheck_add_effects = o.precheck_add_effects;
+                        return abstracted_iw(*task, a);
+                    };
+                    ExpansionProgress baseline_obs;
+                    const auto baseline = run(0, baseline_obs);
+                    for (u32 flags : {1u, 2u, 3u})
+                    {
+                        SCOPED_TRACE(std::string(name) + " flags=" + std::to_string(flags));
+                        ExpansionProgress obs;
+                        const auto result = run(flags, obs);
+                        expect_same_nodes(baseline, result);
+                        EXPECT_EQ(baseline_obs.expanded, obs.expanded);
+                        EXPECT_EQ(baseline_obs.entered, obs.entered);
+                    }
+                }
+    }
+}

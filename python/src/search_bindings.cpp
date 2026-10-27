@@ -2262,6 +2262,18 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
         "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), \
         "observer"_a = nb::none(), "progress_interval"_a = nb::none()
 
+constexpr const char* k_iw1_actions_doc =
+    "Width 1: incremental_first_applicability processes each ground action until its add features have been tested "
+    "once; below the root it discovers bindings from added positive and deleted negative preconditions. Numeric or "
+    "derived applicability, witness pruning, noncanonical ordering and blocked states use full binding enumeration "
+    "with the same action filter. It supports every layer order with one thread, unbounded layers and all-tested "
+    "novelty (no caps or beams). precheck_add_effects rejects successors "
+    "whose add features are all marked before building their states, including with an observer. Both options omit "
+    "skipped transitions from on_generate, on_prune, on_transition and transition trees. generated counts only "
+    "processed actions; expanded states, parents, actions and node ids keep their order. on_progress still follows "
+    "on_expand before generation. The width-0 pass skips generation below the root. Conditional effects, widths "
+    "above 1, landmark novelty and transition_ordering raise ValueError when either option is requested.";
+
 #define MYMYR_IW_ARGS                                                                                                  \
     "task"_a, nb::kw_only(), "max_width"_a = 2, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true,          \
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,          \
@@ -3390,7 +3402,7 @@ void bind_search(nb::module_& parent)
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -3401,15 +3413,18 @@ void bind_search(nb::module_& parent)
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
+            opts.incremental_first_applicability = incremental_first_applicability;
+            opts.precheck_add_effects = precheck_add_effects;
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw(t, opts); });
             return PyIwResult{std::move(r), o};
         },
-        MYMYR_IW_ARGS,
+        MYMYR_IW_ARGS, "incremental_first_applicability"_a = false, "precheck_add_effects"_a = false,
         paragraphs({"The IW(k) ladder: passes of width 0..max_width (optimized "
                      "IW(1) when max_width == 1). width_zero: 'expand_depth_one' (the depth-1 states enter the tree and are expanded) or 'root_only' (they are goal-tested but not expanded). "
                      "transition_ordering: a LandmarkTransitionOrdering that orders each layer of the width-1 pass "
                      "(a transition ordering strategy). ",
+                    k_iw1_actions_doc,
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,
@@ -3424,7 +3439,7 @@ void bind_search(nb::module_& parent)
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
             const u32 k = int_arg<u32>(width, "width");
             ControlScope cs;
@@ -3437,6 +3452,8 @@ void bind_search(nb::module_& parent)
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
+            opts.incremental_first_applicability = incremental_first_applicability;
+            opts.precheck_add_effects = precheck_add_effects;
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw_pass(t, k, opts); });
             return PyIwResult{std::move(r), o};
@@ -3444,7 +3461,7 @@ void bind_search(nb::module_& parent)
         "task"_a, "width"_a, nb::kw_only(), "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false,
         "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
         "transition_ordering"_a = nb::none(),
-        MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "tree"_a = nb::none(), "One IW(width) pass alone, without the ladder. See iw() for the keyword arguments.");
+        MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "tree"_a = nb::none(), "incremental_first_applicability"_a = false, "precheck_add_effects"_a = false, "One IW(width) pass alone, without the ladder. See iw() for the keyword arguments.");
 
     m.def(
         "siw",
@@ -4027,7 +4044,7 @@ void bind_search(nb::module_& parent)
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -4041,6 +4058,8 @@ void bind_search(nb::module_& parent)
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
             opts.tree = tree_record(tree);
+            opts.incremental_first_applicability = incremental_first_applicability;
+            opts.precheck_add_effects = precheck_add_effects;
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::abstracted_iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -4048,7 +4067,7 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "width"_a = 1, "base_abstracted"_a = false, "preserve_goal_atoms"_a = true,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
-        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
+        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(), "incremental_first_applicability"_a = false, "precheck_add_effects"_a = false,
         paragraphs({"Abstracted IW(width): one breadth-first pass whose "
                      "novelty features are abstracted atoms, one per object position with the other objects' type "
                      "signature (base_abstracted: BAIW, no signatures); preserve_goal_atoms keeps positive goal atoms "
@@ -4056,6 +4075,7 @@ void bind_search(nb::module_& parent)
                      "landmarks: abstracted LIW (one table per landmark rank; preserve_landmark_atoms keeps landmark "
                      "atoms whole). The IwResult holds the one pass (IwPass.width = width); an exhausted pass is EXHAUSTED.",
                     k_landmark_doc,
+                    k_iw1_actions_doc,
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,

@@ -50,6 +50,9 @@ struct AbstractedIwOptions
     std::optional<State> start;
     /// As IwOptions::successor_order.
     std::function<void(StateView state, std::span<const Action> actions, std::vector<u32>& order)> successor_order;
+    /// As IwOptions: width 1 without landmark novelty. Skipped transitions have no observer events or tree rows.
+    bool incremental_first_applicability = false;
+    bool precheck_add_effects = false;
 };
 
 /// Abstracted IW(width) / BAIW / abstracted LIW: one pass. Status Failed (with a message) for a width outside 1..3 or
