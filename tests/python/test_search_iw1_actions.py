@@ -173,6 +173,63 @@ def test_incremental_layer_restrictions():
                 fn(task, **width, incremental_first_applicability=True, **kw)
 
 
+@pytest.mark.parametrize('kind', ['pass', 'ladder', 'optimized', 'abstracted'])
+@pytest.mark.parametrize('observed', [False, True])
+@pytest.mark.parametrize('incremental,precheck', [(True, False), (False, True), (True, True)])
+def test_fanout_filter_counts_and_events(tmp_path, kind, observed, incremental, precheck):
+    count = 4
+    path = tmp_path / 'fanout.txt'
+    path.write_text(f'O {count}\nP 1\nF 1 p\nSI 0\nFI 0\nG 0\nA 1\nmark 1\nL 0\nE 1\n0\nL 0\nF 1\n0 1 0\nX 0\n')
+    task = mymyr.Task.from_text(str(path))
+
+    class Events:
+        def __init__(self):
+            self.passes = []
+            self.generated, self.pruned, self.transitions = [], [], []
+
+        def on_generate(self, parent, action, child, state, is_new):
+            self.generated.append((parent, child, is_new))
+
+        def on_prune(self, parent, action, state):
+            self.pruned.append(parent)
+
+        def on_transition(self, parent, action, child, state, outcome):
+            self.transitions.append((parent, child, outcome))
+
+        def on_pass(self, width, stats):
+            self.passes.append((self.generated, self.pruned, self.transitions))
+            self.generated, self.pruned, self.transitions = [], [], []
+
+    baseline_events, events = Events(), Events()
+    kw = dict(goal=lambda s: False, tree='transitions' if observed else 'nodes')
+    baseline = run(task, kind, observer=baseline_events if observed else None, **kw)
+    result = run(task, kind, observer=events if observed else None,
+                 incremental_first_applicability=incremental, precheck_add_effects=precheck, **kw)
+    assert node_key(result) == node_key(baseline)
+    for i, (before, after) in enumerate(zip(baseline.passes, result.passes)):
+        if before.placeholder:
+            assert before.generated == after.generated == 0
+            continue
+        assert before.generated == count * (count + 1)
+        assert after.generated == (count if incremental or after.width == 0 else count * (count + 1))
+        if observed:
+            generated, pruned, transitions = baseline_events.passes[i]
+            assert len(generated) == len(transitions) == count * (count + 1)
+            assert len(pruned) == count * count
+            assert sum(not new for _, _, new in generated) == count * count
+            assert before.tree.num_transitions == count * (count + 1)
+            assert np.count_nonzero(before.tree.t_child == -1) == count * count
+            generated, pruned, transitions = events.passes[i]
+            assert generated == [(0, child, True) for child in range(1, count + 1)]
+            assert pruned == []
+            assert len(transitions) == count
+            assert all(parent == 0 and child is not None and outcome == search.TransitionOutcome.OPENED
+                       for parent, child, outcome in transitions)
+            assert after.tree.num_transitions == count
+            assert after.tree.offsets.tolist() == [0] + [count] * (count + 1)
+            assert after.tree.t_child.tolist() == list(range(1, count + 1))
+
+
 def test_negative_preconditions_constants_and_repeated_parameters():
     if not hasattr(mymyr, 'Domain'):
         pytest.skip('built without the loki front end')
@@ -181,12 +238,14 @@ def test_negative_preconditions_constants_and_repeated_parameters():
         (:requirements :strips :typing :negative-preconditions)
         (:types item) (:constants anchor - item)
         (:predicates (locked ?x - item) (ready ?x - item)
-                     (link ?x ?y - item) (seen ?x - item))
+                     (link ?x ?y - item) (seen ?x - item) (free ?x - item))
         (:action unlock :parameters (?x - item) :precondition (locked ?x)
           :effect (and (not (locked ?x)) (ready ?x) (link ?x ?x)))
         (:action finish :parameters (?x - item)
           :precondition (and (not (locked ?x)) (link ?x ?x) (link anchor anchor))
           :effect (seen ?x))
+        (:action notice :parameters (?x - item) :precondition (not (locked ?x))
+          :effect (free ?x))
         (:action copy :parameters (?x ?y - item)
           :precondition (and (ready ?x) (link ?x ?y) (link anchor anchor))
           :effect (seen ?y)))''')
@@ -197,6 +256,9 @@ def test_negative_preconditions_constants_and_repeated_parameters():
         for canonical, witness in [(True, False), (False, False), (True, True)]:
             kw = dict(tree='nodes', goal=lambda s: False, canonical_order=canonical, witness_pruning=witness)
             baseline = run(task, kind, **kw)
+            labels = [str(a) for p in baseline.passes if p.tree is not None
+                      for a in p.tree.labels()[:p.tree.num_nodes]]
+            assert '(notice a)' in labels and '(notice b)' in labels
             for incremental, precheck in [(True, False), (False, True), (True, True)]:
                 result = run(task, kind, incremental_first_applicability=incremental,
                              precheck_add_effects=precheck, **kw)
