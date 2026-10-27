@@ -1,5 +1,7 @@
 """Device landmark novelty equals CPU LIW, including launch grouping, budgets and seeded layer orders."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -8,7 +10,7 @@ import mymyr.search as search
 from conftest import ROOT, SMALL_TASKS, text_task, walk, wide_task
 from test_cuda_iw import assert_equal, ctx, walk_goals  # noqa: F401
 
-mc = pytest.importorskip("mymyr.cuda")
+mc = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
 pytestmark = pytest.mark.skipif(not mc.available(), reason="no CUDA device")
 
 
@@ -94,6 +96,34 @@ def test_liw_rollout_seeds(ctx, truncation):
                                 max_next_layer_states=truncation, **grouping, **options)
             for i, expected in enumerate(cpu):
                 assert_equal(batch, i, expected)
+
+
+def test_liw_rollouts_with_a_shared_graph_and_goal(ctx):
+    task = text_task("blocks__probBLOCKS-8-0")
+    graph = search.approximate_fact_landmarks(task)
+    start = walk(task, steps=3, seed=2, walks=1)[-1]
+    goal = task.ground_condition(list(task.initial_state.atoms())[:2])
+    seeds = [3, 4, 99]
+    cpu = [search.liw(task, start=start, goal=goal, landmarks=graph, max_width=1, layer_order="randomized", seed=seed,
+                      max_states=200) for seed in seeds]
+    for options in ({}, {"max_searches": 2, "chunk_states": 2}):
+        batch = mc.rollouts(task, seeds, ctx=ctx, start=start, goal=goal, landmarks=graph, max_states=200, **options)
+        for i, expected in enumerate(cpu):
+            assert_equal(batch, i, expected)
+            assert set(start.atom_slots()) <= set(batch.reached_slots(i))
+
+
+def test_liw_chunk_shapes_replay(ctx):
+    task = text_task("blocks__probBLOCKS-8-0")
+    graph = search.approximate_fact_landmarks(task)
+    starts = walk(task, steps=4, seed=1, walks=1)[:4]
+    expected = [search.liw(task, start=s, landmarks=graph, max_width=1, max_states=300) for s in starts]
+    for run in range(2):
+        batch = mc.liw(task, starts, ctx=ctx, landmarks=graph, max_states=300, chunk_states=4)
+        for i, cpu in enumerate(expected):
+            assert_equal(batch, i, cpu)
+    if os.environ.get("MYMYR_CUDA_GRAPHS") != "0":
+        assert batch.counters["replays"] > 0
 
 
 def test_liw_task_table(ctx):
