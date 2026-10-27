@@ -7,6 +7,7 @@ import os
 import re
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -444,7 +445,10 @@ def run_until(deadline: float, *command: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False, timeout=60)
 
 
-def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkeypatch, capsys) -> None:
+# A background job of a non-interactive shell starts with SIGINT ignored, and so would the build without run_until
+# resetting it: an ignored signal stays ignored across exec, and bash cannot trap a signal ignored on entry.
+@pytest.mark.parametrize("sigint", ["inherited", "ignored"])
+def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkeypatch, capsys, sigint: str) -> None:
     ninja = fake_ninja(tmp_path)
     marker = tmp_path / "build"
     main = runpy.run_path(str(RUN_UNTIL))["main"]
@@ -454,9 +458,14 @@ def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkey
         return 1.0
 
     monkeypatch.setitem(main.__globals__, "time", SimpleNamespace(time=expired_deadline, sleep=time.sleep))
-    # The child installs its signal handler before the clock reaches the deadline.
-    # The build tool fails when its Ninja is interrupted, as CMake does.
-    status = main([str(RUN_UNTIL), "0", "--", "bash", "-c", '"$0" "$1"; exit 1', str(ninja), str(marker)])
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN) if sigint == "ignored" else None
+    try:
+        # The child installs its signal handler before the clock reaches the deadline.
+        # The build tool fails when its Ninja is interrupted, as CMake does.
+        status = main([str(RUN_UNTIL), "0", "--", "bash", "-c", '"$0" "$1"; exit 1', str(ninja), str(marker)])
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
 
     assert status == 75
     assert marker.read_text().strip() == "interrupted"
