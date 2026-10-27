@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
 #include <chrono>
 #include <condition_variable>
@@ -89,7 +90,7 @@ public:
     ~ReleaseGate() { open(); }
     void block(const cuda::ContextPtr& ctx)
     {
-        ctx->release_after(std::shared_ptr<void>(m_state.get(), [state = m_state](void*) {
+        cuda::detail::release_after(ctx, std::shared_ptr<void>(m_state.get(), [state = m_state](void*) {
             std::unique_lock lock(state->mutex);
             state->entered = true;
             state->changed.notify_all();
@@ -158,6 +159,64 @@ TEST(CudaRuntime, RetiredBuffersKeepTheirLastUseSnapshotAcrossCaptures)
         gate_ctx->synchronize();
         EXPECT_EQ(ctx->usage().used, baseline);
     }
+}
+
+TEST(CudaRuntime, OwnerDestructorsDrainReleasesAndLeaveTheWorkerRunning)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    struct State
+    {
+        std::atomic<unsigned> completed{0};
+        std::atomic<bool> failed{false};
+        std::atomic<bool> nested_completed{false};
+    };
+    auto state = std::make_shared<State>();
+    ReleaseGate gate;
+    gate.block(ctx);
+    ASSERT_TRUE(gate.entered());
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(ctx.get(), [ctx, state](void*) {
+        try
+        {
+            ctx->synchronize();
+            state->nested_completed = state->completed.load() == 1;
+            (void)ctx->usage();
+            ctx->trim();
+            cuda::DeviceBuffer temporary(ctx, 4096);
+            temporary.reset();
+            ctx->synchronize();
+        }
+        catch (...)
+        {
+            state->failed = true;
+        }
+        ++state->completed;
+    }));
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(ctx.get(), [ctx, state](void*) {
+        try
+        {
+            ctx->synchronize();
+            (void)ctx->usage();
+        }
+        catch (...)
+        {
+            state->failed = true;
+        }
+        ++state->completed;
+    }));
+    gate.open();
+    const auto wait_for = [&](unsigned count) {
+        for (int retry = 0; retry < 3000 && state->completed.load() != count; ++retry)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return state->completed.load() == count;
+    };
+    ASSERT_TRUE(wait_for(2));
+    EXPECT_TRUE(state->nested_completed);
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(state.get(), [state](void*) { ++state->completed; }));
+    ASSERT_TRUE(wait_for(3));
+    EXPECT_FALSE(state->failed);
+    ctx->synchronize();
+    EXPECT_EQ(ctx->usage().used, 0u);
 }
 
 TEST(CudaRuntime, ContextPoolAndBuffers)

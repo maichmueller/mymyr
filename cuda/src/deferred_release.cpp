@@ -1,3 +1,4 @@
+#include "capture_scope.hpp"
 #include "deferred_release.hpp"
 
 #include <algorithm>
@@ -56,17 +57,71 @@ public:
     void drain(const DeviceContext& ctx)
     {
         std::unique_lock lock(m_mutex);
+        const auto ready = [&] {
+            return std::ranges::find_if(m_pending, [&](const auto& r) { return r->ctx.get() == &ctx && r->ready(); });
+        };
+        if (s_current == this)
+        {
+            // Destructors may drain their context. The worker completes ready entries inline, excluding the
+            // destruction already on its stack, because those entries cannot be serviced by another thread.
+            for (auto it = ready(); it != m_pending.end(); it = ready())
+            {
+                auto release = take(it);
+                lock.unlock();
+                process(std::move(release));
+                lock.lock();
+            }
+            return;
+        }
         m_changed.wait(lock, [&] {
-            return m_active != &ctx && std::ranges::none_of(m_pending, [&](const auto& r) {
-                return r->ctx.get() == &ctx && r->ready();
-            });
+            return std::ranges::find(m_active, &ctx) == m_active.end() && ready() == m_pending.end();
         });
     }
 
 private:
+    std::unique_ptr<Release> take(std::vector<std::unique_ptr<Release>>::iterator it)
+    {
+        m_active.push_back((*it)->ctx.get());
+        auto release = std::move(*it);
+        m_pending.erase(it);
+        return release;
+    }
+
+    void process(std::unique_ptr<Release> release)
+    {
+        // Keep the context alive through owner destruction and completion bookkeeping, including nested drains.
+        auto ctx = release->ctx;
+        try
+        {
+            RelaxedCaptureScope capture_mode;
+            DeviceGuard guard(ctx->device());
+            Stream stream;
+            for (const auto& e : release->events)
+                e.wait_on(stream);
+            if (release->pointer)
+                check(cudaFreeAsync(release->pointer, stream), "cudaFreeAsync (deferred release)");
+            stream.synchronize();
+            release.reset();
+        }
+        catch (const std::exception& e)
+        {
+            // A failed device may still read these resources; retain them for driver teardown.
+            std::fprintf(stderr, "mymyr: CUDA: deferred release retained resources: %s\n", e.what());
+            if (release->on_failure)
+                release->on_failure();
+            (void)release.release();
+        }
+        {
+            std::lock_guard lock(m_mutex);
+            m_active.pop_back();
+        }
+        m_changed.notify_all();
+    }
+
     Reclaimer()
     {
         std::thread([this] {
+            s_current = this;
             for (;;)
             {
                 std::unique_ptr<Release> release;
@@ -74,36 +129,9 @@ private:
                     std::unique_lock lock(m_mutex);
                     auto ready = [&] { return std::ranges::find_if(m_pending, [](const auto& r) { return r->ready(); }); };
                     m_changed.wait(lock, [&] { return ready() != m_pending.end(); });
-                    const auto it = ready();
-                    release = std::move(*it);
-                    m_pending.erase(it);
-                    m_active = release->ctx.get();
+                    release = take(ready());
                 }
-                try
-                {
-                    RelaxedCaptureScope capture_mode;
-                    DeviceGuard guard(release->ctx->device());
-                    Stream stream;
-                    for (const auto& e : release->events)
-                        e.wait_on(stream);
-                    if (release->pointer)
-                        check(cudaFreeAsync(release->pointer, stream), "cudaFreeAsync (deferred release)");
-                    stream.synchronize();
-                    release.reset();
-                }
-                catch (const std::exception& e)
-                {
-                    // A failed device may still read these resources; retain them for driver teardown.
-                    std::fprintf(stderr, "mymyr: CUDA: deferred release retained resources: %s\n", e.what());
-                    if (release->on_failure)
-                        release->on_failure();
-                    (void)release.release();
-                }
-                {
-                    std::lock_guard lock(m_mutex);
-                    m_active = nullptr;
-                }
-                m_changed.notify_all();
+                process(std::move(release));
             }
         }).detach();
     }
@@ -111,7 +139,8 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_changed;
     std::vector<std::unique_ptr<Release>> m_pending;
-    const DeviceContext* m_active = nullptr;
+    std::vector<const DeviceContext*> m_active;
+    inline static thread_local Reclaimer* s_current = nullptr;
 };
 
 std::atomic<Reclaimer*> reclaimer{nullptr};
@@ -161,8 +190,15 @@ void release_deferred(ContextPtr ctx, void* pointer, std::vector<Event> events, 
     start_reclaimer().submit(std::move(release));
 }
 
-void release_deferred(ContextPtr ctx, std::shared_ptr<void> owner, Event ready, void (*on_failure)() noexcept)
+void release_after(ContextPtr ctx, std::shared_ptr<void> owner, void (*on_failure)() noexcept)
 {
+    DeviceGuard guard(ctx->device());
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    check(cudaStreamIsCapturing(ctx->stream(), &status), "cudaStreamIsCapturing");
+    if (status != cudaStreamCaptureStatusNone)
+        throw std::invalid_argument("mymyr: CUDA: release_after needs a non-capturing context stream");
+    Event ready;
+    ready.record(ctx->stream());
     auto release = std::make_unique<Release>();
     release->ctx = std::move(ctx);
     release->owner = std::move(owner);

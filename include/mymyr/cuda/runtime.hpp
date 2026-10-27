@@ -64,25 +64,6 @@ private:
     bool m_changed = false;
 };
 
-/// Allows cleanup of resources outside an unrelated capture without changing their stream dependencies.
-/// Restores the calling thread's capture interaction mode on scope exit; cleanup never throws.
-class RelaxedCaptureScope
-{
-public:
-    RelaxedCaptureScope() noexcept : m_restore(cudaThreadExchangeStreamCaptureMode(&m_mode) == cudaSuccess) {}
-    ~RelaxedCaptureScope()
-    {
-        if (m_restore)
-            (void)cudaThreadExchangeStreamCaptureMode(&m_mode);
-    }
-    RelaxedCaptureScope(const RelaxedCaptureScope&) = delete;
-    RelaxedCaptureScope& operator=(const RelaxedCaptureScope&) = delete;
-
-private:
-    cudaStreamCaptureMode m_mode = cudaStreamCaptureModeRelaxed;
-    bool m_restore;
-};
-
 class Event
 {
 public:
@@ -174,11 +155,6 @@ public:
     /// Stream-ordered free on `s`: the memory is reused only after the work enqueued on s before this call.
     /// May release memory outside an unrelated stream's graph capture.
     void deallocate(void* p, cudaStream_t s) noexcept;
-    /// Destroys an owner on a host worker after the context's stream finishes its preceding work. The caller does
-    /// not wait; the owner and context stay alive until the worker releases them. The stream must not be capturing.
-    /// If completion fails, retains the owner and calls on_failure from the worker.
-    void release_after(std::shared_ptr<void> owner, void (*on_failure)() noexcept = nullptr);
-
     /// Memory resources (core/memory.hpp) of this context. Device: stream-ordered on stream(), and allocate()
     /// synchronizes that stream so the memory is usable anywhere; Pinned: cudaMallocHost; Managed: cudaMallocManaged.
     [[nodiscard]] MemoryResource& device_memory() noexcept { return *m_device_mr; }

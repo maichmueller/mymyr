@@ -2,6 +2,7 @@
 // the launch configuration, the CPU fallback for states outside the grounding, and the CPU reference of the device's
 // h_FF and set-additive tie-breaking.
 
+#include "capture_scope.hpp"
 #include "mymyr/cuda/heuristics.hpp"
 
 
@@ -180,7 +181,7 @@ DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuri
 
 DeviceHeuristic::~DeviceHeuristic()
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

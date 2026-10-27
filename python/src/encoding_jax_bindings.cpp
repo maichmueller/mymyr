@@ -48,6 +48,8 @@
 #include "mymyr/encoding/encoder.hpp"
 
 #if defined(MYMYR_HAS_CUDA)
+#include "capture_scope.hpp"
+#include "deferred_release.hpp"
 #include "mymyr/cuda/encoding.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #endif
@@ -151,7 +153,7 @@ struct EncoderEntry : FfiEntry
         void record(cudaStream_t stream)
         {
             std::lock_guard lock(uses_mutex);
-            cuda::RelaxedCaptureScope capture_mode;
+            cuda::detail::RelaxedCaptureScope capture_mode;
             std::erase_if(last_uses, [](const auto& event) { return event->done(); });
             auto ready = std::make_unique<cuda::Event>();
             ready->record(stream);
@@ -169,7 +171,7 @@ struct EncoderEntry : FfiEntry
                 std::optional<cuda::EncodingAcquisition> held;
             };
             const Detached detached;
-            cuda::RelaxedCaptureScope capture_mode;
+            cuda::detail::RelaxedCaptureScope capture_mode;
             std::shared_ptr<Resources> retiring;
             try
             {
@@ -187,7 +189,7 @@ struct EncoderEntry : FfiEntry
                     retiring->held.emplace(std::move(*held));
                     held.reset();
                 }
-                ctx->release_after(retiring, []() noexcept { ++leaked_devices; });
+                cuda::detail::release_after(ctx, retiring, []() noexcept { ++leaked_devices; });
             }
             catch (...)
             {

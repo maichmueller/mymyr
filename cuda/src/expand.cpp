@@ -2,6 +2,7 @@
 // multi-instance path (the multi-instance kernels, table_launch.hpp), the per-instance path (parts expanded apart by
 // single-instance expanders and scattered back) and the host path (rl::expand on the host's threads).
 
+#include "capture_scope.hpp"
 #include "completed_release.hpp"
 
 #include "mymyr/cuda/expand.hpp"
@@ -1157,7 +1158,7 @@ DeviceExpander::DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStrea
 
 DeviceExpander::~DeviceExpander()
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx && !detail::completed_release_active())
     {
         try

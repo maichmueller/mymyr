@@ -1,5 +1,6 @@
 // The CUDA backend's runtime layer: contexts, pools, buffers, events (include/mymyr/cuda/runtime.hpp).
 
+#include "capture_scope.hpp"
 #include "completed_release.hpp"
 #include "deferred_release.hpp"
 
@@ -95,7 +96,7 @@ void Event::record(cudaStream_t s) { check(cudaEventRecord(m_e, s), "cudaEventRe
 void Event::wait_on(cudaStream_t s) const { check(cudaStreamWaitEvent(s, m_e, 0), "cudaStreamWaitEvent"); }
 void Event::synchronize() const
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     check(cudaEventSynchronize(m_e), "cudaEventSynchronize");
 }
 
@@ -128,7 +129,7 @@ Stream::Stream() { check(cudaStreamCreateWithFlags(&m_s, cudaStreamNonBlocking),
 
 Stream::~Stream()
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     if (m_s)
     {
         (void)cudaStreamSynchronize(m_s);
@@ -138,7 +139,7 @@ Stream::~Stream()
 
 void Stream::synchronize() const
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
 }
 
@@ -182,7 +183,7 @@ public:
     {
         if (p)
         {
-            RelaxedCaptureScope capture_mode;
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(p);
         }
     }
@@ -209,7 +210,7 @@ public:
     {
         if (p)
         {
-            RelaxedCaptureScope capture_mode;
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFree(p);
         }
     }
@@ -260,7 +261,7 @@ DeviceContext::DeviceContext(Private, int device, const ContextOptions& options)
 
 DeviceContext::~DeviceContext()
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         DeviceGuard g(m_device);
@@ -300,7 +301,7 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
 {
     if (!p)
         return;
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         DeviceGuard guard(m_device);
@@ -314,18 +315,6 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
     {
         std::fprintf(stderr, "mymyr: CUDA: free retained allocation: %s\n", e.what());
     }
-}
-
-void DeviceContext::release_after(std::shared_ptr<void> owner, void (*on_failure)() noexcept)
-{
-    DeviceGuard guard(m_device);
-    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
-    check(cudaStreamIsCapturing(m_stream, &status), "cudaStreamIsCapturing");
-    if (status != cudaStreamCaptureStatusNone)
-        throw std::invalid_argument("mymyr: CUDA: release_after needs a non-capturing context stream");
-    Event ready;
-    ready.record(m_stream);
-    detail::release_deferred(shared_from_this(), std::move(owner), std::move(ready), on_failure);
 }
 
 PoolUsage DeviceContext::usage() const
@@ -346,7 +335,7 @@ PoolUsage DeviceContext::usage() const
 
 void DeviceContext::trim(u64 keep)
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     synchronize();
     check(cudaMemPoolTrimTo(m_pool, keep), "cudaMemPoolTrimTo");
     std::vector<PinnedBuffer> cached;
@@ -383,7 +372,7 @@ PinnedLease DeviceContext::lease_pinned(u32 n, u64 bytes)
 
 void DeviceContext::synchronize() const
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     DeviceGuard g(m_device);
     check(cudaStreamSynchronize(m_stream), "cudaStreamSynchronize");
     check(cudaStreamSynchronize(m_copy), "cudaStreamSynchronize");
@@ -483,7 +472,7 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
     }
     if (!m_ptr)
         return;
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         std::lock_guard lock(*m_mutex);
@@ -662,7 +651,7 @@ PinnedBuffer::~PinnedBuffer()
 {
     if (m_ptr)
     {
-        RelaxedCaptureScope capture_mode;
+        detail::RelaxedCaptureScope capture_mode;
         (void)cudaFreeHost(m_ptr);
     }
 }
@@ -706,7 +695,7 @@ PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& o) noexcept
     {
         if (m_ptr)
         {
-            RelaxedCaptureScope capture_mode;
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(m_ptr);
         }
         m_ptr = std::exchange(o.m_ptr, nullptr);
@@ -719,14 +708,14 @@ PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& o) noexcept
 
 GraphExec::~GraphExec()
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     if (m_exec)
         (void)cudaGraphExecDestroy(m_exec);
 }
 
 GraphExec& GraphExec::operator=(GraphExec&& o) noexcept
 {
-    RelaxedCaptureScope capture_mode;
+    detail::RelaxedCaptureScope capture_mode;
     if (this != &o)
     {
         if (m_exec)

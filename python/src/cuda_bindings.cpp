@@ -13,6 +13,7 @@
 
 #include "arrays.hpp"
 #include "completed_release.hpp"
+#include "capture_scope.hpp"
 #include "cuda_stream.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
@@ -97,7 +98,7 @@ public:
     explicit PyContext(cuda::ContextPtr c) : ctx(std::move(c)) {}
     ~PyContext()
     {
-        cuda::RelaxedCaptureScope capture_mode;
+        cuda::detail::RelaxedCaptureScope capture_mode;
         try
         {
             drain(true);
