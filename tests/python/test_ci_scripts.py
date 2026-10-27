@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import time
 import tomllib
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -442,15 +444,23 @@ def run_until(deadline: float, *command: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False, timeout=60)
 
 
-def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path) -> None:
+def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkeypatch, capsys) -> None:
     ninja = fake_ninja(tmp_path)
     marker = tmp_path / "build"
-    # the build tool fails when its Ninja is interrupted, as CMake does
-    result = run_until(time.time() + 1, "bash", "-c", '"$0" "$1"; exit 1', str(ninja), str(marker))
+    main = runpy.run_path(str(RUN_UNTIL))["main"]
 
-    assert result.returncode == 75, result.stderr
+    def expired_deadline() -> float:
+        wait_for(marker, "started")
+        return 1.0
+
+    monkeypatch.setitem(main.__globals__, "time", SimpleNamespace(time=expired_deadline, sleep=time.sleep))
+    # The child installs its signal handler before the clock reaches the deadline.
+    # The build tool fails when its Ninja is interrupted, as CMake does.
+    status = main([str(RUN_UNTIL), "0", "--", "bash", "-c", '"$0" "$1"; exit 1', str(ninja), str(marker)])
+
+    assert status == 75
     assert marker.read_text().strip() == "interrupted"
-    assert "stopping the build at the deadline" in result.stderr
+    assert "stopping the build at the deadline" in capsys.readouterr().err
 
 
 def test_run_until_passes_on_the_status_of_a_build_that_ends_in_time(tmp_path: Path) -> None:
