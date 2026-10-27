@@ -162,7 +162,7 @@ def test_warmup_outputs_collected_on_a_capturing_stream(allocation_stream, captu
             output = rl.expand(table, states, ctx=ctx, stream=side if allocation_stream else None,
                                framework="torch" if allocation_stream else "dlpack")
             if not allocation_stream:
-                consumed = torch.from_dlpack(output.states)
+                consumed = torch.from_dlpack(output.succ)
                 del consumed
         torch.cuda.synchronize()
         ctx.synchronize()
