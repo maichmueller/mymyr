@@ -242,6 +242,8 @@ def test_device_suite_expand_equals_host(sets):
             st = torch.from_numpy(states.view(np.int64)).to(dev)
             tid = torch.from_numpy(ids).to(dev)
             d = rl.expand(s, st, tid, goal=True, k=16)
+            assert d.generated == d.total == host.generated
+            assert d.padded.overflow == host.padded.overflow
             for f in ("succ", "parent", "schema", "binding", "goal", "offsets"):
                 got = getattr(d, f).cpu().numpy()
                 want = np.asarray(getattr(host, f))
@@ -256,7 +258,8 @@ def test_device_suite_expand_equals_host(sets):
             M = host.total
             succ = torch.zeros((M, s.words), dtype=torch.int64, device=dev)
             offsets = torch.zeros(len(ids) + 1, dtype=torch.int32, device=dev)
-            rl.expand_into(s, st, tid, succ=succ, offsets=offsets)
+            result = rl.expand_into(s, st, tid, succ=succ, offsets=offsets)
+            assert result["generated"] == result["total"] == host.generated
             assert np.array_equal(succ.cpu().numpy().view(np.uint64), host.succ), (key, grouped)
             assert np.array_equal(offsets.cpu().numpy(), host.offsets), (key, grouped)
         bad = tid.clone()
@@ -366,7 +369,7 @@ def test_captured_suite_rollout_equals_host(sets):
             nxt.copy_(torch.from_numpy(ROT(n, I)(r)))
             out = g.replay()
             for k in range(K):
-                got = step_arrays(rt.StepResult(*(getattr(out, f)[k] for f in fields)))
+                got = step_arrays(rt.StepResult(**{f: getattr(out, f)[k] for f in fields}))
                 for f, v in got.items():
                     assert np.array_equal(v, ref[r * K + k + 1][f]), (key, r, k, f)
             for f, v in env_arrays(env).items():
@@ -419,6 +422,7 @@ def test_jax_suite_env_equals_host(sets, key):
         rows = rj.as_words(final.states)
         host = rl.expand(s, rows, np.asarray(final.task_id), goal=True, k=8)
         p = env.expand(final.states, 8, final.task_id)
+        assert int(p.generated) == host.generated
         assert np.array_equal(np.asarray(p.count), np.asarray(host.padded.count)), device
         assert np.array_equal(np.asarray(p.schema), np.asarray(host.padded.schema)), device
         env.check_errors()

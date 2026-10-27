@@ -321,10 +321,12 @@ def test_expansions_equal_rl_expand():
         assert np.array_equal(np.asarray(flat.binding)[: x.total], x.binding)
         assert np.array_equal(np.asarray(flat.goal)[: x.total], x.goal)
         assert np.array_equal(np.asarray(flat.offsets), x.offsets)
+        assert int(flat.generated) == x.generated
         assert np.all(np.asarray(flat.parent)[x.total :] == -1)
         pad = env.expand(state.states, 16)
         p = x.pad(16)
         assert np.array_equal(np.asarray(pad.count), p.count)
+        assert int(pad.generated) == x.generated
         assert np.array_equal(np.asarray(pad.mask), p.mask)
         assert np.array_equal(np.asarray(pad.schema), p.schema)
         assert np.array_equal(np.asarray(pad.binding), p.binding)

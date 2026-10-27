@@ -2170,8 +2170,6 @@ void bind_cuda(nb::module_& parent)
             if (!e.flat.has_index) return nb::none();
             return e.array(e.flat.off_index, rl::DType::I32, {static_cast<i64>(e.flat.valid())});
         }, "[M] canonical successor positions with drop_noops")
-        .def_prop_ro("generated", [](const PyDeviceExpansion& e) { return e.flat.generated; },
-                     "Successors before no-op filtering; generated > capacity reports overflow.")
         .def_prop_ro("counts", [](const PyDeviceExpansion& e) -> ArrayOut {
             const std::vector<i32> off = e.flat.host_offsets();
             std::vector<i32> c(e.flat.rows);
@@ -2186,6 +2184,8 @@ void bind_cuda(nb::module_& parent)
         }, "[N] int32 successors per state (a fresh array)")
         .def_prop_ro("total", [](const PyDeviceExpansion& e) { return e.flat.total; },
                      "The successor rows of the batch, those beyond the capacity included.")
+        .def_prop_ro("generated", [](const PyDeviceExpansion& e) { return e.flat.generated; },
+                     "Successors before drop_noops; generated > capacity is an overflow.")
         .def_prop_ro("capacity", [](const PyDeviceExpansion& e) { return e.flat.capacity; },
                      "The successor rows the outputs hold; total > capacity is an overflow.")
         .def_prop_ro("num_states", [](const PyDeviceExpansion& e) { return e.flat.rows; },

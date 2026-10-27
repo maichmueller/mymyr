@@ -1453,6 +1453,6 @@ void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansio
         check(lifted::launch_pad(f, rows, p, s), "launch_pad");
     check(cudaMemcpyAsync(I.hctl() + k_overflow, d + k_overflow, sizeof(u32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
     check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
-    out.overflow = I.hctl()[k_overflow] != 0 || flat.overflow();
+    out.overflow = flat.overflow() || I.hctl()[k_overflow] != 0;
 }
 }  // namespace mymyr::cuda

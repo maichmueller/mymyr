@@ -84,6 +84,7 @@ def assert_same_expansion(dev, cpu):
             assert a is None, k
             continue
         assert np.array_equal(host(a), b), k
+    assert dev.generated == cpu.generated
     assert dev.overflow == cpu.overflow
 
 
@@ -323,12 +324,20 @@ def test_expand_dlarray_and_jax_inputs(ctx):
     import jax.numpy as jnp
 
     j = jax.device_put(jnp.asarray(x.view(np.uint32)), gpu)
-    dev = rl.expand(task, j, ctx=ctx, goal=True)
-    assert list(dev.succ.devices())[0] == gpu and dev.succ.dtype == jnp.uint32
-    want = rl.expand(task, x, goal=True)
-    assert np.array_equal(np.asarray(dev.succ).view(np.uint64), want.succ)
-    for k in ("parent", "schema", "binding", "offsets", "goal"):
-        assert np.array_equal(np.asarray(getattr(dev, k)), getattr(want, k)), k
+    for kw in (dict(), dict(words=1), dict(capacity=3)):
+        dev = rl.expand(task, j, ctx=ctx, goal=True, **kw)
+        assert list(dev.succ.devices())[0] == gpu and dev.succ.dtype == jnp.uint32
+        want = rl.expand(task, x, goal=True, **kw)
+        assert np.array_equal(np.asarray(dev.succ).view(np.uint64), want.succ)
+        for k in ("parent", "schema", "binding", "offsets", "goal", "counts"):
+            assert np.array_equal(np.asarray(getattr(dev, k)), getattr(want, k)), k
+        assert dev.generated == want.generated and dev.overflow == want.overflow
+        for width in (1, 16, None):
+            got, expected = dev.pad(width), want.pad(width)
+            assert got.k == expected.k and got.overflow == expected.overflow
+            for field in ("index", "mask", "count", "schema", "binding", "goal"):
+                assert np.array_equal(np.asarray(getattr(got, field)), getattr(expected, field)), field
+            assert np.array_equal(np.asarray(got.succ).view(np.uint64), expected.succ)
     ctx.synchronize()
 
 
