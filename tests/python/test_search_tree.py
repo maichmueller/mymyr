@@ -356,9 +356,9 @@ def test_iw_tree_relaxed_node_recording_uses_serial_beam(fn):
 @pytest.mark.parametrize("fn", [search.iw, search.abstracted_iw, search.liw])
 def test_relaxed_beam_refuses_a_transition_tree_by_name(fn):
     task = text_task("rovers__p02")
-    r = fn(task, tree="transitions", layer_order="goal_count", beam_width=3, beam_novelty="relaxed_survivors_only",
+    with pytest.raises(ValueError, match=r"a transition tree \(tree='transitions'\)"):
+        fn(task, tree="transitions", layer_order="goal_count", beam_width=3, beam_novelty="relaxed_survivors_only",
            max_expanded=30)
-    assert r.status == search.Status.FAILED and "a transition tree (tree='transitions')" in r.message
 
 
 def test_iw_tree_extra_goal_callback_errors_propagate():
