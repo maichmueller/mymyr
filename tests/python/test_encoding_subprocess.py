@@ -1,4 +1,5 @@
-"""Corpus encodings run in child processes so a native fault is reported for its task."""
+"""Corpus encodings run in child processes, one per corpus directory, so a native fault is reported for its
+task without ending the test run."""
 
 import itertools
 import json
@@ -56,20 +57,43 @@ def encode_task(path):
     return {"encodes": encoded, "rejected": rejected}
 
 
+_CORPUS_CHILD = (
+    f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+    "from test_encoding_subprocess import encode_task\n"
+    "from pathlib import Path\n"
+    "import json\n"
+    "for arg in sys.argv[1:]:\n"
+    "    print('task:', arg, flush=True)\n"
+    "    print('result:', json.dumps({'path': arg, **encode_task(Path(arg))}), flush=True)\n"
+)
+_corpus_runs = {}
+
+
+def corpus_run(directory):
+    """One child per corpus directory encodes its tasks in turn, announcing each before it starts: the results by
+    task, and the child's exit code and output (which name the task of a native fault)."""
+    if directory not in _corpus_runs:
+        paths = [str(p) for p in TASKS if p.parent == directory and (p.suffix == ".txt" or hasattr(mymyr, "Domain"))]
+        child = run_code(_CORPUS_CHILD, *paths, capture_output=True, check=False, timeout=600)
+        results = {}
+        for line in child.stdout.splitlines():
+            if line.startswith("result: "):
+                result = json.loads(line[len("result: "):])
+                results[result.pop("path")] = result
+        _corpus_runs[directory] = child, results
+    return _corpus_runs[directory]
+
+
 @pytest.mark.parametrize("path", TASKS, ids=lambda path: str(path.relative_to(ROOT / "tests/data")))
 def test_task_encodes_in_subprocess(path, request):
     if path.suffix == ".pddl" and not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
-    code = (
-        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
-        "from test_encoding_subprocess import encode_task\n"
-        "from pathlib import Path\n"
-        "import json\n"
-        "print(json.dumps(encode_task(Path(sys.argv[1]))))\n"
-    )
-    child = run_code(code, str(path), capture_output=True, check=False)
-    assert child.returncode == 0, f"{path}: exit {child.returncode}\n{child.stdout}\n{child.stderr}"
-    result = json.loads(child.stdout.splitlines()[-1])
+    child, results = corpus_run(path.parent)
+    if str(path) not in results:
+        started = [line for line in child.stdout.splitlines() if line.startswith("task: ")]
+        pytest.fail(f"{path}: not encoded; the child exited {child.returncode} after starting "
+                    f"{started[-1] if started else 'no task'}\n{child.stdout[-4000:]}\n{child.stderr[-4000:]}")
+    result = results[str(path)]
     assert result in ({"encodes": 60, "rejected": 0}, {"encodes": 48, "rejected": 12})
     request.node.user_properties.extend(result.items())
 
