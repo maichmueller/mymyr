@@ -584,7 +584,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             }
             // the window: the most rows whose buffers fit 15/16 of the room (a margin for the pool's granularity)
             const u64 room = window_room(), usable = room - room / 16;
-            u64 hi = std::min(window_cap, M - f);
+            u64 hi = std::min({window_cap, M - f, std::max<u64>(state_set::k_max_states - count, 1)});
             const u64 spare = std::min(states->capacity(), nodes->capacity()) - count;
             if (spare > 0)
                 hi = std::min(hi, spare);
@@ -1001,8 +1001,13 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 cap_max = std::max(cap_max, capacity(plan[j]));
                 ++j;
             }
-            if (count + room > state_set::k_max_states)
-                throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states (with a chunk's candidates)");
+            // candidates beyond the state limit (an estimate, or a halted chunk's count): the first chunk alone, sized
+            // by its count, takes the parents whose candidates fit (or its first state's successor windows)
+            if (count + room > state_set::k_max_states && !plan[i].exact)
+            {
+                plan[i].exact = true;
+                continue;
+            }
             // the scratch of the group's chunks and the arenas for its new states (the device checks the table's room
             // per chunk: ensure_table)
             if (!exact_group && !try_allocate(*ctx, [&](int)
@@ -1141,10 +1146,9 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                             adds = *h_cand;
                         }
                         u64 fit = cap * per_candidate() > reused_bytes() ? room_rows() : cap;
+                        fit = std::min(fit, state_set::k_max_states - count);  // (count stays within the budget)
                         if (cap <= fit || adds == 0)
                         {
-                            if (count + cap > state_set::k_max_states)
-                                throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states");
                             fit = cap;
                             if (!try_allocate(*ctx, [&](int attempt)
                                               {
