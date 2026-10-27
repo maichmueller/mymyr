@@ -1250,7 +1250,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     c->release_after(os.s, std::move(keep));
     nb::dict r;
     r["total"] = x.total;
-        r["generated"] = x.generated;
+    r["generated"] = x.generated;
     r["words_needed"] = x.words_needed;
     r["overflow"] = x.overflow();
     r["capacity"] = x.capacity;
