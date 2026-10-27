@@ -638,3 +638,196 @@ def test_random_actions_are_the_random_policy():
             limited = np.asarray(ra(key, state, 2))
             assert np.all(limited < np.maximum(np.minimum(np.asarray(state.count), 2), 1))
             state = r1[0]
+
+
+# ------------------------------------------------------------------------------------------------ episode visits
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("autoreset", [False, True])
+@pytest.mark.parametrize("name", ["gripper__prob05", "numeric", "suite"])
+def test_visited_rollouts_equal_cpu_pool(name, autoreset, threads):
+    tasks = [text_task("gripper__prob05")]
+    if name in ("numeric", "suite"):
+        numeric = mymyr.Task.from_text(str(NUMERIC / "cs-counters.txt"))
+        tasks = [numeric] if name == "numeric" else [*tasks, numeric]
+    table = rl.TaskSuite.group(tasks) if name == "suite" else rl.TaskTable(tasks)
+    n, seed = 12, 71
+    cfg = dict(track_visited=True, max_steps=7, autoreset=autoreset, sampler=None)
+    env = rj.Env(table, device="cpu", **cfg)
+    pool = rl.CpuEnvPool(table, n, seed=seed, threads=threads, **cfg)
+    ids = np.arange(n, dtype=np.int32) % len(tasks)
+    state, _ = env.reset(seed, ids)
+    initial = state
+    batch = pool.reset(task_ids=ids)
+    histories = [{s} for s in rl.decode(table, np.asarray(batch.states), ids)]
+    step = jax.jit(env.step)
+    for t in range(24):
+        actions = np.full(n, -1, np.int32) if t % 5 == 0 else None
+        nxt = 1 - ids if name == "suite" else ids
+        before = state
+        state, obs, reward, term, trunc, info = step(seed, state, actions, next_task_ids=nxt)
+        batch = pool.step(actions=actions, next_task_ids=nxt)
+        for left, right in ((u64(state.states), batch.states), (reward, batch.reward), (term, batch.terminated),
+                            (trunc, batch.truncated), (info["revisited"], batch.revisited),
+                            (info["schema"], batch.schema), (info["binding"], batch.binding),
+                            (u64(info["final_state"]), batch.final_states), (state.task_id, batch.task_ids)):
+            np.testing.assert_array_equal(left, right)
+        reached = rl.decode(table, u64(info["final_state"]), ids)
+        absorbed = np.asarray(before.at_goal) | (np.asarray(before.steps) >= 7) | (np.asarray(before.count) == 0)
+        expected = [s in histories[i] and (autoreset or not absorbed[i]) for i, s in enumerate(reached)]
+        np.testing.assert_array_equal(info["revisited"], expected)
+        done = np.asarray(term) | np.asarray(trunc)
+        observed = rl.decode(table, u64(state.states), np.asarray(state.task_id))
+        for i, s in enumerate(reached):
+            histories[i].add(s)
+            if autoreset and done[i]:
+                histories[i] = {observed[i]}
+        ids = np.asarray(state.task_id).copy()
+        assert not np.asarray(state.visited_status).any()
+        if t % 4 == 0:
+            if not autoreset:
+                mask = done.copy()
+                state, _ = jax.jit(env.reset_where)(state, mask, ids)
+                pool.reset(env_ids=np.flatnonzero(mask).astype(np.int32), task_ids=ids[mask])
+                for i in np.flatnonzero(mask):
+                    histories[i] = {tasks[int(ids[i])].initial_state}
+            np.testing.assert_array_equal(jax.jit(env.refresh)(state).visited, state.visited)
+            assert np.asarray(state.visited_count).max() <= 8
+    # Reusing an earlier pytree retains its original tables and random stream.
+    again = step(seed, initial, np.full(n, -1, np.int32))
+    assert np.asarray(again[-1]["revisited"]).all()
+    np.testing.assert_array_equal(initial.visited_count, np.ones(n, np.int32))
+
+
+def test_visited_overflow_clear_reset_and_scan():
+    task = text_task("gripper__prob05")
+    env = rj.Env(task, device="cpu", track_visited=2, sampler=None, dead_end="none", max_steps=3)
+    start, _ = env.reset(8, 6)
+
+    @jax.jit
+    def rollout(state):
+        def body(s, _):
+            out = env.step(8, s)
+            return out[0], out[-1]["revisited"]
+        return jax.lax.scan(body, state, None, length=8)
+
+    state, flags = rollout(start)
+    pool = rl.CpuEnvPool(task, 6, track_visited=2, sampler=None, dead_end="none", max_steps=3, seed=8)
+    expected = [np.asarray(pool.step().revisited).copy() for _ in range(8)]
+    np.testing.assert_array_equal(flags, expected)
+    assert np.asarray(state.visited_status).tolist() == [1]
+    mask = np.array([True, False, True, False, False, True])
+    cleared = jax.jit(env.clear_visited)(state, mask)
+    np.testing.assert_array_equal(cleared.visited_count, np.where(mask, 1, state.visited_count))
+    np.testing.assert_array_equal(np.asarray(cleared.visited)[~mask], np.asarray(state.visited)[~mask])
+    np.testing.assert_array_equal(cleared.states, state.states)
+    assert np.asarray(cleared.visited_status).tolist() == [1]
+    reset, _ = jax.jit(env.reset_where)(state, mask)
+    np.testing.assert_array_equal(np.asarray(reset.visited)[~mask], np.asarray(state.visited)[~mask])
+    assert np.asarray(reset.visited_status).tolist() == [1]
+    moved = state._replace(states=start.states)
+    moved = jax.jit(env.clear_visited)(moved)
+    np.testing.assert_array_equal(moved.visited, start.visited)
+    np.testing.assert_array_equal(moved.visited_count, start.visited_count)
+
+
+def test_visited_vmap_keeps_each_batch_status():
+    task = text_task("gripper__prob05")
+    env = rj.Env(task, device="cpu", track_visited=2, sampler=None, dead_end="none")
+    starts, _ = jax.jit(jax.vmap(lambda key: env.reset(key, 3)))(jnp.array([8, 9], jnp.int32))
+    # The first batch stays in place; the second inserts new states and overflows.
+    exp = rl.expand(task, [task.initial_state])
+    initial = task.encode([task.initial_state])[0]
+    move = int(np.flatnonzero(np.any(np.asarray(exp.succ) != initial, axis=1))[0])
+    actions = jnp.array([[-1, -1, -1], [move, move, move]], jnp.int32)
+    out = jax.jit(jax.vmap(env.step))(jnp.array([8, 9], jnp.int32), starts, actions)
+    np.testing.assert_array_equal(out[0].visited_status, [[0], [1]])
+    for i, key in enumerate([8, 9]):
+        start = jax.tree.map(lambda x: x[i], starts)
+        single = jax.jit(env.step)(key, start, actions[i])
+        for a, b in zip(jax.tree.leaves(single), jax.tree.leaves(out)):
+            np.testing.assert_array_equal(a, b[i])
+    reset, _ = jax.jit(jax.vmap(env.reset_where))(out[0], jnp.ones((2, 3), jnp.bool_))
+    np.testing.assert_array_equal(reset.visited_count, np.ones((2, 3), np.int32))
+    np.testing.assert_array_equal(reset.visited_status, [[0], [1]])
+    cleared = jax.jit(jax.vmap(env.clear_visited))(out[0])
+    np.testing.assert_array_equal(cleared.visited_count, np.ones((2, 3), np.int32))
+
+
+def test_visited_absorbing_goal_and_disabled_tracking():
+    task = text_task("gripper__prob05")
+    env = rj.Env(task, device="cpu", goals=True, track_visited=8, autoreset=False)
+    state, _ = env.reset(0, 4)
+    zero = jnp.zeros_like(state.goal_pos)
+    state = env.refresh(state._replace(goal_pos=zero, goal_neg=zero))
+    out = jax.jit(env.step)(0, state, jnp.full(4, -1, jnp.int32))
+    assert np.asarray(out[3]).all()
+    assert not np.asarray(out[-1]["revisited"]).any()
+    np.testing.assert_array_equal(out[0].visited, state.visited)
+    off = rj.Env(task, device="cpu")
+    state, _ = off.reset(0, 4)
+    assert state.visited.shape == (4, 0)
+    assert state.visited_status.shape == (4, 0)
+    assert not np.asarray(jax.jit(off.step)(0, state)[-1]["revisited"]).any()
+    np.testing.assert_array_equal(off.clear_visited(state).states, state.states)
+
+
+@pytest.mark.parametrize("capacity", [0, 1, 3, -2, (1 << 20) + 1, 2.5, None])
+def test_jax_visited_capacity_validation(capacity):
+    with pytest.raises((ValueError, TypeError), match="track_visited"):
+        rj.Env(text_task("gripper__prob05"), device="cpu", track_visited=capacity)
+
+
+def test_jax_visited_default_capacity_and_cuda_error():
+    task = text_task("gripper__prob05")
+    with pytest.raises(ValueError, match="max_steps"):
+        rj.Env(task, device="cpu", track_visited=True)
+    assert rj.Env(task, device="cpu", track_visited=True, max_steps=7).visited_capacity == 16
+    # The native constructor checks this before creating a device context, including CPU-only builds.
+    with pytest.raises(ValueError, match="CUDA requires device visited tables.*device='cpu'"):
+        _rl_jax.Env(task, device=0, track_visited=8)
+
+
+def hash_halves(x):
+    return np.ascontiguousarray(x, dtype=np.uint64).view(np.uint32).reshape(*x.shape, 2)
+
+
+@pytest.mark.parametrize("x64", [False, True])
+@pytest.mark.parametrize("mapped", [False, True])
+def test_jnp_visited_mask_equals_numpy(x64, mapped):
+    h, n = 16, 4
+    reserved = 0x9E3779B97F4A7C15
+    table = np.zeros((n, h), np.uint64)
+    count = np.array([8, h, 0, 12], np.int32)
+    keys = [0, reserved, 15, 31, 47, (1 << 63) + 15, (1 << 32) + 15, 2, 3, 4, 5, 6, 7]
+    for i, size in enumerate([8, 12, 0, 12]):
+        for k in keys[:size]:
+            key = k or reserved
+            at = key & (h - 1)
+            while table[i, at] and int(table[i, at]) != key:
+                at = (at + 1) & (h - 1)
+            table[i, at] = key
+    hashes = np.tile(np.array([*keys, 1, 8, 16, 32, (1 << 64) - 1], np.uint64), n + 1)
+    parent = np.repeat(np.arange(-1, n, dtype=np.int32), len(hashes) // (n + 1))
+    rows = np.array([3, 0, -1, 1], np.int32) if mapped else None
+    expected = rl.visited_mask(table, count, hashes, parent, rows=rows)
+    with jax.enable_x64(x64):
+        jt = jnp.asarray(table if x64 else hash_halves(table).reshape(n, 2 * h))
+        jh = jnp.asarray(hashes if x64 else hash_halves(hashes))
+        for lookup in (rj.visited_mask, rl.visited_mask):
+            got = jax.jit(lookup)(jt, jnp.asarray(count), jh, jnp.asarray(parent), rows=rows)
+            np.testing.assert_array_equal(got, expected)
+        both = jax.jit(jax.vmap(lambda t: rj.visited_mask(t, count, jh, parent, rows=rows)))(jnp.stack([jt, jt]))
+        np.testing.assert_array_equal(both, np.stack([expected, expected]))
+
+
+def test_jnp_visited_mask_empty_padding_and_full_probe():
+    table = jnp.zeros((0, 4), jnp.uint32)
+    hashes = jnp.zeros((3, 2), jnp.uint32)
+    assert not np.asarray(jax.jit(rj.visited_mask)(table, jnp.zeros(0, jnp.int32), hashes, jnp.full(3, -1))).any()
+    table = jnp.array([[1, 0, 3, 0]], jnp.uint32)
+    assert not np.asarray(jax.jit(rj.visited_mask)(table, jnp.array([2]), hashes, jnp.zeros(3, jnp.int32))).any()
+    assert not np.asarray(rj.visited_mask(table, jnp.array([2]), hashes, jnp.zeros(3, jnp.int32),
+                                        rows=jnp.zeros(0, jnp.int32))).any()
+    assert rj.visited_mask(table, jnp.array([2]), jnp.zeros((0, 2), jnp.uint32), jnp.zeros(0, jnp.int32)).shape == (0,)

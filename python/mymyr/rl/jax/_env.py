@@ -15,7 +15,7 @@ __all__ = ["Env", "EnvState", "Observation", "PaddedExpansion", "FlatExpansion",
 
 
 class EnvState(NamedTuple):
-    """The state of N environments (a pytree of arrays; the leading dimension is the environment).
+    """The state of N environments (a pytree of arrays; row arrays lead with the environment dimension).
 
     Fields:
         states: the state words as uint32 halves (a u64 row of ``row_words`` words is ``2 * row_words`` uint32, low
@@ -33,6 +33,9 @@ class EnvState(NamedTuple):
         at_goal: whether the current state is a goal ([N] bool; by the goal masks with goals=True, else the
             instance's goal). Reset, step and refresh keep it, and a step leaves those environments where they are
             (absorbing).
+        visited: uint32 [N, 2H], low/high halves of the per-episode hash table ([N, 0] when disabled).
+        visited_count: int32 [N], stored hashes per row; H denotes overflow.
+        visited_status: int32 [1], sticky bit 0 if any row overflowed ([N, 0] when disabled).
 
     Writing ``states`` or the goal masks needs :meth:`Env.refresh`."""
 
@@ -49,6 +52,9 @@ class EnvState(NamedTuple):
     reset_counts: Any
     sampling_seed: Any
     at_goal: Any
+    visited: Any
+    visited_count: Any
+    visited_status: Any
 
 
 class Observation(NamedTuple):
@@ -213,6 +219,14 @@ class Env:
     device expansion, which synchronizes on the successor count every step). ``labels=False`` skips the binding labels
     and ``final_state=False`` the final states (both are written every step otherwise).
 
+    ``track_visited=H`` enables per-episode visited hashes on the CPU (H a power of two in [2, 2^20]); True chooses
+    the next power of two at least 2 * (max_steps + 1), requiring bounded max_steps. The state carries ``visited``,
+    ``visited_count`` and sticky ``visited_status``; ``info["revisited"]`` tests the reached state before insertion
+    and autoreset. Reset clears histories and inserts initial states; refresh preserves them. Overflow sets status
+    bit 0 and saturates a row's count to H; subsequent lookups can miss visits. Equal 64-bit hashes share an entry,
+    including zero and the reserved key 0x9E3779B97F4A7C15. CUDA tracking requires device visited tables and raises
+    at construction. Under vmap, each mapped batch retains its own [1] status and its FFI calls run sequentially.
+
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over
     a suite of several domains: one encoder per domain, in the suite's order; an observation is then a
     :class:`SuiteObservation`, one batch per domain and each row's index in its batch). Every
@@ -251,6 +265,7 @@ class Env:
         observation: Any = None,
         obs_capacities: Optional[dict] = None,
         obs_actions: bool = False,
+        track_visited: bool | int = False,
     ) -> None:
         numeric = _numeric(table)
         self.device: jax.Device = _jax_device(device, numeric)
@@ -272,9 +287,11 @@ class Env:
             canonical_order=canonical_order,
             witness_pruning=witness_pruning,
             path=path,
+            track_visited=track_visited,
         )
         _ffi.register()
         self.table = table
+        self.visited_capacity: int = self.native.visited_capacity
         self.handle: int = self.native.handle
         self.num_instances: int = self.native.num_instances
         self.sampler = _instance_sampler(sampler, self.num_instances)
@@ -434,8 +451,9 @@ class Env:
         n = ids.shape[0]
         with self._dev():
             ids = jnp.asarray(ids)
-            states, steps, count, counts, views, gpos, gneg, at_goal = _ffi.env_init(
-                self.handle, ids, 2 * self.row_words, self.cache_schemas, 2 * self.cache_view_words, self._goal_cols()
+            states, steps, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status = _ffi.env_init(
+                self.handle, ids, 2 * self.row_words, self.cache_schemas, 2 * self.cache_view_words, self._goal_cols(),
+                self.visited_capacity,
             )
             draws = jnp.zeros((n, 2), jnp.uint32)
             env_id = jnp.arange(first_env, first_env + n, dtype=jnp.uint32)
@@ -448,7 +466,8 @@ class Env:
             gneg = jnp.asarray(goal_neg, jnp.uint32).reshape(gneg.shape)
             at_goal = _masks_hold(states, gpos, gneg)
         state = EnvState(
-            states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed, at_goal
+            states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed, at_goal,
+            visited, visited_count, visited_status,
         )
         if not isinstance(states, jax.core.Tracer):
             # committed to the environment's device: jitted steps of this state run there, whatever the default device
@@ -483,17 +502,34 @@ class Env:
             gpos = jnp.where(m[:, None], jnp.asarray(goal_pos, jnp.uint32), gpos)
             gneg = jnp.where(m[:, None], jnp.asarray(goal_neg, jnp.uint32), gneg)
         with self._dev():
-            states, steps, count, counts, views, gpos, gneg, at_goal = _ffi.env_reset(
+            states, steps, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status = _ffi.env_reset(
                 self.handle, state.states, ids, state.steps, state.count, state.counts, state.views, gpos, gneg,
-                state.at_goal, m, keep,
+                state.at_goal, state.visited, state.visited_count, state.visited_status, m, keep,
             )  # fmt: skip
         s = state._replace(
             states=states, task_id=ids, steps=steps, count=count, counts=counts, views=views, goal_pos=gpos, goal_neg=gneg,
-            at_goal=at_goal,
+            at_goal=at_goal, visited=visited, visited_count=visited_count, visited_status=visited_status,
             reset_counts=reset_counts + m.astype(jnp.uint32),
             sampling_seed=jnp.where(m[:, None], sampling_seed, state.sampling_seed),
         )
         return s, self.observation(s)
+
+    def clear_visited(self, state: EnvState, mask: Any = None) -> EnvState:
+        """Clears selected histories and inserts their current states, retaining the sticky overflow status.
+
+        ``mask`` is bool [N] (None selects every row). Use after writing state words when those rows should start
+        fresh histories; :meth:`refresh` recomputes observations without changing visit tables.
+        """
+        if not self.visited_capacity:
+            return state
+        m = jnp.ones(state.task_id.shape, jnp.bool_) if mask is None else jnp.asarray(mask, jnp.bool_)
+        with self._dev():
+            *_, visited, visited_count, visited_status = _ffi.env_reset(
+                self.handle, state.states, state.task_id, state.steps, state.count, state.counts, state.views,
+                state.goal_pos, state.goal_neg, state.at_goal, state.visited, state.visited_count, state.visited_status,
+                m, True, clear_visited=True,
+            )
+        return state._replace(visited=visited, visited_count=visited_count, visited_status=visited_status)
 
     def refresh(self, state: EnvState) -> EnvState:
         """Recomputes the successor counts, the device cache and ``at_goal`` of states, task ids or goal masks the
@@ -514,7 +550,8 @@ class Env:
         ``info``: ``final_state`` (the reached state before the autoreset; with final_state=True), ``goal`` (the
         reached state is a goal), ``invalid`` (the action was outside [0, count)), ``schema`` [N] and ``binding``
         [N, L] (the action's label, objects of the env's instance before the autoreset; -1 for no move; binding with
-        labels=True)."""
+        labels=True). ``revisited`` bool [N] says whether the reached state was in the episode history before
+        this step (before autoreset; false for absorbing rows or disabled tracking)."""
         n = state.states.shape[:-1]
         with self._dev():
             seed = jnp.broadcast_to(key_seed(key), (*n, 2))
@@ -536,6 +573,9 @@ class Env:
                 state.goal_pos,
                 state.goal_neg,
                 state.at_goal,
+                state.visited,
+                state.visited_count,
+                state.visited_status,
                 state.env_id,
                 seed,
                 act,
@@ -543,16 +583,17 @@ class Env:
                 self.label_width if self.labels else 0,
                 self.final_state,
             )
-        (states, task_id, steps, draws, count, counts, views, gpos, gneg, at_goal, reward, terminated, truncated, goal,
-         invalid, schema, binding, final) = outs  # fmt: skip
+        (states, task_id, steps, draws, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status,
+         reward, terminated, truncated, goal, invalid, schema, binding, final, revisited) = outs  # fmt: skip
         reset_counts = state.reset_counts
         if self.autoreset:
             reset_counts = reset_counts + (terminated | truncated).astype(jnp.uint32)
         s = state._replace(
             states=states, task_id=task_id, steps=steps, draws=draws, count=count, counts=counts, views=views,
             goal_pos=gpos, goal_neg=gneg, reset_counts=reset_counts, at_goal=at_goal,
+            visited=visited, visited_count=visited_count, visited_status=visited_status,
         )
-        info: dict[str, Any] = {"goal": goal, "invalid": invalid, "schema": schema}
+        info: dict[str, Any] = {"goal": goal, "invalid": invalid, "schema": schema, "revisited": revisited}
         if self.labels:
             info["binding"] = binding
         if self.final_state:

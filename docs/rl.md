@@ -191,6 +191,32 @@ The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `s
 `jax.jit`, `jax.vmap` and `jax.lax.scan`. JAX device arrays can use the CUDA path. `mymyr.rl.torch.BatchedEnv` provides
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
 
+On the CPU, `mymyr.rl.jax.Env(..., track_visited=H)` carries per-episode tables in `state.visited` (uint32 `[N, 2H]`,
+low/high halves of 64-bit hashes), `state.visited_count` (int32 `[N]`) and `state.visited_status` (int32 `[1]`, sticky
+bit 0 for overflow). `H` and `track_visited=True` follow the capacity rules in [Revisit avoidance](#revisit-avoidance).
+`info["revisited"]` tests the reached state before insertion and autoreset. Reset clears selected histories and
+inserts initial states; `env.clear_visited(state, mask=None)` returns a state with selected histories cleared and
+current states inserted, retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses
+`[N, 0]` table/status arrays and reports false revisit flags. Each vmapped batch keeps its own `[1]` status; tracked
+FFI calls batch sequentially. CUDA tracking raises a clear construction error because device visit tables are
+unavailable. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or
+(u)int64 hashes with JAX x64 enabled, and equals the NumPy membership operation under jit without host reads.
+
+```python needs-jax
+import jax
+import jax.numpy as jnp
+from mymyr.rl.jax import Env
+
+jax_visit_data = Path("tests/data/pddl/blocks")
+jax_visit_task = mymyr.Task.from_pddl(jax_visit_data / "domain.pddl", jax_visit_data / "probBLOCKS-8-0.pddl")
+jax_visits = Env(jax_visit_task, device="cpu", max_steps=20, track_visited=True)
+jax_state, _ = jax_visits.reset(0, 4)
+jax_next, _, _, _, _, jax_info = jax.jit(jax_visits.step)(0, jax_state, jnp.full(4, -1, jnp.int32))
+assert jax_info["revisited"].all()
+jax_state = jax.jit(jax_visits.clear_visited)(jax_next)
+assert (jax_state.visited_count == 1).all()
+```
+
 Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
 counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
 end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per

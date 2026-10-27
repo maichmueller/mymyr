@@ -43,6 +43,7 @@
 // collected) fails with an error.
 
 #include "ffi_registry.hpp"
+#include "py_pool.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 #include "rl_typing.hpp"
@@ -104,7 +105,7 @@ struct Entry : FfiEntry
     rl::TaskSuitePtr suite;
     rl::EnvConfig cfg;
     std::string path = "auto";
-    u32 W = 1, NN = 0, L = 1;
+    u32 W = 1, NN = 0, L = 1, H = 0;
     std::mutex host_mutex;
     std::unique_ptr<rl::HostEnv> host;
     std::vector<u64> scratch_succ;
@@ -148,7 +149,7 @@ using EntryPtr = std::shared_ptr<Entry>;
 class PyJaxEnv
 {
 public:
-    PyJaxEnv(SuiteArg table, nb::object device, ContextArg ctx, const rl::EnvConfig& cfg, const std::string& path)
+    PyJaxEnv(SuiteArg table, nb::object device, ContextArg ctx, const rl::EnvConfig& cfg, const std::string& path, u32 H)
         : m_ref(suite_of(table))
     {
         if (path != "auto" && path != "fast" && path != "general")
@@ -157,6 +158,10 @@ public:
         e->suite = m_ref.suite;
         e->cfg = cfg;
         e->path = path;
+        e->H = H;
+        if (H && !device.is_none())
+            throw nb::value_error("mymyr: JAX track_visited on CUDA requires device visited tables; "
+                                  "use mymyr.rl.jax.Env(..., device='cpu')");
         e->NN = e->suite->numeric_words();
         {
             nb::gil_scoped_release release;
@@ -425,10 +430,11 @@ i32* task_ids_of(const Entry& e, const View& v, u64 N, const char* name = "task_
 struct StateBufs
 {
     View states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal;
+    View visited, visited_count, visited_status;
 };
 
 /// Which in-place arrays a call has, in this order: states, [task_ids], [steps], [draws], count, counts, views,
-/// goal_pos, goal_neg, at_goal.
+/// goal_pos, goal_neg, at_goal, visited, visited_count, visited_status.
 struct Fields
 {
     bool task_ids = false, steps = true, draws = false;
@@ -449,6 +455,10 @@ rl::EnvBatch make_batch(const Entry& e, const StateBufs& s, u64 N, i32* task_ids
     b.goal_pos = s.goal_pos.cols ? s.goal_pos.as<u64>() : nullptr;
     b.goal_neg = s.goal_neg.cols ? s.goal_neg.as<u64>() : nullptr;
     b.at_goal = s.at_goal.as<u8>();
+    b.visited_capacity = static_cast<u32>(s.visited.cols / 2);
+    b.visited = s.visited.as<u64>();
+    b.visited_count = s.visited_count.as<i32>();
+    b.visited_status = s.visited_status.as<i32>();
     return b;
 }
 
@@ -485,7 +495,13 @@ StateBufs state_results(const Entry& e, ffi::Result<ffi::AnyBuffer>* res, const 
     s.goal_pos = next("goal_pos", ffi::DataType::U32, false, -1);
     s.goal_neg = next("goal_neg", ffi::DataType::U32, false, -1);
     s.at_goal = next("at_goal", ffi::DataType::PRED, true, -1);
+    s.visited = next("visited", ffi::DataType::U32, false, 2 * e.H);
+    s.visited_count = next("visited_count", ffi::DataType::S32, true, -1);
+    s.visited_status = next("visited_status", ffi::DataType::S32, true, -1);
     const u64 N = s.states.rows;
+    expect_rows(s.visited, N, "visited");
+    expect_rows(s.visited_count, N, "visited_count");
+    expect_rows(s.visited_status, e.H ? 1 : 0, "visited_status");
     if (f.task_ids)
         expect_rows(s.task_ids, N, "task_ids");
     if (f.steps)
@@ -525,34 +541,43 @@ ffi::Error env_init_cpu(i64 handle, ffi::AnyBuffer task_ids, ffi::Result<ffi::An
                         ffi::Result<ffi::AnyBuffer> steps, ffi::Result<ffi::AnyBuffer> count,
                         ffi::Result<ffi::AnyBuffer> counts, ffi::Result<ffi::AnyBuffer> views,
                         ffi::Result<ffi::AnyBuffer> goal_pos, ffi::Result<ffi::AnyBuffer> goal_neg,
-                        ffi::Result<ffi::AnyBuffer> at_goal)
+                        ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,
+                        ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal};
+        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal,
+                                         visited, visited_count, visited_status};
         const StateBufs s = state_results(*e, res, nullptr, Fields{}, Host::copy);
         require_host_cache(s);
         const u64 N = s.states.rows;
         rl::EnvBatch b = make_batch(*e, s, N, task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), N));
         std::lock_guard lock(e->host_mutex);
+        std::fill_n(s.visited_count.as<i32>(), N, 0);
+        if (e->H)
+            *s.visited_status.as<i32>() = 0;
         e->host->reset(b, nullptr, s.count.as<i32>());
     });
 }
 
-ffi::Error env_reset_cpu(i64 handle, bool keep_goals, ffi::AnyBuffer states_in, ffi::AnyBuffer task_ids,
+ffi::Error env_reset_cpu(i64 handle, bool keep_goals, bool clear_visited, ffi::AnyBuffer states_in, ffi::AnyBuffer task_ids,
                          ffi::AnyBuffer steps_in, ffi::AnyBuffer count_in, ffi::AnyBuffer counts_in,
                          ffi::AnyBuffer views_in, ffi::AnyBuffer goal_pos_in, ffi::AnyBuffer goal_neg_in,
-                         ffi::AnyBuffer at_goal_in, ffi::AnyBuffer mask, ffi::Result<ffi::AnyBuffer> states,
+                         ffi::AnyBuffer at_goal_in, ffi::AnyBuffer visited_in, ffi::AnyBuffer visited_count_in,
+                         ffi::AnyBuffer visited_status_in, ffi::AnyBuffer mask, ffi::Result<ffi::AnyBuffer> states,
                          ffi::Result<ffi::AnyBuffer> steps, ffi::Result<ffi::AnyBuffer> count,
                          ffi::Result<ffi::AnyBuffer> counts, ffi::Result<ffi::AnyBuffer> views,
                          ffi::Result<ffi::AnyBuffer> goal_pos, ffi::Result<ffi::AnyBuffer> goal_neg,
-                         ffi::Result<ffi::AnyBuffer> at_goal)
+                         ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,
+                         ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal};
+        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal,
+                                         visited, visited_count, visited_status};
         const ffi::AnyBuffer args[] = {states_in,   steps_in,    count_in,   counts_in,
-                                       views_in,    goal_pos_in, goal_neg_in, at_goal_in};
+                                       views_in,    goal_pos_in, goal_neg_in, at_goal_in,
+                                       visited_in, visited_count_in, visited_status_in};
         const StateBufs s = state_results(*e, res, args, Fields{}, Host::copy);
         require_host_cache(s);
         const u64 N = s.states.rows;
@@ -560,7 +585,10 @@ ffi::Error env_reset_cpu(i64 handle, bool keep_goals, ffi::AnyBuffer states_in, 
         expect_rows(m, N, "mask");
         rl::EnvBatch b = make_batch(*e, s, N, task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), N));
         std::lock_guard lock(e->host_mutex);
-        e->host->reset(b, m.as<u8>(), s.count.as<i32>(), keep_goals);
+        if (clear_visited)
+            e->host->clear_visited(b, m.as<u8>());
+        else
+            e->host->reset(b, m.as<u8>(), s.count.as<i32>(), keep_goals);
     });
 }
 
@@ -616,15 +644,18 @@ ffi::Error env_refresh_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
 /// The outputs of a step, checked against N rows.
 struct StepBufs
 {
-    View reward, terminated, truncated, goal, invalid, schema, binding, final_states;
+    View reward, terminated, truncated, goal, invalid, schema, binding, final_states, revisited;
 };
 
 StepBufs step_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> reward, ffi::Result<ffi::AnyBuffer> terminated,
                       ffi::Result<ffi::AnyBuffer> truncated, ffi::Result<ffi::AnyBuffer> goal,
                       ffi::Result<ffi::AnyBuffer> invalid, ffi::Result<ffi::AnyBuffer> schema,
-                      ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> final_states)
+                      ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> final_states,
+                      ffi::Result<ffi::AnyBuffer> revisited)
 {
     StepBufs o;
+    o.revisited = view(*revisited, "revisited", ffi::DataType::PRED, true);
+    expect_rows(o.revisited, N, "revisited");
     o.reward = view(*reward, "reward", ffi::DataType::F32, true);
     o.terminated = view(*terminated, "terminated", ffi::DataType::PRED, true);
     o.truncated = view(*truncated, "truncated", ffi::DataType::PRED, true);
@@ -648,6 +679,7 @@ StepBufs step_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> reward,
 rl::StepOutputs make_outputs(const StepBufs& o)
 {
     rl::StepOutputs out;
+    out.revisited = o.revisited.as<u8>();
     out.reward = o.reward.as<f32>();
     out.terminated = o.terminated.as<u8>();
     out.truncated = o.truncated.as<u8>();
@@ -688,15 +720,18 @@ StepInputs step_inputs(u64 N, const ffi::AnyBuffer& env_id, const ffi::AnyBuffer
 #define MYMYR_STEP_PARAMS                                                                                               \
     ffi::AnyBuffer states_in, ffi::AnyBuffer task_ids_in, ffi::AnyBuffer steps_in, ffi::AnyBuffer draws_in,             \
         ffi::AnyBuffer count_in, ffi::AnyBuffer counts_in, ffi::AnyBuffer views_in, ffi::AnyBuffer goal_pos_in,         \
-        ffi::AnyBuffer goal_neg_in, ffi::AnyBuffer at_goal_in, ffi::AnyBuffer env_id, ffi::AnyBuffer seed,              \
+        ffi::AnyBuffer goal_neg_in, ffi::AnyBuffer at_goal_in, ffi::AnyBuffer visited_in,                               \
+        ffi::AnyBuffer visited_count_in, ffi::AnyBuffer visited_status_in, ffi::AnyBuffer env_id, ffi::AnyBuffer seed,  \
         ffi::AnyBuffer action, ffi::AnyBuffer next_task_ids, ffi::Result<ffi::AnyBuffer> states,                        \
         ffi::Result<ffi::AnyBuffer> task_ids, ffi::Result<ffi::AnyBuffer> steps, ffi::Result<ffi::AnyBuffer> draws,     \
         ffi::Result<ffi::AnyBuffer> count, ffi::Result<ffi::AnyBuffer> counts, ffi::Result<ffi::AnyBuffer> views,       \
         ffi::Result<ffi::AnyBuffer> goal_pos, ffi::Result<ffi::AnyBuffer> goal_neg,                                     \
-        ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> reward,                                        \
-        ffi::Result<ffi::AnyBuffer> terminated, ffi::Result<ffi::AnyBuffer> truncated, ffi::Result<ffi::AnyBuffer> goal, \
+        ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,                                       \
+        ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status,                          \
+        ffi::Result<ffi::AnyBuffer> reward,                                                                             \
+        ffi::Result<ffi::AnyBuffer> terminated, ffi::Result<ffi::AnyBuffer> truncated, ffi::Result<ffi::AnyBuffer> goal,\
         ffi::Result<ffi::AnyBuffer> invalid, ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,   \
-        ffi::Result<ffi::AnyBuffer> final_states
+        ffi::Result<ffi::AnyBuffer> final_states, ffi::Result<ffi::AnyBuffer> revisited
 
 /// The state arrays of a step (results with their operands copied in), its inputs and its outputs.
 struct StepCall
@@ -712,13 +747,14 @@ StepCall step_call(const Entry& e, MYMYR_STEP_PARAMS, Copy copy)
 {
     StepCall c;
     ffi::Result<ffi::AnyBuffer> res[] = {states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg,
-                                         at_goal};
+                                         at_goal, visited, visited_count, visited_status};
     const ffi::AnyBuffer args[] = {states_in, task_ids_in, steps_in, draws_in,    count_in,
-                                   counts_in, views_in,    goal_pos_in, goal_neg_in, at_goal_in};
+                                   counts_in, views_in,    goal_pos_in, goal_neg_in, at_goal_in,
+                                       visited_in, visited_count_in, visited_status_in};
     c.s = state_results(e, res, args, Fields{true, true, true}, copy);
     c.N = c.s.states.rows;
     c.in = step_inputs(c.N, env_id, seed, action, next_task_ids);
-    c.o = step_results(e, c.N, reward, terminated, truncated, goal, invalid, schema, binding, final_states);
+    c.o = step_results(e, c.N, reward, terminated, truncated, goal, invalid, schema, binding, final_states, revisited);
     return c;
 }
 
@@ -727,9 +763,11 @@ ffi::Error env_step_cpu(i64 handle, MYMYR_STEP_PARAMS)
     return guarded([&] {
         EntryPtr e = entry(handle);
         const StepCall c = step_call(*e, states_in, task_ids_in, steps_in, draws_in, count_in, counts_in, views_in,
-                                     goal_pos_in, goal_neg_in, at_goal_in, env_id, seed, action, next_task_ids, states,
-                                     task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, reward,
-                                     terminated, truncated, goal, invalid, schema, binding, final_states, Host::copy);
+                                     goal_pos_in, goal_neg_in, at_goal_in, visited_in, visited_count_in, visited_status_in,
+                                     env_id, seed, action, next_task_ids, states,
+                                     task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal,
+                                     visited, visited_count, visited_status, reward,
+                                     terminated, truncated, goal, invalid, schema, binding, final_states, revisited, Host::copy);
         require_host_cache(c.s);
         rl::EnvBatch b = make_batch(*e, c.s, c.N, e->multi() ? c.s.task_ids.as<i32>() : nullptr);
         b.seeds = c.in.seed.as<u64>();
@@ -1053,6 +1091,10 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
     });
 }
 
+#define MYMYR_VISIT_ARGS                                                                                                \
+    .Arg<ffi::AnyBuffer>() .Arg<ffi::AnyBuffer>() .Arg<ffi::AnyBuffer>()
+#define MYMYR_VISIT_RETS                                                                                                \
+    .Ret<ffi::AnyBuffer>() .Ret<ffi::AnyBuffer>() .Ret<ffi::AnyBuffer>()
 #define MYMYR_RETS8                                                                                                     \
     .Ret<ffi::AnyBuffer>()                                                                                              \
         .Ret<ffi::AnyBuffer>()                                                                                          \
@@ -1062,9 +1104,9 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()
-#define MYMYR_INIT_BINDING .Arg<ffi::AnyBuffer>() MYMYR_RETS8
+#define MYMYR_INIT_BINDING .Arg<ffi::AnyBuffer>() MYMYR_RETS8 MYMYR_VISIT_RETS
 #define MYMYR_RESET_BINDING                                                                                             \
-    .Attr<bool>("keep_goals")                                                                                           \
+    .Attr<bool>("keep_goals").Attr<bool>("clear_visited")                                                               \
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
@@ -1074,7 +1116,7 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>() MYMYR_RETS8
+        .Arg<ffi::AnyBuffer>() MYMYR_VISIT_ARGS MYMYR_RETS8 MYMYR_VISIT_RETS
 #define MYMYR_REFRESH_BINDING                                                                                           \
     .Arg<ffi::AnyBuffer>()                                                                                              \
         .Arg<ffi::AnyBuffer>()                                                                                          \
@@ -1101,6 +1143,7 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
+        MYMYR_VISIT_ARGS                                                                                                \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
@@ -1118,7 +1161,7 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
-        .Ret<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>() MYMYR_VISIT_RETS .Ret<ffi::AnyBuffer>()
 #define MYMYR_EXPAND_ATTRS .Attr<bool>("hashes").Attr<bool>("noops").Attr<bool>("drop_noops")
 #define MYMYR_EXPAND_BINDING                                                                                            \
     .Arg<ffi::AnyBuffer>()                                                                                              \
@@ -1158,6 +1201,8 @@ struct OnStream
 /// The device environment of a call: the fast path for the fast path's cache columns, the general path for none.
 cuda::DeviceEnv& device_env(Entry& e, Entry::Device& d, const StateBufs& s)
 {
+    if (e.H)
+        fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
     if (!s.counts.cols && !s.views.cols)
     {
         if (!d.general)
@@ -1181,11 +1226,13 @@ ffi::Error env_init_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffe
                          ffi::Result<ffi::AnyBuffer> states, ffi::Result<ffi::AnyBuffer> steps,
                          ffi::Result<ffi::AnyBuffer> count, ffi::Result<ffi::AnyBuffer> counts,
                          ffi::Result<ffi::AnyBuffer> views, ffi::Result<ffi::AnyBuffer> goal_pos,
-                         ffi::Result<ffi::AnyBuffer> goal_neg, ffi::Result<ffi::AnyBuffer> at_goal)
+                         ffi::Result<ffi::AnyBuffer> goal_neg, ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,
+                         ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal};
+        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal,
+                                         visited, visited_count, visited_status};
         const StateBufs s = state_results(*e, res, nullptr, Fields{}, OnStream{st});
         const u64 N = s.states.rows;
         i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), N);
@@ -1198,24 +1245,31 @@ ffi::Error env_init_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffe
         if (views->size_bytes())
             cuda::check(cudaMemsetAsync(views->untyped_data(), 0, views->size_bytes(), st), "cudaMemsetAsync (views)");
         rl::EnvBatch b = make_batch(*e, s, N, ids);
+        if (visited_count->size_bytes())
+            cuda::check(cudaMemsetAsync(visited_count->untyped_data(), 0, visited_count->size_bytes(), st),
+                        "cudaMemsetAsync (visited_count)");
         env.reset(b, nullptr, s.count.as<i32>());
     });
 }
 
-ffi::Error env_reset_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool keep_goals, ffi::AnyBuffer states_in,
+ffi::Error env_reset_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool keep_goals, bool clear_visited, ffi::AnyBuffer states_in,
                           ffi::AnyBuffer task_ids, ffi::AnyBuffer steps_in, ffi::AnyBuffer count_in,
                           ffi::AnyBuffer counts_in, ffi::AnyBuffer views_in, ffi::AnyBuffer goal_pos_in,
-                          ffi::AnyBuffer goal_neg_in, ffi::AnyBuffer at_goal_in, ffi::AnyBuffer mask,
+                          ffi::AnyBuffer goal_neg_in, ffi::AnyBuffer at_goal_in, ffi::AnyBuffer visited_in, ffi::AnyBuffer visited_count_in,
+                         ffi::AnyBuffer visited_status_in, ffi::AnyBuffer mask,
                           ffi::Result<ffi::AnyBuffer> states, ffi::Result<ffi::AnyBuffer> steps,
                           ffi::Result<ffi::AnyBuffer> count, ffi::Result<ffi::AnyBuffer> counts,
                           ffi::Result<ffi::AnyBuffer> views, ffi::Result<ffi::AnyBuffer> goal_pos,
-                          ffi::Result<ffi::AnyBuffer> goal_neg, ffi::Result<ffi::AnyBuffer> at_goal)
+                          ffi::Result<ffi::AnyBuffer> goal_neg, ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,
+                         ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal};
+        ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg, at_goal,
+                                         visited, visited_count, visited_status};
         const ffi::AnyBuffer args[] = {states_in,   steps_in,    count_in,   counts_in,
-                                       views_in,    goal_pos_in, goal_neg_in, at_goal_in};
+                                       views_in,    goal_pos_in, goal_neg_in, at_goal_in,
+                                       visited_in, visited_count_in, visited_status_in};
         const StateBufs s = state_results(*e, res, args, Fields{}, OnStream{st});
         const u64 N = s.states.rows;
         const View m = view(mask, "mask", ffi::DataType::PRED, true);
@@ -1226,7 +1280,8 @@ ffi::Error env_reset_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool keep_go
         cuda::DeviceEnv& env = device_env(*e, *d, s);
         env.set_stream(st);
         rl::EnvBatch b = make_batch(*e, s, N, ids);
-        env.reset(b, m.as<u8>(), s.count.as<i32>(), keep_goals);
+        if (!clear_visited)
+            env.reset(b, m.as<u8>(), s.count.as<i32>(), keep_goals);
     });
 }
 
@@ -1257,11 +1312,18 @@ ffi::Error env_step_cuda(cudaStream_t st, i32 ordinal, i64 handle, MYMYR_STEP_PA
     return guarded([&] {
         EntryPtr e = entry(handle);
         const StepCall c = step_call(*e, states_in, task_ids_in, steps_in, draws_in, count_in, counts_in, views_in,
-                                     goal_pos_in, goal_neg_in, at_goal_in, env_id, seed, action, next_task_ids, states,
-                                     task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, reward,
-                                     terminated, truncated, goal, invalid, schema, binding, final_states, OnStream{st});
+                                     goal_pos_in, goal_neg_in, at_goal_in, visited_in, visited_count_in, visited_status_in,
+                                     env_id, seed, action, next_task_ids, states,
+                                     task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal,
+                                     visited, visited_count, visited_status, reward,
+                                     terminated, truncated, goal, invalid, schema, binding, final_states, revisited, OnStream{st});
+        if (e->H)
+            fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
+        if (revisited->size_bytes())
+            cuda::check(cudaMemsetAsync(revisited->untyped_data(), 0, revisited->size_bytes(), st),
+                        "cudaMemsetAsync (revisited)");
         cuda::DeviceEnv& env = device_env(*e, *d, c.s);
         env.set_stream(st);
         rl::EnvBatch b = make_batch(*e, c.s, c.N, e->multi() ? c.s.task_ids.as<i32>() : nullptr);
@@ -1379,6 +1441,8 @@ ffi::Error env_initialize_cuda(i32 ordinal, const ffi::Dictionary& attrs, const 
         if (!handle.has_value())
             fail("an environment call without its 'handle' attribute");
         EntryPtr e = entry(handle.value());
+        if (e->H)
+            fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
         const auto dims = first.dimensions();
         u64 rows = first.element_count();
         if (!vector && dims.size() > 0)
@@ -1497,7 +1561,7 @@ void bind_rl_jax(nb::module_& parent)
             "__init__",
             [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
-               bool canonical, bool witness, Arg<ann::EnvPath> path) {
+               bool canonical, bool witness, Arg<ann::EnvPath> path, Arg<std::variant<bool, int>> track_visited) {
                 const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 rl::EnvConfig c;
                 c.max_steps = max_steps;
@@ -1509,12 +1573,14 @@ void bind_rl_jax(nb::module_& parent)
                 c.autoreset = autoreset;
                 c.canonical_order = canonical;
                 c.witness_pruning = witness;
-                new (self) PyJaxEnv(std::move(table), std::move(device), std::move(ctx), c, nb::cast<std::string>(path));
+                new (self) PyJaxEnv(std::move(table), std::move(device), std::move(ctx), c, nb::cast<std::string>(path),
+                                    visited_capacity_arg(track_visited, max_steps));
             },
             "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
-            "path"_a = "auto")
+            "path"_a = "auto", "track_visited"_a = false)
+        .def_prop_ro("visited_capacity", [](const PyJaxEnv& e) { return e.entry().H; })
         .def_prop_ro("handle", &PyJaxEnv::handle, "The FFI attribute `handle` of this environment's calls.")
         .def_prop_ro("table", [](const PyJaxEnv& e) { return SuiteArg(e.ref().obj); })
         .def_prop_ro("num_instances", [](const PyJaxEnv& e) { return e.entry().suite->size(); })
