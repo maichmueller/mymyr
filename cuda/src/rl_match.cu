@@ -46,8 +46,10 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
         else
         {
             const i32 begin = t.instance_offsets[g], end = t.instance_offsets[g + 1];
+            if (!b.first && local >= static_cast<u32>(end - begin))
+                continue;
             const i32 first = begin + static_cast<i32>(local);
-            const i32 last = b.first ? end : first < end ? first + 1 : end;
+            const i32 last = b.first ? end : first + 1;
             for (i32 k = first; k < last; ++k)
             {
                 if (t.num_vars[k] > 64)
