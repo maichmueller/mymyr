@@ -408,3 +408,25 @@ def test_device_invalid_slots_raise_like_the_host():
     ids = torch.tensor([0, 1, 5], dtype=torch.int32, device="cuda")
     with pytest.raises(ValueError, match=r"task_ids\[2\] is outside the source table"):
         a.translate(clean.repeat(2, 1)[:3], ids, b, missing="drop")
+
+
+def test_invalid_task_ids_raise_before_invalid_slots_on_host_and_device():
+    """Row 0 sets a bit past the source's slots and row 1 has a task id outside the table: both report the task id,
+    since every task id is checked before any row."""
+    source, target, host, _ = invalid_and_missing_rows()
+    a, b = rl.TaskTable([source, source]), rl.TaskTable([target, target])
+    rows = host[[2, 1]]
+    message = r"task_ids\[1\] is outside the source table"
+    for missing in ("raise", "drop"):
+        with pytest.raises(ValueError, match=message):
+            a.translate(rows, np.array([0, 5], dtype=np.int32), b, missing=missing)
+    torch = gpu()
+    device_rows = torch.from_numpy(rows.view(np.int64).copy()).cuda()
+    ids = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
+    for missing in ("raise", "drop"):
+        with pytest.raises(ValueError, match=message):
+            a.translate(device_rows, ids, b, missing=missing)
+    status = torch.empty(3, dtype=torch.int32, device="cuda")
+    a.translate(device_rows, ids, b, status=status)
+    torch.cuda.synchronize()
+    assert status.tolist() == [3, 1, -1]

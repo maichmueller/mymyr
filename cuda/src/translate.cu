@@ -69,7 +69,8 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
         __syncwarp();
         const i32 id = ids ? ids[row] : 0;
         u32 flags = 0;
-        if (id < 0 || static_cast<u32>(id) >= map.count)
+        const bool bad_id = id < 0 || static_cast<u32>(id) >= map.count;
+        if (bad_id)
             flags = 2;
         else
         {
@@ -125,14 +126,15 @@ __global__ void translate(TranslateView map, const u64* source, u64 rows, u64 st
                 atomicOr(status, static_cast<i32>(flags));
                 atomicMin(status + 1, static_cast<i32>(row));
                 if (flags & 2)
-                    atomicMin(status + 2, static_cast<i32>(row));
+                    atomicMin(status + 2, bad_id ? static_cast<i32>(row) + INT_MIN : static_cast<i32>(row));
             }
         }
     }
 }
 
-// During the translation status[2] holds the first row with flag 2. An invalid source slot or task id is reported
-// before any missing value, as the host does.
+// During the translation status[2] holds the first row with flag 2, keyed so that rows with an invalid task id
+// (row + INT_MIN, negative) come before rows with an invalid source slot (row). As on the host, which checks every
+// task id before any row, an invalid task id is reported first, then an invalid source slot, then a missing value.
 __global__ void finish_status(TranslateView map, const u64* source, u64 stride, u32 sw, const i32* ids, i32* status)
 {
     if (status[1] == INT_MAX)
@@ -142,7 +144,8 @@ __global__ void finish_status(TranslateView map, const u64* source, u64 stride, 
         return;
     }
     const bool invalid = status[0] & 2;
-    const u32 row = static_cast<u32>(invalid ? status[2] : status[1]);
+    const i32 key = status[2];
+    const u32 row = static_cast<u32>(!invalid ? status[1] : key < 0 ? key - INT_MIN : key);
     status[1] = static_cast<i32>(row);
     status[2] = -1;
     const i32 id = ids ? ids[row] : 0;

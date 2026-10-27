@@ -280,8 +280,8 @@ CUDA translation requires fixed target slots. It runs on `stream=` (or the task'
 for errors after waiting. Passing a CUDA int32 `status` array of shape `[3]` leaves the check to the caller and permits
 graph capture. Its entries are the flags of all rows, then the row and source slot of the first error, the one that
 host translation with `missing='raise'` reports; success is `[0, -1, -1]`. Flags are 1 for a missing value, 2 for invalid source slots or
-task ids, and 4 for unrepresentable numeric values. With flag 2 the error is the first row with an invalid source slot
-(the slot) or task id (slot -1). Otherwise it is the first row with a missing or unrepresentable value: numeric slots
+task ids, and 4 for unrepresentable numeric values. With flag 2 the error is the first row with an invalid task id
+(slot -1) or, when every task id is valid, the first row with an invalid source slot (the slot). Otherwise it is the first row with a missing or unrepresentable value: numeric slots
 follow the instance's fluent slots, followed by unrepresentable static facts. Warm the map on the same context before capture,
 pass both `status=` and `stream=`, and keep inputs, outputs, status and tasks alive through every replay. Each replay
 resets status. Outputs are stream-ordered graph allocations: a native wrapper that retains them between replays must
