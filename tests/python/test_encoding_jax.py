@@ -1182,10 +1182,11 @@ def test_rows_made_on_xlas_stream_right_before_the_encode_are_complete(cases):
         same_batch(want, f(base, heavy))
 
 
-def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
-    """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
-    captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""
-    need_gpu()
+@pytest.mark.jax_on_cpu(per_case=True)
+def test_encoder_device_retirement_preserves_an_unrelated_capture(cases):
+    """Retiring the device without an executable neither invalidates a foreign capture nor leaks its generation."""
+    if not _encoding_jax.has_cuda():
+        pytest.skip("the encoding FFI has no CUDA handler")
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("torch has no CUDA device")
@@ -1196,6 +1197,7 @@ def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     x = torch.zeros(8, device="cuda")
     torch.cuda.synchronize()
     capturing, release = threading.Event(), threading.Event()
+    errors = []
 
     def capture():
         graph = torch.cuda.CUDAGraph()
@@ -1203,9 +1205,9 @@ def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
             with torch.cuda.graph(graph, capture_error_mode="global"):
                 (x + 1).sum()
                 capturing.set()
-                release.wait(60)
-        except Exception:  # the capture was invalidated by the refused synchronization
-            pass
+                assert release.wait(10)
+        except BaseException as error:
+            errors.append(error)
         finally:
             capturing.set()
 
@@ -1213,13 +1215,13 @@ def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     thread = threading.Thread(target=capture)
     thread.start()
     try:
-        assert capturing.wait(60)
-        time.sleep(0.2)
+        assert capturing.wait(10)
         ej.unregister(handle)  # the registry held the last reference
     finally:
         release.set()
         thread.join()
-    assert _encoding_jax.leaked_devices() == before + 1
+    assert not errors, errors
+    assert _encoding_jax.leaked_devices() == before
 
 
 def test_a_schema_whose_kernels_need_more_shared_memory_than_a_block_has_is_refused_when_traced():

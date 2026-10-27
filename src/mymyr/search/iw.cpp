@@ -145,23 +145,22 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
     timed = secs < 1e15;  // finite
     if (timed)
         deadline = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(std::max(secs, 0.0)));
-    error = check_layers(o.layers);
-    if (error.empty() && o.layers.kind != LayerOrdering::Kind::Queue)
+    if (std::string error = check_layers(o.layers); !error.empty())
+        throw std::invalid_argument(error);
+    if (o.layers.kind != LayerOrdering::Kind::Queue)
     {
         if (o.transition_ordering)
-            error = "IwOptions::layers cannot be combined with a transition ordering";
+            throw std::invalid_argument("IwOptions::layers cannot be combined with a transition ordering");
         else
             layers = std::make_unique<LayerOrderer>(t, o.layers);
     }
     const u32 T = resolve_threads(o.threads);
     const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
-    if (!error.empty())
-        return;
     if (T > 1 && !o.layers.beam())
-        error = "IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)";
+        throw std::invalid_argument("IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)");
     else if (layers && layers->relaxed() && slow)
-        error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
-                "successor order or a transition tree (tree='transitions')";
+        throw std::invalid_argument("LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+                                    "successor order or a transition tree (tree='transitions')");
     else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
              (o.tree == TreeRecord::None || layers->relaxed()))
         team = std::make_unique<BeamTeam>(t, o.tree == TreeRecord::None ? T : 1);
@@ -1198,12 +1197,6 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
 {
     IwResult r;
     const IwOptions& o = c.options;
-    if (!c.error.empty())
-    {
-        r.status = SearchStatus::Failed;
-        r.message = c.error;
-        return r;
-    }
     const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_width;
     if (top > novelty::k_max_arity)
     {

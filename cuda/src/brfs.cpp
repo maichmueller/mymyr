@@ -1,5 +1,6 @@
 // The device layer BrFS (include/mymyr/cuda/brfs.hpp).
 
+#include "capture_scope.hpp"
 #include "row_layout.hpp"
 
 #include "mymyr/cuda/brfs.hpp"
@@ -240,6 +241,7 @@ DeviceBrfs::DeviceBrfs(ContextPtr ctx, TaskPtr task, const DeviceBrfsOptions& op
 
 DeviceBrfs::~DeviceBrfs()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

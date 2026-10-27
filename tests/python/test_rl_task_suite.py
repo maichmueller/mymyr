@@ -349,6 +349,7 @@ def test_device_suite_env_equals_host(sets, key):
             assert env.count.cpu().numpy().tolist() == [init_count[i] for i in np.roll(ids, 3)], (order, path)
 
 
+@pytest.mark.jax_on_cpu
 def test_captured_suite_rollout_equals_host(sets):
     dev = gpu_device()
     rt = pytest.importorskip("mymyr.rl.torch")

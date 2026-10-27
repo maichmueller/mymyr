@@ -135,19 +135,20 @@ def test_invalid_beam_arguments(gripper):
         search.brfs(gripper, layer_order="reverse", beam_width=4, randomize_ties=True)
     with pytest.raises(ValueError, match="flat or chunked"):
         search.brfs(gripper, store="compact", **beam(4))
-    # the IW searches report the error as FAILED
-    for r in (search.iw(gripper, beam_width=4), search.iw_pass(gripper, 1, **beam(0)),
-              search.siw(gripper, **beam(4, max_next_layer_states=3)),
-              search.liw(gripper, **beam(4, "survivors_only")),
-              search.abstracted_iw(gripper, beam_width=4),
-              search.projective_iw(gripper, layer_order="reverse", randomize_ties=True)):
-        assert r.status == Status.FAILED and r.message
+    with pytest.raises(ValueError, match="positive"):
+        search.iw_pass(gripper, 1, **beam(0))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        search.siw(gripper, **beam(4, max_next_layer_states=3))
+    with pytest.raises(ValueError, match="randomize_ties requires"):
+        search.projective_iw(gripper, layer_order="reverse", randomize_ties=True)
+    with pytest.raises(ValueError, match="AllTested"):
+        search.liw(gripper, **beam(4, "survivors_only"))
 
 
 def test_a_beam_refuses_a_transition_ordering(gripper):
     order = search.LandmarkTransitionOrdering(search.approximate_fact_landmarks(gripper))
-    r = search.iw(gripper, max_width=1, transition_ordering=order, **beam(4))
-    assert r.status == Status.FAILED and "transition ordering" in r.message
+    with pytest.raises(ValueError, match="transition ordering"):
+        search.iw(gripper, max_width=1, transition_ordering=order, **beam(4))
 
 
 def summary(r):
@@ -198,13 +199,17 @@ def test_relaxed_survivors_only_beam(blocks, gripper):
 
 
 def test_invalid_threads_and_relaxed_arguments(gripper):
-    for r in (search.iw(gripper, threads=2), search.siw(gripper, layer_order="goal_count", threads=2),
-              search.abstracted_iw(gripper, threads=2),
-              search.liw(gripper, **beam(4, "relaxed_survivors_only")),
-              search.iw(gripper, **beam(4, "relaxed_survivors_only", beam_chunk=0)),
-              search.iw(gripper, layer_order="reverse", beam_width=4, beam_novelty="relaxed_survivors_only"),
-              search.iw(gripper, observer=Expansions(), **beam(4, "relaxed_survivors_only"))):
-        assert r.status == Status.FAILED and r.message
+    for call in (lambda: search.iw(gripper, threads=2),
+                 lambda: search.siw(gripper, layer_order="goal_count", threads=2),
+                 lambda: search.abstracted_iw(gripper, threads=2),
+                 lambda: search.liw(gripper, **beam(4, "relaxed_survivors_only")),
+                 lambda: search.iw(gripper, observer=Expansions(), **beam(4, "relaxed_survivors_only"))):
+        with pytest.raises(ValueError):
+            call()
+    with pytest.raises(ValueError, match="beam_chunk must be positive"):
+        search.iw(gripper, **beam(4, "relaxed_survivors_only", beam_chunk=0))
+    with pytest.raises(ValueError, match="requires Kind::GoalCount"):
+        search.iw(gripper, layer_order="reverse", beam_width=4, beam_novelty="relaxed_survivors_only")
     with pytest.raises(ValueError, match="requires Kind::GoalCount"):
         search.brfs(gripper, layer_order="in_order", beam_width=4, beam_novelty="relaxed_survivors_only")
     with pytest.raises(ValueError, match="observer"):

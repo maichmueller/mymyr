@@ -807,16 +807,15 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
     {
         IwOptions o;
         o.layers = lo;
-        const IwResult r = iw(*task, o);
-        EXPECT_EQ(r.status, SearchStatus::Failed) << msg;
-        EXPECT_NE(r.message.find(msg), std::string::npos) << r.message;
-        EXPECT_EQ(siw(*task, o).status, SearchStatus::Failed) << msg;
+        EXPECT_THROW((void)iw(*task, o), std::invalid_argument) << msg;
+        EXPECT_THROW((void)iw_pass(*task, 1, o), std::invalid_argument) << msg;
+        EXPECT_THROW((void)siw(*task, o), std::invalid_argument) << msg;
         LiwOptions l;
         l.layers = lo;
-        EXPECT_EQ(liw(*task, l).status, SearchStatus::Failed) << msg;
+        EXPECT_THROW((void)liw(*task, l), std::invalid_argument) << msg;
         AbstractedIwOptions a;
         a.layers = lo;
-        EXPECT_EQ(abstracted_iw(*task, a).status, SearchStatus::Failed) << msg;
+        EXPECT_THROW((void)abstracted_iw(*task, a), std::invalid_argument) << msg;
         BrfsOptions b;
         b.stop_at_goal = false;
         b.layers = lo;
@@ -833,18 +832,16 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
     // LIW: no read-only test
     LiwOptions l;
     l.layers = beam(4, Novelty::SurvivorsOnly);
-    const IwResult lr = liw(*task, l);
-    EXPECT_EQ(lr.status, SearchStatus::Failed);
-    EXPECT_NE(lr.message.find("AllTested"), std::string::npos) << lr.message;
+    EXPECT_THROW((void)liw(*task, l), std::invalid_argument);
     // coordination: only the queued BrFS
     SearchCoordination coord;
     AbstractedIwOptions a;
     a.layers = beam(4, Novelty::AllTested);
     a.control.coordination = &coord;
-    EXPECT_EQ(abstracted_iw(*task, a).status, SearchStatus::Failed);
+    EXPECT_THROW((void)abstracted_iw(*task, a), std::invalid_argument);
     l.layers = beam(4, Novelty::AllTested);
     l.control.coordination = &coord;
-    EXPECT_EQ(liw(*task, l).status, SearchStatus::Failed);
+    EXPECT_THROW((void)liw(*task, l), std::invalid_argument);
     // the multi-threaded BrFS orders layers only with a beam; the concurrent and compact stores order none
     BrfsOptions b;
     b.stop_at_goal = false;
@@ -870,9 +867,7 @@ TEST(BeamRefusals, TransitionOrderingIsRefused)
     IwOptions o;
     o.layers = beam(4, Novelty::AllTested);
     o.transition_ordering = std::make_shared<Keep>();
-    const IwResult r = iw(*task, o);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("transition ordering"), std::string::npos) << r.message;
+    EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
 }
 
 // ------------------------------------------------------------------------------------------------- threads

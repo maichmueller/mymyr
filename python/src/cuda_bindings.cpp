@@ -13,6 +13,7 @@
 
 #include "arrays.hpp"
 #include "completed_release.hpp"
+#include "capture_scope.hpp"
 #include "cuda_stream.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
@@ -97,6 +98,7 @@ public:
     explicit PyContext(cuda::ContextPtr c) : ctx(std::move(c)) {}
     ~PyContext()
     {
+        cuda::detail::RelaxedCaptureScope capture_mode;
         try
         {
             drain(true);
@@ -1992,7 +1994,7 @@ void bind_cuda(nb::module_& parent)
         .def_prop_ro("numeric_words", [](const DevicePadded& p) { return p.numeric_words; },
                      "Numeric words per row after the atom words (0 for classical tables).")
         .def_prop_ro("overflow", [](const DevicePadded& p) { return p.overflow; },
-                     "Whether some state has more than K successors (count > K): those were not written.")
+                     "Whether the flat or padded capacity or the atom-word width omitted successor data.")
         .def_prop_ro("index", [](const DevicePadded& p) -> ArrayOut {
             return p.array(p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] int32: row of the flat arrays, -1 = none")

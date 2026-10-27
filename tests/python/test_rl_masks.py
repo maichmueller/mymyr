@@ -180,8 +180,7 @@ def test_masks_framework_cpu(framework):
         states = convert(rows.view(np.int64))
         as_numpy = lambda a: a.numpy()
     else:
-        import jax.numpy as jnp
-        convert = jnp.asarray
+        convert = lambda a: lib.device_put(a, lib.devices("cpu")[0])
         states = convert(rows.view(np.uint32))
         as_numpy = np.asarray
     actual = rl.applicable_schemas(task, states)

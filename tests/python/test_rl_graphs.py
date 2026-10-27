@@ -50,6 +50,7 @@ def expect_equal_results(rollout, results, where):
 
 
 @pytest.mark.parametrize("name", MASK_SETS)
+@pytest.mark.jax_on_cpu
 def test_captured_rollout_equals_host_on_tables(sets, name):
     """K random steps per graph with next_task_ids (rewritten between replays) and per-env goals == the host env."""
     dev = gpu_device()
@@ -80,6 +81,7 @@ def test_captured_rollout_equals_host_on_tables(sets, name):
 
 
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "gripper__prob05", "miconic__s7-4"])
+@pytest.mark.jax_on_cpu
 def test_captured_rollout_equals_eager(name):
     """A policy's graph (given actions, invalid ones too) and the random policy's, with set_seed, masked resets and a
     side stream between replays: byte for byte the eager steps."""
@@ -123,6 +125,7 @@ def test_captured_rollout_equals_eager(name):
         a.check_errors()
 
 
+@pytest.mark.jax_on_cpu
 def test_torch_cuda_graph_around_env_calls():
     """torch.cuda.graph around reset (a mask), random_actions and steps == the same calls eagerly."""
     dev = gpu_device()

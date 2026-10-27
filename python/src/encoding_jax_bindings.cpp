@@ -36,9 +36,9 @@
 // state, which XLA destroys with the executable; the registry and every executable that calls the encoder keep it
 // alive, so a compiled function keeps working after unregister(). On CUDA the initialize stage (before XLA runs a call
 // or traces it into a command buffer) uploads the encoder's context to the call's device once and holds an
-// acquisition of it for the entry's lifetime; the execute stage then enqueues memsets and the encoding kernels on XLA's
-// stream with XLA's scratch, and nothing else: no allocation, synchronization, event or stream operation, so the
-// target is command-buffer compatible.
+// acquisition of it for the entry's and executable's lifetimes. The execute stage uses XLA's stream and scratch. Non-captured calls record completion events; captured calls enqueue only memsets and
+// kernels, so the target is command-buffer compatible. Device retirement waits on the completion events in its own
+// stream and releases its owners on a host worker.
 
 #include "ffi_registry.hpp"
 #include "typing.hpp"
@@ -48,6 +48,8 @@
 #include "mymyr/encoding/encoder.hpp"
 
 #if defined(MYMYR_HAS_CUDA)
+#include "capture_scope.hpp"
+#include "deferred_release.hpp"
 #include "mymyr/cuda/encoding.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #endif
@@ -67,6 +69,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -143,45 +146,59 @@ struct EncoderEntry : FfiEntry
         Device() = default;
         Device(const Device&) = delete;
         Device& operator=(const Device&) = delete;
+        std::mutex uses_mutex;
+        std::vector<std::unique_ptr<cuda::Event>> last_uses;
+        std::atomic<bool> failed{false};
+
+        void record(cudaStream_t stream)
+        {
+            std::lock_guard lock(uses_mutex);
+            cuda::detail::RelaxedCaptureScope capture_mode;
+            std::erase_if(last_uses, [](const auto& event) { return event->done(); });
+            auto ready = std::make_unique<cuda::Event>();
+            ready->record(stream);
+            last_uses.push_back(std::move(ready));
+        }
+
         ~Device()
         {
-            // The calls ran on XLA's streams, which the acquisition's release does not wait for: the device's work
-            // completes before the context generation can be freed. A device that cannot synchronize (CUDA refuses
-            // the call while another thread captures a CUDA graph, and a failed device may still run the work) keeps
-            // its generation: it is leaked rather than freed under the work that may read it.
-            const Detached detached;  // the last reference may be dropped by a Python thread
-            bool synchronized = false;
-            try
-            {
-                cuda::DeviceGuard guard(ordinal);
-                synchronized = cudaDeviceSynchronize() == cudaSuccess;
-                if (!synchronized)
-                    (void)cudaGetLastError();
-            }
-            catch (...)
-            {
-            }
-            if (synchronized)
-            {
-                try
-                {
-                    cuda::DeviceGuard guard(ordinal);
-                    held.reset();
-                    encoder.reset();
-                }
-                catch (...)
-                {
-                }
+            if (!ctx)
                 return;
-            }
-            struct Leaked
+            struct Resources
             {
                 cuda::ContextPtr ctx;
                 std::unique_ptr<cuda::DeviceEncoder> encoder;
                 std::optional<cuda::EncodingAcquisition> held;
             };
-            new Leaked{std::move(ctx), std::move(encoder), std::move(held)};
-            ++leaked_devices;
+            const Detached detached;
+            cuda::detail::RelaxedCaptureScope capture_mode;
+            std::shared_ptr<Resources> retiring;
+            try
+            {
+                cuda::DeviceGuard guard(ordinal);
+                // Executables retain captured calls. Events cover eager calls even if XLA destroys their streams.
+                if (failed.load())
+                    throw std::runtime_error("mymyr: encoding: device execution failed");
+                for (const auto& ready : last_uses)
+                    ready->wait_on(ctx->stream());
+                retiring = std::make_shared<Resources>();
+                retiring->ctx = ctx;
+                retiring->encoder = std::move(encoder);
+                if (held)
+                {
+                    retiring->held.emplace(std::move(*held));
+                    held.reset();
+                }
+                cuda::detail::release_after(ctx, retiring, []() noexcept { ++leaked_devices; });
+            }
+            catch (...)
+            {
+                // A failed device may still read its generation; keep it until driver teardown.
+                if (!retiring)
+                    retiring = std::make_shared<Resources>(Resources{std::move(ctx), std::move(encoder), std::move(held)});
+                (void)new std::shared_ptr<Resources>(std::move(retiring));
+                ++leaked_devices;
+            }
         }
     };
     static inline std::atomic<u64> leaked_devices{0};
@@ -232,6 +249,19 @@ struct EncodeCall
 {
     static ffi::TypeId id;
     EntryPtr entry;
+#if defined(MYMYR_HAS_CUDA)
+    std::mutex devices_mutex;
+    std::map<int, std::shared_ptr<EncoderEntry::Device>> devices;
+
+    std::shared_ptr<EncoderEntry::Device> device(int ordinal, bool create)
+    {
+        std::lock_guard lock(devices_mutex);
+        auto& d = devices[ordinal];
+        if (!d)
+            d = entry->device(ordinal, create);
+        return d;
+    }
+#endif
 };
 template<int Platform>
 ffi::TypeId EncodeCall<Platform>::id = {};
@@ -783,9 +813,24 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
         cuda::check(cudaStreamIsCapturing(st, &status), "cudaStreamIsCapturing");
         const bool capturing = status != cudaStreamCaptureStatusNone;
-        auto d = e.device(ordinal, !capturing);
+        auto d = call->device(ordinal, !capturing);
         if (!d)
             fail("the encoder's context is not on cuda:" + std::to_string(ordinal) + " (the initialize stage uploads it)");
+        struct Completion
+        {
+            EncoderEntry::Device& device;
+            cudaStream_t stream;
+            bool capturing;
+            bool complete = false;
+            ~Completion()
+            {
+                if (!complete)
+                {
+                    if (!capturing)
+                        try { device.record(stream); } catch (...) { device.failed.store(true); }
+                }
+            }
+        } completion{*d, st, capturing};
         ++e.cuda_calls;
         if (capturing)
             ++e.captured_calls;
@@ -795,6 +840,9 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
                 if (c.arrays[k])
                     cuda::check(cudaMemsetAsync(c.arrays[k], 0, c.bytes[k], st), "cudaMemsetAsync");
             cuda::check(cudaMemsetAsync(c.sizes, 0, sizeof(encoding::FlatSizes), st), "cudaMemsetAsync");
+            if (!capturing)
+                d->record(st);
+            completion.complete = true;
             return;
         }
         const encoding::BatchShape shape = c.capacities;
@@ -824,6 +872,9 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         out.sizes = c.sizes;
         out.zero_unused = true;
         d->encoder->encode(*d->held, st, reinterpret_cast<void*>(base + pad), c.scratch_bytes - pad, shape, in, out);
+        if (!capturing)
+            d->record(st);
+        completion.complete = true;
     });
 }
 
@@ -831,7 +882,7 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
 /// execute stage, which XLA may trace into a command buffer, allocates nothing.
 ffi::Error encode_initialize_cuda(i32 ordinal, CudaCall* call, ffi::Dictionary, ffi::RemainingArgs, ffi::RemainingRets)
 {
-    return guarded([&] { state_of(call)->entry->device(ordinal, true); });
+    return guarded([&] { state_of(call)->device(ordinal, true); });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_encode_instantiate_cuda, encode_instantiate<CudaCall>,
@@ -930,7 +981,7 @@ void bind_encoding_jax(nb::module_& parent)
     m.def(
         "unregister",
         [](i64 handle) {
-            nb::gil_scoped_release release;  // the last reference destroys the entry, which waits for its devices
+            nb::gil_scoped_release release;  // the last reference retires the entry and its devices
             ffi_registry().remove(handle);
         },
         "handle"_a,
@@ -1015,8 +1066,7 @@ void bind_encoding_jax(nb::module_& parent)
 #else
         [] { return u64{0}; },
 #endif
-        "How many encoder slots on a device were leaked instead of freed because the device could not synchronize when "
-        "the slot was destroyed (CUDA refuses the synchronization while another thread captures a CUDA graph).");
+        "How many encoder slots on a failed device were retained because their stream-ordered retirement failed.");
     m.def(
         "calls",
         [](i64 handle) {

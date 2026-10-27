@@ -1,5 +1,7 @@
+#include "capture_scope.hpp"
 #include "encoding_collate.hpp"
 #include "mymyr/cuda/encoding.hpp"
+
 
 #include <algorithm>
 #include <limits>
@@ -117,6 +119,7 @@ struct DeviceCollator::Impl
 
     ~Impl()
     {
+        detail::RelaxedCaptureScope capture_mode;
         // Staging may be recycled only after the descriptor copy has finished.
         if (has_upload)
             try { uploaded.synchronize(); } catch (...) { (void)cudaStreamSynchronize(stream); }

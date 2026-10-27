@@ -3,7 +3,9 @@
 // suite of several domains each domain's multi-instance kernels on its rows) and of the general path
 // (SuiteExpander: a table's DeviceExpander, or one per domain), over the kernels of cuda/env_kernels.hpp.
 
+#include "capture_scope.hpp"
 #include "mymyr/cuda/env.hpp"
+
 
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/cuda/expand.hpp"
@@ -905,6 +907,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
 
 DeviceEnv::~DeviceEnv()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

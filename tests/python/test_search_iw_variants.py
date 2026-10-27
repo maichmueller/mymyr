@@ -83,6 +83,29 @@ def test_plans_replay(name):
             assert r.goal_state == end
 
 
+@pytest.mark.parametrize("name", ["iw", "iw_pass", "siw", "liw", "abstracted_iw", "projective_iw", "brfs"])
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("explicit_queue", [False, True])
+def test_beam_requires_ordered_layers(gripper, name, threads, explicit_queue):
+    options = {"beam_width": 4, "threads": threads}
+    if name == "iw_pass":
+        options["width"] = 1
+    if explicit_queue:
+        options["layer_order"] = "queue"
+    with pytest.raises(ValueError, match="beam_width.*ordered layer"):
+        getattr(search, name)(gripper, **options)
+
+
+@pytest.mark.parametrize("name", ["iw", "iw_pass", "siw", "liw", "abstracted_iw", "projective_iw", "brfs"])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_beam_accepts_ordered_layers(gripper, name, threads):
+    options = {"beam_width": 4, "layer_order": "in_order", "threads": threads, "max_expanded": 20}
+    if name == "iw_pass":
+        options["width"] = 1
+    result = getattr(search, name)(gripper, **options)
+    assert result.status != Status.FAILED, result.message
+
+
 def test_liw_landmark_sources_agree(blocks):
     lifted = search.lifted_fact_landmarks(blocks)
     approx = search.approximate_fact_landmarks(blocks)
@@ -429,8 +452,8 @@ def test_argument_errors(blocks, gripper):
     g2 = search.FactLandmarkGraph(blocks, [], [["(on c a)", "(on b a)"]])
     r = search.liw(blocks, landmarks=g2, disjunctive=True, all_private=True, unshared_atoms=["(on a b)"])
     assert r.status == Status.FAILED and "all_private" in r.message
-    r = search.abstracted_iw(blocks, max_next_layer_states=3)
-    assert r.status == Status.FAILED and "max_next_layer_states" in r.message
+    with pytest.raises(ValueError, match="max_next_layer_states"):
+        search.abstracted_iw(blocks, max_next_layer_states=3)
     b = search.find_rollouts_parallel(blocks, [1], max_width=1)
     b2 = search.find_rollouts_parallel(gripper, [1], max_width=1)
     with pytest.raises(ValueError):

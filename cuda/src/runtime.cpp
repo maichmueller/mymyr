@@ -1,12 +1,15 @@
 // The CUDA backend's runtime layer: contexts, pools, buffers, events (include/mymyr/cuda/runtime.hpp).
 
+#include "capture_scope.hpp"
 #include "completed_release.hpp"
+#include "deferred_release.hpp"
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
 #include <string_view>
 #include <utility>
 
@@ -114,7 +117,11 @@ Event& Event::operator=(Event&& o) noexcept
 
 void Event::record(cudaStream_t s) { check(cudaEventRecord(m_e, s), "cudaEventRecord"); }
 void Event::wait_on(cudaStream_t s) const { check(cudaStreamWaitEvent(s, m_e, 0), "cudaStreamWaitEvent"); }
-void Event::synchronize() const { check(cudaEventSynchronize(m_e), "cudaEventSynchronize"); }
+void Event::synchronize() const
+{
+    detail::RelaxedCaptureScope capture_mode;
+    check(cudaEventSynchronize(m_e), "cudaEventSynchronize");
+}
 
 bool Event::done() const
 {
@@ -145,6 +152,7 @@ Stream::Stream() { check(cudaStreamCreateWithFlags(&m_s, cudaStreamNonBlocking),
 
 Stream::~Stream()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m_s)
     {
         (void)cudaStreamSynchronize(m_s);
@@ -152,7 +160,11 @@ Stream::~Stream()
     }
 }
 
-void Stream::synchronize() const { check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize"); }
+void Stream::synchronize() const
+{
+    detail::RelaxedCaptureScope capture_mode;
+    check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
+}
 
 // ------------------------------------------------------------------------------------------------ resources
 
@@ -191,7 +203,10 @@ public:
     void deallocate(void* p, usize, usize) noexcept override
     {
         if (p)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(p);
+        }
     }
     [[nodiscard]] MemKind kind() const noexcept override { return MemKind::Pinned; }
 
@@ -215,7 +230,10 @@ public:
     void deallocate(void* p, usize, usize) noexcept override
     {
         if (p)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFree(p);
+        }
     }
     [[nodiscard]] MemKind kind() const noexcept override { return MemKind::Managed; }
 
@@ -264,6 +282,7 @@ DeviceContext::DeviceContext(Private, int device, const ContextOptions& options)
 
 DeviceContext::~DeviceContext()
 {
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         DeviceGuard g(m_device);
@@ -290,6 +309,7 @@ void* DeviceContext::allocate(u64 bytes, cudaStream_t s)
 {
     if (bytes == 0)
         return nullptr;
+    detail::drain_releases(*this);
     DeviceGuard g(m_device);
     void* p = nullptr;
     const cudaError_t e = cudaMallocFromPoolAsync(&p, bytes, m_pool, s ? s : m_stream);
@@ -305,18 +325,25 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
 {
     if (!p)
         return;
-    int prev = -1;
-    const bool got = cudaGetDevice(&prev) == cudaSuccess;
-    if (got && prev != m_device)
-        (void)cudaSetDevice(m_device);
-    if (cudaFreeAsync(p, s ? s : m_stream) != cudaSuccess)
-        (void)cudaGetLastError();  // runtime unloading at exit: the driver reclaims everything
-    if (got && prev != m_device)
-        (void)cudaSetDevice(prev);
+    detail::RelaxedCaptureScope capture_mode;
+    try
+    {
+        DeviceGuard guard(m_device);
+        s = s ? s : m_stream;
+        if (auto capture = detail::capture_lifetime(s))
+            detail::release_deferred(shared_from_this(), p, {}, {std::move(capture)});
+        else
+            check(cudaFreeAsync(p, s), "cudaFreeAsync");
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "mymyr: CUDA: free retained allocation: %s\n", e.what());
+    }
 }
 
 PoolUsage DeviceContext::usage() const
 {
+    detail::drain_releases(*this);
     PoolUsage u;
     std::uint64_t v = 0;
     check(cudaMemPoolGetAttribute(m_pool, cudaMemPoolAttrReservedMemCurrent, &v), "cudaMemPoolGetAttribute");
@@ -332,6 +359,7 @@ PoolUsage DeviceContext::usage() const
 
 void DeviceContext::trim(u64 keep)
 {
+    detail::RelaxedCaptureScope capture_mode;
     synchronize();
     check(cudaMemPoolTrimTo(m_pool, keep), "cudaMemPoolTrimTo");
     std::vector<PinnedBuffer> cached;
@@ -368,9 +396,11 @@ PinnedLease DeviceContext::lease_pinned(u32 n, u64 bytes)
 
 void DeviceContext::synchronize() const
 {
+    detail::RelaxedCaptureScope capture_mode;
     DeviceGuard g(m_device);
     check(cudaStreamSynchronize(m_stream), "cudaStreamSynchronize");
     check(cudaStreamSynchronize(m_copy), "cudaStreamSynchronize");
+    detail::drain_releases(*this);
 }
 
 // ------------------------------------------------------------------------------------------------ buffers
@@ -466,32 +496,62 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
     }
     if (!m_ptr)
         return;
-    cudaStream_t fs = m_stream;
+    detail::RelaxedCaptureScope capture_mode;
+    try
     {
         std::lock_guard lock(*m_mutex);
-        int prev = -1;
-        const bool got = cudaGetDevice(&prev) == cudaSuccess;
-        if (got && prev != m_ctx->device())
-            (void)cudaSetDevice(m_ctx->device());
+        DeviceGuard guard(m_ctx->device());
         // the stream that frees: the releasing call's, the context's (a tracked LastUse: the allocation stream may be
         // gone), or the allocation stream
-        fs = release ? release : m_free_live ? m_ctx->stream() : m_stream;
-        for (cudaStream_t s : m_users)
-            if (s != fs)
-                order_after(fs, s);  // (the users must exist now)
+        const cudaStream_t fs = release ? release : m_free_live ? m_ctx->stream() : m_stream;
+        std::vector<cudaStream_t> streams = m_users;
+        streams.push_back(fs);
+        if (!m_free_live)
+            streams.push_back(m_stream);
+        std::vector<cudaStream_t> uncaptured;
+        std::vector<detail::CapturePtr> captures;
+        for (usize i = 0; i < streams.size(); ++i)
+        {
+            const auto s = streams[i];
+            if (std::find(streams.begin(), streams.begin() + static_cast<std::ptrdiff_t>(i), s) !=
+                streams.begin() + static_cast<std::ptrdiff_t>(i))
+                continue;
+            if (auto capture = detail::capture_lifetime(s))
+                captures.push_back(std::move(capture));
+            else
+                uncaptured.push_back(s);
+        }
+        for (const auto& last : m_lasts)
+            last->snapshot(fs, captures);
+        if (!captures.empty())
+        {
+            std::vector<Event> events;
+            for (auto s : uncaptured)
+            {
+                events.emplace_back();
+                events.back().record(s);
+            }
+            detail::release_deferred(m_ctx, m_ptr, std::move(events), std::move(captures));
+        }
+        else
+        {
+            for (cudaStream_t s : m_users)
+                if (s != fs)
+                    order_after(fs, s);  // (the users must exist now)
+            if (!m_free_live && fs != m_stream)
+                order_after(fs, m_stream);
+            m_ctx->deallocate(m_ptr, fs);
+        }
+        m_ptr = nullptr;
+        m_bytes = 0;
+        m_free_live = false;
         m_users.clear();
-        for (const auto& l : m_lasts)
-            l->wait_on(fs);
         m_lasts.clear();
-        if (!m_free_live && fs != m_stream)
-            order_after(fs, m_stream);
-        if (got && prev != m_ctx->device())
-            (void)cudaSetDevice(prev);
     }
-    m_ctx->deallocate(m_ptr, fs);
-    m_ptr = nullptr;
-    m_bytes = 0;
-    m_free_live = false;
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "mymyr: CUDA: buffer release retained allocation: %s\n", e.what());
+    }
 }
 
 namespace
@@ -570,8 +630,25 @@ void LastUse::record(cudaStream_t s)
 {
     std::lock_guard lock(m_mutex);
     DeviceGuard g(m_device);
+    std::erase_if(m_captures, [](const auto& c) { return c->complete.load(std::memory_order_acquire); });
+    auto capture = detail::capture_lifetime(s);
+    if (capture)
+        m_captures.push_back(capture);
     check(cudaEventRecord(m_event, s), "cudaEventRecord (last use)");
+    m_record_capture = std::move(capture);
     m_recorded = true;
+}
+
+void LastUse::snapshot(cudaStream_t stream, std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const
+{
+    std::lock_guard lock(m_mutex);
+    for (const auto& c : m_captures)
+        if (!c->complete.load(std::memory_order_acquire))
+            captures.push_back(c);
+    // A captured record completes with its graph's lifetime. Ordinary records are copied into stream order while
+    // locked, so a subsequent record cannot change the retirement dependency.
+    if (m_recorded && !m_record_capture)
+        check(cudaStreamWaitEvent(stream, m_event, 0), "cudaStreamWaitEvent (last use snapshot)");
 }
 
 bool LastUse::recorded() const noexcept
@@ -597,7 +674,10 @@ PinnedBuffer::PinnedBuffer(u64 bytes) : m_bytes(bytes)
 PinnedBuffer::~PinnedBuffer()
 {
     if (m_ptr)
+    {
+        detail::RelaxedCaptureScope capture_mode;
         (void)cudaFreeHost(m_ptr);
+    }
 }
 
 PinnedLease::~PinnedLease() { give_back(); }
@@ -638,7 +718,10 @@ PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& o) noexcept
     if (this != &o)
     {
         if (m_ptr)
+        {
+            detail::RelaxedCaptureScope capture_mode;
             (void)cudaFreeHost(m_ptr);
+        }
         m_ptr = std::exchange(o.m_ptr, nullptr);
         m_bytes = std::exchange(o.m_bytes, 0);
     }
@@ -649,12 +732,14 @@ PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& o) noexcept
 
 GraphExec::~GraphExec()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m_exec)
         (void)cudaGraphExecDestroy(m_exec);
 }
 
 GraphExec& GraphExec::operator=(GraphExec&& o) noexcept
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (this != &o)
     {
         if (m_exec)

@@ -430,6 +430,7 @@ def test_device_absorbing_rollout_equals_host(absorbing_tables, dead_end, termin
                         assert np.array_equal(a[field], value), (kind, goals, path, launch, step, field)
 
 
+@pytest.mark.jax_on_cpu
 def test_captured_sampled_rollout_equals_host(absorbing_tables):
     """Autoresets into sampled instances inside a CUDA graph: replays equal the host environment's steps."""
     from test_rl_table import gpu_device, step_arrays

@@ -41,31 +41,30 @@ inline novelty::LandmarkCoordinates make_coordinates(const Task& task, const Lan
 }
 
 /// Applies a layer ordering and a thread count (IwOptions::threads) to an engine environment (`orderer` and `team`
-/// hold their state and must outlive the search); returns an error message, or an empty string.
-inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& orderer, u32 threads, std::unique_ptr<BeamTeam>& team)
+/// hold their state and must outlive the search). Throws std::invalid_argument for unsupported options.
+inline void apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& orderer, u32 threads, std::unique_ptr<BeamTeam>& team)
 {
     if (std::string e = check_layers(lo); !e.empty())
-        return e;
+        throw std::invalid_argument(e);
     const u32 T = resolve_threads(threads);
     if (T > 1 && !lo.beam())
-        return "threads > 1 requires a beam (LayerOrdering::beam_width)";
+        throw std::invalid_argument("threads > 1 requires a beam (LayerOrdering::beam_width)");
     if (lo.kind == LayerOrdering::Kind::Queue)
-        return {};
+        return;
     if (env.coord)
-        return "SearchControl::coordination is only supported with LayerOrdering::Kind::Queue: an ordered or truncated layer order cannot "
-               "publish sound completed depths";
+        throw std::invalid_argument("SearchControl::coordination is only supported with LayerOrdering::Kind::Queue: an ordered or truncated layer order cannot "
+               "publish sound completed depths");
     orderer = LayerOrderer(env.task, lo);
     env.layers = &orderer;
     if (orderer.relaxed() && env.slow())
-        return "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
-               "successor order or a transition tree (tree='transitions')";
+        throw std::invalid_argument("LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+               "successor order or a transition tree (tree='transitions')");
     if (orderer.beam() && !env.slow() && (T > 1 || orderer.relaxed()) &&
         (env.tree == TreeRecord::None || orderer.relaxed()))
     {
         team = std::make_unique<BeamTeam>(env.task, env.tree == TreeRecord::None ? T : 1);
         env.team = team.get();
     }
-    return {};
 }
 
 /// A result that could not run.

@@ -72,8 +72,9 @@ def host(x):
 def assert_same_expansion(dev, cpu):
     """Equal outputs. The automatic capacity (the rows allocated) may differ: the CPU guesses it from a running
     branching estimate and reruns on overflow, the device counts first and allocates exactly the total."""
-    assert (dev.total, dev.words, dev.words_needed, dev.label_width, len(dev)) == (
+    assert (dev.total, dev.generated, dev.words, dev.words_needed, dev.label_width, len(dev)) == (
         cpu.total,
+        cpu.generated,
         cpu.words,
         cpu.words_needed,
         cpu.label_width,

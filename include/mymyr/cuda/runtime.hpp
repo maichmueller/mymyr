@@ -1,6 +1,6 @@
 #pragma once
 // The CUDA backend's runtime layer:
-//   - DeviceContext: a user-owned device context (no global state): the device ordinal, its own stream-ordered
+//   - DeviceContext: a user-owned device context: the device ordinal, its own stream-ordered
 //     memory pool (cudaMemPoolCreate, not the device's default pool), a compute stream and a copy stream. Everything
 //     that allocates device memory holds a shared_ptr to its context, so the pool outlives every buffer;
 //   - memory resources over the context (core/memory.hpp's MemoryResource: Device, Pinned, Managed);
@@ -25,6 +25,10 @@
 
 namespace mymyr::cuda
 {
+namespace detail
+{
+struct CaptureLifetime;
+}
 class CudaError : public std::runtime_error
 {
 public:
@@ -167,8 +171,8 @@ public:
     /// streams after an event handoff). Throws CudaError (cudaErrorMemoryAllocation beyond max_bytes).
     [[nodiscard]] void* allocate(u64 bytes, cudaStream_t s);
     /// Stream-ordered free on `s`: the memory is reused only after the work enqueued on s before this call.
+    /// May release memory outside an unrelated stream's graph capture.
     void deallocate(void* p, cudaStream_t s) noexcept;
-
     /// Memory resources (core/memory.hpp) of this context. Device: stream-ordered on stream(), and allocate()
     /// synchronizes that stream so the memory is usable anywhere; Pinned: cudaMallocHost; Managed: cudaMallocManaged.
     [[nodiscard]] MemoryResource& device_memory() noexcept { return *m_device_mr; }
@@ -223,9 +227,13 @@ public:
     [[nodiscard]] bool recorded() const noexcept;
 
 private:
+    friend class DeviceBuffer;
+    void snapshot(cudaStream_t stream, std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const;
     int m_device = 0;
     cudaEvent_t m_event = nullptr;
     bool m_recorded = false;
+    std::shared_ptr<detail::CaptureLifetime> m_record_capture;
+    std::vector<std::shared_ptr<detail::CaptureLifetime>> m_captures;
     mutable std::mutex m_mutex;
 };
 
@@ -254,8 +262,9 @@ public:
     /// The uses on `s` (record_stream, or the allocation stream) end with `last`, just recorded on s: the free
     /// waits for `last` instead of touching s, which may be gone by then. Thread-safe.
     void retire_stream(cudaStream_t s, std::shared_ptr<const LastUse> last);
-    /// Frees now (stream-ordered), as the destructor does: on the allocation stream, or on the context's stream when
-    /// the buffer tracks a LastUse.
+    /// Frees stream-ordered, as the destructor does: on the allocation stream, or on the context's stream when the
+    /// buffer tracks a LastUse. A capturing allocation or user stream retains the buffer through the graph's lifetime,
+    /// including executable clones and outstanding launches. Reclamation runs asynchronously on a host worker.
     void reset() noexcept;
     /// Frees now on `s` (a live stream, e.g. the call that releases the buffer: ordered after its work so far),
     /// after the recorded users, the tracked LastUse, and (when it tracks none) the allocation stream's work so far.

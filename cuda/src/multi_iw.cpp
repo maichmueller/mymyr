@@ -7,6 +7,7 @@
 // does nothing and the driver redoes the chunk at the reported sizes. The host reads the chunk's control block (a few
 // u32) once, after the last kernel; the last chunk of a layer also ends the layer (segments, shuffles, exhaustion).
 
+#include "capture_scope.hpp"
 #include "row_layout.hpp"
 
 #include "mymyr/cuda/multi_iw.hpp"
@@ -624,6 +625,7 @@ DeviceMultiIw::DeviceMultiIw(ContextPtr ctx, TaskPtr task, const MultiIwOptions&
 
 DeviceMultiIw::~DeviceMultiIw()
 {
+    detail::RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

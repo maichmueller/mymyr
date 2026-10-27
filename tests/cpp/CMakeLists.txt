@@ -121,6 +121,7 @@ if(TARGET mymyr_cuda)
                                     ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_iw.cpp
                                     ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_deep_matchers.cpp)
     target_link_libraries(mymyr_cuda_tests PRIVATE mymyr::cuda mymyr_warnings GTest::gtest_main)
+    target_include_directories(mymyr_cuda_tests PRIVATE ${PROJECT_SOURCE_DIR}/cuda/src)
     target_compile_definitions(mymyr_cuda_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     gtest_discover_tests(mymyr_cuda_tests DISCOVERY_TIMEOUT 60
         PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")

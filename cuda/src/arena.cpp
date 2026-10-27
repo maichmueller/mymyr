@@ -1,6 +1,8 @@
 // DeviceArena: append-only device records with tail syncs to a pinned mirror (include/mymyr/cuda/arena.hpp).
 
+#include "capture_scope.hpp"
 #include "mymyr/cuda/arena.hpp"
+
 
 #include "mymyr/core/checked.hpp"
 
@@ -28,6 +30,7 @@ DeviceArena::DeviceArena(ContextPtr ctx, u32 record_bytes, u64 capacity, bool ho
 
 DeviceArena::~DeviceArena()
 {
+    detail::RelaxedCaptureScope capture_mode;
     try
     {
         wait();  // the mirror must outlive the copies into it

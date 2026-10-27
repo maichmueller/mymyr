@@ -672,39 +672,31 @@ TEST(BeamParallel, Refusals)
     // threads > 1 without a beam
     IwOptions o;
     o.threads = 2;
-    IwResult r = iw(*task, o);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("requires a beam"), std::string::npos) << r.message;
+    EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
     o.layers.kind = LayerOrdering::Kind::GoalCount;
-    EXPECT_EQ(siw(*task, o).status, SearchStatus::Failed);
+    EXPECT_THROW((void)siw(*task, o), std::invalid_argument);
     AbstractedIwOptions a;
     a.threads = 2;
-    EXPECT_EQ(abstracted_iw(*task, a).status, SearchStatus::Failed);
+    EXPECT_THROW((void)abstracted_iw(*task, a), std::invalid_argument);
     LiwOptions l;
     l.threads = 2;
-    EXPECT_EQ(liw(*task, l).status, SearchStatus::Failed);
+    EXPECT_THROW((void)liw(*task, l), std::invalid_argument);
     // relaxed: needs GoalCount and a positive chunk; LIW has no read-only test
     LayerOrdering lo = beam(4, Novelty::RelaxedSurvivorsOnly);
     lo.kind = LayerOrdering::Kind::InOrder;
     o = IwOptions{};
     o.layers = lo;
-    r = iw(*task, o);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("RelaxedSurvivorsOnly requires Kind::GoalCount"), std::string::npos) << r.message;
+    EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
     BrfsOptions b;
     b.stop_at_goal = false;
     b.layers = lo;
     EXPECT_THROW((void)brfs(*task, b), std::invalid_argument);
     o.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
     o.layers.beam_chunk = 0;
-    r = iw(*task, o);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("beam_chunk must be positive"), std::string::npos) << r.message;
+    EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
     l = LiwOptions{};
     l.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
-    r = liw(*task, l);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("AllTested"), std::string::npos) << r.message;
+    EXPECT_THROW((void)liw(*task, l), std::invalid_argument);
     // relaxed with an observer, blocked states or a successor order
     struct Quiet : SearchObserver
     {
@@ -713,13 +705,11 @@ TEST(BeamParallel, Refusals)
     o = IwOptions{};
     o.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
     o.control.observer = &q;
-    r = iw(*task, o);
-    EXPECT_EQ(r.status, SearchStatus::Failed);
-    EXPECT_NE(r.message.find("observer"), std::string::npos) << r.message;
+    EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
     a = AbstractedIwOptions{};
     a.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
     a.control.observer = &q;
-    EXPECT_EQ(abstracted_iw(*task, a).status, SearchStatus::Failed);
+    EXPECT_THROW((void)abstracted_iw(*task, a), std::invalid_argument);
     b = BrfsOptions{};
     b.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
     b.observer = &q;

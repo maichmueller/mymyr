@@ -6,6 +6,7 @@
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "deferred_release.hpp"
 #include "mymyr/cuda/arena.hpp"
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/kernels.hpp"
@@ -13,8 +14,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -66,6 +72,152 @@ cuda::DeviceBuffer to_device(const cuda::ContextPtr& ctx, const std::vector<T>& 
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ runtime
+
+namespace
+{
+class ReleaseGate
+{
+    struct State
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool entered = false;
+        bool open = false;
+    };
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+
+public:
+    ~ReleaseGate() { open(); }
+    void block(const cuda::ContextPtr& ctx)
+    {
+        cuda::detail::release_after(ctx, std::shared_ptr<void>(m_state.get(), [state = m_state](void*) {
+            std::unique_lock lock(state->mutex);
+            state->entered = true;
+            state->changed.notify_all();
+            state->changed.wait(lock, [&] { return state->open; });
+        }));
+    }
+    bool entered()
+    {
+        std::unique_lock lock(m_state->mutex);
+        return m_state->changed.wait_for(lock, std::chrono::seconds(3), [&] { return m_state->entered; });
+    }
+    void open()
+    {
+        std::lock_guard lock(m_state->mutex);
+        m_state->open = true;
+        m_state->changed.notify_all();
+    }
+};
+}  // namespace
+
+TEST(CudaRuntime, RetiredBuffersKeepTheirLastUseSnapshotAcrossCaptures)
+{
+    SKIP_WITHOUT_GPU();
+    for (bool captured_record : {false, true})
+    {
+        SCOPED_TRACE(captured_record);
+        auto ctx = context(), gate_ctx = context();
+        const auto baseline = ctx->usage().used;
+        cuda::Stream side;
+        cuda::DeviceBuffer buffer(ctx, 4096);
+        auto last = std::make_shared<cuda::LastUse>(ctx->device());
+        buffer.track(last);
+        if (!captured_record)
+        {
+            last->record(ctx->stream());
+            buffer.record_stream(side);
+        }
+        ctx->synchronize();
+        ReleaseGate gate;
+        gate.block(gate_ctx);
+        ASSERT_TRUE(gate.entered());
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "begin first capture");
+        if (captured_record)
+            last->record(side);
+        buffer.reset();
+        cudaGraph_t first = nullptr;
+        const auto first_end = cudaStreamEndCapture(side, &first);
+        if (first)
+            cuda::check(cudaGraphDestroy(first), "destroy first capture");
+        ASSERT_EQ(first_end, cudaSuccess);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "begin second capture");
+        last->record(side);
+        gate.open();
+        cuda::detail::drain_releases(*ctx);
+        cudaGraph_t second = nullptr;
+        const auto second_end = cudaStreamEndCapture(side, &second);
+        if (second)
+            cuda::check(cudaGraphDestroy(second), "destroy second capture");
+        EXPECT_EQ(second_end, cudaSuccess);
+        (void)cudaGetLastError();
+        side.synchronize();
+        for (int retry = 0; retry < 200 && ctx->usage().used != baseline; ++retry)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ctx->synchronize();
+        gate_ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, baseline);
+    }
+}
+
+TEST(CudaRuntime, OwnerDestructorsDrainReleasesAndLeaveTheWorkerRunning)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    struct State
+    {
+        std::atomic<unsigned> completed{0};
+        std::atomic<bool> failed{false};
+        std::atomic<bool> nested_completed{false};
+    };
+    auto state = std::make_shared<State>();
+    ReleaseGate gate;
+    gate.block(ctx);
+    ASSERT_TRUE(gate.entered());
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(ctx.get(), [ctx, state](void*) {
+        try
+        {
+            ctx->synchronize();
+            state->nested_completed = state->completed.load() == 1;
+            (void)ctx->usage();
+            ctx->trim();
+            cuda::DeviceBuffer temporary(ctx, 4096);
+            temporary.reset();
+            ctx->synchronize();
+        }
+        catch (...)
+        {
+            state->failed = true;
+        }
+        ++state->completed;
+    }));
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(ctx.get(), [ctx, state](void*) {
+        try
+        {
+            ctx->synchronize();
+            (void)ctx->usage();
+        }
+        catch (...)
+        {
+            state->failed = true;
+        }
+        ++state->completed;
+    }));
+    gate.open();
+    const auto wait_for = [&](unsigned count) {
+        for (int retry = 0; retry < 3000 && state->completed.load() != count; ++retry)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return state->completed.load() == count;
+    };
+    ASSERT_TRUE(wait_for(2));
+    EXPECT_TRUE(state->nested_completed);
+    cuda::detail::release_after(ctx, std::shared_ptr<void>(state.get(), [state](void*) { ++state->completed; }));
+    ASSERT_TRUE(wait_for(3));
+    EXPECT_FALSE(state->failed);
+    ctx->synchronize();
+    EXPECT_EQ(ctx->usage().used, 0u);
+}
 
 TEST(CudaRuntime, ContextPoolAndBuffers)
 {
@@ -167,6 +319,164 @@ TEST(CudaRuntime, LastUseFreesAfterTheCallersStreamIsGone)
             ASSERT_EQ(h[i], 7 + i) << "reused before the last use finished";
         cuda::check(cudaDeviceSynchronize(), "sync");
         EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+    }
+}
+
+TEST(CudaRuntime, ReleasesDuringUnrelatedGraphCapture)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    cuda::Stream capture, user;
+    cuda::DeviceBuffer marker(ctx, sizeof(u64));
+    for (bool threaded : {false, true})
+    for (u32 cycle = 0; cycle < 12; ++cycle)
+    {
+        SCOPED_TRACE(threaded ? "worker thread" : "capturing thread");
+        cuda::DeviceBuffer allocation(ctx, 4096), recorded(ctx, 4096), tracked(ctx, 4096);
+        cuda::stream_wait(user, ctx->stream());
+        recorded.record_stream(user);
+        auto last = std::make_shared<cuda::LastUse>(ctx->device());
+        last->record(user);
+        tracked.retire_stream(ctx->stream(), last);
+        cuda::stream_wait(capture, ctx->stream());
+        cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        cuda::check(k::launch_iota(static_cast<u64*>(marker.data()), 1, cycle, capture), "iota");
+        auto release = [&] {
+            allocation.reset();
+            recorded.reset();
+            tracked.reset();
+        };
+        if (threaded)
+            std::thread(release).join();
+        else
+            release();
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamEndCapture(capture, &graph), "cudaStreamEndCapture");
+        cudaGraphExec_t exec = nullptr;
+        const auto instantiated = cudaGraphInstantiate(&exec, graph, 0);
+        cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+        cuda::check(instantiated, "cudaGraphInstantiate");
+        for (u32 replay = 0; replay < 3; ++replay)
+        {
+            cuda::check(cudaGraphLaunch(exec, capture), "cudaGraphLaunch");
+            const auto h = to_host<u64>(marker.data(), 1, capture);
+            EXPECT_EQ(h[0], cycle);
+        }
+        cuda::check(cudaGraphExecDestroy(exec), "cudaGraphExecDestroy");
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, sizeof(u64));
+        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+        cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "get capture mode");
+        EXPECT_EQ(mode, cudaStreamCaptureModeGlobal);
+        cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "restore capture mode");
+    }
+}
+
+TEST(CudaRuntime, WaitsAndGraphDestructionDuringForeignCapture)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    cuda::Stream capture;
+    cuda::Event ready;
+    ready.record(ctx->stream());
+    auto stream = std::make_unique<cuda::Stream>();
+    auto graph = cuda::GraphExec::capture(ctx->stream(), [] {});
+    auto other = std::make_unique<cuda::GraphExec>(cuda::GraphExec::capture(ctx->stream(), [] {}));
+    ctx->synchronize();
+    cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+    std::exception_ptr error;
+    std::thread([&] {
+        try
+        {
+            ready.synchronize();
+            stream->synchronize();
+            ctx->synchronize();
+            ctx->trim();
+            graph = {};
+            other.reset();
+            stream.reset();
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+    }).join();
+    cudaGraph_t captured = nullptr;
+    const auto ended = cudaStreamEndCapture(capture, &captured);
+    if (captured)
+        cuda::check(cudaGraphDestroy(captured), "cudaGraphDestroy");
+    cuda::check(ended, "cudaStreamEndCapture");
+    if (error)
+        std::rethrow_exception(error);
+}
+
+TEST(CudaRuntime, HostWaitsOnCapturedWorkThrow)
+{
+    SKIP_WITHOUT_GPU();
+    for (bool event : {false, true})
+    {
+        cuda::Stream stream;
+        cuda::Event ready;
+        cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        ready.record(stream);
+        if (event)
+            EXPECT_THROW(ready.synchronize(), cuda::CudaError);
+        else
+            EXPECT_THROW(stream.synchronize(), cuda::CudaError);
+        cudaGraph_t graph = nullptr;
+        EXPECT_EQ(cudaStreamEndCapture(stream, &graph), cudaErrorStreamCaptureInvalidated);
+        if (graph)
+            (void)cudaGraphDestroy(graph);
+        (void)cudaGetLastError();
+    }
+}
+
+TEST(CudaRuntime, CapturedBuffersOutliveGraphsAndExecutableClones)
+{
+    SKIP_WITHOUT_GPU();
+    for (int kind = 0; kind < 3; ++kind)
+    {
+        SCOPED_TRACE(kind);
+        auto ctx = context();
+        cuda::Stream side;
+        cuda::DeviceBuffer buffer(ctx, 4096, kind == 0 ? side.get() : ctx->stream());
+        cuda::stream_wait(side, ctx->stream());
+        if (kind == 1)
+            buffer.record_stream(side);
+        std::shared_ptr<cuda::LastUse> last;
+        if (kind == 2)
+        {
+            last = std::make_shared<cuda::LastUse>(ctx->device());
+            buffer.track(last);
+        }
+        ctx->synchronize();
+        side.synchronize();
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        cuda::check(cudaMemsetAsync(buffer.data(), 3, buffer.size(), side), "cudaMemsetAsync");
+        if (last)
+            last->record(side);
+        buffer.reset();
+        cudaGraph_t graph = nullptr, clone = nullptr;
+        cuda::check(cudaStreamEndCapture(side, &graph), "cudaStreamEndCapture");
+        cuda::check(cudaGraphClone(&clone, graph), "cudaGraphClone");
+        cudaGraphExec_t exec = nullptr;
+        cuda::check(cudaGraphInstantiate(&exec, graph, 0), "cudaGraphInstantiate");
+        cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, 4096);
+        cuda::check(cudaGraphExecDestroy(exec), "cudaGraphExecDestroy");
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, 4096);
+        cuda::check(cudaGraphDestroy(clone), "cudaGraphDestroy");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do
+        {
+            ctx->synchronize();
+            if (ctx->usage().used == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        EXPECT_EQ(ctx->usage().used, 0);
     }
 }
 
