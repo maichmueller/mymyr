@@ -40,6 +40,10 @@ search that takes these options raises `ValueError` for a combination it does no
 without `"goal_count"`) before it starts. A layer beam is different from `search.beam`, which is heuristic best-first
 search with a fixed queue width.
 
+LIW requires `beam_novelty="all_tested"`. The IW family raises `ValueError` for `threads > 1` without a beam,
+and a relaxed survivor beam rejects an observer, blocked states, a successor order or `tree="transitions"`.
+Native C++ entry points throw `std::invalid_argument` for these layer and thread option errors.
+
 `threads=` runs a layer beam's step (successor generation, scoring and read-only novelty tests) on that many threads
 (`0`: one per hardware thread) for `brfs` and the IW family. With `"all_tested"` and `"survivors_only"` the plan and
 every count equal the single-threaded search's, ties and seeds included; an observer or blocked states keep the
