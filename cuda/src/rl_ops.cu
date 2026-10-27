@@ -131,8 +131,9 @@ __device__ void clear_row(ExpansionRows o, u64 j)
     if (o.index) o.index[j] = -1;
 }
 
-__global__ void k_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows)
+__global__ void k_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, const u32* status)
 {
+    if (status && (*status & 2u)) return;  // an invalid batch writes nothing
     const u32 lane = threadIdx.x & 31;
     const u64 threads = u64{gridDim.x} * blockDim.x;
     for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < dst.capacity; j += threads)
@@ -167,8 +168,9 @@ __global__ void k_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows)
     }
 }
 
-__global__ void k_expansion_indices(ExpansionRows out, u64 rows)
+__global__ void k_expansion_indices(ExpansionRows out, u64 rows, const u32* status)
 {
+    if (status && (*status & 2u)) return;  // an invalid batch writes nothing
     const u32 end = static_cast<u32>(out.offsets[rows]);
     for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < out.capacity; j += u64{gridDim.x} * blockDim.x)
     {
@@ -224,16 +226,16 @@ cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStr
     return cudaGetLastError();
 }
 
-cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, cudaStream_t s)
+cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, cudaStream_t s, const u32* status)
 {
     const u64 n = rows * 32 > dst.capacity ? rows * 32 : dst.capacity;
-    k_noop_scatter<<<grid_for(n), k_block, 0, s>>>(src, dst, rows);
+    k_noop_scatter<<<grid_for(n), k_block, 0, s>>>(src, dst, rows, status);
     return cudaGetLastError();
 }
 
-cudaError_t launch_expansion_indices(ExpansionRows out, u64 rows, cudaStream_t s)
+cudaError_t launch_expansion_indices(ExpansionRows out, u64 rows, cudaStream_t s, const u32* status)
 {
-    if (out.capacity) k_expansion_indices<<<grid_for(out.capacity), k_block, 0, s>>>(out, rows);
+    if (out.capacity) k_expansion_indices<<<grid_for(out.capacity), k_block, 0, s>>>(out, rows, status);
     return cudaGetLastError();
 }
 

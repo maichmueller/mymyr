@@ -1416,7 +1416,7 @@ void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl
     if (options.drop_noops)
         I.drop.compact(raw, out, in.rows, I.ctx, I.s, status);
     else if (out.index || out.succ_hash || out.noop)
-        check(launch_expansion_indices(detail::expansion_rows(out), in.rows, I.s), "launch_expansion_indices");
+        check(launch_expansion_indices(detail::expansion_rows(out), in.rows, I.s, status), "launch_expansion_indices");
 }
 
 const i32* DeviceExpander::generated_offsets() const noexcept { return m->generated_offsets; }

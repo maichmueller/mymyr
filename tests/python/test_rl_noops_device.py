@@ -265,6 +265,69 @@ def test_all_noop_fallback_empty_parents_and_zero_capacity():
     assert kept.generated == kept.total == 3 and kept.noop.all() and not kept.index.any()
 
 
+def test_overflow_with_drop_reports_the_counts_before_dropping():
+    from test_rl_noops import overflow_case
+    task, states, full = overflow_case()
+    cap = full.total - 1
+    rows = np.asarray(task.encode(states))
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    host = rl.expand(task, rows, hashes=True, drop_noops=True, capacity=cap)
+    np.testing.assert_array_equal(host.offsets, full.offsets)
+    device = rl.expand(task, source, hashes=True, drop_noops=True, capacity=cap)
+    assert device.overflow and device.generated == device.total == host.total == full.total
+    np.testing.assert_array_equal(array(device.offsets), full.offsets)
+    opts = dict(device="cuda", dtype=torch.int32)
+    index = torch.zeros(cap, **opts)
+    offsets = torch.zeros(len(states) + 1, **opts)
+    status = torch.zeros(1, **opts)
+    rl.expand_into(task, source, index=index, offsets=offsets, status=status, drop_noops=True,
+                   stream=torch.cuda.current_stream())
+    assert int(status.item()) == 1
+    np.testing.assert_array_equal(array(offsets), full.offsets)
+    from mymyr.rl.torch import register, unregister
+    handle = register(task)
+    flat = torch.ops.mymyr.expand_flat(handle, source, None, cap, hashes=True, drop_noops=True)
+    unregister(handle)
+    np.testing.assert_array_equal(array(flat[5]), full.offsets)
+    assert int(flat[-1].item()) & 1
+    jax = pytest.importorskip("jax")
+    from mymyr._core import _rl_jax
+    if not _rl_jax.has_ffi() or not jax.devices("cuda"):
+        return
+    from mymyr.rl.jax import Env
+    env = Env(task, device="cuda")
+    actual = jax.jit(lambda s: env.expand_flat(s, cap, hashes=True, drop_noops=True))(
+        jax.device_put(rows.view(np.uint32), jax.devices("cuda")[0]))
+    assert int(actual.generated) == full.total
+    np.testing.assert_array_equal(np.asarray(actual.offsets), full.offsets)
+
+
+def test_asynchronous_invalid_batch_writes_nothing():
+    table = rl.TaskTable([pddl_task(atoms="dense")])
+    task = table.tasks[0]
+    rows = np.asarray(task.encode([task.initial_state] * 3))
+    source = torch.as_tensor(rows.view(np.int64), device="cuda")
+    bad = torch.tensor([0, 7, 0], dtype=torch.int32, device="cuda")  # no instance 7
+    cap = 16
+    opts = dict(device="cuda", dtype=torch.int32)
+    for drop in (False, True):
+        out = dict(succ_hash=torch.full((cap,), 5, dtype=torch.int64, device="cuda"),
+                   noop=torch.ones(cap, dtype=torch.bool, device="cuda"), index=torch.full((cap,), 9, **opts),
+                   schema=torch.full((cap,), 9, **opts), parent=torch.full((cap,), 9, **opts))
+        before = {name: value.clone() for name, value in out.items()}
+        status = torch.zeros(1, **opts)
+        # a valid call first leaves scratch behind that an invalid one must not copy out
+        rl.expand_into(table, source, torch.zeros(3, **opts), **{k: v.clone() for k, v in out.items()},
+                       offsets=torch.zeros(4, **opts), status=status, drop_noops=drop,
+                       stream=torch.cuda.current_stream())
+        assert int(status.item()) == 0
+        rl.expand_into(table, source, bad, **out, offsets=torch.zeros(4, **opts), status=status, drop_noops=drop,
+                       stream=torch.cuda.current_stream())
+        assert int(status.item()) & 2
+        for name, value in out.items():
+            assert torch.equal(value, before[name]), (drop, name)
+
+
 @pytest.mark.parametrize("drop", [False, True])
 @pytest.mark.parametrize("hashes,noops", [(True, False), (False, True), (True, True)])
 def test_jax_cuda_matches_host(drop, hashes, noops):

@@ -169,10 +169,12 @@ assert np.array_equal(padded.canonical[padded.mask], kept.index)
 ```
 
 `generated` counts successors before filtering; `total` and `offsets` count kept successors. A fixed `capacity` bounds
-`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering,
-`generated` stays exact, but `total`, `offsets` and the kept rows are undefined: size `capacity` from `generated`.
+`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering, `total`
+and `offsets` are the counts before filtering (`offsets[N] == total == generated`) on every platform, and the rows
+and per-successor outputs are unspecified: size `capacity` from `generated` or `offsets[N]`.
 `expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations; `drop_noops=True` requires `index=` when it
-writes any per-successor array (counting with `offsets=` alone needs none). Digests work with `succ=None`, without
+writes any per-successor array. With `offsets=` alone the capacity is 0, so the offsets are the counts before
+filtering. Digests work with `succ=None`, without
 storing successor rows; they are exact for every stored row, also one too wide for `words` (`words_needed`), and the
 width bounds stored rows only, so a label-only call never reports a width overflow. A single `Task` may use lazy atom slots: expansion
 uses its live slot layout, counts new atoms as changes, and grows output rows automatically unless `words=` fixes
@@ -188,7 +190,8 @@ Absent digests are `None` and cost no digest work.
 On CUDA arrays, `rl.expand` and `rl.expand_into` compute the same hashes, no-op flags and filtered rows bit for bit,
 also without a `succ=` destination (the label-only form), and `mymyr.hash_rows(rows, numeric_words=..., stream=...)`
 hashes device rows. With `status=` and `stream=` the filtering stays on the stream and captures in CUDA graphs; an
-overflowing filtered call keeps the offsets before filtering there, so `offsets[N]` sizes the next capacity. JAX
+overflowing filtered call reports the offsets before filtering, as on the host, so `offsets[N]` sizes the next
+capacity. JAX
 `Env.expand` and `Env.expand_flat` take the same flags on a CUDA device. The torch ops `mymyr::expand` and
 `mymyr::expand_flat` take `derived`, `rows`, `hashes`, `noops` and `drop_noops` and return eleven tensors `(succ,
 parent, schema, binding, goal, offsets, derived, succ_hash, noop, index, status)`, empty where absent; the padded

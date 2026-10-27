@@ -44,7 +44,7 @@ struct ExpansionDrop
         const u64 bytes = lifted::scan_temp_bytes(rows + 1);
         check(lifted::launch_scan(count, reinterpret_cast<u32*>(out.offsets), rows + 1,
                                  scan.ensure(ctx, bytes, s), bytes, s), "launch_scan");
-        check(launch_noop_scatter(expansion_rows(src), expansion_rows(out), rows, s), "launch_noop_scatter");
+        check(launch_noop_scatter(expansion_rows(src), expansion_rows(out), rows, s, status), "launch_noop_scatter");
     }
 };
 }  // namespace mymyr::cuda::detail

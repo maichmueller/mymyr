@@ -176,8 +176,8 @@ digests it and stores only the requested arrays. `drop_noops=True` expands into 
 and compacts every requested array by a scan and a stable scatter, with `index` the kept row's position in its
 parent's full order; the padded view (`DeviceExpansion.pad()`) carries those positions in `canonical` and the flat row
 in `index`. Capacity bounds the successors before dropping (status bit 0, `generated > capacity`). On that overflow the
-device keeps the offsets before dropping, so `offsets[N]` is the generated count also on the asynchronous path below,
-and the kept rows are unspecified. `mymyr.hash_rows(rows, numeric_words=..., stream=...)` hashes CUDA rows (a thread
+offsets and total are the counts before dropping, as on the host, so `offsets[N]` is the generated count also on the
+asynchronous path below, and the rows are unspecified. `mymyr.hash_rows(rows, numeric_words=..., stream=...)` hashes CUDA rows (a thread
 per row, a warp per wide row), with int64 bit patterns for torch and uint32 pairs for JAX, and captures in CUDA graphs.
 
 With `status=` and `stream=`, device-complete Single and Multi tables keep counts, digests, compaction and every

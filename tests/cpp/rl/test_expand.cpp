@@ -310,6 +310,9 @@ TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
         run();
         EXPECT_TRUE(kept.x.overflow());
         EXPECT_GT(kept.x.generated, kept.x.capacity);
+        // The overflow reports the counts before dropping.
+        EXPECT_EQ(kept.x.total, kept.x.generated);
+        EXPECT_EQ(kept.offsets, full.offsets);
     }
 }
 

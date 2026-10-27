@@ -571,6 +571,9 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
     Generators gens(table);
     std::vector<u64> tmp;
     std::vector<u8> flags;
+    std::vector<u64> generated;  // per state, for the offsets of an overflow with drop_noops
+    if (opt.drop_noops && out.offsets)
+        generated.resize(in.rows);
     const u32 L = out.label_width;
     u64 next = 0;
     if (out.offsets)
@@ -588,7 +591,10 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
         flags.clear();
         DirectSink sink{out, row, nw, static_cast<i32>(i), next, L, tmp, nn ? row + in.words : nullptr, nn, next,
                         out.succ_hash != nullptr && !defer_hash, opt.drop_noops ? &flags : nullptr};
-        out.generated += expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
+        const u64 n = expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
+        out.generated += n;
+        if (!generated.empty())
+            generated[i] = n;
         if (opt.drop_noops)
             sink.next = next + sink.compact();
         const u64 stored = sink.next < out.capacity ? sink.next : std::max(out.capacity, next);
@@ -603,6 +609,15 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
             write_offsets(out.offsets, i + 1, next);
     }
     out.total = next;
+    if (opt.drop_noops && out.generated > out.capacity)
+    {
+        // An overflow with drop_noops reports the counts before dropping, as the device does (it keeps no no-op
+        // flags past the capacity): offsets[N] == total == generated.
+        out.total = out.generated;
+        u64 at = 0;
+        for (u64 i = 0; i < generated.size(); ++i)
+            write_offsets(out.offsets, i + 1, at += generated[i]);
+    }
 }
 
 template<class Table>
@@ -706,20 +721,23 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
             }
         });
 
-    // offsets (exclusive prefix sums of the counts)
-    u64 total = 0;
+    // offsets (exclusive prefix sums of the counts); an overflow with drop_noops reports the counts before dropping
+    for (u64 i = 0; i < in.rows; ++i)
+        out.generated += S.generated[i];
+    const bool pre_drop = opt.drop_noops && out.generated > out.capacity;
+    u64 total = 0, generated = 0;
     if (out.offsets)
         out.offsets[0] = 0;
     for (u64 i = 0; i < in.rows; ++i)
     {
-        out.generated += S.generated[i];
         const u64 c = S.counts[i];
         S.counts[i] = total;  // now: first flat row of state i
         total += c;
+        generated += S.generated[i];
         if (out.offsets)
-            write_offsets(out.offsets, i + 1, total);
+            write_offsets(out.offsets, i + 1, pre_drop ? generated : total);
     }
-    out.total = total;
+    out.total = pre_drop ? out.generated : total;
     for (u32 t = 0; out.succ && t < T; ++t)  // the width bounds stored rows only
         out.words_needed = std::max(out.words_needed, S.members[t].words_needed);
 

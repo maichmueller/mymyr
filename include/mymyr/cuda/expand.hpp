@@ -35,8 +35,8 @@
 // drop_noops, the expansion goes to retained scratch of out.capacity rows and a stable compaction (scan and scatter)
 // keeps effective successors, or all successors of an all-no-op parent. The index destination carries the kept
 // rows' positions in each parent's full expansion. generated counts before compaction, total and offsets after it;
-// capacity bounds generated. On generated > capacity every parent keeps all of its rows' offsets, so total and
-// offsets[N] equal generated (the rows are unspecified). Capturable calls retain the scratch across replays.
+// capacity bounds generated. On generated > capacity, as on the host, total and offsets are the counts before
+// compaction, so offsets[N] equals generated (the rows are unspecified). Capturable calls retain the scratch across replays.
 //
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
 // successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
