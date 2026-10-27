@@ -54,9 +54,12 @@ public:
         m_out = &out;
         m_set.clear();
         m_bits.assign(m_w, 0);
-        // joinable recurses at most k deep; sized up front, so that references into them stay valid
+        // joinable and rec recurse at most k deep; sized up front, so that pointers and references into the
+        // per-level scratch stay valid across the recursion
         m_level_nb.resize(std::max<usize>(m_level_nb.size(), k + 1));
         m_level_cand.resize(std::max<usize>(m_level_cand.size(), k + 1));
+        m_level_after.resize(std::max<usize>(m_level_after.size(), static_cast<usize>(k + 1) * m_w));
+        m_children.resize(std::max<usize>(m_children.size(), static_cast<usize>(k + 1) * m_w));
         rec(0);
     }
 

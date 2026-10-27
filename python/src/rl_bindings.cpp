@@ -2642,7 +2642,7 @@ void bind_rl(nb::module_& parent)
             "source"_a, "conditions"_a,
             "Templates given as conditions: conditions[i] lists instance i's ConjunctiveConditions in match order (largest "
             "first by convention). Each needs literals, untyped variables, no numeric constraints, and either no "
-            "equalities or one disequality per pair of variables (distinct; ConjunctiveCondition.lift(True) makes such "
+            "equalities or one disequality per pair of variables (distinct; GroundCondition.lift(True) makes such "
             "a condition). Terms may be objects.")
         .def_static(
             "_restore",

@@ -16,7 +16,7 @@ import pytest
 
 import mymyr
 from conftest import ROOT, text_task, walk
-from her_lifted_reference import below, philox4x32_10, templates
+from her_lifted_reference import below, philox4x32_10, subgoals, templates
 from mymyr import rl
 from mymyr._core import _rl_torch
 
@@ -157,6 +157,50 @@ def test_dense_goal_graph_within_the_time_target():
     t = rl.lifted_goal_templates(task)
     assert time.perf_counter() - start < 2.0
     check_reference(t, 0, task)
+
+
+def sparse_goal_task(shape, rng):
+    """A task whose goal graph is a path, the line graph of a random tree, or a sparse random graph of unary, binary
+    and ternary literals, with the goal literals in random order."""
+    objects = {"path": 40, "tree": 40, "sparse": 80}[shape]
+    count = rng.randint(10, {"path": 36, "tree": 36, "sparse": 60}[shape])
+    literals = set()
+    for _ in range(10 * count):
+        if len(literals) == count:
+            break
+        if shape == "path":
+            a = rng.randrange(objects - 1)
+            literals.add(("b", (a, a + 1)))
+        elif shape == "tree":
+            a = rng.randrange(1, objects)
+            literals.add(("b", (rng.randrange(a), a)))
+        else:
+            arity = rng.choice([1, 2, 2, 3])
+            literals.add(({1: "u", 2: "b", 3: "t"}[arity], tuple(rng.randrange(objects) for _ in range(arity))))
+    literals = sorted(literals)
+    rng.shuffle(literals)
+    domain = mymyr.Domain.from_string(
+        "(define (domain sparsegoals) (:requirements :strips)"
+        " (:predicates (u ?x) (b ?x ?y) (t ?x ?y ?z))"
+        " (:action a1 :parameters (?x) :precondition (and) :effect (u ?x))"
+        " (:action a2 :parameters (?x ?y) :precondition (and) :effect (b ?x ?y))"
+        " (:action a3 :parameters (?x ?y ?z) :precondition (and) :effect (t ?x ?y ?z)))"
+    )
+    goal = " ".join(f"({p} {' '.join(f'o{o}' for o in args)})" for p, args in literals)
+    names = " ".join(f"o{i}" for i in range(objects))
+    problem = f"(define (problem p) (:domain sparsegoals) (:objects {names}) (:init) (:goal (and {goal})))"
+    return mymyr.Task(domain.instantiate_string(problem))
+
+
+@needs_frontend
+def test_sparse_goal_graphs_equal_the_reference():
+    # paths and trees reach deep levels of the subset search; each level's state must survive the deeper ones
+    for case in range(120):
+        rng = random.Random(case)
+        task = sparse_goal_task(["path", "tree", "sparse"][case % 3], rng)
+        options = {"max_size": rng.randint(4, 10), "max_subsets_per_size": rng.randint(1, 50), "seed": case}
+        t = rl.lifted_goal_templates(task, **options)
+        assert t.goal_literals(0) == subgoals(task, 0, **options), (case, options)
 
 
 # ------------------------------------------------------------------------------------------------ bounds and order

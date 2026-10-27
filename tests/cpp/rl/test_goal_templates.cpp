@@ -1,12 +1,13 @@
 // Lifted goal templates (rl/goal_templates.hpp), on the text exports of tests/data/tasks:
 //   - the subsets of a component are the first connected subsets of each size in lexicographic order, as a brute-force
-//     enumeration over all index tuples finds them;
+//     enumeration over all index tuples finds them, on the tasks and on path- and tree-shaped goals;
 //   - generated templates: sizes bounded and largest first, at most the quota per size, each the lift of its goal
 //     literals (with or without disequalities), the binding order of its condition, the packed arrays consistent;
 //   - an instance's templates are those of its task at its global id, whatever the other instances;
 //   - from_conditions and from_arrays rebuild the same templates; invalid options and conditions throw.
 
 #include "../support/suite.hpp"
+#include "mymyr/formalism/text_format.hpp"
 #include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/successor/bindings.hpp"
@@ -20,7 +21,9 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -168,45 +171,120 @@ rl::GoalTemplates::Arrays arrays_of(const rl::GoalTemplates& t)
 }
 }  // namespace
 
+namespace
+{
+/// Expects the subgoals within one component to be the first connected subsets of each size in lexicographic order,
+/// for every component the single-component draws hit.
+void expect_first_connected_subsets(const Task& task, const std::string& name, u32 max_size)
+{
+    const GroundCondition goal = GroundCondition::goal(task);
+    const std::vector<u32> comp = components(goal);
+    for (u32 limit : {3u, 100u})
+    {
+        rl::TemplateOptions o;
+        o.max_size = max_size;
+        o.max_subsets_per_size = limit;
+        o.max_subgoals_per_size = 1u << 30;  // every subgoal
+        o.max_component_samples = 64;        // as many single-component draws as there are components
+        o.max_products = 20000;              // more than a component's subsets
+        // the subgoals within one component, by (component, size), in order: the subset lists of the components
+        // the uniform single-component draws hit (duplicate draws are dropped, so not necessarily all)
+        std::map<std::pair<u32, u32>, std::vector<std::vector<u32>>> got;
+        for (const std::vector<u32>& g : rl::goal_subgoals(task, 0, o))
+            if (std::ranges::all_of(g, [&](u32 i) { return comp[i] == comp[g[0]]; }))
+                got[{comp[g[0]], static_cast<u32>(g.size())}].push_back(g);
+        std::map<u32, std::vector<u32>> vertices;
+        for (u32 i = 0; i < comp.size(); ++i)
+            vertices[comp[i]].push_back(i);
+        u32 drawn = 0;
+        for (const auto& [c, vs] : vertices)
+        {
+            if (!got.contains(std::pair{c, 1u}))
+                continue;
+            ++drawn;
+            for (u32 k = 1; k <= std::min<u32>(o.max_size, static_cast<u32>(vs.size())); ++k)
+            {
+                const std::vector<std::vector<u32>>& listed = got[std::pair{c, k}];
+                EXPECT_EQ(listed, brute_force_subsets(goal, vs, k, limit))
+                    << name << ": component " << c << ", size " << k << ", limit " << limit;
+            }
+        }
+        EXPECT_GT(drawn, 0u) << name;
+    }
+}
+
+/// A task without actions whose goal is the given positive literals over the predicates u/1, b/2 and t/3 (by arity),
+/// in an order shuffled by `seed`.
+TaskPtr goal_task(u32 objects, std::vector<std::vector<u32>> literals, u64 seed)
+{
+    std::mt19937_64 rng(seed);
+    std::ranges::shuffle(literals, rng);
+    std::ostringstream text;
+    text << "O " << objects << "\nP 3\nF 1 u\nF 2 b\nF 3 t\nSI 0\nFI 0\nG " << literals.size() << "\n";
+    for (const std::vector<u32>& l : literals)
+    {
+        text << l.size() - 1 << " 1";
+        for (u32 o : l)
+            text << ' ' << o;
+        text << '\n';
+    }
+    text << "A 0\n";
+    std::istringstream in(text.str());
+    return Task::create(formalism::read_task_text(in));
+}
+
+/// Literal i is b(o_i, o_i+1): the goal graph is a path.
+TaskPtr path_goal(u32 n, u64 seed)
+{
+    std::vector<std::vector<u32>> literals;
+    for (u32 i = 0; i < n; ++i)
+        literals.push_back({i, i + 1});
+    return goal_task(n + 1, std::move(literals), seed);
+}
+
+/// A random tree on n literals of degree at most 3; each tree edge is an object of its own that both of its literals
+/// take as an argument, so two literals share an object iff the tree joins them: the goal graph is that tree.
+TaskPtr tree_goal(u32 n, u64 seed)
+{
+    std::mt19937_64 rng(seed);
+    std::vector<std::vector<u32>> literals(n);
+    for (u32 v = 1; v < n; ++v)
+    {
+        u32 parent = 0;
+        do
+            parent = static_cast<u32>(rng() % v);
+        while (literals[parent].size() == 3);
+        literals[parent].push_back(v - 1);
+        literals[v].push_back(v - 1);
+    }
+    return goal_task(n - 1, std::move(literals), seed);
+}
+
+/// Literal a is b(o_p, o_a) for a random p < a: the goal graph is the line graph of a random tree on the objects.
+TaskPtr tree_edges_goal(u32 n, u64 seed)
+{
+    std::mt19937_64 rng(seed);
+    std::vector<std::vector<u32>> literals;
+    for (u32 a = 1; a <= n; ++a)
+        literals.push_back({static_cast<u32>(rng() % a), a});
+    return goal_task(n + 1, std::move(literals), seed);
+}
+}  // namespace
+
 TEST(GoalTemplates, ComponentSubsetsAreTheFirstConnectedSubsetsInLexicographicOrder)
 {
     for (const std::string& name : task_names())
+        expect_first_connected_subsets(*load(name), name, 5);
+}
+
+TEST(GoalTemplates, PathAndTreeGoalsListTheFirstConnectedSubsets)
+{
+    // sparse goal graphs reach deep levels of the subset search
+    for (u64 seed = 0; seed < 4; ++seed)
     {
-        const TaskPtr task = load(name);
-        const GroundCondition goal = GroundCondition::goal(*task);
-        const std::vector<u32> comp = components(goal);
-        for (u32 limit : {3u, 100u})
-        {
-            rl::TemplateOptions o;
-            o.max_size = 5;
-            o.max_subsets_per_size = limit;
-            o.max_subgoals_per_size = 1u << 30;  // every subgoal
-            o.max_component_samples = 64;        // as many single-component draws as there are components
-            o.max_products = 20000;              // more than a component's subsets
-            // the subgoals within one component, by (component, size), in order: the subset lists of the components
-            // the uniform single-component draws hit (duplicate draws are dropped, so not necessarily all)
-            std::map<std::pair<u32, u32>, std::vector<std::vector<u32>>> got;
-            for (const std::vector<u32>& g : rl::goal_subgoals(*task, 0, o))
-                if (std::ranges::all_of(g, [&](u32 i) { return comp[i] == comp[g[0]]; }))
-                    got[{comp[g[0]], static_cast<u32>(g.size())}].push_back(g);
-            std::map<u32, std::vector<u32>> vertices;
-            for (u32 i = 0; i < comp.size(); ++i)
-                vertices[comp[i]].push_back(i);
-            u32 drawn = 0;
-            for (const auto& [c, vs] : vertices)
-            {
-                if (!got.contains(std::pair{c, 1u}))
-                    continue;
-                ++drawn;
-                for (u32 k = 1; k <= std::min<u32>(o.max_size, static_cast<u32>(vs.size())); ++k)
-                {
-                    const std::vector<std::vector<u32>>& listed = got[std::pair{c, k}];
-                    EXPECT_EQ(listed, brute_force_subsets(goal, vs, k, limit))
-                        << name << ": component " << c << ", size " << k << ", limit " << limit;
-                }
-            }
-            EXPECT_GT(drawn, 0u) << name;
-        }
+        expect_first_connected_subsets(*path_goal(24, seed), "path " + std::to_string(seed), 8);
+        expect_first_connected_subsets(*tree_goal(24, seed), "tree " + std::to_string(seed), 8);
+        expect_first_connected_subsets(*tree_edges_goal(24, seed), "tree edges " + std::to_string(seed), 8);
     }
 }
 
