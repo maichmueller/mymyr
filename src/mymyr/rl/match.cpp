@@ -49,7 +49,8 @@ void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
                     const u64 at = row * b.capacity + j;
                     b.found[at] = 1;
                     b.template_id[at] = k;
-                    std::copy_n(binding.data(), t.num_vars[k], b.binding + at * t.max_vars);
+                    if (t.num_vars[k])
+                        std::copy_n(binding.data(), t.num_vars[k], b.binding + at * t.max_vars);
                 }
                 if (b.first)
                     break;
