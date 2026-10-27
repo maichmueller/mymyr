@@ -1,7 +1,6 @@
 #include "mymyr/cuda/encoding.hpp"
 
 #include "axiom_reads.hpp"
-#include "capture_mode.hpp"
 #include "encoding_kernels.hpp"
 #include "encoding_scratch.hpp"
 #include "mymyr/encoding/detail/horizon.hpp"
@@ -357,7 +356,7 @@ DeviceEncodingContext::DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<con
 }
 DeviceEncodingContext::~DeviceEncodingContext()
 {
-    detail::RelaxedCaptureScope capture_mode;
+    RelaxedCaptureScope capture_mode;
     if (m_generation)
     {
         try { DeviceGuard guard(m_ctx->device()); m_ready.synchronize(); }

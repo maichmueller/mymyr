@@ -5,7 +5,6 @@
 
 #include "mymyr/cuda/env.hpp"
 
-#include "capture_mode.hpp"
 
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/cuda/expand.hpp"
@@ -907,7 +906,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
 
 DeviceEnv::~DeviceEnv()
 {
-    detail::RelaxedCaptureScope capture_mode;
+    RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

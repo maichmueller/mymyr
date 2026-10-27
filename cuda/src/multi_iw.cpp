@@ -9,7 +9,6 @@
 
 #include "mymyr/cuda/multi_iw.hpp"
 
-#include "capture_mode.hpp"
 
 #include "goal_program.hpp"
 
@@ -508,7 +507,7 @@ DeviceMultiIw::DeviceMultiIw(ContextPtr ctx, TaskPtr task, const MultiIwOptions&
 
 DeviceMultiIw::~DeviceMultiIw()
 {
-    detail::RelaxedCaptureScope capture_mode;
+    RelaxedCaptureScope capture_mode;
     if (m && m->ctx)
     {
         try

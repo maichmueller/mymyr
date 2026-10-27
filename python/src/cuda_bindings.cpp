@@ -97,6 +97,7 @@ public:
     explicit PyContext(cuda::ContextPtr c) : ctx(std::move(c)) {}
     ~PyContext()
     {
+        cuda::RelaxedCaptureScope capture_mode;
         try
         {
             drain(true);

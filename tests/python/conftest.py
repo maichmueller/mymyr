@@ -102,7 +102,7 @@ ISOLATED_MARKERS = {
     "jax_on_cpu": {"JAX_PLATFORMS": "cpu"},
 }
 _isolated_outcomes: dict[str, dict] = {}
-_isolated_groups: dict[tuple[str, str], list[str]] = {}
+_isolated_groups: dict[tuple[str, str, str], list[str]] = {}
 
 
 def pytest_configure(config):
@@ -111,7 +111,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "jax_on_cpu: holds a CUDA graph capture while it waits; runs in a child process whose JAX uses only "
-        "the CPU (tests/python/conftest.py)"
+        "the CPU; per_case=True isolates each case (tests/python/conftest.py)"
     )
 
 
@@ -119,12 +119,17 @@ def _isolated_marker(item):
     return next((name for name in ISOLATED_MARKERS if item.get_closest_marker(name)), None)
 
 
+def _isolated_key(item, marker):
+    per_case = item.get_closest_marker(marker).kwargs.get("per_case", False)
+    return str(item.path), marker, item.nodeid if per_case else ""
+
+
 def pytest_collection_modifyitems(config, items):
     if ISOLATED_REPORT in os.environ:
         return
     for item in items:
         if marker := _isolated_marker(item):
-            _isolated_groups.setdefault((str(item.path), marker), []).append(item.nodeid)
+            _isolated_groups.setdefault(_isolated_key(item, marker), []).append(item.nodeid)
 
 
 def pytest_runtest_logreport(report):
@@ -140,7 +145,8 @@ def pytest_runtest_logreport(report):
         f.write(json.dumps(entry) + "\n")
 
 
-def _run_isolated(config, path, marker):
+def _run_isolated(config, key):
+    path, marker, _ = key
     fd, report = tempfile.mkstemp(suffix=".jsonl")
     os.close(fd)
     from python_children import run_code
@@ -156,7 +162,7 @@ def _run_isolated(config, path, marker):
         args += ["-o", override]
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
-    group = _isolated_groups[(path, marker)]
+    group = _isolated_groups[key]
     targets = [path + "::" + nodeid.split("::", 1)[1] for nodeid in group]
     proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *targets,
                     env={**os.environ, ISOLATED_REPORT: report, **ISOLATED_MARKERS[marker]}, timeout=None,
@@ -179,7 +185,7 @@ def pytest_pyfunc_call(pyfuncitem):
     if marker is None:
         return None
     if pyfuncitem.nodeid not in _isolated_outcomes:
-        _run_isolated(pyfuncitem.config, str(pyfuncitem.path), marker)
+        _run_isolated(pyfuncitem.config, _isolated_key(pyfuncitem, marker))
     entry = _isolated_outcomes[pyfuncitem.nodeid]
     if entry["outcome"] == "failed":
         pytest.fail(f"in the child process:\n{entry['text']}", pytrace=False)

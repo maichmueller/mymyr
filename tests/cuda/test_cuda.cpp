@@ -176,8 +176,10 @@ TEST(CudaRuntime, ReleasesDuringUnrelatedGraphCapture)
     auto ctx = context();
     cuda::Stream capture, user;
     cuda::DeviceBuffer marker(ctx, sizeof(u64));
+    for (bool threaded : {false, true})
     for (u32 cycle = 0; cycle < 12; ++cycle)
     {
+        SCOPED_TRACE(threaded ? "worker thread" : "capturing thread");
         cuda::DeviceBuffer allocation(ctx, 4096), recorded(ctx, 4096), tracked(ctx, 4096);
         cuda::stream_wait(user, ctx->stream());
         recorded.record_stream(user);
@@ -185,24 +187,95 @@ TEST(CudaRuntime, ReleasesDuringUnrelatedGraphCapture)
         last->record(user);
         tracked.retire_stream(ctx->stream(), last);
         cuda::stream_wait(capture, ctx->stream());
-        auto graph = cuda::GraphExec::capture(capture, [&] {
-            cuda::check(k::launch_iota(static_cast<u64*>(marker.data()), 1, cycle, capture), "iota");
+        cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        cuda::check(k::launch_iota(static_cast<u64*>(marker.data()), 1, cycle, capture), "iota");
+        auto release = [&] {
             allocation.reset();
             recorded.reset();
             tracked.reset();
-        });
+        };
+        if (threaded)
+            std::thread(release).join();
+        else
+            release();
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamEndCapture(capture, &graph), "cudaStreamEndCapture");
+        cudaGraphExec_t exec = nullptr;
+        const auto instantiated = cudaGraphInstantiate(&exec, graph, 0);
+        cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+        cuda::check(instantiated, "cudaGraphInstantiate");
         for (u32 replay = 0; replay < 3; ++replay)
         {
-            graph.launch(capture);
+            cuda::check(cudaGraphLaunch(exec, capture), "cudaGraphLaunch");
             const auto h = to_host<u64>(marker.data(), 1, capture);
-            ASSERT_EQ(h[0], cycle);
+            EXPECT_EQ(h[0], cycle);
         }
+        cuda::check(cudaGraphExecDestroy(exec), "cudaGraphExecDestroy");
         ctx->synchronize();
         EXPECT_EQ(ctx->usage().used, sizeof(u64));
         cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
         cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "get capture mode");
         EXPECT_EQ(mode, cudaStreamCaptureModeGlobal);
         cuda::check(cudaThreadExchangeStreamCaptureMode(&mode), "restore capture mode");
+    }
+}
+
+TEST(CudaRuntime, WaitsAndGraphDestructionDuringForeignCapture)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    cuda::Stream capture;
+    cuda::Event ready;
+    ready.record(ctx->stream());
+    auto stream = std::make_unique<cuda::Stream>();
+    auto graph = cuda::GraphExec::capture(ctx->stream(), [] {});
+    auto other = std::make_unique<cuda::GraphExec>(cuda::GraphExec::capture(ctx->stream(), [] {}));
+    ctx->synchronize();
+    cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+    std::exception_ptr error;
+    std::thread([&] {
+        try
+        {
+            ready.synchronize();
+            stream->synchronize();
+            ctx->synchronize();
+            ctx->trim();
+            graph = {};
+            other.reset();
+            stream.reset();
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+    }).join();
+    cudaGraph_t captured = nullptr;
+    const auto ended = cudaStreamEndCapture(capture, &captured);
+    if (captured)
+        cuda::check(cudaGraphDestroy(captured), "cudaGraphDestroy");
+    cuda::check(ended, "cudaStreamEndCapture");
+    if (error)
+        std::rethrow_exception(error);
+}
+
+TEST(CudaRuntime, HostWaitsOnCapturedWorkThrow)
+{
+    SKIP_WITHOUT_GPU();
+    for (bool event : {false, true})
+    {
+        cuda::Stream stream;
+        cuda::Event ready;
+        cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        ready.record(stream);
+        if (event)
+            EXPECT_THROW(ready.synchronize(), cuda::CudaError);
+        else
+            EXPECT_THROW(stream.synchronize(), cuda::CudaError);
+        cudaGraph_t graph = nullptr;
+        EXPECT_EQ(cudaStreamEndCapture(stream, &graph), cudaErrorStreamCaptureInvalidated);
+        if (graph)
+            (void)cudaGraphDestroy(graph);
+        (void)cudaGetLastError();
     }
 }
 

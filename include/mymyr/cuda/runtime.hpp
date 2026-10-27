@@ -60,6 +60,25 @@ private:
     bool m_changed = false;
 };
 
+/// Allows cleanup of resources outside an unrelated capture without changing their stream dependencies.
+/// Restores the calling thread's capture interaction mode on scope exit; cleanup never throws.
+class RelaxedCaptureScope
+{
+public:
+    RelaxedCaptureScope() noexcept : m_restore(cudaThreadExchangeStreamCaptureMode(&m_mode) == cudaSuccess) {}
+    ~RelaxedCaptureScope()
+    {
+        if (m_restore)
+            (void)cudaThreadExchangeStreamCaptureMode(&m_mode);
+    }
+    RelaxedCaptureScope(const RelaxedCaptureScope&) = delete;
+    RelaxedCaptureScope& operator=(const RelaxedCaptureScope&) = delete;
+
+private:
+    cudaStreamCaptureMode m_mode = cudaStreamCaptureModeRelaxed;
+    bool m_restore;
+};
+
 class Event
 {
 public:
