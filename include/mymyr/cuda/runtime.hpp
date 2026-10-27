@@ -16,6 +16,7 @@
 #include <cuda_runtime_api.h>
 
 #include <memory>
+#include <new>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -26,11 +27,28 @@ namespace mymyr::cuda
 class CudaError : public std::runtime_error
 {
 public:
-    CudaError(cudaError_t code, const std::string& what);
+    CudaError(cudaError_t code, const std::string& what, u64 bytes = 0);
     [[nodiscard]] cudaError_t code() const noexcept { return m_code; }
+    /// The size of the device allocation that failed (0: not a device allocation).
+    [[nodiscard]] u64 bytes() const noexcept { return m_bytes; }
 
 private:
     cudaError_t m_code;
+    u64 m_bytes;
+};
+
+/// A pinned (page-locked) host allocation that failed for want of memory: host memory, not the device's, so it is not
+/// a CudaError (handling of device shortages, such as the searches' refusals, does not take it for one).
+class PinnedAllocationError : public std::bad_alloc
+{
+public:
+    explicit PinnedAllocationError(u64 bytes);
+    [[nodiscard]] const char* what() const noexcept override { return m_what.c_str(); }
+    [[nodiscard]] u64 bytes() const noexcept { return m_bytes; }
+
+private:
+    std::string m_what;
+    u64 m_bytes;
 };
 
 /// Throws CudaError if e is not cudaSuccess.

@@ -65,6 +65,14 @@ inline u64 device_room(const DeviceContext& ctx)
     return limit > u.used ? limit - u.used : 0;
 }
 
+/// The rows a search's node arrays start with: row_reserve_floor(words, rows), within a quarter of what the context
+/// can still allocate at `row_bytes` per row (at least one; the first expansion refuses a state whose successors
+/// do not fit).
+inline u64 start_rows(const DeviceContext& ctx, u32 words, u64 rows, u64 row_bytes)
+{
+    return std::min(row_reserve_floor(words, rows), std::max<u64>(1, device_room(ctx) / 4 / std::max<u64>(row_bytes, 1)));
+}
+
 /// True when `e` is the pool's allocation failure (the error is then cleared).
 inline bool out_of_memory(const CudaError& e)
 {
@@ -138,11 +146,13 @@ inline std::string max_bytes_text(const DeviceContext& ctx)
 }
 
 /// Refuses a search after a device allocation it did not size against the context's room failed (`phase`: what it was
-/// allocating; `held`: held_text). The message says that an allocation failed, unlike the sized refusals'.
+/// allocating; `bytes`: the request, CudaError::bytes(), 0 when unknown; `held`: held_text). The message says that an
+/// allocation failed, unlike the sized refusals'.
 [[noreturn]] inline void refuse_allocation_failure(const DeviceContext& ctx, const std::string& search, const std::string& phase,
-                                                   const std::string& held, const std::string& advice)
+                                                   u64 bytes, const std::string& held, const std::string& advice)
 {
-    throw std::length_error("mymyr: " + search + ": a device memory allocation failed during " + phase +
+    throw std::length_error("mymyr: " + search + ": a device memory allocation" +
+                            (bytes ? " of " + std::to_string(bytes) + " bytes" : std::string()) + " failed during " + phase +
                             ": the CUDA context can still allocate " + std::to_string(device_room(ctx)) + " bytes" +
                             max_bytes_text(ctx) + ", and " + held + ". " + advice);
 }

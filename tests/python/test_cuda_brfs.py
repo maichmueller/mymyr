@@ -429,8 +429,8 @@ def test_search_runs_on_past_a_windowed_state(tmp_path, drop, budget, windows):
 
 
 # A refusal the search sized (its memory left too little for a named need), not the last-resort refusal of an
-# allocation that failed beyond its sizing ("a device memory allocation failed during ...").
-SIZED_BRFS_REFUSAL = (r"^mymyr: device BrFS: (?!a device memory allocation failed )"
+# allocation that failed beyond its sizing ("a device memory allocation of N bytes failed during ...").
+SIZED_BRFS_REFUSAL = (r"^mymyr: device BrFS: (?!a device memory allocation )"
                       r".*Raise the Context's max_bytes, or use the CPU BrFS\.$")
 
 

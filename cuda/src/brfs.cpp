@@ -278,7 +278,7 @@ DeviceBrfsResult DeviceBrfs::run()
         // (an allocation the search did not size against the context's room: its phase and what it holds)
         if (!out_of_memory(e))
             throw;
-        refuse_allocation_failure(*m->ctx, "device BrFS", m->phase, m->held(),
+        refuse_allocation_failure(*m->ctx, "device BrFS", m->phase, e.bytes(), m->held(),
                                   "Raise the Context's max_bytes, or use the CPU BrFS.");
     }
 }

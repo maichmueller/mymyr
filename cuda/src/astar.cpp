@@ -188,7 +188,8 @@ struct Driver
     bfk::Ctl* hc = nullptr;
     // the step: B parents in K chunks of C rows; a pop window of window_cap entries; cap candidates per chunk. B is the
     // requested batch (it decides which nodes a step expands); C only bounds a launch's memory: wide rows take chunks
-    // of at most 16 MiB of parent rows (row_reserve_floor), gathered one chunk at a time (chunk_gather()). A lazy task
+    // of at most 16 MiB of parent rows (row_reserve_floor) and a quarter of what the context can still allocate
+    // (start_rows), gathered one chunk at a time (chunk_gather()). A lazy task
     // that grows wide mid-step finishes the step at its C; next_C applies at the next step.
     u32 B = 0, C = 0, K = 1, window_cap = 0, next_C = 0;
     static constexpr u32 k_max_graph_chunks = 16;  // a step of more chunks runs from the host
@@ -435,9 +436,9 @@ struct Driver
                                 {"open list", open_bytes},
                                 {"step and chunk buffers", step_bytes}});
     }
-    [[noreturn]] void refuse_memory_failure() const
+    [[noreturn]] void refuse_memory_failure(u64 bytes) const
     {
-        refuse_allocation_failure(*ctx, greedy ? "device GBFS" : "device A*", phase, held(),
+        refuse_allocation_failure(*ctx, greedy ? "device GBFS" : "device A*", phase, bytes, held(),
                                   "Raise the Context's max_bytes, or use the CPU search.");
     }
     /// The step's scratch (batch, pop window, the batch's rows).
@@ -988,7 +989,9 @@ struct Driver
 bool Driver::start(const State& s0)
 {
     W = bucket(std::max(task->words(), s0.size_words()));
-    ensure_nodes(0, row_reserve_floor(W, 1024));
+    // (node arrays, the table's slots and open entries of a node beside its row)
+    const u64 first_rows = start_rows(*ctx, W, 1024, u64{W} * 8 + 64);
+    ensure_nodes(0, first_rows);
     std::vector<u64> row(W, 0);
     std::copy_n(s0.data(), s0.size_words(), row.begin());
     to_device(rows.data(), row.data(), W, s);
@@ -1031,7 +1034,7 @@ bool Driver::start(const State& s0)
     hc->runs = 1;
     hc->count = 1;
     hc->open_entries = 1;
-    ensure_room(row_reserve_floor(W, 1024));
+    ensure_room(first_rows);
     to_device(open.data(), &entry, 1, s);
     to_device(run_key.data(), &key, 1, s);
     const u64 zero = 0;
@@ -1193,7 +1196,8 @@ DeviceBestFirstResult Driver::run()
         const u64 per = std::max<u64>(8, (gen->view_words() + (lifted::wide_row(task->words()) ? task->words() : 0)) * 8);
         const u64 chunk_cap = o.chunk_states ? o.chunk_states : std::max<u64>(lifted::wide_row(task->words()) ? 1u : 8192u, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per);
         B = o.batch;
-        C = static_cast<u32>(std::min<u64>(chunk_cap, row_reserve_floor(bucket(std::max(task->words(), s0.size_words())), B)));
+        const u32 w0 = bucket(std::max(task->words(), s0.size_words()));
+        C = static_cast<u32>(std::min<u64>(chunk_cap, start_rows(*ctx, w0, B, u64{w0} * 8)));
         K = (B + C - 1) / C;
         window_cap = static_cast<u32>(std::max<u64>(2 * u64{B}, 1024));
     }
@@ -1335,7 +1339,7 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
             // (an allocation the search did not size against the context's room: its phase and what it holds)
             if (!out_of_memory(e))
                 throw;
-            d.refuse_memory_failure();
+            d.refuse_memory_failure(e.bytes());
         }
     }
     catch (const NegativeCost& e)

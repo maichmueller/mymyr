@@ -74,7 +74,22 @@ void DeviceArena::reserve(u64 more, u64 most)
     DeviceGuard g(m_ctx->device());
     wait();  // pending copies read the old generation and write the old mirror
     auto gen = std::make_shared<DeviceBuffer>(m_ctx, bytes, m_ctx->stream());
-    auto mirror = remirror ? std::make_shared<PinnedBuffer>(mirror_cap * m_rb) : nullptr;
+    std::shared_ptr<PinnedBuffer> mirror;
+    u64 mirror_records = mirror_cap;
+    if (remirror)
+    {
+        try
+        {
+            mirror = std::make_shared<PinnedBuffer>(mirror_cap * m_rb);
+        }
+        catch (const PinnedAllocationError&)
+        {
+            if (mirror_cap == cap)
+                throw;
+            mirror_records = cap;  // the doubled mirror does not fit the host's pinned memory: the one it needs
+            mirror = std::make_shared<PinnedBuffer>(bytes);
+        }
+    }
     if (m_device_size)
         check(cudaMemcpyAsync(gen->data(), m_gen->data(), m_device_size * m_rb, cudaMemcpyDeviceToDevice, m_ctx->stream()),
               "cudaMemcpyAsync (arena growth)");
@@ -84,7 +99,7 @@ void DeviceArena::reserve(u64 more, u64 most)
         if (m_host_size)
             std::memcpy(mirror->data(), m_mirror->data(), m_host_size * m_rb);
         m_mirror = std::move(mirror);
-        m_mirror_capacity = mirror_cap;
+        m_mirror_capacity = mirror_records;
         ++m_mirror_growths;
     }
     m_capacity = cap;

@@ -553,7 +553,7 @@ struct DeviceMultiIw::Impl
     /// What the searches hold of the context's memory (refusals), and the refusal of an allocation they did not size
     /// against the context's room (`phase`: what they were allocating).
     [[nodiscard]] std::string held() const;
-    [[noreturn]] void refuse_memory_failure() const;
+    [[noreturn]] void refuse_memory_failure(u64 bytes) const;
     const char* phase = "the task's device tables and the successor generator";
     /// f(), with an allocation failure turned into refuse_memory_failure().
     template<class F>
@@ -567,7 +567,7 @@ struct DeviceMultiIw::Impl
         {
             if (!out_of_memory(e))
                 throw;
-            refuse_memory_failure();
+            refuse_memory_failure(e.bytes());
         }
     }
     /// The estimated bytes of a one-row chunk's candidates, and of the candidate buffers a chunk reuses.
@@ -683,7 +683,7 @@ void DeviceMultiIw::Impl::ensure_nodes(u64 n)
             node_masks.ensure(ctx, n_cap * mask_words, s, u64{n_tail} * mask_words);
         return;
     }
-    const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, row_reserve_floor(W, 1024)});
+    const u64 cap = std::max<u64>({n, n_cap + n_cap / 2, start_rows(*ctx, W, 1024, u64{W} * 8 + 16 + u64{LW} * 4)});
     n_rows.ensure(ctx, cap * W, s, u64{n_tail} * W);
     n_parent.ensure(ctx, cap, s, n_tail);
     n_search.ensure(ctx, cap, s, n_tail);
@@ -1383,6 +1383,11 @@ void DeviceMultiIw::Impl::refuse_unless_room() const
 
 void DeviceMultiIw::Impl::refuse_room(u64 need) const
 {
+    if (most_successors == 0)  // (no state expanded yet: the estimate, not a count)
+        refuse_memory(*ctx, "device IW",
+                      "the candidates of a chunk of one state at the estimated successors" +
+                          (need ? " (" + std::to_string(need) + " bytes)" : std::string()),
+                      held(), "Raise the Context's max_bytes, or use the CPU search.");
     refuse_successors(*ctx, "device IW", "a state", most_successors, need, device_room(*ctx) + candidate_buffer_bytes(),
                       "Raise the Context's max_bytes, or use the CPU search.",
                       static_cast<u64>(W) * 8 + 4 * static_cast<u64>(L) + 40, held());
@@ -1397,9 +1402,10 @@ std::string DeviceMultiIw::Impl::held() const
                             {"candidate buffers", candidate_buffer_bytes()}});
 }
 
-void DeviceMultiIw::Impl::refuse_memory_failure() const
+void DeviceMultiIw::Impl::refuse_memory_failure(u64 bytes) const
 {
-    refuse_allocation_failure(*ctx, "device IW", phase, held(), "Raise the Context's max_bytes, or use the CPU search.");
+    refuse_allocation_failure(*ctx, "device IW", phase, bytes, held(),
+                              "Raise the Context's max_bytes, or use the CPU search.");
 }
 
 bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)

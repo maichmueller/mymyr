@@ -17,11 +17,34 @@ namespace
 thread_local cudaStream_t completed_release_stream = nullptr;
 }
 
-CudaError::CudaError(cudaError_t code, const std::string& what)
+CudaError::CudaError(cudaError_t code, const std::string& what, u64 bytes)
     : std::runtime_error("mymyr: CUDA: " + what + ": " + cudaGetErrorName(code) + " (" + cudaGetErrorString(code) + ")"),
-      m_code(code)
+      m_code(code), m_bytes(bytes)
 {
 }
+
+PinnedAllocationError::PinnedAllocationError(u64 bytes)
+    : m_what("mymyr: CUDA: cudaMallocHost (" + std::to_string(bytes) + " bytes): too little pinned host memory"),
+      m_bytes(bytes)
+{
+}
+
+namespace
+{
+/// cudaMallocHost, with a failure for want of memory as PinnedAllocationError.
+void* malloc_pinned(u64 bytes)
+{
+    void* p = nullptr;
+    const cudaError_t e = cudaMallocHost(&p, bytes);
+    if (e == cudaErrorMemoryAllocation)
+    {
+        (void)cudaGetLastError();
+        throw PinnedAllocationError(bytes);
+    }
+    check(e, "cudaMallocHost");
+    return p;
+}
+}  // namespace
 
 void check(cudaError_t e, const char* what)
 {
@@ -161,9 +184,7 @@ public:
         if (align > 4096)
             throw std::bad_alloc();
         DeviceGuard g(m_device);
-        void* p = nullptr;
-        check(cudaMallocHost(&p, std::max<usize>(bytes, 1)), "cudaMallocHost");
-        return p;
+        return malloc_pinned(std::max<usize>(bytes, 1));
     }
     void deallocate(void* p, usize, usize) noexcept override
     {
@@ -271,7 +292,10 @@ void* DeviceContext::allocate(u64 bytes, cudaStream_t s)
     void* p = nullptr;
     const cudaError_t e = cudaMallocFromPoolAsync(&p, bytes, m_pool, s ? s : m_stream);
     if (e != cudaSuccess)
-        check(e, ("cudaMallocFromPoolAsync (" + std::to_string(bytes) + " bytes)").c_str());
+    {
+        (void)cudaGetLastError();
+        throw CudaError(e, "cudaMallocFromPoolAsync (" + std::to_string(bytes) + " bytes)", bytes);
+    }
     return p;
 }
 
@@ -565,7 +589,7 @@ void LastUse::wait_on(cudaStream_t s) const noexcept
 PinnedBuffer::PinnedBuffer(u64 bytes) : m_bytes(bytes)
 {
     if (bytes)
-        check(cudaMallocHost(&m_ptr, bytes), "cudaMallocHost");
+        m_ptr = malloc_pinned(bytes);
 }
 
 PinnedBuffer::~PinnedBuffer()
