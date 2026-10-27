@@ -56,6 +56,13 @@ public:
     u32 label_width = 0;
     /// Expected successors per state (rounded up, with headroom), for sizing rl.expand outputs (see expand()).
     std::atomic<u32> branching{8};
+    nb::ft_mutex frozen_mutex;
+    struct FrozenCore
+    {
+        std::shared_ptr<PyTaskCore> core;
+        nb::object wrapper;  // weak reference: the twin's wrapper owns its source
+    };
+    std::unordered_map<u64, FrozenCore> frozen_cores;
 
     [[nodiscard]] const NameIndex& names();
     /// Cached snapshots (rebuilt when lazy slots were added since).
@@ -120,7 +127,11 @@ using CorePtr = std::shared_ptr<PyTaskCore>;
 struct PyTask
 {
     CorePtr core;
+    nb::object frozen_source = {};
 };
+
+/// Cached frozen twin of a Task or TaskHandle, preserving its source for serialization.
+[[nodiscard]] nb::object frozen_task(nb::handle source, std::string_view atoms = "auto");
 
 struct PyHandle
 {

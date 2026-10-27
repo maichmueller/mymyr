@@ -22,6 +22,7 @@
 #include "py_expansion.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
+#include "translate_bindings.hpp"
 #include "py_task.hpp"
 #include "rl_imports.hpp"
 #include "rl_typing.hpp"
@@ -1421,6 +1422,13 @@ void bind_rl(nb::module_& parent)
             "as 'f64' when one of them needs it (a table has one numeric storage). Raises ValueError when a directory "
             "or pattern has no problem files.")
 #endif
+        .def("translate", [](nb::pointer_and_handle<PyTable> self, StatesLike rows, TaskIdsArg task_ids,
+                              TableArg other, std::string_view missing, PoolArg pool, ArrayArg status,
+                              StreamArg stream, ContextArg ctx) {
+            return Arg<ann::Any>(translate_table(self.h, rows, task_ids, other, missing, pool, status, stream, ctx));
+        }, "rows"_a, "task_ids"_a, "other_table"_a, nb::kw_only(), "missing"_a = "raise", "pool"_a = nb::none(),
+           "status"_a = nb::none(), "stream"_a = nb::none(), "ctx"_a = nb::none(),
+           "Translate instance i into instance i of another equally sized table, matching names.")
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
         .def(
             "__getitem__",

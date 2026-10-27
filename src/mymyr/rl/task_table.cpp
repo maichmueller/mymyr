@@ -224,7 +224,10 @@ u64 TaskTable::fingerprint() const
 {
     u64 h = hash::k_seed ^ m_inst.size();
     for (const Instance& in : m_inst)
+    {
         h = hash::combine(h, in.task->fingerprint());
+        h = hash::combine(h, in.task->encoding_fingerprint());
+    }
     return h;
 }
 

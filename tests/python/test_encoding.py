@@ -164,14 +164,17 @@ def test_walks_equal_the_reconstruction_from_the_atoms(name, atoms):
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
 def test_slot_layout_does_not_change_the_encoding(name):
-    batches = []
+    batches, layouts = [], []
     for atoms in MODES:
         task = text_task(name, atoms=atoms)
+        layouts.append(task.encoding_fingerprint)
         batches.append(encoder_of(task).encode(walk(task, steps=6, seed=3)))
     first = batches[0].as_dict()
-    for other in batches[1:]:
+    for index, other in enumerate(batches[1:], 1):
+        assert (other.as_dict()["table_fingerprint"] == first["table_fingerprint"]) == (layouts[index] == layouts[0])
         for key, value in other.as_dict().items():
-            assert np.array_equal(value, first[key]), key
+            if key != "table_fingerprint":
+                assert np.array_equal(value, first[key]), key
 
 
 @pytest.mark.parametrize("atoms", MODES)
@@ -460,10 +463,8 @@ def test_bad_tables_are_refused():
         encoder_of(rl.TaskSuite([rl.TaskTable([task])]))
 
 
-def test_lazy_atom_slots_are_refused():
+def test_task_tables_require_frozen_slots():
     task = text_task("gripper__prob05", atoms="lazy")
-    with pytest.raises(ValueError, match="lazy atom slots"):
-        encoder_of(task)
     with pytest.raises(ValueError, match="lazy atom slots"):
         encoder_of(rl.TaskTable([task]))
 
@@ -545,8 +546,8 @@ def test_a_derived_array_narrower_than_the_instance_needs_is_refused():
 # digest of the encoder's rl::ArrayBundle. tests/cpp/encoding/test_encoder.cpp asserts the same constants for the same
 # encodings, so the arrays that Python exports are the bytes that the C++ encoder wrote.
 GOLDEN_DIGESTS = {
-    "gripper__prob05": 9666753341531803529,
-    "philosophers__p03-phil4": 8295029642410720015,
+    "gripper__prob05": 7519147456470550542,
+    "philosophers__p03-phil4": 2548283153954645567,
 }
 
 

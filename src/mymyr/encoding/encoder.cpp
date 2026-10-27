@@ -84,6 +84,7 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
            a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data &&
            a.states.rows == b.states.rows && a.states.words == b.states.words &&
            a.states.stride == b.states.stride && a.states.numeric_words == b.states.numeric_words &&
+           a.slot_map == b.slot_map && a.slot_map_size == b.slot_map_size && a.slot_maps == b.slot_maps &&
            a.task_ids == b.task_ids && a.derived == b.derived && a.derived_stride == b.derived_stride &&
            a.goal_pos == b.goal_pos && a.goal_neg == b.goal_neg && a.goal_stride == b.goal_stride &&
            a.goal_words == b.goal_words && a.goal_derived_pos == b.goal_derived_pos &&
@@ -118,6 +119,11 @@ struct Pass
     detail::SimpleParams simple_params{R, context.schema().simple_max_arity(), context.schema().simple_constants()};
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
+
+    [[nodiscard]] SlotMapView map_of(u64 g) const noexcept
+    {
+        return in.slot_maps ? in.slot_maps[g] : SlotMapView{in.slot_map, in.slot_map_size};
+    }
 
     [[nodiscard]] const u64* derived_of(u64 g, const detail::InstanceView& v) const noexcept
     {
@@ -171,12 +177,19 @@ struct Pass
     /// it has any). `Lanes`: the batch has numeric rows.
     template<bool Layered, bool Lanes>
     [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts, u32* cursors,
-                                             detail::RowLayers& layers) const noexcept
+                                             detail::RowLayers& layers, std::vector<u64>& mapped) const
     {
         detail::RowInput row{in.states.row(g), derived_of(g, v)};
+        if (const SlotMapView map = map_of(g); map.data)
+        {
+            mapped.resize(v.words);
+            map_fluent_words(map, {row.atoms, in.states.words}, mapped,
+                             context.table().task(instance_of(g))->atoms().fluent_slots());
+            row.atoms = mapped.data();
+        }
         if constexpr (Lanes)
             if (in.states.numeric_words != 0)
-                row.numeric = row.atoms + in.states.words;
+                row.numeric = in.states.row(g) + in.states.words;
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -260,7 +273,8 @@ void count_range(const Pass& p, u32 t)
         }
         const u32 instance = static_cast<u32>(id);
         const detail::InstanceView v = detail::instance_view(p.view, instance);
-        if (const auto validity = detail::row_validity(v, p.in.states.words, p.in.goal_pos != nullptr, p.in.goal_words,
+        if (const auto validity = detail::row_validity(v, p.map_of(g).data ? v.words : p.in.states.words,
+                                                       p.in.goal_pos != nullptr, p.in.goal_words,
                                                        p.in.goal_derived_pos != nullptr, p.in.goal_derived_words);
             validity != detail::RowValidity::Valid)
         {
@@ -278,7 +292,7 @@ void count_range(const Pass& p, u32 t)
         detail::RowLayers layers;
         const detail::RowInput input = p.row_input<Layered, Lanes>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
-            m.action_cursors.data(), layers);
+            m.action_cursors.data(), layers, m.mapped_state);
         const u64* row = input.atoms;
         const u64* derived = input.derived;
         if (derived && p.evaluate)
@@ -380,7 +394,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         detail::RowLayers layers;
         const detail::RowInput row = p.row_input<Layered, Lanes>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
-            m.action_cursors.data(), layers);
+            m.action_cursors.data(), layers, m.mapped_state);
         if (Layered && row.layers)
             p.bind_levels(v, row, layers, m.effective);
         entity_offsets[g] = static_cast<I>(entity);
@@ -507,6 +521,8 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, c
 
 std::shared_ptr<const FlatEncoder> FlatEncoder::create(TaskPtr task, const FlatOptions& options)
 {
+    if (task && !task->atoms().frozen() && options.horizon.mode == HorizonMode::None)
+        task = task->frozen();
     return create(rl::TaskTable::single(std::move(task)), options);
 }
 
@@ -557,6 +573,8 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     s.counted = false;
     if (extra)
         *extra = {};
+    if (m_schema->has_horizon() && (in.slot_map || in.slot_maps))
+        invalid("slot-mapped states require an encoder without a horizon");
     if (m_schema->has_horizon())
         return count_horizon(in, pool, scratch);
     if (in.horizon.graphs != 0 || in.horizon.node_offsets || in.horizon.nodes.rows != 0)

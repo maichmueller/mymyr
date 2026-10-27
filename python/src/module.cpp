@@ -17,6 +17,7 @@
 
 #include "arrays.hpp"
 #include "py_task.hpp"
+#include "translate_bindings.hpp"
 
 #include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/hash.hpp"
@@ -139,6 +140,7 @@ NB_MODULE(_core, m)
     mymyr::python::bind_arrays(m);
     mymyr::python::bind_task(m);
     mymyr::python::bind_rl(m);
+    mymyr::python::bind_translate(m);
     mymyr::python::bind_rl_torch(m);
     mymyr::python::bind_rl_jax(m);
     mymyr::python::bind_rl_ops(m);

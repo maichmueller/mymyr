@@ -693,3 +693,10 @@ does not wait for the device (see [the encoding](encoding.md)).
 An environment's device observation rows can be passed directly to `encoder.encode(obs.states, obs.task_ids)`.
 The table may mix row widths; each instance reads only its own words. `statics="shared"` keeps one static block per
 instance in the resulting CUDA batch. The same observation tensors can back `datasets.StateRows` for encoding on load.
+
+States and rows from another parse must be translated before use. `source.translate(states_or_rows, target)` matches
+predicate, function and object names and returns target-owned States or target-layout rows. For a table, use
+`source_table.translate(rows, task_ids, target_table)`; instance i maps into instance i. `mymyr.SlotMap` reuses the
+mapping across batches. `missing='drop'` also returns a per-row lossless mask; the default raises on a missing true
+atom or numeric value. CUDA arrays support `status=` and graph capture; see
+[Moving states between parses](parsing-and-tasks.md#state-encodings) for the status layout and buffer lifetimes.

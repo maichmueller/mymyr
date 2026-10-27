@@ -141,6 +141,7 @@
 #include "mymyr/encoding/layers.hpp"
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/task/slot_map.hpp"
 
 #include <memory>
 
@@ -214,6 +215,12 @@ struct EncodeInput
     HistoryInput history{};
     // The graphs of a horizon schema.
     HorizonInput horizon{};
+    /// Host-only source fluent slots -> instance fluent slots. With a map, states.words is the source width;
+    /// derived, goal, subgoal and history masks still use the destination slots. Numeric words retain their order.
+    const u32* slot_map = nullptr;
+    u32 slot_map_size = 0;
+    /// Optional per-row maps [N], taking precedence over slot_map. A null data pointer means an unmapped row.
+    const SlotMapView* slot_maps = nullptr;
 };
 
 /// The graphs a pool member should have at least: waking a member costs about as much as encoding several hundred
