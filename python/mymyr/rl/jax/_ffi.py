@@ -104,8 +104,8 @@ def env_init(handle: int, task_ids, rw2: int, c: int, v2: int, g2: int, h: int) 
     call = jax.ffi.ffi_call(
         "mymyr_env_init",
         (_u32((*n, rw2)), _i32(n), _i32(n), _u32((*n, c)), _u32((*n, v2)), _u32((*n, g2)), _u32((*n, g2)), _bool(n),
-         _u32((*n, 2 * h)), _i32(n), _i32((1,) if h else (*n, 0))),
-        vmap_method="sequential" if h else "broadcast_all",
+         _u32((*n, 2 * h)), _i32(n), _i32(n if h else (*n, 0))),
+        vmap_method="broadcast_all",
     )
     return call(task_ids, handle=np.int64(handle))
 
@@ -120,7 +120,7 @@ def env_reset(
         "mymyr_env_reset",
         tuple(jax.ShapeDtypeStruct(x.shape, x.dtype) for x in same),
         input_output_aliases={0: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9, 11: 10},
-        vmap_method="sequential" if visited.shape[-1] else "broadcast_all",
+        vmap_method="broadcast_all",
     )
     return call(
         states, task_ids, steps, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, mask, handle=np.int64(handle),
@@ -173,7 +173,7 @@ def env_step(
         "mymyr_env_step" if _fast(counts) else "mymyr_env_step_sync",
         outs,
         input_output_aliases={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12},
-        vmap_method="sequential" if visited.shape[-1] else "broadcast_all",
+        vmap_method="broadcast_all",
     )
     return call(
         states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, env_id, seed, action,

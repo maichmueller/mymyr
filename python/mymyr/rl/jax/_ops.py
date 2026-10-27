@@ -10,6 +10,7 @@ from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from mymyr.rl._ops import HerBatch
 
@@ -88,8 +89,15 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
     number of stored hashes (H denotes overflow); H must be a power of two in [2, 2^20]. ``parent`` int32 [M]
     indexes environment rows, or ``rows`` int32 [P] when supplied. Negative and out-of-range indices return False.
     Zero hashes map to 0x9E3779B97F4A7C15; equal hashes share an entry. Overflow can cause false negatives.
-    The inputs are read only, and the operation works under jit and vmap without enabling x64.
+    The inputs are read only, and the operation works under jit and vmap without enabling x64; 64-bit inputs without
+    x64 raise TypeError, since JAX would truncate them (``x.view(np.uint32)`` of a NumPy array gives the halves).
+    Successor hashes in this layout come from ``Env.expand_flat(..., hashes=True).succ_hash`` (or ``Env.expand``).
     """
+    for name, x in (("table", table), ("succ_hash", succ_hash)):
+        dtype = getattr(x, "dtype", None)
+        if dtype is not None and jax.dtypes.canonicalize_dtype(np.dtype(dtype)) != np.dtype(dtype):
+            raise TypeError(f"mymyr: visited_mask: the 64-bit {name} needs JAX x64 enabled; pass uint32 low/high "
+                            "halves instead (x.view(np.uint32) of a NumPy array)")
     table = jnp.asarray(table)
     hashes = jnp.asarray(succ_hash)
     if table.ndim != 2:

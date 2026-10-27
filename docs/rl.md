@@ -192,15 +192,17 @@ The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `s
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
 
 On the CPU, `mymyr.rl.jax.Env(..., track_visited=H)` carries per-episode tables in `state.visited` (uint32 `[N, 2H]`,
-low/high halves of 64-bit hashes), `state.visited_count` (int32 `[N]`) and `state.visited_status` (int32 `[1]`, sticky
-bit 0 for overflow). `H` and `track_visited=True` follow the capacity rules in [Revisit avoidance](#revisit-avoidance).
-`info["revisited"]` tests the reached state before insertion and autoreset. Reset clears selected histories and
-inserts initial states; `env.clear_visited(state, mask=None)` returns a state with selected histories cleared and
-current states inserted, retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses
-`[N, 0]` table/status arrays and reports false revisit flags. Each vmapped batch keeps its own `[1]` status; tracked
-FFI calls batch sequentially. CUDA tracking raises a clear construction error because device visit tables are
-unavailable. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or
-(u)int64 hashes with JAX x64 enabled, and equals the NumPy membership operation under jit without host reads.
+low/high halves of 64-bit hashes), `state.visited_count` (int32 `[N]`) and `state.visited_status` (int32 `[N]`, sticky
+bit 0 once the row's table overflowed; every state array leads with the rows, so states split and join by rows). `H` and
+`track_visited=True` follow the capacity rules in [Revisit avoidance](#revisit-avoidance). `info["revisited"]` tests the
+reached state before insertion and autoreset. Reset clears selected histories and inserts initial states;
+`env.clear_visited(state, mask=None)` returns a state with selected histories cleared and current states inserted,
+retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses `[N, 0]` table/status arrays and
+reports false revisit flags. CUDA tracking raises a clear construction error because device visit tables are
+unavailable. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
+hashes with JAX x64 enabled (64-bit inputs raise `TypeError` without it; `x.view(np.uint32)` gives the halves), and
+equals the NumPy membership operation under jit without host reads. The successor hashes in that layout are
+`env.expand_flat(state.states, capacity, hashes=True).succ_hash`, and `flat.parent` their parents.
 
 ```python needs-jax
 import jax
@@ -215,6 +217,9 @@ jax_next, _, _, _, _, jax_info = jax.jit(jax_visits.step)(0, jax_state, jnp.full
 assert jax_info["revisited"].all()
 jax_state = jax.jit(jax_visits.clear_visited)(jax_next)
 assert (jax_state.visited_count == 1).all()
+jax_flat = jax_visits.expand_flat(jax_state.states, 64, hashes=True)
+jax_seen = mymyr.rl.jax.visited_mask(jax_state.visited, jax_state.visited_count, jax_flat.succ_hash, jax_flat.parent)
+assert jax_seen.shape == jax_flat.parent.shape
 ```
 
 Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step

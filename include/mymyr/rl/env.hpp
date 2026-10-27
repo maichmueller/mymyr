@@ -114,7 +114,8 @@ struct EnvBatch
     u64* visited = nullptr;       // [rows, visited_capacity]; null with tracking disabled
     i32* visited_count = nullptr;  // [rows]; capacity denotes overflow
     u32 visited_capacity = 0;      // 0: disabled; otherwise a power of two in [2, 2^20]
-    i32* visited_status = nullptr; // [1]; sticky bit 0: some row overflowed
+    i32* visited_status = nullptr; // [1], or [rows] with visited_status_per_row; sticky bit 0: a row overflowed
+    bool visited_status_per_row = false;  // one status word per row (rows can be split and joined), not per batch
 
     [[nodiscard]] u32 row_words() const noexcept { return words + numeric_words; }
     [[nodiscard]] bool goals() const noexcept { return goal_pos != nullptr; }

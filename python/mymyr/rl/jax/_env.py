@@ -35,7 +35,10 @@ class EnvState(NamedTuple):
             (absorbing).
         visited: uint32 [N, 2H], low/high halves of the per-episode hash table ([N, 0] when disabled).
         visited_count: int32 [N], stored hashes per row; H denotes overflow.
-        visited_status: int32 [1], sticky bit 0 if any row overflowed ([N, 0] when disabled).
+        visited_status: int32 [N], sticky bit 0 once a row's table overflowed ([N, 0] when disabled).
+
+    Every array leads with the environment rows, so a state can be split and joined by rows (``x[idx]``,
+    ``jnp.concatenate``).
 
     Writing ``states`` or the goal masks needs :meth:`Env.refresh`."""
 
@@ -225,7 +228,8 @@ class Env:
     and autoreset. Reset clears histories and inserts initial states; refresh preserves them. Overflow sets status
     bit 0 and saturates a row's count to H; subsequent lookups can miss visits. Equal 64-bit hashes share an entry,
     including zero and the reserved key 0x9E3779B97F4A7C15. CUDA tracking requires device visited tables and raises
-    at construction. Under vmap, each mapped batch retains its own [1] status and its FFI calls run sequentially.
+    at construction. Status is per row, so vmap batches tracked calls like untracked ones. Successor hashes for
+    :func:`mymyr.rl.jax.visited_mask` come from ``expand_flat(..., hashes=True).succ_hash`` (or ``expand``).
 
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over
     a suite of several domains: one encoder per domain, in the suite's order; an observation is then a

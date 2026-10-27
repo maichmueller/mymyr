@@ -716,16 +716,20 @@ def test_visited_overflow_clear_reset_and_scan():
     pool = rl.CpuEnvPool(task, 6, track_visited=2, sampler=None, dead_end="none", max_steps=3, seed=8)
     expected = [np.asarray(pool.step().revisited).copy() for _ in range(8)]
     np.testing.assert_array_equal(flags, expected)
-    assert np.asarray(state.visited_status).tolist() == [1]
+    status = np.asarray(state.visited_status)
+    assert status.shape == (6,) and set(status.tolist()) <= {0, 1} and status.any()
+    assert pool.visited_status == 1
+    # a row whose table is full overflowed
+    assert np.all(status[np.asarray(state.visited_count) == 2] == 1)
     mask = np.array([True, False, True, False, False, True])
     cleared = jax.jit(env.clear_visited)(state, mask)
     np.testing.assert_array_equal(cleared.visited_count, np.where(mask, 1, state.visited_count))
     np.testing.assert_array_equal(np.asarray(cleared.visited)[~mask], np.asarray(state.visited)[~mask])
     np.testing.assert_array_equal(cleared.states, state.states)
-    assert np.asarray(cleared.visited_status).tolist() == [1]
+    np.testing.assert_array_equal(cleared.visited_status, status)
     reset, _ = jax.jit(env.reset_where)(state, mask)
     np.testing.assert_array_equal(np.asarray(reset.visited)[~mask], np.asarray(state.visited)[~mask])
-    assert np.asarray(reset.visited_status).tolist() == [1]
+    np.testing.assert_array_equal(reset.visited_status, status)
     moved = state._replace(states=start.states)
     moved = jax.jit(env.clear_visited)(moved)
     np.testing.assert_array_equal(moved.visited, start.visited)
@@ -742,7 +746,7 @@ def test_visited_vmap_keeps_each_batch_status():
     move = int(np.flatnonzero(np.any(np.asarray(exp.succ) != initial, axis=1))[0])
     actions = jnp.array([[-1, -1, -1], [move, move, move]], jnp.int32)
     out = jax.jit(jax.vmap(env.step))(jnp.array([8, 9], jnp.int32), starts, actions)
-    np.testing.assert_array_equal(out[0].visited_status, [[0], [1]])
+    np.testing.assert_array_equal(out[0].visited_status, [[0, 0, 0], [1, 1, 1]])
     for i, key in enumerate([8, 9]):
         start = jax.tree.map(lambda x: x[i], starts)
         single = jax.jit(env.step)(key, start, actions[i])
@@ -750,9 +754,73 @@ def test_visited_vmap_keeps_each_batch_status():
             np.testing.assert_array_equal(a, b[i])
     reset, _ = jax.jit(jax.vmap(env.reset_where))(out[0], jnp.ones((2, 3), jnp.bool_))
     np.testing.assert_array_equal(reset.visited_count, np.ones((2, 3), np.int32))
-    np.testing.assert_array_equal(reset.visited_status, [[0], [1]])
+    np.testing.assert_array_equal(reset.visited_status, [[0, 0, 0], [1, 1, 1]])
     cleared = jax.jit(jax.vmap(env.clear_visited))(out[0])
     np.testing.assert_array_equal(cleared.visited_count, np.ones((2, 3), np.int32))
+
+
+def test_visited_states_split_and_join_by_rows():
+    task = text_task("gripper__prob05")
+    env = rj.Env(task, device="cpu", track_visited=2, sampler=None, dead_end="none")
+    state, _ = env.reset(3, 4)
+    exp = rl.expand(task, [task.initial_state])
+    initial = task.encode([task.initial_state])[0]
+    move = int(np.flatnonzero(np.any(np.asarray(exp.succ) != initial, axis=1))[0])
+    # rows 0 and 2 move (and overflow at H = 2), rows 1 and 3 stay
+    actions = jnp.array([move, -1, move, -1], jnp.int32)
+    step = jax.jit(env.step)
+    full = step(5, state, actions)
+    np.testing.assert_array_equal(full[0].visited_status, [1, 0, 1, 0])
+    order = np.array([2, 1, 3, 0])
+    head = jax.tree.map(lambda x: x[order[:2]], state)
+    tail = jax.tree.map(lambda x: x[order[2:]], state)
+    joined = jax.tree.map(lambda x, y: jnp.concatenate([x, y]), head, tail)
+    for part, rows in ((head, order[:2]), (joined, order)):
+        out = step(5, part, actions[rows])
+        for got, want in zip(jax.tree.leaves(out[0]), jax.tree.leaves(full[0])):
+            np.testing.assert_array_equal(got, np.asarray(want)[rows])
+        np.testing.assert_array_equal(out[-1]["revisited"], np.asarray(full[-1]["revisited"])[rows])
+
+
+@pytest.mark.parametrize("name", ["gripper__prob05", "numeric"])
+def test_visited_mask_of_flat_successor_hashes(name):
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt")) if name == "numeric" \
+        else text_task(name)
+    env = rj.Env(task, device="cpu", track_visited=64, sampler=None, dead_end="none", autoreset=False)
+    state, _ = env.reset(1, 4)
+
+    def u64(x):
+        return np.ascontiguousarray(np.asarray(x)).view(np.uint64)
+
+    history = [{s} for s in task.decode(u64(state.states))]
+    step = jax.jit(env.step)
+    for t in range(5):
+        state = step(t, state)[0]
+        for i, s in enumerate(task.decode(u64(state.states))):
+            history[i].add(s)
+    flat = env.expand_flat(state.states, 256, hashes=True)
+    total = int(np.asarray(flat.offsets)[-1])
+    parent = np.asarray(flat.parent)[:total]
+    succ = task.decode(u64(flat.succ)[:total])
+    expected = [s in history[int(p)] for s, p in zip(succ, parent)]
+    assert any(expected)
+    got = jax.jit(rj.visited_mask)(state.visited, state.visited_count, flat.succ_hash[:total], flat.parent[:total])
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_jnp_visited_mask_refuses_64_bit_inputs_without_x64():
+    table = np.zeros((2, 4), np.uint64)
+    hashes = np.zeros(3, np.uint64)
+    parent = np.zeros(3, np.int32)
+    with jax.enable_x64(False):
+        with pytest.raises(TypeError, match="64-bit table needs JAX x64"):
+            rj.visited_mask(table, np.zeros(2, np.int32), hash_halves(hashes), parent)
+        with pytest.raises(TypeError, match="64-bit succ_hash needs JAX x64"):
+            rj.visited_mask(table.view(np.uint32), np.zeros(2, np.int32), hashes, parent)
+        assert not np.asarray(rj.visited_mask(table.view(np.uint32), np.zeros(2, np.int32), hash_halves(hashes),
+                                              parent)).any()
+    with jax.enable_x64(True):
+        assert not np.asarray(rj.visited_mask(table, np.zeros(2, np.int32), hashes, parent)).any()
 
 
 def test_visited_absorbing_goal_and_disabled_tracking():

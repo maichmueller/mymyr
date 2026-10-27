@@ -459,6 +459,7 @@ rl::EnvBatch make_batch(const Entry& e, const StateBufs& s, u64 N, i32* task_ids
     b.visited = s.visited.as<u64>();
     b.visited_count = s.visited_count.as<i32>();
     b.visited_status = s.visited_status.as<i32>();
+    b.visited_status_per_row = true;
     return b;
 }
 
@@ -501,7 +502,7 @@ StateBufs state_results(const Entry& e, ffi::Result<ffi::AnyBuffer>* res, const 
     const u64 N = s.states.rows;
     expect_rows(s.visited, N, "visited");
     expect_rows(s.visited_count, N, "visited_count");
-    expect_rows(s.visited_status, e.H ? 1 : 0, "visited_status");
+    expect_rows(s.visited_status, e.H ? N : 0, "visited_status");
     if (f.task_ids)
         expect_rows(s.task_ids, N, "task_ids");
     if (f.steps)
@@ -555,7 +556,7 @@ ffi::Error env_init_cpu(i64 handle, ffi::AnyBuffer task_ids, ffi::Result<ffi::An
         std::lock_guard lock(e->host_mutex);
         std::fill_n(s.visited_count.as<i32>(), N, 0);
         if (e->H)
-            *s.visited_status.as<i32>() = 0;
+            std::fill_n(s.visited_status.as<i32>(), N, 0);
         e->host->reset(b, nullptr, s.count.as<i32>());
     });
 }

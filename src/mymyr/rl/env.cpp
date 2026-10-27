@@ -437,7 +437,8 @@ void HostEnv::step_row_impl(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i
         revisited = visited_insert(b.visited + i * H, H, b.visited_count[i],
                                    StateView{s2, bits::trimmed_size(s2, w), nn ? s2n : nullptr, nn}.hash());
         if (b.visited_count[i] == static_cast<i32>(H))
-            std::atomic_ref<i32>(*b.visited_status).fetch_or(1, std::memory_order_relaxed);
+            std::atomic_ref<i32>(b.visited_status[b.visited_status_per_row ? i : 0])
+                .fetch_or(1, std::memory_order_relaxed);
     }
     if (out.revisited)
         out.revisited[o] = revisited ? 1 : 0;
