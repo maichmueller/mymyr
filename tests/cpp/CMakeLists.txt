@@ -189,6 +189,12 @@ if(TARGET mymyr_cuda)
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         gtest_discover_tests(mymyr_device_table_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        # the device action masks and the label-mode device env against the host
+        add_executable(mymyr_device_masks_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_masks.cpp)
+        target_link_libraries(mymyr_device_masks_tests PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings GTest::gtest_main)
+        target_compile_definitions(mymyr_device_masks_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        gtest_discover_tests(mymyr_device_masks_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the derived words of the device expand against rl::expand
         add_executable(mymyr_device_derived_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_derived.cpp)
         target_link_libraries(mymyr_device_derived_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)

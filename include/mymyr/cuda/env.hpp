@@ -34,6 +34,13 @@
 //     internal flat buffers with SuiteExpander (a table's DeviceExpander, or one per domain; canonical order, goal
 //     flags; it synchronizes), moves every environment to its chosen row, and counts the reached states'
 //     successors with a second expansion. The cache arrays are not used.
+// Label mode (rl::EnvConfig::actions = rl::ActionSpace::Label) has a path of its own, on the device without host round
+// trips and capturable like the fast path: a step applies each row's given label where it is applicable
+// (envk::launch_label_step), then tests the moved rows for an applicable action with the existence matchers of the
+// device masks (cuda/masks.hpp, from the rows' matcher views in the env's scratch) and finishes as the fast path does.
+// The count cache is one column, the 0/1 count (cache_schemas() 1, cache_view_words() 0). It needs the device masks'
+// tasks (no numeric fluents or axioms) whose schemas have no conditional effects (fast_unsupported() says why not);
+// there is no general path in label mode.
 // Both paths keep the batch's at_goal flags (rl::EnvBatch::at_goal, required): reset() writes them, a step reads them
 // for its absorbing rows instead of testing the current states, and writes those of the reached states (the goal test
 // of its finish, or the flat expansion's goal flags) and of autoresets (the initial state's), so no step tests a state
@@ -156,6 +163,10 @@ public:
     /// in any row, is reported by check_errors() and by the general path's next step or refresh, and an autoresetting
     /// row keeps its instance).
     void step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions action = {}, const i32* next_task_ids = nullptr);
+    /// rl::HostEnv's label-mode step on device arrays: labels (device) of each row's domain and instance; an
+    /// inapplicable label does not move and sets `invalid`; counts are 0/1. Throws std::invalid_argument unless the env
+    /// is in label mode.
+    void step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Labels labels, const i32* next_task_ids = nullptr);
     /// The random policy's next choices without a step (TorchRL's rand_action): out[i] = the successor index step()
     /// would draw now for row i (draws, count [rows] device; the env's key, env id first_env + i), limited to
     /// max_actions (~u32{0}: no limit), 0 where count[i] is 0.

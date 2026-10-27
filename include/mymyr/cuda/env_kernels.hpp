@@ -61,6 +61,35 @@ struct Select
 };
 cudaError_t launch_select(const Select& p, cudaStream_t s);
 
+/// The label-mode step's choice and move (rl::ActionSpace::Label): status[i] = k_goal for a row at a goal, k_stuck for
+/// one without applicable actions (its 0/1 count any[i * any_stride] is 0), else k_ok if its label (schema[i],
+/// binding[i * binding_stride ..], the instance's schema and object ids) is applicable (rl::dev::is_applicable), which
+/// then moves the row in place (rl::dev::apply_action: no conditional effects, frozen slots) and writes the label
+/// outputs (the arity's objects, -1 past it), and k_invalid otherwise. The draw counters advance by one.
+struct LabelStep
+{
+    u64 rows = 0;
+    u32 words = 0;      // atom words per row (the rows have no numeric words)
+    u64* states = nullptr;
+    const i32* inst = nullptr;                 // [rows] task ids (null: instance 0; outside [0, instances): 0)
+    const rl::dev::TaskView* views = nullptr;  // [instances] (device)
+    u32 instances = 1;
+    const u8* at_goal = nullptr;  // [rows]
+    const u32* any = nullptr;     // [rows, any_stride]: the current states' 0/1 counts (column 0)
+    u64 any_stride = 1;
+    const i32* schema = nullptr;   // [rows]
+    const i32* binding = nullptr;  // [rows, binding_stride]
+    u32 binding_stride = 0;
+    u64* draws = nullptr;  // [rows] (may be null)
+    u8* status = nullptr;  // [rows] out
+    i32* out_schema = nullptr;   // [rows] (null: not written; the moves' only, launch_finish writes the others)
+    i32* out_binding = nullptr;  // [rows, out_width]
+    u32 out_width = 0;
+    u32 label_width = 0;  // columns of the suite's labels (larger out_width columns are -1)
+    u32* error = nullptr;  // value 8: a move added an atom outside the rows (internal error)
+};
+cudaError_t launch_label_step(const LabelStep& p, cudaStream_t s);
+
 /// The flat path's move: states[i] = succ[pick_row[i]] (in place), the goal flag and the label of the successor row.
 struct Move
 {
