@@ -369,7 +369,7 @@ def test_captured_suite_rollout_equals_host(sets):
             nxt.copy_(torch.from_numpy(ROT(n, I)(r)))
             out = g.replay()
             for k in range(K):
-                got = step_arrays(rt.StepResult(*(getattr(out, f)[k] for f in fields)))
+                got = step_arrays(rt.StepResult(**{f: getattr(out, f)[k] for f in fields}))
                 for f, v in got.items():
                     assert np.array_equal(v, ref[r * K + k + 1][f]), (key, r, k, f)
             for f, v in env_arrays(env).items():

@@ -69,7 +69,7 @@ def test_captured_rollout_equals_host_on_tables(sets, name):
             out = g.replay()
             for k in range(K):
                 want = ref[r * K + k + 1]
-                got = step_arrays(rt.StepResult(*(getattr(out, f)[k] for f in FIELDS)))
+                got = step_arrays(rt.StepResult(**{f: getattr(out, f)[k] for f in FIELDS}))
                 for f, v in got.items():
                     assert np.array_equal(v, want[f]), (launch, r, k, f)
             a = env_arrays(env)
