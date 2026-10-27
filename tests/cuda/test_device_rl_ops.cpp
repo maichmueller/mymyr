@@ -18,6 +18,7 @@
 #include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
+#include "mymyr/successor/bindings.hpp"
 
 #include <gtest/gtest.h>
 
@@ -515,4 +516,71 @@ TEST(DeviceRlOps, MatchFirstReportsCapacityVariableLimitAndInvalidInstances)
     b.rows = 0;
     cuda::check(cuda::launch_match_first(view, b, stream), "empty matches");
     EXPECT_EQ(download<u64>(status, 1, stream)[0], 0);
+}
+
+TEST(DeviceRlOps, MatchFirstGroundOnlyNeedsNoBindingStorage)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    const auto task = load("gripper__prob05");
+    const auto suite = rl::TaskSuite::of(rl::TaskTable::single(task));
+    const auto lifted = rl::lifted_goal_templates(suite);
+    auto condition = lifted.condition(0);
+    const auto state = task->initial_state();
+    std::vector<ObjectId> binding;
+    {
+        const auto workspace = task->workspace();
+        for_each_binding(*task, *workspace, condition, state.view(), {}, [&](std::span<const ObjectId> values)
+        {
+            binding.assign(values.begin(), values.end());
+            return false;
+        });
+    }
+    ASSERT_EQ(binding.size(), condition.variables.size());
+    for (auto& literal : condition.literals)
+        for (auto& term : literal.terms)
+            if (term >= 0)
+                term = formalism::object_term(binding[static_cast<u32>(term)]);
+    condition.variables.clear();
+    condition.equalities.clear();
+    const auto templates = rl::GoalTemplates::from_conditions(suite, {{condition}});
+    ASSERT_EQ(templates.max_vars(), 0);
+    std::vector<u64> words(suite->words(), 0);
+    std::copy(state.words().begin(), state.words().end(), words.begin());
+    u8 found = 0;
+    i32 which = -1, count = 0;
+    u64 status = 99;
+    rl::MatchBatch batch;
+    batch.rows = 1;
+    batch.row_words = suite->words();
+    batch.states = words.data();
+    batch.capacity = 1;
+    batch.first = true;
+    batch.found = &found;
+    batch.template_id = &which;
+    batch.count = &count;
+    batch.status = &status;
+    rl::match_first(templates.view(), batch);
+    ASSERT_EQ(found, 1);
+    ASSERT_EQ(which, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_EQ(status, 0);
+    std::vector<std::byte> packed(templates.arrays().bytes());
+    std::memcpy(packed.data(), templates.arrays().block(), packed.size());
+    auto block = upload(ctx, packed, stream), states = upload(ctx, words, stream);
+    auto df = upload(ctx, std::vector<u8>{0}, stream);
+    auto dt = upload(ctx, std::vector<i32>{-1}, stream), dc = upload(ctx, std::vector<i32>{0}, stream);
+    auto ds = upload(ctx, std::vector<u64>{99}, stream);
+    batch.states = ptr<const u64>(states);
+    batch.found = ptr<u8>(df);
+    batch.template_id = ptr<i32>(dt);
+    batch.count = ptr<i32>(dc);
+    batch.status = ptr<u64>(ds);
+    cuda::check(cuda::launch_match_first(templates.view(static_cast<const std::byte*>(block.data())), batch, stream),
+                "ground-only match");
+    EXPECT_EQ(download<u8>(df, 1, stream)[0], found);
+    EXPECT_EQ(download<i32>(dt, 1, stream)[0], which);
+    EXPECT_EQ(download<i32>(dc, 1, stream)[0], count);
+    EXPECT_EQ(download<u64>(ds, 1, stream)[0], status);
 }
