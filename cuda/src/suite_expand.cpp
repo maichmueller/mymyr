@@ -183,6 +183,7 @@ struct SuiteExpander::Impl
                 check(suitek::launch_add(out.parent + p.base, e.capacity, static_cast<i32>(p.first), s), "launch_add");
         }
         out.total = total;
+        out.generated = total;
         out.words_needed = need;
         if (out.offsets && in.rows == 0)
             check(cudaMemsetAsync(out.offsets, 0, sizeof(i32), s), "cudaMemsetAsync");
@@ -222,6 +223,7 @@ struct SuiteExpander::Impl
             need = std::max(need, e.words_needed);
         }
         out.total = total;
+        out.generated = total;
         out.words_needed = need;
     }
 };
