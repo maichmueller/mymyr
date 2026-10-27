@@ -36,6 +36,9 @@ constexpr u32 k_no_parent = 0xFFFFFFFFu;
 
 /// Timed chunks between two folds of their events into the statistics (each CUDA event holds host memory).
 constexpr usize k_timed_chunks = 256;
+/// The fewest rows of a successor window held to the arenas' spare rows before the search refuses (a window costs a
+/// few synchronizations and launches whatever its rows).
+constexpr u64 k_min_window_rows = 64;
 
 template<class T>
 T* as(Scratch& s)
@@ -582,6 +585,9 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             // the window: the most rows whose buffers fit 15/16 of the room (a margin for the pool's granularity)
             const u64 room = window_room(), usable = room - room / 16;
             u64 hi = std::min(window_cap, M - f);
+            const u64 spare = std::min(states->capacity(), nodes->capacity()) - count;
+            if (spare > 0)
+                hi = std::min(hi, spare);
             SuccessorWindow w = successor_window(off, f, 1);
             if (window_bytes(w) > usable)
                 refuse_window(w, room, false);
@@ -596,11 +602,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 else
                     hi = mid - 1;
             }
-            // the arenas' spare rows without their growth, unless they hold less than a quarter of the window that fits
-            // with it (after an exact growth the spare rows are the last window's duplicates: a few rows per window)
-            if (const u64 spare = std::min(states->capacity(), nodes->capacity()) - count; spare > 0 && spare < w.rows &&
-                                                                                          spare >= w.rows / 4)
-                w = successor_window(off, f, spare);
+            // A window held to a few spare rows of arenas that cannot grow by one more: the state's other successors
+            // would take a window per few rows (each with its synchronizations), and the search fails at the first
+            // window whose new states exceed the spare rows unless all the rest are duplicates
+            if (spare > 0 && w.rows == spare && spare < k_min_window_rows && spare < M - f)
+                if (const u64 more = window_bytes(successor_window(off, f, spare + 1)); more > usable)
+                    refuse_memory(*ctx, "device BrFS",
+                                  "the arenas of more than " + std::to_string(count + spare) +
+                                      " states with a successor window's buffers (" + std::to_string(more) + " bytes)",
+                                  held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
             // (numeric successor rows are written whole: a numeric state's successors fit at once or are refused)
             if (task->numeric_slots() && w.rows < M)
                 refuse_successors(*ctx, "device BrFS", "a state", M, window_bytes(successor_window(off, 0, M)), room,
