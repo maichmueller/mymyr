@@ -2726,7 +2726,8 @@ void bind_rl(nb::module_& parent)
             "predicate (the instance's domain table's predicate id), polarity, kind (0 static, 1 fluent, 2 derived), "
             "arity, terms [L, max_arity] (>= 0 a variable, < 0 the object -(t + 1), -2**31 padding) and goal_literal (the "
             "index in the instance's task.goal_condition.literals, -1 for templates from conditions); scalars "
-            "num_instances, num_templates, num_literals, max_vars, max_arity.")
+            "num_instances, num_templates, num_literals, max_vars, max_arity, capacity. The literal index is stored in "
+            "literal_inst, literal_ranges, literal_slots, literal_derived and literal_static; it is included in nbytes.")
         .def(
             "conditions",
             [](const PyGoalTemplates& t, InstanceArg instance) {

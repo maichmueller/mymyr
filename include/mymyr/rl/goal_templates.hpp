@@ -48,7 +48,15 @@
 //   terms [L, A]              formalism::Term (>= 0 a variable, < 0 the object -(t + 1)), k_no_term padding; A = the
 //                             largest literal arity (generated templates hold variables only)
 //   goal_literal [L]          the literal's index in the instance's goal literals (-1: from_conditions)
-// with the scalars num_instances, num_templates, num_literals, max_vars, max_arity.
+// The literal-resolution section is packed in the same block:
+//   literal_inst [I, encoding::detail::k_instance_columns] holds object counts and offsets into the tuple arrays;
+//                 the other columns are zero
+//   literal_ranges [I, P, encoding::detail::k_literal_columns] holds ranges for each table predicate, including
+//                 instance-owned derived predicates; P is the widest predicate table of the suite
+//   literal_slots, literal_derived, literal_static [rows, Aindex] hold the sorted fluent, derived and static tuples;
+//                 Aindex is the widest predicate arity of the suite, at least one
+// with scalars num_instances, num_templates, num_literals, max_vars, max_arity and capacity (the most templates of any
+// instance). The literal-resolution section contributes to nbytes and is read by view() on either memory space.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/match.hpp"

@@ -414,7 +414,10 @@ so a state's first binding is the smallest in that order. `templates.arrays(fram
 the templates of instance i at `[instance_offsets[i], instance_offsets[i + 1])`. Each template has a `template_size`,
 `num_vars`, `distinct` flag, `literal_offsets` and an `order` row (its binding order, padded with -1). Each literal has
 a `predicate` (the domain table's predicate id), `polarity`, `kind` (0 static, 1 fluent, 2 derived), `arity`, a `terms`
-row (variable indices, padded with -2**31) and `goal_literal`.
+row (variable indices, padded with -2**31) and `goal_literal`. The arrays also hold a literal index: instance object
+counts and tuple offsets in `literal_inst`, predicate ranges in `literal_ranges`, and sorted fluent, derived and
+static tuples in `literal_slots`, `literal_derived` and `literal_static`. This index covers instance-owned derived
+predicates as well as domain predicates, contributes to `nbytes`, and is part of the same device upload.
 
 `GoalTemplates.from_conditions(source, conditions)` packs your own templates, one list per instance in match order.
 Each condition needs literals, untyped variables and no numeric constraints. It carries either no equalities or one

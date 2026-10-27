@@ -13,6 +13,7 @@ namespace mymyr::rl
 {
 struct MatchTemplates
 {
+    /// Literal resolution: instance object counts, tuple offsets, sorted tuple rows and predicate ranges.
     encoding::detail::ContextView literals{};
     u32 num_instances = 0, capacity = 0, max_vars = 0, max_arity = 0;
     const i32 *instance_offsets = nullptr, *num_vars = nullptr, *literal_offsets = nullptr, *order = nullptr;
