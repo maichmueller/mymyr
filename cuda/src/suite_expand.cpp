@@ -47,6 +47,7 @@ struct SuiteExpander::Impl
     bool counted = false, drop_noops = false;
     detail::ExpansionDrop drop;
     Scratch digest_offsets;
+    const i32* generated_offsets = nullptr;  // the pre-drop offsets of the last write with drop_noops
     rl::StateBatchView in{};
     u64 stride = 0, total = 0;
     // the suite on the device: each instance's domain and local id, and its fluent slots (uploaded once)
@@ -364,6 +365,7 @@ void SuiteExpander::write(rl::Expansion& out)
     if ((I.drop_noops || out.index) && !dest.offsets)
         dest.offsets = scratch_of<i32>(I.digest_offsets, I.ctx, I.in.rows + 1, I.s);
     rl::Expansion raw = I.drop_noops ? I.drop.prepare(dest, I.in.rows, I.ctx, I.s) : dest;
+    I.generated_offsets = I.drop_noops ? raw.offsets : nullptr;
     if (I.runs)
         I.write_runs(raw);
     else
@@ -405,7 +407,13 @@ void SuiteExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl:
     if (!m->one())
         throw std::invalid_argument("mymyr: device expand: the expansion needs the host: " + async_unsupported(in.rows, options));
     m->counted = false;
+    m->generated_offsets = nullptr;
     m->subs[0]->expand_async(in, task_ids, out, status, options, rows_dev);
+}
+
+const i32* SuiteExpander::generated_offsets() const noexcept
+{
+    return m->generated_offsets || !m->one() ? m->generated_offsets : m->subs[0]->generated_offsets();
 }
 
 void SuiteExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)

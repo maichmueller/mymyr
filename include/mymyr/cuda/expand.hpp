@@ -96,11 +96,15 @@ public:
     /// outside the table or rows with unassigned atom slots (validate), std::length_error beyond 2^31 - 1 successors.
     u64 count(rl::StateBatchView in, const i32* task_ids, const rl::ExpandOptions& options = {});
     /// Writes the expansion of the counted batch (count() first; the batch and its task ids must still hold the same
-    /// values) into `out` and sets out.total, out.generated (equal to the total) and out.words_needed. May be called
-    /// again with other destinations.
+    /// values) into `out` and sets out.total, out.generated and out.words_needed as rl::expand does (generated equals
+    /// the total without drop_noops). May be called again with other destinations.
     void write(rl::Expansion& out);
     /// count() then write().
     void expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options = {});
+    /// After a write() or expand_async() with drop_noops: the device CSR offsets [rows + 1] of the successors before
+    /// dropping (offsets[i + 1] - offsets[i] counts state i's generated successors), on this expander's stream and
+    /// valid until its next call; null after a call without drop_noops.
+    [[nodiscard]] const i32* generated_offsets() const noexcept;
 
     /// The counted batch as a part of a larger batch (cuda::SuiteExpander's domains): row q of the counted batch
     /// is row rows[q] of the larger one, whose CSR offsets are batch_offsets (device arrays; [counted rows] and [larger

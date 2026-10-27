@@ -36,12 +36,15 @@ cudaError_t launch_expansion_generated(u32 value, u32* out, cudaStream_t s);
 /// Native state hashes, with the numeric block following `words` atom words in each row.
 cudaError_t launch_hash_rows(const u64* states, u64 rows, u64 stride, u32 words, u32 numeric_words,
                              u64* out, cudaStream_t s);
-/// Kept counts per parent (all-no-op parents keep all rows); counts[rows] = 0 for an exclusive scan.
+/// Kept counts per parent (all-no-op parents keep all rows); counts[rows] = 0 for an exclusive scan. When the
+/// pre-drop expansion overflows its capacity (or `status` is nonzero), every parent keeps all of its rows.
 cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s, const u32* status = nullptr);
 /// Stable scatter into scanned offsets, including canonical indices and cleared padding.
 cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, cudaStream_t s);
 /// Canonical positions without dropping, and zero digest padding beyond the live total.
 cudaError_t launch_expansion_indices(ExpansionRows out, u64 rows, cudaStream_t s);
+/// counts[i] = offsets[i + 1] - offsets[i] for i < rows.
+cudaError_t launch_segment_counts(const i32* offsets, u64 rows, i32* counts, cudaStream_t s);
 
 /// rl::novelty_update on device arrays: seen [rows, words] (in place), states [rows, state_stride], reward [rows].
 cudaError_t launch_novelty_update(u64* seen, const u64* states, u64 rows, u32 words, u32 state_stride, i32* reward,

@@ -1394,17 +1394,17 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool hashes, bo
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
         if (sv.rows == 0)
-        {
-            if (p.digests.generated)
-                cuda::check(cuda::launch_expansion_generated(0, p.digests.generated->as<u32>(), st), "launch_expansion_generated");
-            return;
-        }
+            return;  // no state: every output, the per-state generated counts included, is empty
         const rl::Expansion x = device_expand(*e, *d, sv, ids, st, p.derived.has_value(), hashes, noops, drop);
         rl::PaddedExpansion out = make_padded(*e, p);
         d->expander->pad(x, sv.rows, out);
         if (p.digests.generated)
-            cuda::check(cuda::launch_expansion_generated(static_cast<u32>(x.generated), p.digests.generated->as<u32>(), st),
-                        "launch_expansion_generated");
+        {
+            // each state's successors before dropping, so that a vmapped call keeps one count per state
+            const i32* full = drop ? d->expander->generated_offsets() : x.offsets;
+            cuda::check(cuda::launch_segment_counts(full, sv.rows, p.digests.generated->as<i32>(), st),
+                        "launch_segment_counts");
+        }
     });
 }
 

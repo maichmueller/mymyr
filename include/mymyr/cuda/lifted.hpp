@@ -343,8 +343,9 @@ struct Padded
     u32* overflow = nullptr;  // set to 1 when some count > K or a successor is past the flat capacity
     u64* derived = nullptr;   // [rows, K, derived_words], zero padding
     u32 derived_words = 0;
-    u64* hash = nullptr;
-    u8* noop = nullptr;
+    u64* hash = nullptr;      // [rows, K], zero padding
+    u8* noop = nullptr;       // [rows, K], zero padding
+    i32* canonical = nullptr;  // [rows, K]: Flat::index of the row, -1 padding (and without Flat::index)
 };
 struct Flat
 {

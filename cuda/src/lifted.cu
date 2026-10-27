@@ -141,7 +141,9 @@ __global__ void k_pad(Flat f, u64 rows, Padded o)
         if (k < c && j >= f.capacity && o.overflow)
             *o.overflow = 1;
         if (o.index)
-            o.index[at] = valid ? (f.index ? f.index[j] : static_cast<i32>(j)) : -1;
+            o.index[at] = valid ? static_cast<i32>(j) : -1;
+        if (o.canonical)
+            o.canonical[at] = valid && f.index ? f.index[j] : -1;
         if (o.hash) o.hash[at] = valid && f.hash ? f.hash[j] : 0;
         if (o.noop) o.noop[at] = valid && f.noop ? f.noop[j] : 0;
         if (o.mask)

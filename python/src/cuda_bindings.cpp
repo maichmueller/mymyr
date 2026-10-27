@@ -845,8 +845,8 @@ struct DevicePadded
     u32 k = 0, words = 0, label_width = 0, numeric_words = 0;
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
-    bool has_goal = false, has_derived = false, overflow = false, has_hash = false, has_noop = false;
-    u64 off_hash = 0, off_noop = 0;
+    bool has_goal = false, has_derived = false, overflow = false, has_hash = false, has_noop = false, has_canonical = false;
+    u64 off_hash = 0, off_noop = 0, off_canonical = 0;
     Framework fw = Framework::DLPack;
     WordEncoding enc;
 
@@ -895,6 +895,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.has_derived = f.has_derived;
     p.has_hash = f.has_hash;
     p.has_noop = f.has_noop;
+    p.has_canonical = f.has_index;
     p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
@@ -909,6 +910,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.off_derived = lay.add(f.has_derived ? NK : 0, u64{f.derived_words} * sizeof(u64));
     p.off_hash = lay.add(f.has_hash ? NK : 0, sizeof(u64));
     p.off_noop = lay.add(f.has_noop ? NK : 0, 1);
+    p.off_canonical = lay.add(f.has_index ? NK : 0, sizeof(i32));
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
@@ -927,6 +929,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     out.derived = f.has_derived && f.derived_words ? reinterpret_cast<u64*>(b + p.off_derived) : nullptr;
     out.succ_hash = f.has_hash ? reinterpret_cast<u64*>(b + p.off_hash) : nullptr;
     out.noop = f.has_noop ? reinterpret_cast<u8*>(b + p.off_noop) : nullptr;
+    out.canonical = f.has_index ? reinterpret_cast<i32*>(b + p.off_canonical) : nullptr;
     {
         ExpanderLease ex(ref, c, f.os.s);
         nb::gil_scoped_release release;
@@ -1240,7 +1243,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (waited)
         {
             r["total"] = x.total;
-        r["generated"] = x.generated;
+            r["generated"] = x.generated;
             r["words_needed"] = x.words_needed;
             r["overflow"] = x.overflow();
         }
@@ -2106,6 +2109,11 @@ void bind_cuda(nb::module_& parent)
             if (!p.has_noop) return nb::none();
             return p.array(p.off_noop, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] bitwise equality with the parent, false padding")
+        .def_prop_ro("canonical", [](const DevicePadded& p) -> MaybeArray {
+            if (!p.has_canonical) return nb::none();
+            return p.array(p.off_canonical, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
+        }, "[N, K] int32: the flat index (position in the parent's full successor order, the environment action), "
+           "-1 padding; None if the expansion has no index")
         .def_prop_ro("derived", [](const DevicePadded& p) -> MaybeArray {
             if (!p.has_derived)
                 return nb::none();

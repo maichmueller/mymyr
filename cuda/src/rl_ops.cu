@@ -112,7 +112,8 @@ __global__ void k_noop_counts(ExpansionRows src, u64 rows, u32* counts, const u3
             for (u64 j = u64{b} + lane; j < e; j += 32)
                 n += !src.noop[j];
         for (u32 d = 16; d; d >>= 1) n += __shfl_down_sync(0xFFFFFFFFu, n, d);
-        if (!lane) counts[p] = fits ? (n ? n : e - b) : 0;
+        // an overflowing batch keeps every row: its offsets are those before dropping, so offsets[rows] = generated
+        if (!lane) counts[p] = fits && n ? n : e - b;
     }
     if (!blockIdx.x && !threadIdx.x) counts[rows] = 0;
 }
@@ -190,7 +191,18 @@ __global__ void k_expansion_indices(ExpansionRows out, u64 rows)
         }
     }
 }
+__global__ void k_segment_counts(const i32* offsets, u64 rows, i32* counts)
+{
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
+        counts[i] = offsets[i + 1] - offsets[i];
+}
 }  // namespace
+
+cudaError_t launch_segment_counts(const i32* offsets, u64 rows, i32* counts, cudaStream_t s)
+{
+    if (rows) k_segment_counts<<<grid_for(rows), k_block, 0, s>>>(offsets, rows, counts);
+    return cudaGetLastError();
+}
 
 cudaError_t launch_expansion_generated(u32 value, u32* out, cudaStream_t s)
 {

@@ -50,6 +50,7 @@ struct DeviceExpander::Impl
     Scratch ctl, sort, numeric_in, numeric_out, digest_offsets;
     detail::ExpansionDrop drop;
     bool drop_noops = false;
+    const i32* generated_offsets = nullptr;  // the pre-drop offsets of the last call with drop_noops
     // an expansion's rows apart from the caller's outputs: Multi's labels of deferred successors the caller does not
     // take, or of a mapped write; Single's and PerInstance's expansion before it is scattered to the caller's rows
     Scratch t_succ, t_schema, t_binding, t_parent, t_goal, t_derived, t_offsets, t_hash, t_noop;
@@ -1292,6 +1293,7 @@ void DeviceExpander::write(rl::Expansion& out)
     if ((I.drop_noops || out.index) && !dest.offsets)
         dest.offsets = scratch_of<i32>(I.digest_offsets, I.ctx, I.in.rows + 1, I.s);
     rl::Expansion raw = I.drop_noops ? I.drop.prepare(dest, I.in.rows, I.ctx, I.s) : dest;
+    I.generated_offsets = I.drop_noops ? raw.offsets : nullptr;
     if (I.on_host)
         I.write_host(raw);
     else
@@ -1409,12 +1411,15 @@ void DeviceExpander::expand_async(rl::StateBatchView in, const i32* task_ids, rl
     if (options.drop_noops && out.capacity && !out.index)
         throw std::invalid_argument("mymyr: expand: drop_noops requires index");
     rl::Expansion raw = options.drop_noops ? I.drop.prepare(out, in.rows, I.ctx, I.s) : out;
+    I.generated_offsets = options.drop_noops ? raw.offsets : nullptr;
     I.expand_async(raw, status);
     if (options.drop_noops)
         I.drop.compact(raw, out, in.rows, I.ctx, I.s, status);
     else if (out.index || out.succ_hash || out.noop)
         check(launch_expansion_indices(detail::expansion_rows(out), in.rows, I.s), "launch_expansion_indices");
 }
+
+const i32* DeviceExpander::generated_offsets() const noexcept { return m->generated_offsets; }
 
 void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansion& out)
 {
@@ -1441,6 +1446,7 @@ void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansio
     f.index = flat.index;
     p.hash = out.succ_hash;
     p.noop = out.noop;
+    p.canonical = out.canonical;
     if (flat.numeric_words)
         check(numeric::launch_pad(f, rows, p, flat.numeric_words, s), "numeric::launch_pad");
     else

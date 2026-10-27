@@ -19,7 +19,8 @@ __global__ void pad(lifted::Flat f, u64 rows, lifted::Padded o, u32 nn)
     const u64 j = b + k;
     const bool valid = k < c && j < f.capacity;
     if (k < c && j >= f.capacity && o.overflow) atomicOr(o.overflow, 1u);
-    if (o.index) o.index[at] = valid ? (f.index ? f.index[j] : static_cast<i32>(j)) : -1;
+    if (o.index) o.index[at] = valid ? static_cast<i32>(j) : -1;
+    if (o.canonical) o.canonical[at] = valid && f.index ? f.index[j] : -1;
     if (o.hash) o.hash[at] = valid && f.hash ? f.hash[j] : 0;
     if (o.noop) o.noop[at] = valid && f.noop ? f.noop[j] : 0;
     if (o.mask) o.mask[at] = valid;
