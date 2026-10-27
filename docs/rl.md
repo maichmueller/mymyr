@@ -422,6 +422,62 @@ disequality per pair of variables, as `GroundCondition.lift(True)` makes them. T
 with their source, options and arrays; nothing is generated again. Like tables, templates refuse tasks with lazy
 atom slots (load with `atoms="auto"`, `"reachable"` or `"dense"`).
 
+`rl.match_first(rows, task_ids, templates, first=False, derived=None, status=None, capacity=None, pool=None)` matches each row
+against its instance's templates. Static literals use the instance's facts, fluent literals the row's bits, derived
+literals the supplied derived words, and negative literals absence. Supply contiguous NumPy arrays or torch tensors;
+rows are `[N, RW]` words, task ids are int32 `[N]` (or `None` for a single instance). Derived words `[N, DW]` are
+required whenever any template has a derived literal. The first binding is exactly
+`task.bindings(condition, state, limit=1)`: compiler binding order, objects ascending. Distinctness belongs to the
+templates and is selected when building them.
+
+The result has `found` bool `[N, C]`, `binding` int32 `[N, C, V]`, `template` int32 `[N, C]`, `count` int32 `[N]` and
+`status` int64 scalar. `V = templates.max_vars`, `C = templates.capacity` (the most templates of any instance), or the
+explicit capacity. Slot j is instance-local template j, while `template` stores its global packed id. Failed matches
+and padding have `found=False`, template id -1 and binding -1. Binding entries are indexed by variable id and padded
+with -1. `first=True` stops at the first matched template, removing the C axis: `[N]`, `[N,V]`, `[N]`.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import rl
+
+match_task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+match_templates = rl.lifted_goal_templates(match_task)
+match_rows = np.asarray(match_task.encode([match_task.initial_state]))
+matched = rl.match_first(match_rows, None, match_templates, first=True)
+assert matched.found.tolist() == [True] and matched.count.tolist() == [1]
+condition = match_templates.conditions(0)[int(matched.template[0])]
+expected = next(iter(match_task.bindings(condition, match_task.initial_state, limit=1)))
+assert matched.binding[0, :condition.arity].tolist() == [o.index for o in expected]
+assert int(matched.status) == 0
+```
+
+Counts include successful matches beyond capacity. Status is cleared each call: bit 0 (value 1) reports truncated
+matches, bit 1 (value 2) a template exceeding the device limit of 64 variables, bit 2 (value 4) an invalid instance id.
+Invalid rows have no matches. A supplied `status` scalar is reused and returned. Host calls can reuse an `rl.ThreadPool` with `pool=` to partition
+rows across workers. The destination-passing C++ form
+`rl::match_first(MatchTemplates, MatchBatch, ThreadPool*)` also accepts caller-owned output buffers and a thread pool;
+`GoalTemplates::view(block)` resolves the packed pointers on either host or device memory.
+
+For CUDA, upload once with `templates.to("cuda:0")` or `templates.upload(torch.cuda.current_stream())`. Uploads include
+the sorted literal index and reject templates above the variable limit. Warm matching on the capture stream before
+capture and retain uploaded templates and graph buffers through the last replay. Outputs, counts and status remain
+on the device; there is no host synchronization. `mymyr::match_first` on a registered template handle has a fake for
+`torch.compile` and `torch.export`. There is no JAX form.
+
+```python needs-torch skip-if-no-cuda
+import torch
+from mymyr.rl.torch import register
+
+uploaded_templates = match_templates.to("cuda:0")
+device_match_rows = torch.tensor(match_rows.view(np.int64), device="cuda:0")
+handle = register(uploaded_templates)
+found, binding, template_id, count, status = torch.ops.mymyr.match_first(handle, device_match_rows, first=True)
+assert found.cpu().tolist() == matched.found.tolist()
+assert binding.cpu().tolist() == matched.binding.tolist()
+assert status.item() == 0
+```
+
 ## Instance sampling and curricula
 
 Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at

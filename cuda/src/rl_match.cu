@@ -36,8 +36,9 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
     for (u64 job = (u64{blockIdx.x} * blockDim.x + threadIdx.x) / 32; job < jobs;
          job += u64{gridDim.x} * blockDim.x / 32)
     {
-        const u64 row = b.first ? job : job / t.capacity;
-        const u32 local = b.first ? 0 : static_cast<u32>(job % t.capacity);
+        const u32 width = t.capacity ? t.capacity : 1;
+        const u64 row = b.first ? job : job / width;
+        const u32 local = b.first ? 0 : static_cast<u32>(job % width);
         const i32 g = b.task_ids ? b.task_ids[row] : 0;
         u64 flags = 0;
         if (g < 0 || static_cast<u32>(g) >= t.num_instances)
@@ -100,7 +101,7 @@ cudaError_t launch_match_first(const rl::MatchTemplates& t, const rl::MatchBatch
     auto err = cudaGetLastError();
     if (err != cudaSuccess)
         return err;
-    const u64 jobs = b.rows * (b.first ? 1 : t.capacity);
+    const u64 jobs = b.rows * (b.first || !t.capacity ? 1 : t.capacity);
     if (jobs)
         match<<<static_cast<u32>((jobs + 3) / 4 > 65535 ? 65535 : (jobs + 3) / 4), 128, 0, stream>>>(t, b, jobs);
     return cudaGetLastError();

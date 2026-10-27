@@ -617,7 +617,7 @@ struct GoalTemplates::Packer
             const auto& table = owner->table_of(g);
             for (u32 ar : table.predicate_arities())
                 index_arity = std::max(index_arity, ar);
-            predicates = std::max(predicates, table.num_domain_predicates());
+            predicates = std::max(predicates, static_cast<u32>(table.predicate_names().size()));
             capacity = std::max(capacity, static_cast<u32>(instance_offsets[g + 1] - instance_offsets[g]));
         }
         std::vector<u64> inst(static_cast<usize>(I) * ed::k_instance_columns, 0);
@@ -659,7 +659,7 @@ struct GoalTemplates::Packer
                         statics.push_back(j < ar ? tuple[j] : -1);
                 return std::pair{begin, static_cast<u32>(statics.size() / index_arity - row[ed::k_static_args_offset])};
             };
-            const auto r = ed::build_literal_ranges(table, local, meta, static_rows);
+            const auto r = ed::build_literal_ranges(table, local, meta, static_rows, true);
             std::copy(r.begin(), r.end(), ranges.begin() + u64{g} * predicates * ed::k_literal_columns);
         }
         b.add("literal_inst", DType::U64, {I, ed::k_instance_columns}, inst);

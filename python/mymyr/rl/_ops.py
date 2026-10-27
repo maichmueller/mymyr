@@ -242,7 +242,7 @@ def her_relabel(
     return HerBatch(goal, source, achieved, reward, valid)
 
 
-def match_first(rows, task_ids, templates, *, first=False, derived=None, status=None, capacity=None):
+def match_first(rows, task_ids, templates, *, first=False, derived=None, status=None, capacity=None, pool=None):
     """Lifted conjunction matching; see mymyr.rl.match_first for shapes and ordering."""
     from ._match import match_first as match
-    return match(rows, task_ids, templates, first=first, derived=derived, status=status, capacity=capacity)
+    return match(rows, task_ids, templates, first=first, derived=derived, status=status, capacity=capacity, pool=pool)

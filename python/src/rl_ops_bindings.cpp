@@ -12,6 +12,7 @@
 #include "arrays.hpp"
 #include "dlpack.hpp"
 #include "rl_imports.hpp"
+#include "py_pool.hpp"
 #include "rl_typing.hpp"
 #include "typing.hpp"
 
@@ -186,10 +187,11 @@ void schema_masks(ArrayArg parent, ArrayArg schema, ArrayArg mask, StreamArg str
     rl::schema_masks(x, n, S, m);
 }
 
-void match_first(ArrayArg states, ArrayArg task_ids, nb::object templates, ArrayArg block,
+void match_first(ArrayArg states, ArrayArg task_ids, Arg<ann::GoalTemplates> templates, ArrayArg block,
                  ArrayArg found, ArrayArg binding, ArrayArg template_id, ArrayArg count, ArrayArg status,
-                 bool first, ArrayArg derived, StreamArg stream)
+                 bool first, ArrayArg derived, StreamArg stream, Arg<PyPool> pool)
 {
+    PyPool* workers = pool_arg(pool);
     const auto t = goal_templates_of(templates);
     const Place pl = place_of(states, stream);
     Imports in(pl.device, pl.stream, false);
@@ -221,6 +223,8 @@ void match_first(ArrayArg states, ArrayArg task_ids, nb::object templates, Array
 #if defined(MYMYR_HAS_CUDA)
     if (pl.device >= 0)
     {
+        if (workers)
+            throw nb::value_error("mymyr: match_first: pool is only used for host rows");
         if (block.is_none())
             throw nb::value_error("mymyr: match_first: CUDA templates must be uploaded before matching");
         const auto view = t->view(reinterpret_cast<const std::byte*>(packed));
@@ -230,7 +234,7 @@ void match_first(ArrayArg states, ArrayArg task_ids, nb::object templates, Array
     if (!block.is_none())
         throw nb::value_error("mymyr: match_first: block is only used for CUDA templates");
     nb::gil_scoped_release release;
-    rl::match_first(t->view(), b);
+    rl::match_first(t->view(), b, workers ? workers->pool.get() : nullptr);
 }
 
 rl::HerStrategy her_strategy(const std::string& s)
@@ -313,7 +317,7 @@ void bind_rl_ops(nb::module_& parent)
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
           "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
-          "derived"_a = nb::none(), "stream"_a = nb::none(),
+          "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(),
           "Destination-passing lifted matching; outputs are padded [N, C], bindings [N, C, V], counts [N], status scalar. "
           "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, 2 invalid instance.");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),

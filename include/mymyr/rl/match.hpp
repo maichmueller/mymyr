@@ -174,7 +174,7 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
             --depth;
             continue;
         }
-        const u32 pick = static_cast<u32>(std::countr_zero(masks[depth]));
+        const u32 pick = ed::lowest_bit64(masks[depth]);
         masks[depth] &= masks[depth] - 1;
         binding[variable] = static_cast<i32>(base[depth] + pick);
         if (!ready(grp, t, g, k, binding, state, derived, variable))

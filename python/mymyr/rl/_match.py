@@ -68,12 +68,15 @@ class DeviceGoalTemplates:
 def upload(host, stream=None):
     import torch
 
-    stream = torch.cuda.current_stream() if stream is None else stream
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    elif isinstance(stream, int):
+        stream = torch.cuda.ExternalStream(stream, device=torch.cuda.current_device())
     with torch.cuda.device(stream.device), torch.cuda.stream(stream):
         return DeviceGoalTemplates(host, stream.device)
 
 
-def _match(rows, task_ids, templates, first, derived, capacity, status=None):
+def _match(rows, task_ids, templates, first, derived, capacity, status=None, pool=None):
     fw = _framework(rows)
     if fw not in ("numpy", "torch"):
         raise TypeError("mymyr: match_first supports NumPy and torch arrays")
@@ -98,7 +101,7 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None):
             stream_obj.wait_event(templates._ready)
             templates._block.record_stream(stream_obj)
             block, stream = templates._block, stream_obj.cuda_stream
-            for tensor in (rows, task_ids, derived):
+            for tensor in (rows, task_ids, derived, status):
                 if tensor is not None:
                     tensor.record_stream(stream_obj)
         elif isinstance(templates, DeviceGoalTemplates):
@@ -117,13 +120,14 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None):
     if status is None:
         status = empty((), "int64")
     _rl_ops.match_first(rows, task_ids, host, block, found, binding, template, count, status,
-                        first=first, derived=derived, stream=stream)
+                        first=first, derived=derived, stream=stream, pool=pool)
     if first:
         found, binding, template = found[:, 0], binding[:, 0], template[:, 0]
     return MatchResult(found, binding, template, count, status)
 
 
-def match_first(rows, task_ids, templates, *, first=False, derived=None, status=None, capacity=None):
+def match_first(rows: Any, task_ids: Any, templates: Any, *, first: bool = False, derived: Any = None,
+                status: Any = None, capacity: int | None = None, pool: Any = None) -> MatchResult:
     """The first canonical binding of each instance's lifted templates in each state row.
 
     Templates carry distinctness (True by default; also 'equality' and False). The first binding equals
@@ -136,8 +140,4 @@ def match_first(rows, task_ids, templates, *, first=False, derived=None, status=
     are global packed ids. Count includes truncated successes; status is cleared each call. No device counts are
     read on the host. CUDA uses uploaded templates and captures after warm-up. No JAX form is provided.
     """
-    if _framework(rows) == "torch" and status is None:
-        from .torch._ops import match_first as op, register
-
-        return MatchResult(*op(register(templates), rows, task_ids, first, derived, capacity))
-    return _match(rows, task_ids, templates, first, derived, capacity, status)
+    return _match(rows, task_ids, templates, first, derived, capacity, status, pool)

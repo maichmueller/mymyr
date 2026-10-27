@@ -2701,13 +2701,13 @@ void bind_rl(nb::module_& parent)
             a.dtype = rl::DType::U8;
             a.shape = {static_cast<i64>(t.t->arrays().bytes())};
             a.readonly = true;
-            return export_array(std::move(a), Framework::Numpy, default_words(Framework::Numpy));
+            return ArrayOut(export_array(std::move(a), Framework::Numpy, default_words(Framework::Numpy)));
         })
-        .def("to", [](nb::object self, nb::object device) {
-            return nb::module_::import_("mymyr.rl._match").attr("DeviceGoalTemplates")(self, device);
+        .def("to", [](Arg<PyGoalTemplates> self, Arg<ann::Any> device) {
+            return Arg<ann::DeviceGoalTemplates>(nb::module_::import_("mymyr.rl._match").attr("DeviceGoalTemplates")(self, device));
         }, "device"_a, "Uploads the packed templates and literal index to a torch CUDA device. Retain through graph replay.")
-        .def("upload", [](nb::object self, StreamArg stream) {
-            return nb::module_::import_("mymyr.rl._match").attr("upload")(self, stream);
+        .def("upload", [](Arg<PyGoalTemplates> self, StreamArg stream) {
+            return Arg<ann::DeviceGoalTemplates>(nb::module_::import_("mymyr.rl._match").attr("upload")(self, stream));
         }, "stream"_a = nb::none(), "Uploads on a torch CUDA stream (None: the current stream).")
         .def_prop_ro("nbytes", [](const PyGoalTemplates& t) { return t.t->arrays().bytes(); },
                      "Bytes of the packed arrays.")

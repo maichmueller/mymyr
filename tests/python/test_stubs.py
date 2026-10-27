@@ -209,6 +209,8 @@ def test_stubs_parse_and_are_typed():
     assert f"def fast_unsupported({table}, *, canonical_order: bool = True," in env
     assert "def recv(self, min_rows: int = 0) -> PoolBatch" in rl and "class CpuEnvPool:" in rl
     assert f"def __init__(self, {table}, *, device: int | None = None," in jx
+    assert "def to(self, device: Any) -> mymyr.rl.DeviceGoalTemplates:" in rl
+    assert "def capacity(self) -> int:" in rl
     # lifted goal templates
     assert (f"def lifted_goal_templates({suite.replace('table:', 'source:')}, *, max_subgoals_per_size: int = 2, "
             "max_size: int = 10, max_subsets_per_size: int = 100, max_component_samples: int = 5, max_products: int = 1000, "
@@ -220,6 +222,8 @@ def test_stubs_parse_and_are_typed():
     assert ") -> tuple[int, ...]:" in formalism
     assert ": object" not in rl and "-> object" not in rl and "-> list:" not in rl and "-> dict:" not in rl
     ops =(d / "_rl_ops.pyi").read_text()
+    assert "def match_first(rows: mymyr._typing.SupportsDLPack" in ops
+    assert "templates: mymyr._core._rl.GoalTemplates" in ops
     assert "strategy: Literal['future', 'final', 'episode'] = 'future'" in ops
     assert "prefix: mymyr._typing.SupportsDLPack | None, depth: int, mask: mymyr._typing.SupportsDLPack" in ops
     for text in (jx, ops):
