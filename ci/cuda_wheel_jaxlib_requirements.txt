@@ -1,0 +1,7 @@
+# jaxlib provides the XLA FFI headers of the JAX targets (mymyr.rl.jax, mymyr.encoding.jax) in the CUDA wheels;
+# ci/cuda_wheel.sh installs it with --require-hashes for the build's interpreter.
+jaxlib==0.11.2 \
+    --hash=sha256:1f31d8a6b1fb13181ff1807757506d10f6e7cba6b2707f7f80f73b853cb2ff22 \
+    --hash=sha256:d100ddb54a68d59cc3103729082324fccc4ca65e1d1b03c325208c43dd5c3c40 \
+    --hash=sha256:b2965e43db9951a4b5e11dfd437477944fa5a4cc4f4fb969725788b90ebd7c09 \
+    --hash=sha256:4b553584279c42018dae4ede7963c7db6cdb35d1f36804b18a07256146c4529f

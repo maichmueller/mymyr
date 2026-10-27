@@ -1,0 +1,50 @@
+name: Save a CUDA wheel build
+description: >-
+  Hand the CUDA wheel build in $RUNNER_TEMP/cuda-wheel (which ci/cuda_wheel.sh left with its build-status) and the
+  toolchain in .ci-toolchain on to a later job: the artifact <artifact> holds their compressed parts, the small
+  artifact <artifact>-manifest the list of the parts and the build status, which a later job reads before it downloads
+  the parts. Both directories are removed from this runner as they are packed.
+
+inputs:
+  artifact:
+    description: Name of the artifact
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Pack the build tree and the toolchain
+      id: pack
+      shell: bash
+      run: |
+        status=$(cat "$RUNNER_TEMP/cuda-wheel/build-status")
+        # the pip caches and temporary files are not needed to resume the build
+        sudo rm -rf "$RUNNER_TEMP/cuda-wheel/cache" "$RUNNER_TEMP/cuda-wheel/tmp"
+        # the hosted runners' second disk, /mnt, keeps the parts off the disk of the build when it has the room;
+        # the files belong to the container's root
+        state=$(sudo bash ci/build_state.sh pack --state /mnt/cuda-build-state --state "$RUNNER_TEMP/cuda-build-state" \
+          "$RUNNER_TEMP/cuda-wheel" "$GITHUB_WORKSPACE/.ci-toolchain")
+        echo "$status" | sudo tee "$state/build-status"
+        echo "state=$state" >> "$GITHUB_OUTPUT"
+        df -h / /mnt 2> /dev/null || true
+    - name: Upload the parts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ steps.pack.outputs.state }}
+        if-no-files-found: error
+        retention-days: 1
+        # the parts are compressed already
+        compression-level: 0
+        # a resumed build replaces the state it started from
+        overwrite: true
+    - name: Upload the manifest
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact }}-manifest
+        path: |
+          ${{ steps.pack.outputs.state }}/manifest
+          ${{ steps.pack.outputs.state }}/build-status
+        if-no-files-found: error
+        retention-days: 1
+        overwrite: true

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run pytest and fail when fewer tests pass than the job's environment can run (ci/expected_counts.json).
 
-usage: run_pytest.py --runtimes {none,rl} [--platform {linux,macos}] [pytest arguments...]
+usage: run_pytest.py --runtimes {none,rl} [--platform {linux,macos}] [--import-first MODULE ...]
+                     [pytest arguments...]
 
 Tests that need the benchmark data skip when it is missing, so a run with a misconfigured data
 directory can finish green with most of the suite skipped. This wrapper turns that into a failure.
@@ -14,9 +15,13 @@ Seven tests run only on Linux (pytest_linux_only_tests): the ones in test_thread
 with RLIMIT_AS and read /proc (4 + 1 cases), and two in test_block_cache.py that read the resident set from /proc. The
 floor on macOS is lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
 On GIL builds, the floor is lower by pytest_free_threaded_only_tests, which need a free-threaded interpreter.
+
+--import-first imports a module before pytest collects anything, and so before mymyr: the CUDA wheels are tested in
+a process that has loaded torch's CUDA libraries first.
 """
 
 import argparse
+import importlib
 import json
 import sys
 import sysconfig
@@ -42,6 +47,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--platform", choices=("linux", "macos"),
                         default="macos" if sys.platform == "darwin" else "linux",
                         help="platform the tests run on (default: this one)")
+    parser.add_argument("--import-first", action="append", default=[], metavar="MODULE",
+                        help="import MODULE before the tests (repeatable)")
     args, pytest_args = parser.parse_known_args(argv[1:])
     expected = json.loads(Path(__file__).with_name("expected_counts.json").read_text())
     minimum = expected["pytest_min_passed_rl" if args.runtimes == "rl" else "pytest_min_passed_plain"]
@@ -49,6 +56,8 @@ def main(argv: list[str]) -> int:
         minimum -= expected["pytest_linux_only_tests"]
     if not sysconfig.get_config_var("Py_GIL_DISABLED"):
         minimum -= expected["pytest_free_threaded_only_tests"]
+    for module in args.import_first:
+        importlib.import_module(module)
     counter = Counter()
     code = int(pytest.main(pytest_args, plugins=[counter]))
     print(f"run_pytest: {counter.passed} passed, at least {minimum} expected")

@@ -1,0 +1,298 @@
+name: CUDA wheels
+
+# CUDA wheels for Linux x86_64 (manylinux_2_34, version <version>+cu13), one per CPython ABI, with SASS for compute
+# capabilities 8.6, 8.9 and 9.0. ci/cuda_wheel.sh builds each in the manylinux image of the CPU wheels and tests it
+# with the CPU suite; hosted runners have no GPU, so the wheels stay workflow artifacts named cuda-wheel-<abi> (never
+# dist-*: the PyPI jobs do not see them) until ci/attach_cuda_wheels.sh tests them on a GPU and attaches them to the
+# GitHub Release. The release workflow calls this workflow for every v* tag; a manual run builds a tag or the branch
+# it is started on.
+#
+# Time: every architecture compiles the device code once more. One SASS architecture compiles in 1 to 1.5 hours on
+# these runners (the CUDA compile-only jobs of ci.yml), nearly all of it per architecture, so three take about 3 to 4
+# hours, too close to one job's 6 hours with the toolchain build and the tests. Each ABI therefore takes a chain of
+# jobs that hand the build tree and the toolchain on as an artifact (ci/build_state.sh); Ninja resumes the build where
+# it stopped and compiles only what is missing:
+#   compile  builds until 280 minutes after the job starts (about 4.5 hours of compiling, 4 when the toolchain cache
+#            missed) and hands the build on, with 50 minutes to pack it and upload about 4 GB of parts;
+#   resume   only if the build stopped: resumes it until 280 minutes after its start and hands it on again;
+#   wheel    finishes the build by 255 minutes after its start, then repairs, checks and tests the wheel (about half an
+#            hour, the CPU suite 10 minutes of it), with 75 minutes left before the job's time limit.
+# That is about 12 hours of compiling per wheel, 8 without the resume job. A build that has not finished by the wheel
+# job's deadline fails there with a message instead of at the time limit; fewer architectures per run (the archs
+# input) fit then.
+#
+# Disk: the build tree takes about 1.2 GB per architecture and the toolchain 1.7 GB. Packing removes each file once it
+# is archived and unpacking each part once it is extracted, the parts go to the runner's second disk (/mnt) when it
+# has the room, and the wheel job removes the build tree before it installs the test environment (about 4.5 GB). Each
+# job checks early that / has the room it needs, about 16 GB of the 40 GB a runner has once its unused SDKs are gone.
+#
+# The toolchain (GCC 16, the dependency superbuild and the CUDA compiler) is cached. A tag can restore only the
+# caches of its own ref and of the default branch, so the cache is saved on main only: by the toolchain job, on a
+# push to main that changes the toolchain's inputs, on a manual run on main and once a week. The weekly run restores
+# the cache, which keeps GitHub from evicting it after 7 days unused before the next release. Tag runs restore it by
+# key and never save it; without it they build the toolchain in the compile job.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ci/wheel_toolchain.sh
+      - dependencies/CMakeLists.txt
+      - ci/cuda_redist.json
+      - ci/install_cuda_redist.py
+      - .github/workflows/cuda-wheels.yml
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (empty for the branch of the run)
+        type: string
+        default: ""
+      python:
+        description: CPython ABIs, space-separated
+        type: string
+        default: cp314t cp315t
+      archs:
+        description: CUDA architectures (CMAKE_CUDA_ARCHITECTURES)
+        type: string
+        default: 86-real;89-real;90-real
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build
+        type: string
+        required: true
+      python:
+        description: CPython ABIs, space-separated
+        type: string
+        default: cp314t cp315t
+      archs:
+        description: CUDA architectures (CMAKE_CUDA_ARCHITECTURES)
+        type: string
+        default: 86-real;89-real;90-real
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  toolchain:
+    name: CUDA wheel toolchain
+    # pushes, manual and scheduled runs on main
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the toolchain
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-toolchain
+          key: cuda-wheel-toolchain-linux-${{ hashFiles('ci/wheel_toolchain.sh', 'dependencies/CMakeLists.txt', 'ci/cuda_redist.json', 'ci/install_cuda_redist.py') }}
+      - name: Install the toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+          mkdir -p .ci-toolchain "$RUNNER_TEMP/cuda-wheel"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
+            --volume "$RUNNER_TEMP/cuda-wheel:/work" \
+            "$image" \
+            bash /src/ci/cuda_wheel.sh --stage toolchain --work /work
+
+  check-inputs:
+    name: ABIs and disk space
+    # tags (through the release workflow) and manual runs
+    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.list.outputs.python }}
+      disk-gb: ${{ steps.list.outputs.disk-gb }}
+    steps:
+      - name: List the ABIs and the disk space the jobs need
+        id: list
+        env:
+          PYTHON_ABIS: ${{ inputs.python }}
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+          abis = os.environ["PYTHON_ABIS"].split()
+          if not abis or not all(re.fullmatch(r"cp3[0-9]{2}t?", abi) for abi in abis):
+              sys.exit(f"error: expected CPython ABIs such as cp314t, got {abis}")
+          archs = [arch for arch in os.environ["CUDA_ARCHS"].split(";") if arch]
+          print(f"python={json.dumps(abis)}")
+          # GB on / per job: 10 for the image, the toolchain, the source copy, the build and test environments and an
+          # archive part in flight, 2 per architecture for the build tree, the wheel and its unpacked copy
+          print(f"disk-gb={10 + 2 * len(archs)}")
+          EOF
+
+  compile:
+    name: CUDA wheel, ${{ matrix.python }}, compile
+    # after the toolchain job of a manual run on main, so that the compile restores its cache
+    needs: [check-inputs, toolchain]
+    if: ${{ !cancelled() && needs.check-inputs.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.check-inputs.outputs.python) }}
+    steps:
+      - name: Note the start of the job
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Check the tag against the package version
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: python3 ci/check_release_version.py "$TAG"
+      # the runner image's Android SDK, .NET and GHC are unused
+      - name: Free disk space
+        env:
+          DISK_GB: ${{ needs.check-inputs.outputs.disk-gb }}
+        run: |
+          df -h / /mnt 2> /dev/null || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          bash ci/build_state.sh space / "$DISK_GB"
+      - name: Restore the toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-toolchain
+          key: cuda-wheel-toolchain-linux-${{ hashFiles('ci/wheel_toolchain.sh', 'dependencies/CMakeLists.txt', 'ci/cuda_redist.json', 'ci/install_cuda_redist.py') }}
+      - name: Compile
+        env:
+          PYTHON_ABI: ${{ matrix.python }}
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: |
+          image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+          mkdir -p .ci-toolchain "$RUNNER_TEMP/cuda-wheel"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
+            --volume "$RUNNER_TEMP/cuda-wheel:/work" \
+            "$image" \
+            bash /src/ci/cuda_wheel.sh --stage compile --minutes $(((JOB_START + 280 * 60 - $(date +%s)) / 60)) \
+              --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
+          df -h /
+      - uses: ./.github/actions/save-cuda-build
+        with:
+          artifact: cuda-build-state-${{ matrix.python }}
+
+  resume:
+    name: CUDA wheel, ${{ matrix.python }}, resume
+    needs: [check-inputs, compile]
+    # per ABI; the steps after the first two run only if the compile job stopped the build at its time limit
+    if: ${{ !cancelled() && needs.check-inputs.result == 'success' && needs.compile.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.check-inputs.outputs.python) }}
+    steps:
+      - name: Note the start of the job
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cuda-build-state-${{ matrix.python }}-manifest
+          path: ${{ runner.temp }}/cuda-build-manifest
+      - name: Read the build status
+        id: build
+        run: |
+          status=$(cat "$RUNNER_TEMP/cuda-build-manifest/build-status")
+          echo "the compile job left the build $status"
+          echo "stopped=$([ "$status" = stopped ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.build.outputs.stopped == 'true'
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Free disk space
+        if: steps.build.outputs.stopped == 'true'
+        env:
+          DISK_GB: ${{ needs.check-inputs.outputs.disk-gb }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          bash ci/build_state.sh space / "$DISK_GB"
+      - uses: ./.github/actions/restore-cuda-build
+        if: steps.build.outputs.stopped == 'true'
+        with:
+          artifact: cuda-build-state-${{ matrix.python }}
+      - name: Resume the build
+        if: steps.build.outputs.stopped == 'true'
+        env:
+          PYTHON_ABI: ${{ matrix.python }}
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: |
+          image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
+            --volume "$RUNNER_TEMP/cuda-wheel:/work" \
+            "$image" \
+            bash /src/ci/cuda_wheel.sh --stage resume --minutes $(((JOB_START + 280 * 60 - $(date +%s)) / 60)) \
+              --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
+          df -h /
+      - uses: ./.github/actions/save-cuda-build
+        if: steps.build.outputs.stopped == 'true'
+        with:
+          artifact: cuda-build-state-${{ matrix.python }}
+
+  wheel:
+    name: CUDA wheel, ${{ matrix.python }}
+    needs: [check-inputs, compile, resume]
+    # per ABI: a wheel whose compile failed finds no build state and fails, the others go on
+    if: ${{ !cancelled() && needs.check-inputs.result == 'success' && needs.compile.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.check-inputs.outputs.python) }}
+    steps:
+      - name: Note the start of the job
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Free disk space
+        env:
+          DISK_GB: ${{ needs.check-inputs.outputs.disk-gb }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          bash ci/build_state.sh space / "$DISK_GB"
+      - uses: ./.github/actions/restore-cuda-build
+        with:
+          artifact: cuda-build-state-${{ matrix.python }}
+      # the build stops 255 minutes after the start of the job and fails if it has not finished by then, which leaves
+      # the repair, the checks, the tests and the upload 75 minutes before the job's time limit
+      - name: Finish, check and test the wheel
+        env:
+          PYTHON_ABI: ${{ matrix.python }}
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: |
+          image=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])')
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --volume "$GITHUB_WORKSPACE/.ci-toolchain:/opt/mymyr-toolchain" \
+            --volume "$RUNNER_TEMP/cuda-wheel:/work" \
+            "$image" \
+            bash /src/ci/cuda_wheel.sh --stage finish --minutes $(((JOB_START + 255 * 60 - $(date +%s)) / 60)) \
+              --python "$PYTHON_ABI" --archs "$CUDA_ARCHS" --out /src/wheelhouse --work /work --jobs 4 --cuda-jobs 2
+          ls -l wheelhouse
+          df -h /
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-wheel-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          # a wheel is already compressed
+          compression-level: 0

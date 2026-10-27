@@ -43,6 +43,8 @@ int device_count() noexcept
     return n;
 }
 
+std::string_view build_info() noexcept { return "CUDA " MYMYR_CUDA_TOOLKIT_VERSION ", " MYMYR_CUDA_CODE; }
+
 DeviceGuard::DeviceGuard(int device)
 {
     if (cudaGetDevice(&m_prev) != cudaSuccess)
