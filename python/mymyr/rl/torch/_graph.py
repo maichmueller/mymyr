@@ -38,7 +38,7 @@ class Rollout(NamedTuple):
     at_goal: Tensor  # bool [K, N]: the observed state after each step is a goal
     obs: Optional[tuple] = None  # the K steps' encoded observations
     final_obs: Optional[tuple] = None  # the K steps' encoded final observations (final=True)
-    revisited: Optional[Tensor] = None  # bool [K, N]: reached state was visited before the step
+    revisited: Optional[Tensor] = None  # bool [K, N]: false when visit tracking is disabled
 
 
 class CapturedRollout:
@@ -128,8 +128,9 @@ class CapturedRollout:
                 if actions is not None:
                     a = actions[k]
                     a.copy_(policy(env).reshape(n))
-                step_obs, step_final = env._step_into(StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]),
-                                                             a, next_task_ids, final)
+                step_obs, step_final = env._step_into(
+                    StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
+                )
                 obs.append(step_obs)
                 final_obs.append(step_final)
             self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,

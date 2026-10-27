@@ -96,6 +96,7 @@ def test_captured_rollout_equals_eager(name):
         g = a.capture(K, pol, final=True)
         side = torch.cuda.Stream(dev)
         for r in range(6):
+            g.result.revisited.fill_(True)
             if r == 2:
                 a.set_seed(4)
                 b.set_seed(4)

@@ -2074,7 +2074,7 @@ void bind_cuda(nb::module_& parent)
         .def_prop_ro("total", [](const PyDeviceExpansion& e) { return e.flat.total; },
                      "The successor rows of the batch, those beyond the capacity included.")
         .def_prop_ro("generated", [](const PyDeviceExpansion& e) { return e.flat.generated; },
-                     "Successors before no-op filtering.")
+                     "Successors before drop_noops; generated > capacity is an overflow.")
         .def_prop_ro("capacity", [](const PyDeviceExpansion& e) { return e.flat.capacity; },
                      "The successor rows the outputs hold; total > capacity is an overflow.")
         .def_prop_ro("num_states", [](const PyDeviceExpansion& e) { return e.flat.rows; },

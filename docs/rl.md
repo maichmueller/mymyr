@@ -281,6 +281,8 @@ CPU framework bundle used for validation; those packages remain optional runtime
 `CpuEnvPool(..., track_visited=H)` and torch CPU `BatchedEnv(..., track_visited=H)` keep one fixed-capacity hash table
 per environment. `H` is a power of two from 2 to 2²⁰. With `track_visited=True`, set `max_steps`: the capacity is the
 next power of two at least `2 * (max_steps + 1)`, up to 2²⁰. Tracking is disabled by default.
+Disabled tracking reports all-false `revisited` flags, including the `[K, N]` tensor in captured torch rollouts.
+CUDA environments reject enabled tracking because device visit tables are unavailable.
 
 Reset inserts the initial state. Each step reports `revisited`, whether the reached state was present before that
 step, then inserts it. This includes invalid actions that stay in place. Absorbing rows without autoreset report
