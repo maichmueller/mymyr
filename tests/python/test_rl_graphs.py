@@ -69,7 +69,7 @@ def test_captured_rollout_equals_host_on_tables(sets, name):
             out = g.replay()
             for k in range(K):
                 want = ref[r * K + k + 1]
-                got = step_arrays(rt.StepResult(*(getattr(out, f)[k] for f in FIELDS)))
+                got = step_arrays(rt.StepResult(**{f: getattr(out, f)[k] for f in FIELDS}))
                 for f, v in got.items():
                     assert np.array_equal(v, want[f]), (launch, r, k, f)
             a = env_arrays(env)
@@ -80,7 +80,8 @@ def test_captured_rollout_equals_host_on_tables(sets, name):
 
 
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "gripper__prob05", "miconic__s7-4"])
-def test_captured_rollout_equals_eager(name):
+@pytest.mark.parametrize("track_visited", [False, True])
+def test_captured_rollout_equals_eager(name, track_visited):
     """A policy's graph (given actions, invalid ones too) and the random policy's, with set_seed, masked resets and a
     side stream between replays: byte for byte the eager steps."""
     dev = gpu_device()
@@ -91,8 +92,8 @@ def test_captured_rollout_equals_eager(name):
         return (e.states.sum(1) + e.steps) % (e.count.to(torch.int64) + 1)
 
     for pol in (None, policy, lambda e: e.random_actions(3)):
-        a = rt.BatchedEnv(task, n, device=dev, seed=11, **CFG)
-        b = rt.BatchedEnv(task, n, device=dev, seed=11, **CFG)
+        a = rt.BatchedEnv(task, n, device=dev, seed=11, track_visited=track_visited, **CFG)
+        b = rt.BatchedEnv(task, n, device=dev, seed=11, track_visited=track_visited, **CFG)
         g = a.capture(K, pol, final=True)
         side = torch.cuda.Stream(dev)
         for r in range(6):
