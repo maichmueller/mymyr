@@ -464,8 +464,9 @@ rows across workers. The destination-passing C++ form
 `rl::match_first(MatchTemplates, MatchBatch, ThreadPool*)` also accepts caller-owned output buffers and a thread pool;
 `GoalTemplates::view(block)` resolves the packed pointers on either host or device memory.
 
-Search has exponential worst-case work. Total object counts and shared unary candidate domains prune
-impossible injective bindings. `max_steps` (default 1,000,000; integer in `[0, 2**63)`) limits work independently for
+Search has exponential worst-case work. Total object counts and shared positive-literal argument projections, including type domains prune
+impossible injective bindings. Variables with candidate domains contained in the same projection count together,
+including constraints from different predicates or argument positions. `max_steps` (default 1,000,000; integer in `[0, 2**63)`) limits work independently for
 each row/template on host and device. One step is a candidate tile scan (including domain pruning) or a binding
 trial; a tile scans the template's literals and their indexed tuples. Ground checks and cardinality rejection need
 no steps. Exhaustion leaves that template's outputs at failure/padding and sets status value 8; other templates

@@ -869,33 +869,37 @@ def test_match_first_upload_accepts_stream_handles_and_stream_protocol():
 
 @needs_frontend
 @pytest.mark.parametrize("on_device", [False, True])
-@pytest.mark.parametrize("typed", ["none", "static", "fluent"])
+@pytest.mark.parametrize("typed", ["none", "static", "fluent", "binary", "binary_pairs"])
 @pytest.mark.parametrize("first", [False, True])
 def test_match_first_rejects_impossible_injective_domains(on_device, typed, first):
     limited_type = typed != "none"
     action = "(:action add :parameters (?x) :precondition (and) :effect (member ?x))" if typed == "fluent" else ""
     domain = mymyr.Domain.from_string(f"""(define (domain domains)
-        (:requirements :adl :equality) (:predicates (ok) (member ?x))
+        (:requirements :adl :equality) (:predicates (ok) (member ?x) (pair ?x ?y))
         (:action set :parameters () :precondition (and) :effect (ok)) {action})""")
     objects = " ".join(f"o{i}" for i in range(70 if limited_type else 63))
-    members = " ".join(f"(member o{i})" for i in range(63))
+    members = " ".join(f"(member o{i}) (pair o{i} o{i})" for i in range(63))
+    if typed == "binary_pairs":
+        members = " ".join(f"(pair o{i} o{j})" for i in range(63) for j in range(63))
     task = mymyr.Task(domain.instantiate_string(f"""(define (problem domains) (:domain domains)
         (:objects {objects}) (:init (ok) {members}) (:goal (ok)))"""))
     variables = [f"?v{i}" for i in range(64)]
-    literals = [f"(member {v})" for v in variables] if limited_type else ["(ok)"]
+    literals = ([f"(pair {a} {b})" for a, b in zip(variables[::2], variables[1::2])] if typed == "binary_pairs" else
+                [f"(pair {v} {v})" for v in variables] if typed == "binary" else
+                [f"(member {v})" for v in variables] if limited_type else ["(ok)"])
+    budget = 512 if typed == "binary_pairs" else 3 if limited_type else 0
     condition = task.condition(variables, literals,
                                equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
     rows = np.asarray(task.encode([task.initial_state]))
-    # Prove the rejection on the host before submitting the same condition to the device.
-    expected = rl.match_first(rows, None, templates, first=first, max_steps=3 if limited_type else 0)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=budget)
     assert not expected.found.any() and expected.count.tolist() == [0]
     assert (expected.binding == -1).all() and (expected.template == -1).all()
     assert int(expected.status) == 0
     if on_device:
         torch = cuda_match_runtime()
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
-                                templates.to("cuda:0"), first=first, max_steps=3 if limited_type else 0)
+                                templates.to("cuda:0"), first=first, max_steps=budget)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
 
@@ -975,5 +979,35 @@ def test_match_first_exhausted_template_continues_and_combines_status(on_device,
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"),
                                 torch.tensor(ids, device="cuda:0"), templates.to("cuda:0"),
                                 first=first, capacity=1, max_steps=1)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain shared)
+        (:requirements :adl :equality) (:predicates (ok) (a ?x) (b ?x) (c ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem shared) (:domain shared)
+        (:objects o0 o1 o2 o3 o4 o5 o6 o7 o8 o9)
+        (:init (ok) (a o0) (a o1) (b o0) (b o1) (c o0) (c o1)) (:goal (ok)))"""))
+    variables = ["?x", "?y", "?z"]
+    literals = ["(a ?x)", "(b ?y)", "(c ?z)"]
+    impossible = task.condition(variables, literals, equalities=[("?x", "?y", False), ("?x", "?z", False),
+                                                                ("?y", "?z", False)])
+    reusable = task.condition(variables, literals)
+    templates = rl.GoalTemplates.from_conditions(task, [[impossible, reusable]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=6)
+    assert int(expected.status) == 0 and expected.count.tolist() == [1]
+    assert expected.found.tolist() == ([True] if first else [[False, True]])
+    assert expected.template.tolist() == ([1] if first else [[-1, 1]])
+    assert (expected.binding[0] if first else expected.binding[0, 1]).tolist() == [0, 0, 0]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), first=first, max_steps=6)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())

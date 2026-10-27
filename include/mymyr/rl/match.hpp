@@ -104,19 +104,22 @@ MYMYR_HD bool ready(const Group& grp, const MatchTemplates& t, u32 g, u32 k, con
 
 template<class Group>
 MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k, i32 variable, u32 base,
-                         u32 objects, const i32* binding, const u64* state, const u64* derived, i32 unary_predicate = -1)
+                         u32 objects, const i32* binding, const u64* state, const u64* derived, i32 domain_literal = -1, u32 domain_position = 0)
 {
     u32 mask = objects - base >= 32 ? ~u32{0} : (u32{1} << (objects - base)) - 1;
     const u64* inst = t.literals.inst + u64{g} * ed::k_instance_columns;
-    for (u32 l = t.literal_offsets[k]; l < static_cast<u32>(t.literal_offsets[k + 1]); ++l)
+    const u32 begin_literal = domain_literal < 0 ? static_cast<u32>(t.literal_offsets[k]) : static_cast<u32>(domain_literal);
+    const u32 end_literal = domain_literal < 0 ? static_cast<u32>(t.literal_offsets[k + 1]) : begin_literal + 1;
+    for (u32 l = begin_literal; l < end_literal; ++l)
     {
-        if (!t.polarity[l] || (unary_predicate >= 0 && (t.arity[l] != 1 || t.predicate[l] != unary_predicate)))
+        if (!t.polarity[l])
             continue;
-        i32 position = -1;
+        i32 position = domain_literal < 0 ? -1 : static_cast<i32>(domain_position);
         const i32* terms = t.terms + u64{l} * t.max_arity;
-        for (i32 j = 0; j < t.arity[l]; ++j)
-            if (terms[j] == variable)
-                position = j;
+        if (domain_literal < 0)
+            for (i32 j = 0; j < t.arity[l]; ++j)
+                if (terms[j] == variable)
+                    position = j;
         if (position < 0)
             continue;
         const u32* r = t.literals.literal_ranges + (u64{g} * t.literals.num_predicates + t.predicate[l]) * ed::k_literal_columns;
@@ -135,7 +138,7 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
             if (object < base || object - base >= 32 || (!stat && !bit(der ? derived : state, n)))
                 continue;
             bool same = true;
-            for (i32 j = 0; j < t.arity[l]; ++j)
+            for (i32 j = 0; domain_literal < 0 && j < t.arity[l]; ++j)
             {
                 const i32 term = terms[j];
                 const i32 want = term == variable ? static_cast<i32>(object) : term < 0 ? -(term + 1) : binding[term];
@@ -160,72 +163,105 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
     return mask;
 }
 
-/// Positive unary predicates supply candidate domains, including type membership. Variables sharing a domain need at least that many
-/// unused objects, even when the instance has enough objects in total. Each domain is checked once per prefix.
+/// Positive predicate argument projections bound candidate domains, including types implicit in tuple rows.
+/// Unbound variables sharing a projection need at least that many unused objects. Ignoring other arguments makes
+/// the projection a superset of each variable's candidates. Other variables count toward its capacity only when
+/// their full candidate domains are subsets, including types shared across predicates or argument positions.
 template<class Group>
-MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects,
+MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects, u32 remaining,
                                 const i32* binding, const u64* state, const u64* derived, Budget& budget)
 {
     const u32 begin = static_cast<u32>(t.literal_offsets[k]), end = static_cast<u32>(t.literal_offsets[k + 1]);
     for (u32 l = begin; l < end; ++l)
     {
-        if (!t.polarity[l] || t.arity[l] != 1)
+        if (!t.polarity[l])
             continue;
-        const i32 variable = t.terms[u64{l} * t.max_arity];
-        if (variable < 0 || binding[variable] >= 0)
-            continue;
-        const i32 predicate = t.predicate[l];
-        bool shared = false;
-        for (u32 other = l + 1; other < end; ++other)
+        for (i32 position = 0; position < t.arity[l]; ++position)
         {
-            const i32 term = t.terms[u64{other} * t.max_arity];
-            if (t.polarity[other] && t.arity[other] == 1 && t.predicate[other] == predicate &&
-                term >= 0 && term != variable && binding[term] < 0)
-            {
-                shared = true;
-                break;
-            }
-        }
-        if (!shared)
-            continue;
-        bool seen = false;
-        for (u32 before = begin; before < l; ++before)
-        {
-            const i32 term = t.terms[u64{before} * t.max_arity];
-            seen |= t.polarity[before] && t.arity[before] == 1 && t.predicate[before] == predicate &&
-                    term >= 0 && binding[term] < 0;
-        }
-        if (seen)
-            continue;
-        u32 needed = 0;
-        for (u32 v = 0; v < static_cast<u32>(t.num_vars[k]); ++v)
-        {
-            if (binding[v] >= 0)
+            const i32 variable = t.terms[u64{l} * t.max_arity + position];
+            if (variable < 0 || binding[variable] >= 0)
                 continue;
-            for (u32 other = l; other < end; ++other)
-                if (t.polarity[other] && t.arity[other] == 1 && t.predicate[other] == predicate &&
-                    t.terms[u64{other} * t.max_arity] == static_cast<i32>(v))
+            const i32 predicate = t.predicate[l];
+            bool shared = false;
+            for (u32 other = l + 1; other < end; ++other)
+            {
+                const i32 term = t.terms[u64{other} * t.max_arity + position];
+                if (t.polarity[other] && t.arity[other] > position && t.predicate[other] == predicate &&
+                    term >= 0 && term != variable && binding[term] < 0)
                 {
-                    ++needed;
+                    shared = true;
                     break;
                 }
-        }
-        if (needed < 2)
-            continue;
-        u32 available = 0;
-        for (u32 tile = 0; tile < objects && available < needed; tile += 32)
-        {
-            if (!budget.take())
-                return false;
-            u32 mask = candidates(grp, t, g, k, variable, tile, objects, binding, state, derived, predicate);
-            while (mask)
+            }
+            // Candidate filtering checks a single pair directly without extra projection scans.
+            if (!shared && remaining <= 2)
+                continue;
+            bool seen = false;
+            for (u32 before = begin; before < l; ++before)
             {
-                ++available;
-                mask &= mask - 1;
+                const i32 term = t.terms[u64{before} * t.max_arity + position];
+                seen |= t.polarity[before] && t.arity[before] > position && t.predicate[before] == predicate &&
+                        term >= 0 && binding[term] < 0;
+            }
+            if (seen)
+                continue;
+            u32 needed = 0;
+            for (u32 v = 0; v < static_cast<u32>(t.num_vars[k]); ++v)
+            {
+                if (binding[v] >= 0)
+                    continue;
+                for (u32 other = l; other < end; ++other)
+                    if (t.polarity[other] && t.arity[other] > position && t.predicate[other] == predicate &&
+                        t.terms[u64{other} * t.max_arity + position] == static_cast<i32>(v))
+                    {
+                        ++needed;
+                        break;
+                    }
+            }
+            u32 available = 0;
+            for (u32 tile = 0; tile < objects && available < remaining; tile += 32)
+            {
+                if (!budget.take())
+                    return false;
+                const u32 mask = candidates(grp, t, g, k, variable, tile, objects, binding, state, derived,
+                                            static_cast<i32>(l), static_cast<u32>(position));
+                available += ed::popcount64(mask);
+            }
+            if (available < needed)
+                return false;
+            if (available >= remaining)
+                continue;
+            u32 confined = needed;
+            for (u32 v = 0; v < static_cast<u32>(t.num_vars[k]); ++v)
+            {
+                if (binding[v] >= 0)
+                    continue;
+                bool member = false;
+                for (u32 other = l; other < end; ++other)
+                    member |= t.polarity[other] && t.arity[other] > position && t.predicate[other] == predicate &&
+                              t.terms[u64{other} * t.max_arity + position] == static_cast<i32>(v);
+                if (member)
+                    continue;
+                bool subset = true;
+                for (u32 tile = 0; tile < objects; tile += 32)
+                {
+                    if (!budget.take())
+                        return false;
+                    const u32 domain = candidates(grp, t, g, k, variable, tile, objects, binding, state, derived,
+                                                  static_cast<i32>(l), static_cast<u32>(position));
+                    if (!budget.take())
+                        return false;
+                    const u32 values = candidates(grp, t, g, k, static_cast<i32>(v), tile, objects, binding, state, derived);
+                    if (values & ~domain)
+                    {
+                        subset = false;
+                        break;
+                    }
+                }
+                if (subset && ++confined > available)
+                    return false;
             }
         }
-        if (available < needed)
-            return false;
     }
     return true;
 }
@@ -256,7 +292,7 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         if (enter)
         {
             if (t.distinct[k] && static_cast<u32>(depth + 1) < vars &&
-                !domains_possible(grp, t, g, k, objects, binding, state, derived, budget))
+                !domains_possible(grp, t, g, k, objects, vars - static_cast<u32>(depth), binding, state, derived, budget))
             {
                 --depth;
                 enter = false;
