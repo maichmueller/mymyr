@@ -12,7 +12,7 @@ These pages describe the Python package, optional CUDA backend, plain-C API and 
 - [Search](search.md): breadth-first search, the IW family, best-first search, heuristics, goals, budgets, observers,
   negative action costs and plan validation.
 - [Heuristics](heuristics.md): relaxation heuristics, h², set-additive and perfect heuristics.
-- [Datasets](datasets.md): state spaces, generalized state spaces, samplers, knowledge bases and tuple graphs.
+- [Datasets](datasets.md): state spaces, generalized state spaces, samplers, knowledge bases, tuple graphs and training rows (also from plans, for behaviour cloning).
 - [Reinforcement learning](rl.md): batched expansion, CPU environments, JAX/PyTorch interop and Gymnasium
   environments.
 - [Native encoding](encoding.md): relational graphs of states as flat arrays, and the relation catalog.

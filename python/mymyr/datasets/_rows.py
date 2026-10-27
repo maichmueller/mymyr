@@ -12,6 +12,7 @@ import numpy as np
 if TYPE_CHECKING:
     from mymyr._core._datasets import KnowledgeBase, StateSpace
     from mymyr._typing import SupportsDLPack
+    from mymyr.datasets._plans import PlanRows
     from mymyr.encoding import DeviceFlatBatch, FlatBatch, SuiteBatch, SuiteEncoder
     from mymyr.rl import Expansion, ThreadPool
 
@@ -214,6 +215,53 @@ class StateRows:
             np.concatenate([part.task_ids for part in parts]),
             labels={name: np.concatenate([part.labels[name] for part in parts]) for name in labels},
         )
+
+    @classmethod
+    def from_plans(cls, plans: Sequence[PlanRows], *, device: Any = None) -> StateRows:
+        """The rows of plans replayed by ``datasets.plan_rows``, plan after plan, each of its plan's ``task_id``, with
+        the step labels behaviour cloning trains on:
+
+        - ``action``: int32 ``[N]``, the step's canonical successor index (``PlanRows.index``);
+        - ``schema``: int32 ``[N]`` and ``binding``: int32 ``[N, B]`` (-1 padded), the step's action label;
+        - ``noop``: bool ``[N]``, the step's action is a no-op;
+        - ``equivalent_actions``: bool ``[N, A]``, the multi-hot ``PlanRows.equivalent_actions`` over the canonical
+          successor positions (``A`` the most actions of any row's state), when every plan has ``equivalent``.
+
+        A plan replayed with ``goal_state=True`` adds its last state, with ``action``, ``schema`` and ``binding`` -1 and
+        no equivalent action. The plans must be of one source (one table's or suite's instances, or one Task); the rows
+        are as wide as the widest plan's. ``device`` (a torch device) places the dataset on that device, where
+        ``EncodingCollate`` encodes it without a host copy."""
+        if not plans:
+            raise ValueError("mymyr: datasets: from_plans needs at least one plan")
+        with_equivalent = [p.equivalent is not None for p in plans]
+        if any(with_equivalent) and not all(with_equivalent):
+            raise ValueError("mymyr: datasets: some plans have equivalent actions and some do not")
+        width = max(p.rows.shape[1] for p in plans)
+        label_width = max(p.binding.shape[1] for p in plans)
+        rows = np.concatenate([np.pad(p.rows, ((0, 0), (0, width - p.rows.shape[1]))) for p in plans])
+        task_ids = np.concatenate([np.full(len(p.rows), p.task_id, np.int32) for p in plans])
+
+        def per_row(p: PlanRows, values: np.ndarray, fill: Any) -> np.ndarray:
+            extra = len(p.rows) - len(values)
+            return np.concatenate([values, np.full((extra, *values.shape[1:]), fill, values.dtype)])
+
+        labels: dict[str, np.ndarray] = {
+            "action": np.concatenate([per_row(p, p.index, -1) for p in plans]),
+            "schema": np.concatenate([per_row(p, p.schema, -1) for p in plans]),
+            "binding": np.concatenate(
+                [per_row(p, np.pad(p.binding, ((0, 0), (0, label_width - p.binding.shape[1])), constant_values=-1), -1)
+                 for p in plans]),
+            "noop": np.concatenate([per_row(p, p.noop, False) for p in plans]),
+        }
+        if all(with_equivalent):
+            most = max(int(p.num_actions.max(initial=0)) for p in plans)
+            labels["equivalent_actions"] = np.concatenate([p.equivalent_actions(most) for p in plans])
+        if device is None:
+            return cls(rows, task_ids, labels=labels)
+        import torch
+
+        return cls(torch.as_tensor(rows.view(np.int64), device=device), torch.as_tensor(task_ids, device=device),
+                   labels={name: torch.as_tensor(values, device=device) for name, values in labels.items()})
 
     def __len__(self) -> int:
         return len(self.rows)

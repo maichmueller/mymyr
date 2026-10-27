@@ -36,6 +36,9 @@ Datasets for models store rows and encode them when a batch is loaded:
     collate = mymyr.datasets.EncodingCollate(encoder)            # collate_fn: encodes the items of a batch
     loader = torch.utils.data.DataLoader(rows, batch_size=64, collate_fn=collate)
 
+    pr = mymyr.datasets.plan_rows(task, plan_text)               # a plan's states, action labels, canonical indices
+    rows = mymyr.datasets.StateRows.from_plans([pr, ...])        # labels: action, schema, binding, noop
+
 Every applicable action is a transition, the goal distances
 are computed backward from the goal states, remove_if_unsolvable (default True) drops the whole space when
 the initial state cannot reach a goal, and a statically false goal gives no space at all. State ids are in
@@ -65,6 +68,7 @@ from mymyr._core._datasets import (
 from mymyr._core._datasets import state_space as _cpu_state_space
 from mymyr._core._rl import TaskSuite, TaskTable
 from mymyr.datasets._files import load, save
+from mymyr.datasets._plans import PlanRows, plan_rows
 from mymyr.datasets._rows import EncodedRows, EncodingCollate, StateRow, StateRows
 
 if TYPE_CHECKING:
@@ -285,6 +289,7 @@ __all__ = [
     "GeneralizedStateSpace",
     "GenerationResult",
     "KnowledgeBase",
+    "PlanRows",
     "StateRow",
     "StateRows",
     "StateSpace",
@@ -294,6 +299,7 @@ __all__ = [
     "generate",
     "generate_many",
     "load",
+    "plan_rows",
     "save",
     "sorted_by_size",
     "state_space",
