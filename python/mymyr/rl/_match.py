@@ -27,7 +27,8 @@ class DeviceGoalTemplates:
     """An immutable packed template table and literal index on one torch CUDA device.
 
     Upload before capture, warm matching on the capture stream, and retain this object through the last replay.
-    Matching waits on the upload event in stream order and records the packed tensor's use on each stream.
+    The first eager match on each stream waits on the upload event; later calls reuse that acquisition.
+    Matching records the packed tensor's use on every stream.
     """
 
     def __init__(self, host, device):
@@ -46,6 +47,7 @@ class DeviceGoalTemplates:
             self._block = torch.tensor(np.array(host._block(), copy=True), dtype=torch.uint8, device=self.device)
             self._ready = torch.cuda.Event()
             self._ready.record(torch.cuda.current_stream(self.device))
+        self._streams = set()
         self.capacity = host.capacity
         self.max_vars = host.max_vars
         self.num_instances = host.num_instances
@@ -99,7 +101,12 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None, poo
             if not isinstance(templates, DeviceGoalTemplates) or templates.device != rows.device:
                 raise ValueError("mymyr: upload templates to the rows' device with templates.to(device)")
             stream_obj = torch.cuda.current_stream(rows.device)
-            stream_obj.wait_event(templates._ready)
+            key = stream_obj.cuda_stream
+            if key not in templates._streams:
+                if torch.cuda.is_current_stream_capturing():
+                    raise ValueError("mymyr: warm matching on the capture stream before capture")
+                stream_obj.wait_event(templates._ready)
+                templates._streams.add(key)
             templates._block.record_stream(stream_obj)
             block, stream = templates._block, stream_obj.cuda_stream
             for tensor in (rows, task_ids, derived, status):

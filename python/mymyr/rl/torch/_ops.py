@@ -104,7 +104,8 @@ _ids = itertools.count(1)
 
 
 def register(obj: Any) -> int:
-    """The op handle of a TaskTable, Task, TaskHandle, encoder or native Env (the same handle for the same object). The
+    """The op handle of a task source, host or uploaded templates, an encoder or a native Env (the same handle for
+    the same object). The
     registry holds a reference until :func:`unregister`."""
     with _lock:
         h = _by_id.get(id(obj))
@@ -951,7 +952,7 @@ def match_first(templates: int, rows: Tensor, task_ids: Optional[Tensor] = None,
 
 @match_first.register_fake
 def _(templates, rows, task_ids=None, first=False, derived=None, capacity=None):
-    t = lookup(templates)
+    t = lookup(int(templates))
     width = (1 if first else t.capacity) if capacity is None else capacity
     shape = (rows.shape[0],) if first else (rows.shape[0], width)
     return [rows.new_empty(shape, dtype=torch.bool),
