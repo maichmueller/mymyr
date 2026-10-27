@@ -140,12 +140,16 @@ struct DeviceBrfs::Impl
             check(state_set::launch_relayout(reinterpret_cast<const u64*>(states->device_data()), W, reinterpret_cast<u64*>(dst), nw,
                                              count, s), "launch_relayout");
         grown->commit(count);
+        widened_growths += states->growths();
+        widened_mirror_growths += states->mirror_growths();
         states = std::move(grown);
         W = nw;
         check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
         check(state_set::launch_rehash(tab(), rows(), count, s), "launch_rehash");
         ++st.widenings;
     }
+
+    u64 widened_growths = 0, widened_mirror_growths = 0;  // of the states' arenas replaced by widen()
 
     /// A chunk of a layer: parents [b, b + ns); its candidate capacity (0: from the estimate), whether its last
     /// parent precedes the search's first goal state (the parents before it, redone after a goal halt), and whether the
@@ -176,13 +180,15 @@ struct DeviceBrfs::Impl
     u64 pin_bytes = 0;
 
     /// Grows an arena for `more` records: doubling while the doubled arena takes at most a third of what the context
-    /// can still allocate, otherwise to what that third holds, but at least to what it needs (the old generation is
-    /// held until the copy is done).
+    /// can still allocate, otherwise to what that third holds, but by at least a quarter while that takes at most half
+    /// of it, and at least to what it needs (the old generation is held until the copy is done). Growth by exactly
+    /// what each chunk needs would copy the whole arena at every chunk: quadratic in the states.
     void grow(DeviceArena& a, u64 more) const
     {
         if (a.device_size() + more <= a.capacity())
             return;
-        a.reserve(more, device_room(*ctx) / 3 / a.record_bytes());
+        const u64 room = device_room(*ctx) / a.record_bytes(), step = a.capacity() + a.capacity() / 4;
+        a.reserve(more, std::max(room / 3, step <= room / 2 ? step : 0));
     }
     /// At least `bytes` of `x`; with `exact`, exactly max(bytes, 64): a buffer of another size is freed first (no
     /// growth margin, and the old one is not held while the new one is allocated).
@@ -269,7 +275,8 @@ DeviceBrfsResult DeviceBrfs::run()
         // (an allocation the search did not size against the context's room: its phase and what it holds)
         if (!out_of_memory(e))
             throw;
-        refuse_memory(*m->ctx, "device BrFS", m->phase, m->held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
+        refuse_allocation_failure(*m->ctx, "device BrFS", m->phase, m->held(),
+                                  "Raise the Context's max_bytes, or use the CPU BrFS.");
     }
 }
 
@@ -575,8 +582,6 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             // the window: the most rows whose buffers fit 15/16 of the room (a margin for the pool's granularity)
             const u64 room = window_room(), usable = room - room / 16;
             u64 hi = std::min(window_cap, M - f);
-            if (const u64 spare = std::min(states->capacity(), nodes->capacity()) - count; spare > 0)
-                hi = std::min(hi, spare);
             SuccessorWindow w = successor_window(off, f, 1);
             if (window_bytes(w) > usable)
                 refuse_window(w, room, false);
@@ -591,6 +596,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 else
                     hi = mid - 1;
             }
+            // the arenas' spare rows without their growth, unless they hold less than a quarter of the window that fits
+            // with it (after an exact growth the spare rows are the last window's duplicates: a few rows per window)
+            if (const u64 spare = std::min(states->capacity(), nodes->capacity()) - count; spare > 0 && spare < w.rows &&
+                                                                                          spare >= w.rows / 4)
+                w = successor_window(off, f, spare);
             // (numeric successor rows are written whole: a numeric state's successors fit at once or are refused)
             if (task->numeric_slots() && w.rows < M)
                 refuse_successors(*ctx, "device BrFS", "a state", M, window_bytes(successor_window(off, 0, M)), room,
@@ -1222,7 +1232,9 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 continue;  // the chunk again with fewer parents
             if (windowed)
             {
-                if (run_windows(plan[i], d_ctl, d_rec, h_ctl, h_rec))
+                const bool more = run_windows(plan[i], d_ctl, d_rec, h_ctl, h_rec);
+                phase = "the successors of a chunk of states";
+                if (more)
                     ++i;
                 continue;
             }
@@ -1345,6 +1357,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     st.host_axiom_ms = gs.host_axiom_ms;
     st.axiom_reruns = gs.axiom_reruns;
     st.table_slots = slots;
+    st.growths = widened_growths + states->growths() + nodes->growths();
+    st.mirror_growths = widened_mirror_growths + states->mirror_growths();
     st.device_bytes = ctx->usage().used_high;
     if (!r.solved && first_goal != ~u64{0})
     {

@@ -603,9 +603,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
         "max_seconds spans the call.\n\n"
-        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
-        "IwBatch.message).\n\n"
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError; a wider pass whose one table exceeds it ends the "
+        "searches that reach it with status FAILED (the refusal in IwBatch.message).\n\n"
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
@@ -664,9 +664,10 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "(LIW has no optimized IW(1)). landmarks: one FactLandmarkGraph shared by all searches, or one per search; "
         "None gives every state the BOT coordinate. disjunctive, all_private and unshared_atoms select the landmark "
         "grouping as in search.liw. max_width above 1 raises ValueError (LIW(2) runs on the host: search.liw); so do "
-        "tasks with numeric fluents. table_bytes bounds the novelty tables of a group; a search whose own table "
-        "exceeds it, or what the context can still allocate, ends with status FAILED (the refusal in "
-        "IwBatch.message). Over a TaskTable, search i runs on instance task_ids[i].");
+        "tasks with numeric fluents. table_bytes bounds the novelty tables of a group; when every search's table "
+        "exceeds it, the call raises ValueError, and otherwise a search whose own table exceeds it, or what the "
+        "context can still allocate, ends with status FAILED (the refusal in IwBatch.message). Over a TaskTable, "
+        "search i runs on instance task_ids[i].");
 
     m.def(
         "rollouts",
@@ -723,9 +724,10 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Not reported: "
         "derived atoms, landing states, co-occurrence. "
-        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
-        "IwBatch.message). landmarks: randomized LIW(1) rollouts "
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError; a wider pass whose one table exceeds it ends the "
+        "searches that reach it with status FAILED (the refusal in IwBatch.message). landmarks: randomized LIW(1) "
+        "rollouts "
         "(search.liw(max_width=1, layer_order='randomized', seed=k)) with one FactLandmarkGraph shared by every "
         "rollout or one per seed, grouped by disjunctive, all_private and unshared_atoms as in search.liw; "
         "optimize_iw1 does not apply to them.");
@@ -851,9 +853,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "(IwBatch); equal to mymyr.search.iw(task, max_width=1, start=...). Over a mymyr.rl.TaskTable: "
         "search i runs on instance task_ids[i] (host ints, or an int32 CUDA array read after the work on `stream`); "
         "device starts are rows of at most the table's width. "
-        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it, and a pass "
-        "whose one table exceeds it ends the searches that reach it with status FAILED (the refusal in "
-        "IwBatch.message).");
+        "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
+        "width-1 table exceeds it, the call raises ValueError; a wider pass whose one table exceeds it ends the "
+        "searches that reach it with status FAILED (the refusal in IwBatch.message).");
 #undef MYMYR_MULTI_IW_COMMON_ARGS
 }
 }  // namespace mymyr::python

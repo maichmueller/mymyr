@@ -225,6 +225,10 @@ def test_liw_table_beyond_table_bytes_fails_only_its_search(ctx):
         expected = (f"mymyr: device LIW(1): the novelty table requires {8 * 9 * (task.words + 1)} bytes per search for "
                     f"{64 * task.words} atom slots and 9 landmark ranks, and table_bytes is {budget} (raise table_bytes=)")
         assert batch.message == expected
+    # no search's table fits: the call raises before a search runs
+    with pytest.raises(ValueError, match=r"^mymyr: device LIW\(1\): the novelty table requires \d+ bytes per search "
+                                         r"for \d+ atom slots and 2 landmark ranks, and table_bytes is 8 \(raise table_bytes=\)$"):
+        mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graphs, table_bytes=8)
 
 
 def test_liw_table_beyond_the_context_fails_its_search(tmp_path):

@@ -78,7 +78,8 @@ instance. `cuda.rollouts(..., landmarks=...)` runs randomized LIW(1) with one gr
 rollout k equals `search.liw(..., max_width=1, layer_order="randomized", seed=k)`. LIW(2) and tasks with numeric
 fluents run on the host (`search.liw`). A search's novelty table holds, per landmark rank (BOT included), one bit per
 atom slot and one word for the empty tuple. Groups shrink to `table_bytes` as for IW; a search whose table cannot
-fit ends with status `FAILED` at the LIW(1) pass, and the batch's `message` names the option to raise.
+fit ends with status `FAILED` at the LIW(1) pass, and the batch's `message` names the option to raise. When no
+search's table fits `table_bytes`, the call raises `ValueError`.
 
 ```python skip-if-no-cuda
 from pathlib import Path
@@ -113,9 +114,11 @@ fit runs with fewer parents. When the search's own buffers leave too little, or 
 `ValueError` names what holds the context's memory.
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
 into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
-`batched_iw1`, `liw` and `rollouts`); a pass whose table cannot fit even one search ends the searches that reach it with
-status `FAILED`, and the batch's `message` gives its required byte size and the budget; the searches solved at a lower
-width keep their results. Groups also shrink to the memory the context can still allocate; a single search's table
+`batched_iw1`, `liw` and `rollouts`). When the width-1 table of one search exceeds it, the call raises `ValueError`
+before it runs a search (every search that width 0 does not solve reaches width 1); a wider pass whose table cannot fit
+even one search ends the searches that reach it with status `FAILED`, and the batch's `message` gives its required
+byte size and the budget; the searches solved at a lower width keep their results and an empty `message` in C++
+`MultiIwBatch::result`. Over a `TaskSuite`, `SuiteIwBatch.message` joins the domains' messages. Groups also shrink to the memory the context can still allocate; a single search's table
 beyond it ends that search the same way, the `message` naming what holds the context's memory. Wide exact novelty uses
 full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the

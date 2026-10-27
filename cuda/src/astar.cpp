@@ -437,8 +437,8 @@ struct Driver
     }
     [[noreturn]] void refuse_memory_failure() const
     {
-        refuse_memory(*ctx, greedy ? "device GBFS" : "device A*", phase, held(),
-                      "Raise the Context's max_bytes, or use the CPU search.");
+        refuse_allocation_failure(*ctx, greedy ? "device GBFS" : "device A*", phase, held(),
+                                  "Raise the Context's max_bytes, or use the CPU search.");
     }
     /// The step's scratch (batch, pop window, the batch's rows).
     void size_step()

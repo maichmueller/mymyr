@@ -228,6 +228,36 @@ TEST(CudaArena, AppendsTailsSyncsAndGrows)
     ctx->synchronize();
 }
 
+TEST(CudaArena, MirrorGrowsGeometricallyUnderExactDeviceGrowth)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const u32 W = 2;
+    cuda::DeviceArena arena(ctx, W * 8, 4);
+    std::vector<u64> expect;
+    for (u64 step = 0; step < 200; ++step)
+    {
+        arena.reserve(1, 0);  // exactly what one more record needs: a new device generation per step
+        const std::vector<u64> row{step, ~step};
+        arena.append_from_host(row.data(), 1);
+        expect.insert(expect.end(), row.begin(), row.end());
+        if (step % 16 == 0)
+            arena.sync_to_host();
+    }
+    EXPECT_EQ(arena.capacity(), 200u);
+    EXPECT_EQ(arena.growths(), 196u);
+    EXPECT_LE(arena.mirror_growths(), 6u);  // 4 -> 8 -> ... -> 256
+    arena.sync_to_host();
+    arena.wait();
+    ASSERT_EQ(arena.host_size(), 200u);
+    EXPECT_EQ(std::memcmp(arena.host_data(), expect.data(), expect.size() * 8), 0);
+    cuda::DeviceArena device_only(ctx, W * 8, 4, false);
+    device_only.reserve(100);
+    EXPECT_EQ(device_only.growths(), 1u);
+    EXPECT_EQ(device_only.mirror_growths(), 0u);
+    ctx->synchronize();
+}
+
 TEST(CudaArena, RefusesSizesBeyondSixtyFourBitsAndStaysUnchanged)
 {
     SKIP_WITHOUT_GPU();

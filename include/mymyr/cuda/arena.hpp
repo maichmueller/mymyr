@@ -10,9 +10,9 @@
 //   - One writer: the records are written on one stream (the context's compute stream unless the caller orders its
 //     own stream first). The arena object is not thread-safe.
 //   - Growth is a batch-boundary event: reserve() allocates a new device generation (stream-ordered copy of the
-//     records) and a larger mirror (after waiting for the syncs in flight). Exports hold the generation they point
-//     into (generation()), so a grown arena never invalidates an exported slice. Stable addresses without copies
-//     (VMM) are a later refinement.
+//     records) and, when the mirror is full, a mirror of at least twice its size (after waiting for the syncs in
+//     flight). Exports hold the generation they point into (generation()), so a grown arena never invalidates an
+//     exported slice. Stable addresses without copies (VMM) are a later refinement.
 
 #include "mymyr/cuda/runtime.hpp"
 
@@ -42,6 +42,9 @@ public:
     /// End of the last sync issued (host_size() once every sync in flight has landed).
     [[nodiscard]] u64 synced_upto() const noexcept { return m_issued; }
     [[nodiscard]] usize syncs_in_flight() const noexcept { return m_pending.size(); }
+    /// Device generations allocated by reserve() since construction, and mirrors allocated by it.
+    [[nodiscard]] u64 growths() const noexcept { return m_growths; }
+    [[nodiscard]] u64 mirror_growths() const noexcept { return m_mirror_growths; }
     /// The writer's stream.
     [[nodiscard]] cudaStream_t stream() const noexcept { return m_ctx->stream(); }
 
@@ -59,7 +62,8 @@ public:
 
     /// Makes room for `more` records past device_size() (a new generation when full; capacity at least doubles, but
     /// stays at or below `most` records when that holds device_size() + more). The new generation is allocated while
-    /// the old one is still held. Throws std::length_error, leaving the arena unchanged, when the records or their
+    /// the old one is still held. The mirror grows with it to at least twice its own capacity, so that it is
+    /// reallocated a logarithmic number of times however small the device steps are. Throws std::length_error, leaving the arena unchanged, when the records or their
     /// bytes exceed 2^64 - 1 (and the context's error, leaving it unchanged, when the allocation fails).
     void reserve(u64 more, u64 most = ~u64{0});
     /// The bytes reserve(more, most) allocates (0: the records fit).
@@ -94,6 +98,9 @@ private:
     ContextPtr m_ctx;
     u32 m_rb;
     u64 m_capacity = 0;
+    u64 m_mirror_capacity = 0;  // records the mirror holds (at least m_capacity)
+    u64 m_growths = 0;
+    u64 m_mirror_growths = 0;
     u64 m_device_size = 0;
     u64 m_host_size = 0;
     u64 m_issued = 0;

@@ -573,6 +573,15 @@ def test_iw_over_a_suite():
     for i, (st, g) in enumerate(zip(starts, ids)):
         one = mc.batched_iw1(s[g], [st], ctx=ctx)
         assert iw_record(host, i) == iw_record(one, 0) == iw_record(d, i), i
+    # IW(2) tables beyond table_bytes: the searches that reach width 2 fail, the message joins the domains' refusals
+    b = mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=2, table_bytes=8 * s.words)
+    failed = [i for i in range(len(b)) if b.status[i] == mymyr.search.Status.FAILED]
+    assert failed and all(b.passes(i)[-1].width == 2 for i in failed)
+    assert b.message == "; ".join(dict.fromkeys(p.message for p in b.parts if p.message))
+    assert b.message.startswith("mymyr: device IW(2): the novelty table requires ")
+    assert mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=1).message == ""
+    with pytest.raises(ValueError, match=r"^mymyr: device IW\(1\): .*table_bytes is 1 "):
+        mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=1, table_bytes=1)
     with pytest.raises(ValueError, match="task_ids"):
         mc.multi_iw(s, starts, ctx=ctx)
     with pytest.raises(ValueError, match="outside the suite"):

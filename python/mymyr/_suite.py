@@ -84,7 +84,8 @@ def _rows(starts: Any) -> int:
 class SuiteIwBatch:
     """The results of device IW searches over a TaskSuite (mymyr.cuda.multi_iw / batched_iw1): search i ran on global
     instance ``task_ids[i]`` (of domain ``domains[i]``), with what an IwBatch reports per search. Each domain's searches
-    ran as one IwBatch over its table (``parts``), the domains one after the other."""
+    ran as one IwBatch over its table (``parts``), the domains one after the other; a domain whose call raises
+    (ValueError: no search of it can run its width-1 pass within table_bytes) raises for the suite."""
 
     def __init__(self, suite: TaskSuite, split: _Split, parts: list[Any]) -> None:
         self.suite = suite
@@ -140,6 +141,16 @@ class SuiteIwBatch:
     def generated(self) -> list[int]:
         """Per search: the successors it generated, over its passes."""
         return self._gather("generated")
+
+    @property
+    def message(self) -> str:
+        """Why the searches with status FAILED could not run: the parts' messages joined by "; " (empty when none
+        failed)."""
+        parts: list[str] = []
+        for p in self.parts:
+            if p.message and p.message not in parts:
+                parts.append(p.message)
+        return "; ".join(parts)
 
     @property
     def task_ids(self) -> list[int]:

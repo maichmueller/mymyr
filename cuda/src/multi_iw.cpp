@@ -269,7 +269,8 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
         r.stats.seconds += s.seconds;
     }
     r.effective_width = effective_width.at(i);
-    r.message = message;
+    if (r.status == search::SearchStatus::Failed)
+        r.message = message;  // (the batch's refusals: a search that ran keeps an empty message)
     r.fluent_slots = task.atoms().fluent_slots();
     if (r.status == search::SearchStatus::Solved)
     {
@@ -935,6 +936,21 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
               "numeric starts");
         starts = DeviceStarts{converted, W, W, n};
     }
+    // every search that is not solved at width 0 reaches width 1: when no search's table of that pass fits
+    // table_bytes, the options cannot run any search (a wider pass is refused only for the searches that reach it)
+    if (n && o.max_width >= 1)
+    {
+        const u32 words = std::max<u32>(1, task->words());
+        u32 ranks = 0;
+        if (o.landmarks)
+        {
+            ranks = landmark_ranks;
+            for (const novelty::LandmarkCoordinates& c : coordinates)
+                ranks = std::min(ranks, c.num_ranks());
+        }
+        if (const u64 per = table_bytes_per_search(1, words, ranks); per > o.table_bytes)
+            throw std::invalid_argument(table_budget_refusal(1, words, per, o.table_bytes, ranks));
+    }
     // group size: the novelty tables of a group fit table_bytes
     const u32 grouping_ranks = landmark_ranks;
     u32 group = group_size(o.max_width, task->words(), o.table_bytes, grouping_ranks);
@@ -1383,7 +1399,7 @@ std::string DeviceMultiIw::Impl::held() const
 
 void DeviceMultiIw::Impl::refuse_memory_failure() const
 {
-    refuse_memory(*ctx, "device IW", phase, held(), "Raise the Context's max_bytes, or use the CPU search.");
+    refuse_allocation_failure(*ctx, "device IW", phase, held(), "Raise the Context's max_bytes, or use the CPU search.");
 }
 
 bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)

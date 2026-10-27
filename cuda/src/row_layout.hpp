@@ -137,6 +137,16 @@ inline std::string max_bytes_text(const DeviceContext& ctx)
                             ", and " + held + ". " + advice);
 }
 
+/// Refuses a search after a device allocation it did not size against the context's room failed (`phase`: what it was
+/// allocating; `held`: held_text). The message says that an allocation failed, unlike the sized refusals'.
+[[noreturn]] inline void refuse_allocation_failure(const DeviceContext& ctx, const std::string& search, const std::string& phase,
+                                                   const std::string& held, const std::string& advice)
+{
+    throw std::length_error("mymyr: " + search + ": a device memory allocation failed during " + phase +
+                            ": the CUDA context can still allocate " + std::to_string(device_room(ctx)) + " bytes" +
+                            max_bytes_text(ctx) + ", and " + held + ". " + advice);
+}
+
 /// Refuses a state (or a chunk of states) whose successors need more device memory than the context has left: the
 /// count, the bytes (0: more than `room`, an allocation for them failed) and the options that change it. When `room`
 /// is below `row_bytes` (what one successor takes), the search's own buffers took the memory: the refusal names them

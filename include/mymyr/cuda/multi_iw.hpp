@@ -74,9 +74,10 @@ struct MultiIwOptions
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
     // launch configuration: exact results are independent of it unless a wall-time limit interrupts the search
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
-    // Novelty tables of a group. A pass whose one table exceeds it is refused when a search reaches that pass: the
-    // searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep the
-    // results of the passes before it. Groups also shrink to what the context can still allocate, and a single
+    // Novelty tables of a group. When no search's width-1 table fits it, run() throws std::invalid_argument. A wider
+    // pass (or, with landmarks, a search's own width-1 table) beyond it is refused when a search reaches that pass:
+    // the searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep
+    // the results of the passes before it. Groups also shrink to what the context can still allocate, and a single
     // search's table beyond that is refused the same way.
     u64 table_bytes = u64{1} << 30;
     u32 chunk_states = u32{1} << 20;  // layer entries per chunk at most
@@ -146,7 +147,8 @@ struct MultiIwBatch
     [[nodiscard]] u64 generated(u32 i) const;
     /// The plan of search i as actions.
     [[nodiscard]] std::vector<Action> plan(u32 i, const Task& task) const;
-    /// search::iw()'s result for search i (plan cost when `costs`; start: the search's start state).
+    /// search::iw()'s result for search i (plan cost when `costs`; start: the search's start state); its message is
+    /// the batch's when the search failed, else empty.
     [[nodiscard]] search::IwResult result(u32 i, const Task& task, const State& start, bool costs) const;
 };
 

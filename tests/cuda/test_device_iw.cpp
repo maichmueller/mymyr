@@ -996,6 +996,28 @@ TEST(DeviceIw, WidePairTableFailsTheSearchesThatReachIt)
     EXPECT_EQ(batch.result(0, *task, starts[0], true).message, batch.message);
 }
 
+TEST(DeviceIw, WidthOneTableBeyondTableBytesRefusesTheCall)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = wide_task(80);
+    const std::vector<State> starts(2, task->initial_state());
+    for (u32 width : {1u, 2u})
+    {
+        cuda::MultiIwOptions o;
+        o.max_width = width;
+        o.table_bytes = 512;  // below the IW(1) table of 800 bytes
+        cuda::DeviceMultiIw device(context(), task, o);
+        EXPECT_THROW((void)device.run(starts), std::invalid_argument);
+    }
+    cuda::MultiIwOptions o;
+    o.max_width = 0;  // width 0 needs no table
+    o.table_bytes = 512;
+    cuda::DeviceMultiIw zero(context(), task, o);
+    const auto batch = zero.run(starts);
+    EXPECT_TRUE(batch.message.empty());
+    EXPECT_NE(batch.status[0], search::SearchStatus::Failed);
+}
+
 TEST(DeviceIw, LazyGrowthShrinksTableGroups)
 {
     SKIP_WITHOUT_GPU();
@@ -1195,6 +1217,68 @@ TEST(DeviceLiw, LandmarkResolutionSizesLazyRowsBeforeSearch)
     const auto expected = search::liw(*task, cpu);
     for (u32 i = 0; i < starts.size(); ++i)
         expect_same(batch.result(i, *task, root, true), expected, "landmark slot resolution");
+}
+
+TEST(DeviceLiw, TablesBeyondTableBytesFailTheirSearchesOrRefuseTheCall)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    const State root = task->initial_state();
+    std::vector<CanonicalAtom> facts;
+    bits::for_each(root.data(), root.size_words(), [&](u64 slot)
+                   { facts.push_back(task->atoms().canonical(AtomKind::Fluent, static_cast<u32>(slot))); });
+    ASSERT_GE(facts.size(), 8u);
+    cuda::MultiIwOptions o;
+    o.landmarks.emplace(2);
+    (*o.landmarks)[0].graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create({facts[0]}));
+    (*o.landmarks)[1].graph = std::make_shared<const landmarks::FactLandmarkGraph>(
+        landmarks::FactLandmarkGraph::create(std::vector<CanonicalAtom>(facts.begin(), facts.begin() + 8)));
+    const u64 words = task->words();
+    o.table_bytes = 8 * 2 * (words + 1);  // the tables of one landmark and BOT
+    o.budget.max_states = 60;
+    const std::vector<State> starts(2, root);
+    const std::string refusal = "mymyr: device LIW(1): the novelty table requires " + std::to_string(8 * 9 * (words + 1)) +
+                                " bytes per search for " + std::to_string(64 * words) +
+                                " atom slots and 9 landmark ranks, and table_bytes is " + std::to_string(o.table_bytes) +
+                                " (raise table_bytes=)";
+    for (u32 group : {1u, 2u})
+    {
+        o.max_searches = group;
+        cuda::DeviceMultiIw device(ctx, task, o);
+        const auto batch = device.run(starts);
+        search::LiwOptions cpu;
+        cpu.max_width = 1;
+        cpu.start = root;
+        cpu.control.budget = o.budget;
+        cpu.landmarks = (*o.landmarks)[0];
+        const auto fits = batch.result(0, *task, root, true);
+        expect_same(fits, search::liw(*task, cpu), "the search whose table fits");
+        EXPECT_TRUE(fits.message.empty()) << fits.message;
+        ASSERT_EQ(batch.status[1], search::SearchStatus::Failed);
+        const auto passes = batch.passes(1);
+        ASSERT_EQ(passes.size(), 2u);
+        EXPECT_EQ(passes[1].width, 1u);
+        EXPECT_EQ(passes[1].status, search::SearchStatus::Failed);
+        EXPECT_EQ(batch.message, refusal);
+        EXPECT_EQ(batch.result(1, *task, root, true).message, refusal);
+    }
+    // no search's table fits: the call is refused before a search runs
+    o.table_bytes = 8;
+    cuda::DeviceMultiIw device(ctx, task, o);
+    try
+    {
+        (void)device.run(starts);
+        ADD_FAILURE() << "expected a refusal";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_EQ(std::string(e.what()), "mymyr: device LIW(1): the novelty table requires " +
+                                             std::to_string(8 * 2 * (words + 1)) + " bytes per search for " +
+                                             std::to_string(64 * words) +
+                                             " atom slots and 2 landmark ranks, and table_bytes is 8 (raise table_bytes=)");
+    }
 }
 
 TEST(DeviceLiw, RankMaskViewsFollowNodeReservations)

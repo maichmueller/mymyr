@@ -428,6 +428,31 @@ def test_search_runs_on_past_a_windowed_state(tmp_path, drop, budget, windows):
     small.synchronize()
 
 
+# A refusal the search sized (its memory left too little for a named need), not the last-resort refusal of an
+# allocation that failed beyond its sizing ("a device memory allocation failed during ...").
+SIZED_BRFS_REFUSAL = (r"^mymyr: device BrFS: (?!a device memory allocation failed )"
+                      r".*Raise the Context's max_bytes, or use the CPU BrFS\.$")
+
+
+def run_budgets(task, budgets, cpu, **kw):
+    """The outcome per budget (ascending): the device counters of a run equal to the CPU's, or None for a sized
+    refusal; once a budget runs, every larger one does."""
+    outcomes = []
+    for budget in budgets:
+        small = mc.Context(0, max_bytes=budget)
+        try:
+            dev = mc.brfs(task, ctx=small, fingerprint=True, **kw)
+            brfs_matches(dev, cpu)
+            outcomes.append(dev.counters)
+        except ValueError as e:
+            assert re.match(SIZED_BRFS_REFUSAL, str(e)), str(e)
+            outcomes.append(None)
+        small.synchronize()
+    ran = [x is not None for x in outcomes]
+    assert ran == sorted(ran), ran
+    return outcomes
+
+
 def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
     """1100 successors of 151 KB rows (159 MiB) in a context of twice that: windows sized by what they allocate. In
     smaller contexts the search gives the CPU's result or refuses (the states after the fan have no successors: chunks
@@ -437,16 +462,8 @@ def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
     task = wide_fan_task(tmp_path)
     row = (task.words + 63) // 64 * 64 * 8
     cpu = mymyr.search.brfs(task, fingerprint=True, threads=1)
-    for eighths in (16, 13, 10):
-        small = mc.Context(0, max_bytes=1100 * row * eighths // 8)
-        try:
-            dev = mc.brfs(task, ctx=small, fingerprint=True)
-            brfs_matches(dev, cpu)
-            assert dev.counters["windows"] >= 1
-        except ValueError as e:
-            assert eighths < 16
-            assert re.match(r"^mymyr: device BrFS: .*Raise the Context's max_bytes, or use the CPU BrFS\.$", str(e))
-        small.synchronize()
+    largest = run_budgets(task, [1100 * row * eighths // 8 for eighths in (10, 13, 16)], cpu)[-1]
+    assert largest is not None and largest["windows"] >= 1
 
 
 def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):
@@ -459,8 +476,9 @@ def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):
 
 
 def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wide):
-    """Every budget gives the CPU's result or a ValueError that names the memory, never an allocator error: the setup,
-    the windows of a state's successors, the chunks after them and the arenas' growth."""
+    """Every budget gives the CPU's result or a ValueError that names the memory the search sized, never an allocator
+    error or a failed allocation beyond that sizing: the setup, the windows of a state's successors, the chunks after
+    them and the arenas' growth."""
     from conftest import symfan_task
 
     symfan = symfan_task(tmp_path, 300)
@@ -468,14 +486,6 @@ def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wi
     outcomes = []
     for task, kw in cases:
         cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
-        for budget in (1, 4, 8, 16, 32, 48):
-            small = mc.Context(0, max_bytes=budget << 20)
-            try:
-                brfs_matches(mc.brfs(task, ctx=small, fingerprint=True, **kw), cpu)
-                outcomes.append("equal")
-            except ValueError as e:
-                assert re.match(r"^mymyr: device BrFS: .*Raise the Context's max_bytes, or use the CPU BrFS\.$", str(e))
-                outcomes.append("refused")
-            small.synchronize()
-    assert "equal" in outcomes and "refused" in outcomes
+        outcomes += run_budgets(task, [budget << 20 for budget in (1, 4, 8, 16, 32, 48)], cpu, **kw)
+    assert None in outcomes and any(x is not None for x in outcomes)
 
