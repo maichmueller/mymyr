@@ -117,7 +117,8 @@ asynchronous environments on the CPU (send / recv from any number of Python thre
 RL helpers: :func:`prefix_masks` / :func:`schema_masks` (factored action masks from an expansion's labels),
 :func:`novelty_update` (width-1 novelty rewards over per-environment atom tables) and :func:`her_relabel` (hindsight
 relabels with atom-set goals, counter-based RNG), in the inputs' framework: NumPy and torch (CPU and CUDA) run the
-native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`.
+native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`. :func:`lifted_goal_templates` makes the goals of
+lifted hindsight relabelling: per instance a few lifted conjunctions of its goal literals (:class:`GoalTemplates`).
 
 For custom encoders and environments (see also :mod:`mymyr.encoding`): ``table.atom_metadata()`` (the instances'
 atoms with ``atom_offsets``, table predicate ids), :func:`object_offsets` (PyG ``ptr``), :func:`goal_masks`,
@@ -136,6 +137,7 @@ from mymyr._core import Task, TaskHandle
 from mymyr._core._rl import (
     CpuEnvPool,
     Expansion,
+    GoalTemplates,
     PaddedExpansion,
     PoolBatch,
     TaskSuite,
@@ -149,6 +151,7 @@ from mymyr._core._rl import (
     goal_count,
     goal_test,
     is_goal,
+    lifted_goal_templates,
     numeric_values,
     random_walks,
     successor_bounds,
@@ -159,6 +162,7 @@ from mymyr.rl._sampling import InstanceSampler
 __all__ = [
     "CpuEnvPool",
     "Expansion",
+    "GoalTemplates",
     "HerBatch",
     "InstanceSampler",
     "PaddedExpansion",
@@ -178,6 +182,7 @@ __all__ = [
     "goal_test",
     "her_relabel",
     "is_goal",
+    "lifted_goal_templates",
     "novelty_update",
     "numeric_values",
     "object_offsets",

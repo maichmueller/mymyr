@@ -306,16 +306,16 @@ struct BusyGuard
 };
 }  // namespace
 
-u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& target, StateView s, PartialBinding partial,
-                       const BindingOptions& options, BindingSink* bsink, ConjunctionSink* csink)
+namespace
+{
+/// The checks every entry point makes; returns the target's arity.
+u32 check_target(const Task& task, Workspace& ws, const BindingTarget& target, PartialBinding partial)
 {
     if (&ws.engine().task() != &task)
         throw std::invalid_argument("mymyr: bindings: the workspace belongs to another task");
-    BindingScratch& sc = ws.bindings();
-    if (sc.busy)
+    if (ws.bindings().busy)
         throw std::logic_error("mymyr: bindings: an enumeration is already running on this workspace (do not start one "
                                "from inside a binding callback; use another workspace)");
-    const BusyGuard guard(sc.busy);
     const u32 n = task.num_objects();
     u32 arity = 0;
     if (target.condition)
@@ -332,19 +332,12 @@ u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& tar
     for (const auto& o : partial)
         if (o && o->v >= n)
             throw std::invalid_argument("mymyr: bindings: object index " + std::to_string(o->v) + " out of range");
-    const bool resuming = !options.resume_after.empty();
-    if (resuming)
-    {
-        if (options.resume_after.size() != arity)
-            throw std::invalid_argument("mymyr: bindings: resume_after has the wrong number of objects");
-        for (u32 v = 0; v < arity; ++v)
-            if (options.resume_after[v].v >= n || (!partial.empty() && partial[v] && *partial[v] != options.resume_after[v]))
-                throw std::invalid_argument("mymyr: bindings: resume_after does not agree with the partial binding");
-    }
-    if (options.limit == 0)
-        return 0;
+    return arity;
+}
 
-    // the compiled query of (target, fixed variables)
+/// The compiled query of (target, fixed variables), from the workspace's cache or compiled into it.
+BindingQuery& query_of(const Task& task, BindingScratch& sc, const BindingTarget& target, PartialBinding partial, u32 arity)
+{
     std::vector<u64>& key = sc.key;
     key.clear();
     key.push_back(target.condition ? k_condition_key : k_schema_key);
@@ -379,7 +372,36 @@ u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& tar
         compile_query(sc, *q);
         it = sc.cache.emplace(key, std::move(q)).first;
     }
-    BindingQuery& q = *it->second;
+    return *it->second;
+}
+}  // namespace
+
+std::vector<u32> binding_order(const Task& task, Workspace& ws, const BindingTarget& target, PartialBinding partial)
+{
+    const u32 arity = check_target(task, ws, target, partial);
+    return query_of(task, ws.bindings(), target, partial, arity).order;
+}
+
+u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& target, StateView s, PartialBinding partial,
+                       const BindingOptions& options, BindingSink* bsink, ConjunctionSink* csink)
+{
+    const u32 arity = check_target(task, ws, target, partial);
+    const u32 n = task.num_objects();
+    BindingScratch& sc = ws.bindings();
+    const BusyGuard guard(sc.busy);
+    const bool resuming = !options.resume_after.empty();
+    if (resuming)
+    {
+        if (options.resume_after.size() != arity)
+            throw std::invalid_argument("mymyr: bindings: resume_after has the wrong number of objects");
+        for (u32 v = 0; v < arity; ++v)
+            if (options.resume_after[v].v >= n || (!partial.empty() && partial[v] && *partial[v] != options.resume_after[v]))
+                throw std::invalid_argument("mymyr: bindings: resume_after does not agree with the partial binding");
+    }
+    if (options.limit == 0)
+        return 0;
+
+    BindingQuery& q = query_of(task, sc, target, partial, arity);
     if (resuming && q.order.empty())
         return 0;  // every variable is fixed: the only binding is resume_after itself
     if (resuming && !q.has_resume)
@@ -435,6 +457,16 @@ u64 count(const Task& task, Workspace& ws, const detail::BindingTarget& t, State
     return detail::enumerate_bindings(task, ws, t, s, partial, o, &sink, nullptr);
 }
 }  // namespace
+
+std::vector<u32> binding_order(const Task& task, Workspace& ws, const ConjunctiveCondition& condition, PartialBinding partial)
+{
+    return detail::binding_order(task, ws, {&condition, SchemaId{}}, partial);
+}
+
+std::vector<u32> binding_order(const Task& task, Workspace& ws, SchemaId schema, PartialBinding partial)
+{
+    return detail::binding_order(task, ws, {nullptr, schema}, partial);
+}
 
 std::vector<std::vector<ObjectId>> bindings(const Task& task, Workspace& ws, const ConjunctiveCondition& condition, StateView s,
                                             PartialBinding partial, u64 limit)

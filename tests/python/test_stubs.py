@@ -209,8 +209,17 @@ def test_stubs_parse_and_are_typed():
     assert f"def fast_unsupported({table}, *, canonical_order: bool = True," in env
     assert "def recv(self, min_rows: int = 0) -> PoolBatch" in rl and "class CpuEnvPool:" in rl
     assert f"def __init__(self, {table}, *, device: int | None = None," in jx
+    # lifted goal templates
+    assert (f"def lifted_goal_templates({suite.replace('table:', 'source:')}, *, max_subgoals_per_size: int = 2, "
+            "max_size: int = 10, max_subsets_per_size: int = 100, max_component_samples: int = 5, max_products: int = 1000, "
+            "distinct: bool | Literal['equality'] = True, seed: int = 0) -> GoalTemplates:") in rl
+    assert "def conditions(self, instance: int | mymyr._core.Task | mymyr._core.TaskHandle) -> list[mymyr._core._formalism.ConjunctiveCondition]" in rl
+    assert "def options(self) -> dict[str, int | bool | str] | None" in rl
+    formalism = (d / "_formalism.pyi").read_text()
+    assert "def binding_order(self, task: mymyr._core.Task | mymyr._core.TaskHandle, partial: " in formalism
+    assert ") -> tuple[int, ...]:" in formalism
     assert ": object" not in rl and "-> object" not in rl and "-> list:" not in rl and "-> dict:" not in rl
-    ops = (d / "_rl_ops.pyi").read_text()
+    ops =(d / "_rl_ops.pyi").read_text()
     assert "strategy: Literal['future', 'final', 'episode'] = 'future'" in ops
     assert "prefix: mymyr._typing.SupportsDLPack | None, depth: int, mask: mymyr._typing.SupportsDLPack" in ops
     for text in (jx, ops):

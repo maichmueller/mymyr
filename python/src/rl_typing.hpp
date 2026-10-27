@@ -35,6 +35,10 @@ struct SamplerArg
 struct Sampler
 {
 };
+/// Which template variables bind distinct objects (rl::Distinct): True, False or "equality".
+struct TemplateDistinct
+{
+};
 }  // namespace mymyr::python::ann
 
 namespace nanobind::detail
@@ -74,5 +78,10 @@ template<>
 struct type_caster<mymyr::python::ann::HerStrategy>
 {
     static constexpr auto Name = const_name("typing.Literal['future', 'final', 'episode']");
+};
+template<>
+struct type_caster<mymyr::python::ann::TemplateDistinct>
+{
+    static constexpr auto Name = const_name("bool | typing.Literal['equality']");
 };
 }  // namespace nanobind::detail

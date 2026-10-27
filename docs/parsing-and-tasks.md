@@ -353,6 +353,9 @@ goal incomplete). Tasks from PDDL are not affected: they expand the goal as writ
 `task.bindings(target, state)` lazily enumerates parameter bindings whose conditions hold in that state. `target` can
 be a schema name/index or a `ConjunctiveCondition`. `partial=` accepts a mapping from parameter index/name to object,
 or a sequence with `None` for unbound parameters; `limit=` caps the number of yielded bindings.
+Bindings come in lexicographic order by object index over the free variables in the order
+`condition.binding_order(task, partial=None)` lists them. That order depends only on the task, the condition and which
+variables `partial` fixes, not on the state.
 `task.ground_conjunctions` yields the binding and its ground static, fluent and derived literals.
 
 See [Formula values](formulas.md) for creating atoms, literals and conditions, checking them against states, and using

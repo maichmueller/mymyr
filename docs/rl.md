@@ -344,6 +344,78 @@ assert torch.all(visit_env.visited_count == 1)
 visit_env.close()
 ```
 
+## Lifted hindsight relabelling
+
+Lifted hindsight relabelling uses parts of an instance's goal, with the objects replaced by variables, as goals for
+the states a trajectory reaches. `rl.lifted_goal_templates(source)` makes these goal templates for every instance of a
+Task, TaskTable or TaskSuite. An instance's templates come from its goal literals, `task.goal_condition.literals`
+(both polarities and all predicate kinds; numeric constraints are skipped):
+
+1. Two literals are joined when their atoms share an object. The components of this graph are ordered by their
+   smallest literal index.
+2. Each component lists its first `max_subsets_per_size` connected subsets of each size up to `max_size`, in
+   lexicographic order of their literal indices.
+3. For c = 1 up to `max_size` components, up to `max_component_samples` uniform draws of c components are taken, and
+   each draw contributes the first `max_products` combinations of one subset per drawn component. The draws use a
+   counter-based random generator keyed by `seed` and the instance's index in the source.
+4. Subgoals with more than `max_size` literals are dropped. The first `max_subgoals_per_size` of each size are kept,
+   largest first.
+5. Each subgoal is lifted. Every object, constants included, becomes a variable `?x<i>`, numbered by first appearance.
+
+With `distinct=True` (the default) distinct variables must bind distinct objects, and the condition carries one
+disequality per pair of variables. `distinct=False` lets variables share an object, and `distinct="equality"` behaves
+like `True` when the domain declares `:equality` and like `False` otherwise. The templates of an instance depend only
+on its task, its index in the source and the options, not on the other instances.
+
+```python
+from pathlib import Path
+import pickle
+
+import mymyr
+from mymyr import rl
+
+data = Path("tests/data/pddl/gripper")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p02.pddl")
+templates = rl.lifted_goal_templates(task, seed=0)
+for literals, condition in zip(templates.goal_literals(0), templates.conditions(0)):
+    print(literals, condition)
+# (0, 1) (?x0 ?x1 ?x2) (and (at ?x0 ?x1) (at ?x2 ?x1) (!= ?x0 ?x1) (!= ?x0 ?x2) (!= ?x1 ?x2))
+# (0,) (?x0 ?x1) (and (at ?x0 ?x1) (!= ?x0 ?x1))
+# (1,) (?x0 ?x1) (and (at ?x0 ?x1) (!= ?x0 ?x1))
+
+largest = templates.conditions(0)[0]
+assert largest.binding_order(task) == (0, 1, 2)
+binding = next(iter(task.bindings(largest, task.initial_state, limit=1)))
+assert [obj.name for obj in binding] == ["ball1", "rooma", "ball2"]
+assert str(rl.lifted_goal_templates(task, distinct=False).conditions(0)[0]) == "(?x0 ?x1 ?x2) (and (at ?x0 ?x1) (at ?x2 ?x1))"
+
+arrays = templates.arrays()
+assert arrays["instance_offsets"].tolist() == [0, 3]
+assert arrays["template_size"].tolist() == [2, 1, 1]
+assert arrays["order"].tolist() == [[0, 1, 2], [0, 1, -1], [0, 1, -1]]
+assert arrays["terms"].tolist() == [[0, 1], [2, 1], [0, 1], [0, 1]]
+
+fixed = rl.GoalTemplates.from_conditions(task, [[largest]])
+assert fixed.options is None and fixed.goal_literals(0) == [()]
+restored = pickle.loads(pickle.dumps(templates))
+assert [str(c) for c in restored.conditions(0)] == [str(c) for c in templates.conditions(0)]
+```
+
+`templates.conditions(i)` returns instance i's templates as `ConjunctiveCondition`s, and `templates.goal_literals(i)`
+returns the goal literal indices each template came from. `condition.binding_order(task)` lists the free variables in
+the order `task.bindings` binds them: the bindings come in lexicographic order over those variables by object index,
+so a state's first binding is the smallest in that order. `templates.arrays(framework=None)` is the packed form, with
+the templates of instance i at `[instance_offsets[i], instance_offsets[i + 1])`. Each template has a `template_size`,
+`num_vars`, `distinct` flag, `literal_offsets` and an `order` row (its binding order, padded with -1). Each literal has
+a `predicate` (the domain table's predicate id), `polarity`, `kind` (0 static, 1 fluent, 2 derived), `arity`, a `terms`
+row (variable indices, padded with -2**31) and `goal_literal`.
+
+`GoalTemplates.from_conditions(source, conditions)` packs your own templates, one list per instance in match order.
+Each condition needs literals, untyped variables and no numeric constraints. It carries either no equalities or one
+disequality per pair of variables, as `GroundCondition.lift(True)` makes them. Terms may be objects. Templates pickle
+with their source, options and arrays; nothing is generated again. Like tables, templates refuse tasks with lazy
+atom slots (load with `atoms="auto"`, `"reachable"` or `"dense"`).
+
 ## Instance sampling and curricula
 
 Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at
