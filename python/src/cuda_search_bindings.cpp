@@ -654,7 +654,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
             return x;
         },
         "task"_a, "starts"_a, nb::kw_only(), "ctx"_a = nb::none(), "goals"_a = nb::none(), "max_width"_a = 1,
-        "width_zero"_a = "expand_depth_one", MYMYR_IW_SEARCH_ARGS, "task_ids"_a = nb::none(), "landmarks"_a,
+        "width_zero"_a = "expand_depth_one", MYMYR_IW_SEARCH_ARGS, "task_ids"_a = nb::none(), "landmarks"_a.none(),
         "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),
         "Landmark-restricted IW(1) from every start: search i equals mymyr.search.liw(max_width=1) for every group "
         "and chunk size in exact mode (status, plan, goal state and per-pass counts). Runs width zero then LIW(1) "
