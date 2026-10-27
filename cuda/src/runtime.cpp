@@ -287,6 +287,7 @@ void* DeviceContext::allocate(u64 bytes, cudaStream_t s)
 {
     if (bytes == 0)
         return nullptr;
+    detail::drain_releases(*this);
     DeviceGuard g(m_device);
     void* p = nullptr;
     const cudaError_t e = cudaMallocFromPoolAsync(&p, bytes, m_pool, s ? s : m_stream);
