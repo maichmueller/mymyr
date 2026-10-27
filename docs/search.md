@@ -36,8 +36,9 @@ orders. `max_next_layer_states=` caps a generated layer. Ordered IW-family and B
 novelty-tested successor, while `"survivors_only"` commits novelty only for retained states. The latter is not
 supported by LIW, and the two modes are equivalent for BrFS. `randomize_ties=True` uses `seed=` for equal scores. Every
 search that takes these options raises `ValueError` for a combination it does not support (a `beam_width=` or a
-`max_next_layer_states=` with `"queue"`, both together, a zero width or limit, `randomize_ties=True` without
-`"goal_count"`) before it starts. A layer beam is different from `search.beam`, which is heuristic best-first search with a fixed queue width.
+`max_next_layer_states=` with `"queue"`, the default, both together, a zero width or limit, `randomize_ties=True`
+without `"goal_count"`) before it starts. A layer beam is different from `search.beam`, which is heuristic best-first
+search with a fixed queue width.
 
 `threads=` runs a layer beam's step (successor generation, scoring and read-only novelty tests) on that many threads
 (`0`: one per hardware thread) for `brfs` and the IW family. With `"all_tested"` and `"survivors_only"` the plan and
