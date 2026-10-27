@@ -435,8 +435,8 @@ SIZED_BRFS_REFUSAL = (r"^mymyr: device BrFS: (?!a device memory allocation faile
 
 
 def run_budgets(task, budgets, cpu, **kw):
-    """The outcome per budget (ascending): the device counters of a run equal to the CPU's, or None for a sized
-    refusal; once a budget runs, every larger one does."""
+    """The outcome per budget: the device counters of a run equal to the CPU's, or None for a sized refusal. (Not
+    monotone in the budget: the pool's free pieces can hold a window's buffers at one budget and not at a larger one.)"""
     outcomes = []
     for budget in budgets:
         small = mc.Context(0, max_bytes=budget)
@@ -448,8 +448,6 @@ def run_budgets(task, budgets, cpu, **kw):
             assert re.match(SIZED_BRFS_REFUSAL, str(e)), str(e)
             outcomes.append(None)
         small.synchronize()
-    ran = [x is not None for x in outcomes]
-    assert ran == sorted(ran), ran
     return outcomes
 
 
@@ -464,6 +462,42 @@ def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
     cpu = mymyr.search.brfs(task, fingerprint=True, threads=1)
     largest = run_budgets(task, [1100 * row * eighths // 8 for eighths in (10, 13, 16)], cpu)[-1]
     assert largest is not None and largest["windows"] >= 1
+
+
+def test_brfs_window_reaching_max_states_ends_the_search(tmp_path):
+    """The wide fan with max_states=150 in 95-105 MiB: the arenas hold up to max_states, so the window held to their
+    few spare rows ends the search with the CPU's result instead of refusing for want of more rows."""
+    from conftest import wide_fan_task
+
+    task = wide_fan_task(tmp_path)
+    cpu = mymyr.search.brfs(task, max_states=150, fingerprint=True, threads=1)
+    for mib in (95, 100, 105):
+        small = mc.Context(0, max_bytes=mib << 20)
+        brfs_matches(mc.brfs(task, ctx=small, max_states=150, fingerprint=True), cpu)
+        small.synchronize()
+
+
+def test_brfs_refuses_windows_held_to_a_few_spare_rows(tmp_path):
+    """symfan(300) without drop just below the memory it needs: the fan's windows shrink to the arenas' few spare rows,
+    which cannot grow; the search refuses at once instead of going a few successors per window."""
+    import time
+
+    from conftest import symfan_task
+
+    task = symfan_task(tmp_path, 300, drop=False)
+    cpu = mymyr.search.brfs(task, stop_at_goal=False, fingerprint=True, threads=1)
+    window_refusals = 0
+    for kib in (5580, 5730, 5890):
+        small = mc.Context(0, max_bytes=kib << 10)
+        t = time.perf_counter()
+        try:
+            brfs_matches(mc.brfs(task, ctx=small, stop_at_goal=False, fingerprint=True), cpu)
+        except ValueError as e:
+            assert re.match(SIZED_BRFS_REFUSAL, str(e)), str(e)
+            window_refusals += "with a successor window's buffers" in str(e)
+            assert time.perf_counter() - t < 3.0
+        small.synchronize()
+    assert window_refusals >= 1
 
 
 def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):

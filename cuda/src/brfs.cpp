@@ -604,8 +604,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             }
             // A window held to a few spare rows of arenas that cannot grow by one more: the state's other successors
             // would take a window per few rows (each with its synchronizations), and the search fails at the first
-            // window whose new states exceed the spare rows unless all the rest are duplicates
-            if (spare > 0 && w.rows == spare && spare < k_min_window_rows && spare < M - f)
+            // window whose new states exceed the spare rows unless all the rest are duplicates. Not when the window
+            // ends the search: the spare rows reach max_states, or the state is a goal that stops it (its first window
+            // halts before the successors are stored).
+            const bool ends = count + spare >= budget || (f == 0 && goals && o.stop_at_goal);
+            if (spare > 0 && w.rows == spare && spare < k_min_window_rows && spare < M - f && !ends)
                 if (const u64 more = window_bytes(successor_window(off, f, spare + 1)); more > usable)
                     refuse_memory(*ctx, "device BrFS",
                                   "the arenas of more than " + std::to_string(count + spare) +
