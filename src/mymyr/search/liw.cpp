@@ -67,10 +67,9 @@ IwResult liw(const Task& task, const LiwOptions& o)
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;
     std::unique_ptr<detail::BeamTeam> team;
-    if (std::string e = detail::apply_layers(env, o.layers, layers, o.threads, team); !e.empty())
-        return detail::failed(std::move(e));
+    detail::apply_layers(env, o.layers, layers, o.threads, team);
     if (o.layers.beam() && o.layers.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
-        return detail::failed("LIW supports only LayerOrdering::BeamNovelty::AllTested (the landmark novelty table "
+        throw std::invalid_argument("LIW supports only LayerOrdering::BeamNovelty::AllTested (the landmark novelty table "
                               "has no read-only test)");
     novelty::LandmarkCoordinates coords;
     try

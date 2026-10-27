@@ -609,8 +609,7 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;
     std::unique_ptr<detail::BeamTeam> team;
-    if (std::string e = detail::apply_layers(env, o.layers, layers, o.threads, team); !e.empty())
-        return detail::failed(std::move(e));
+    detail::apply_layers(env, o.layers, layers, o.threads, team);
     std::optional<novelty::LandmarkCoordinates> coords;
     try
     {

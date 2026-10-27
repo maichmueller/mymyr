@@ -118,7 +118,6 @@ struct Context
     std::unique_ptr<LayerOrderer> layers;  // IwOptions::layers when ordered, else null
     /// The members of the beam's layer step (beam_detail.hpp): with threads > 1 or a relaxed beam, on the fast path.
     std::unique_ptr<BeamTeam> team;
-    std::string error;                     // why the options cannot run (empty: they can)
 
     Context(const Task& t, const IwOptions& o, Successors& s);
     ~Context();

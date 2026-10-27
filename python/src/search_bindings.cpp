@@ -1684,9 +1684,6 @@ search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle 
         throw nb::value_error("mymyr: beam_novelty must be 'all_tested', 'survivors_only' or 'relaxed_survivors_only'");
     l.randomize_ties = randomize_ties;
     l.beam_chunk = int_arg<u32>(beam_chunk, "beam_chunk");
-    // Raised here rather than reported as a FAILED result, so that no search starts with options it rejects.
-    if (std::string e = search::check_layers(l); !e.empty())
-        throw nb::value_error(("mymyr: " + e).c_str());
     return l;
 }
 
