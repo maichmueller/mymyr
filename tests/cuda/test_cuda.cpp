@@ -14,6 +14,8 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <chrono>
+#include <exception>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -276,6 +278,55 @@ TEST(CudaRuntime, HostWaitsOnCapturedWorkThrow)
         if (graph)
             (void)cudaGraphDestroy(graph);
         (void)cudaGetLastError();
+    }
+}
+
+TEST(CudaRuntime, CapturedBuffersOutliveGraphsAndExecutableClones)
+{
+    SKIP_WITHOUT_GPU();
+    for (int kind = 0; kind < 3; ++kind)
+    {
+        SCOPED_TRACE(kind);
+        auto ctx = context();
+        cuda::Stream side;
+        cuda::DeviceBuffer buffer(ctx, 4096, kind == 0 ? side.get() : ctx->stream());
+        cuda::stream_wait(side, ctx->stream());
+        if (kind == 1)
+            buffer.record_stream(side);
+        std::shared_ptr<cuda::LastUse> last;
+        if (kind == 2)
+        {
+            last = std::make_shared<cuda::LastUse>(ctx->device());
+            buffer.track(last);
+        }
+        ctx->synchronize();
+        side.synchronize();
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "cudaStreamBeginCapture");
+        cuda::check(cudaMemsetAsync(buffer.data(), 3, buffer.size(), side), "cudaMemsetAsync");
+        if (last)
+            last->record(side);
+        buffer.reset();
+        cudaGraph_t graph = nullptr, clone = nullptr;
+        cuda::check(cudaStreamEndCapture(side, &graph), "cudaStreamEndCapture");
+        cuda::check(cudaGraphClone(&clone, graph), "cudaGraphClone");
+        cudaGraphExec_t exec = nullptr;
+        cuda::check(cudaGraphInstantiate(&exec, graph, 0), "cudaGraphInstantiate");
+        cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, 4096);
+        cuda::check(cudaGraphExecDestroy(exec), "cudaGraphExecDestroy");
+        ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, 4096);
+        cuda::check(cudaGraphDestroy(clone), "cudaGraphDestroy");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do
+        {
+            ctx->synchronize();
+            if (ctx->usage().used == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        EXPECT_EQ(ctx->usage().used, 0);
     }
 }
 

@@ -118,6 +118,12 @@ h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device 
 data with JAX and torch through DLPack. `mymyr.cuda.Context` owns a stream-ordered memory pool; set `max_bytes=` to
 cap it. Arrays and device tasks keep their context alive.
 
+Collecting an array while its allocation stream or a recorded DLPack consumer stream is capturing retains its
+storage until that graph, its executable clones and their outstanding launches are released. This also applies
+to warm-up outputs collected during capture on a torch side stream. Reclamation runs on a host worker, so a live
+graph can keep the context's `usage()["used"]` elevated even after `synchronize()`. Release the graph and its
+executables to return that storage to the pool; subsequent context calls observe completed reclamation.
+
 The encoding helpers `literal_slots` and `literal_masks` resolve CUDA torch arrays of table predicate ids and
 instance-local object ids into slots and goal or subgoal masks. They support both frozen atom layouts and CUDA graph
 capture after warming the encoder on the capture stream; invalid inputs report value 4 in a device status scalar.

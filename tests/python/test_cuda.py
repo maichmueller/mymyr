@@ -138,6 +138,86 @@ def test_outputs_collected_during_unrelated_capture(source, capture_thread):
     assert torch_used[1:] == [torch_used[1]] * (len(torch_used) - 1), torch_used
 
 
+@pytest.mark.jax_on_cpu(per_case=True)
+@pytest.mark.parametrize("allocation_stream", [False, True])
+@pytest.mark.parametrize("capture_thread", [False, True])
+def test_warmup_outputs_collected_on_a_capturing_stream(allocation_stream, capture_thread):
+    """A graph retains collected buffers until its final executable and outstanding launches are released."""
+    import gc
+    import time
+    from conftest import TASKS
+
+    torch = torch_cuda()
+    task = mymyr.Task.from_text(TASKS / "gripper__prob05.txt", atoms="dense")
+    table = rl.as_table(task)
+    ctx = mc.Context(0, max_bytes=64 << 20)
+    states = torch.from_numpy(np.asarray(table.initial_states()).view(np.int64).copy()).cuda()
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    marker = torch.zeros(1, device="cuda")
+    torch.cuda.synchronize()
+    baseline = None
+    for _ in range(6):
+        with torch.cuda.stream(side):
+            output = rl.expand(table, states, ctx=ctx, stream=side if allocation_stream else None,
+                               framework="torch" if allocation_stream else "dlpack")
+            if not allocation_stream:
+                consumed = torch.from_dlpack(output.states)
+                del consumed
+        torch.cuda.synchronize()
+        ctx.synchronize()
+        held = ctx.usage()["used"]
+        garbage = [output]
+        del output
+        graph = torch.cuda.CUDAGraph()
+        started, released = threading.Event(), threading.Event()
+        errors = []
+
+        def capture():
+            try:
+                with torch.cuda.graph(graph, stream=side):
+                    marker.add_(1)
+                    if capture_thread:
+                        started.set()
+                        assert released.wait(10)
+                    else:
+                        garbage.clear()
+                        gc.collect()
+            except BaseException as error:
+                errors.append(error)
+                started.set()
+
+        if capture_thread:
+            worker = threading.Thread(target=capture)
+            worker.start()
+            try:
+                assert started.wait(10)
+                garbage.clear()
+                gc.collect()
+            finally:
+                released.set()
+                worker.join()
+        else:
+            capture()
+        if errors:
+            raise errors[0]
+        ctx.synchronize()
+        retained = ctx.usage()["used"]
+        assert retained <= held
+        graph.reset()
+        deadline = time.monotonic() + 5
+        while True:
+            ctx.synchronize()
+            used = ctx.usage()["used"]
+            if used < retained:
+                break
+            assert time.monotonic() < deadline, (held, retained, used)
+            time.sleep(0.01)
+        if baseline is None:
+            baseline = used
+        assert used == baseline
+
+
 def jax_gpu():
     jax = pytest.importorskip("jax")
     try:

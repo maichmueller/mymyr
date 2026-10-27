@@ -24,6 +24,10 @@
 
 namespace mymyr::cuda
 {
+namespace detail
+{
+struct CaptureLifetime;
+}
 class CudaError : public std::runtime_error
 {
 public:
@@ -170,6 +174,9 @@ public:
     /// Stream-ordered free on `s`: the memory is reused only after the work enqueued on s before this call.
     /// May release memory outside an unrelated stream's graph capture.
     void deallocate(void* p, cudaStream_t s) noexcept;
+    /// Destroys an owner on a host worker after the context's stream finishes its preceding work. The caller does
+    /// not wait; the owner and context stay alive until the worker releases them. The stream must not be capturing.
+    void release_after(std::shared_ptr<void> owner);
 
     /// Memory resources (core/memory.hpp) of this context. Device: stream-ordered on stream(), and allocate()
     /// synchronizes that stream so the memory is usable anywhere; Pinned: cudaMallocHost; Managed: cudaMallocManaged.
@@ -225,9 +232,12 @@ public:
     [[nodiscard]] bool recorded() const noexcept;
 
 private:
+    friend class DeviceBuffer;
+    void append_captures(std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const;
     int m_device = 0;
     cudaEvent_t m_event = nullptr;
     bool m_recorded = false;
+    std::vector<std::shared_ptr<detail::CaptureLifetime>> m_captures;
     mutable std::mutex m_mutex;
 };
 
@@ -256,8 +266,9 @@ public:
     /// The uses on `s` (record_stream, or the allocation stream) end with `last`, just recorded on s: the free
     /// waits for `last` instead of touching s, which may be gone by then. Thread-safe.
     void retire_stream(cudaStream_t s, std::shared_ptr<const LastUse> last);
-    /// Frees now (stream-ordered), as the destructor does: on the allocation stream, or on the context's stream when
-    /// the buffer tracks a LastUse.
+    /// Frees stream-ordered, as the destructor does: on the allocation stream, or on the context's stream when the
+    /// buffer tracks a LastUse. A capturing allocation or user stream retains the buffer through the graph's lifetime,
+    /// including executable clones and outstanding launches. Reclamation runs asynchronously on a host worker.
     void reset() noexcept;
     /// Frees now on `s` (a live stream, e.g. the call that releases the buffer: ordered after its work so far),
     /// after the recorded users, the tracked LastUse, and (when it tracks none) the allocation stream's work so far.

@@ -12,6 +12,7 @@
 
 add_library(mymyr_cuda STATIC
     src/runtime.cpp
+    src/deferred_release.cpp
     src/arena.cpp
     src/device_task.cpp
     src/kernels.cu

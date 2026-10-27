@@ -1,12 +1,14 @@
 // The CUDA backend's runtime layer: contexts, pools, buffers, events (include/mymyr/cuda/runtime.hpp).
 
 #include "completed_release.hpp"
+#include "deferred_release.hpp"
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
 #include <string_view>
 #include <utility>
 
@@ -298,18 +300,36 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
     if (!p)
         return;
     RelaxedCaptureScope capture_mode;
-    int prev = -1;
-    const bool got = cudaGetDevice(&prev) == cudaSuccess;
-    if (got && prev != m_device)
-        (void)cudaSetDevice(m_device);
-    if (cudaFreeAsync(p, s ? s : m_stream) != cudaSuccess)
-        (void)cudaGetLastError();  // runtime unloading at exit: the driver reclaims everything
-    if (got && prev != m_device)
-        (void)cudaSetDevice(prev);
+    try
+    {
+        DeviceGuard guard(m_device);
+        s = s ? s : m_stream;
+        if (auto capture = detail::capture_lifetime(s))
+            detail::release_deferred(shared_from_this(), p, {}, {}, {std::move(capture)});
+        else
+            check(cudaFreeAsync(p, s), "cudaFreeAsync");
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "mymyr: CUDA: free retained allocation: %s\n", e.what());
+    }
+}
+
+void DeviceContext::release_after(std::shared_ptr<void> owner)
+{
+    DeviceGuard guard(m_device);
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    check(cudaStreamIsCapturing(m_stream, &status), "cudaStreamIsCapturing");
+    if (status != cudaStreamCaptureStatusNone)
+        throw std::invalid_argument("mymyr: CUDA: release_after needs a non-capturing context stream");
+    Event ready;
+    ready.record(m_stream);
+    detail::release_deferred(shared_from_this(), std::move(owner), std::move(ready));
 }
 
 PoolUsage DeviceContext::usage() const
 {
+    detail::drain_releases(*this);
     PoolUsage u;
     std::uint64_t v = 0;
     check(cudaMemPoolGetAttribute(m_pool, cudaMemPoolAttrReservedMemCurrent, &v), "cudaMemPoolGetAttribute");
@@ -366,6 +386,7 @@ void DeviceContext::synchronize() const
     DeviceGuard g(m_device);
     check(cudaStreamSynchronize(m_stream), "cudaStreamSynchronize");
     check(cudaStreamSynchronize(m_copy), "cudaStreamSynchronize");
+    detail::drain_releases(*this);
 }
 
 // ------------------------------------------------------------------------------------------------ buffers
@@ -461,32 +482,64 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
     }
     if (!m_ptr)
         return;
-    cudaStream_t fs = m_stream;
+    RelaxedCaptureScope capture_mode;
+    try
     {
         std::lock_guard lock(*m_mutex);
-        int prev = -1;
-        const bool got = cudaGetDevice(&prev) == cudaSuccess;
-        if (got && prev != m_ctx->device())
-            (void)cudaSetDevice(m_ctx->device());
+        DeviceGuard guard(m_ctx->device());
         // the stream that frees: the releasing call's, the context's (a tracked LastUse: the allocation stream may be
         // gone), or the allocation stream
-        fs = release ? release : m_free_live ? m_ctx->stream() : m_stream;
-        for (cudaStream_t s : m_users)
-            if (s != fs)
-                order_after(fs, s);  // (the users must exist now)
+        const cudaStream_t fs = release ? release : m_free_live ? m_ctx->stream() : m_stream;
+        std::vector<cudaStream_t> streams = m_users;
+        streams.push_back(fs);
+        if (!m_free_live)
+            streams.push_back(m_stream);
+        std::vector<cudaStream_t> uncaptured;
+        std::vector<detail::CapturePtr> captures;
+        for (usize i = 0; i < streams.size(); ++i)
+        {
+            const auto s = streams[i];
+            if (std::find(streams.begin(), streams.begin() + static_cast<std::ptrdiff_t>(i), s) !=
+                streams.begin() + static_cast<std::ptrdiff_t>(i))
+                continue;
+            if (auto capture = detail::capture_lifetime(s))
+                captures.push_back(std::move(capture));
+            else
+                uncaptured.push_back(s);
+        }
+        for (const auto& last : m_lasts)
+            last->append_captures(captures);
+        if (!captures.empty())
+        {
+            std::vector<Event> events;
+            for (auto s : uncaptured)
+            {
+                events.emplace_back();
+                events.back().record(s);
+            }
+            detail::release_deferred(m_ctx, m_ptr, std::move(events), m_lasts, std::move(captures));
+        }
+        else
+        {
+            for (cudaStream_t s : m_users)
+                if (s != fs)
+                    order_after(fs, s);  // (the users must exist now)
+            for (const auto& l : m_lasts)
+                l->wait_on(fs);
+            if (!m_free_live && fs != m_stream)
+                order_after(fs, m_stream);
+            m_ctx->deallocate(m_ptr, fs);
+        }
+        m_ptr = nullptr;
+        m_bytes = 0;
+        m_free_live = false;
         m_users.clear();
-        for (const auto& l : m_lasts)
-            l->wait_on(fs);
         m_lasts.clear();
-        if (!m_free_live && fs != m_stream)
-            order_after(fs, m_stream);
-        if (got && prev != m_ctx->device())
-            (void)cudaSetDevice(prev);
     }
-    m_ctx->deallocate(m_ptr, fs);
-    m_ptr = nullptr;
-    m_bytes = 0;
-    m_free_live = false;
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "mymyr: CUDA: buffer release retained allocation: %s\n", e.what());
+    }
 }
 
 namespace
@@ -565,8 +618,19 @@ void LastUse::record(cudaStream_t s)
 {
     std::lock_guard lock(m_mutex);
     DeviceGuard g(m_device);
+    std::erase_if(m_captures, [](const auto& c) { return c->complete.load(std::memory_order_acquire); });
+    if (auto capture = detail::capture_lifetime(s))
+        m_captures.push_back(std::move(capture));
     check(cudaEventRecord(m_event, s), "cudaEventRecord (last use)");
     m_recorded = true;
+}
+
+void LastUse::append_captures(std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const
+{
+    std::lock_guard lock(m_mutex);
+    for (const auto& c : m_captures)
+        if (!c->complete.load(std::memory_order_acquire))
+            captures.push_back(c);
 }
 
 bool LastUse::recorded() const noexcept
