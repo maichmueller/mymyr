@@ -16,6 +16,7 @@
 #include "typing.hpp"
 
 #include "mymyr/rl/her.hpp"
+#include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
 
@@ -35,6 +36,8 @@
 namespace mymyr::python
 {
 using namespace nb::literals;
+
+std::shared_ptr<const rl::GoalTemplates> goal_templates_of(nb::handle object);
 
 namespace
 {
@@ -183,6 +186,53 @@ void schema_masks(ArrayArg parent, ArrayArg schema, ArrayArg mask, StreamArg str
     rl::schema_masks(x, n, S, m);
 }
 
+void match_first(ArrayArg states, ArrayArg task_ids, nb::object templates, ArrayArg block,
+                 ArrayArg found, ArrayArg binding, ArrayArg template_id, ArrayArg count, ArrayArg status,
+                 bool first, ArrayArg derived, StreamArg stream)
+{
+    const auto t = goal_templates_of(templates);
+    const Place pl = place_of(states, stream);
+    Imports in(pl.device, pl.stream, false);
+    rl::MatchBatch b;
+    std::vector<i64> lead, ext;
+    b.states = in.words_nd(states, "rows", {-1}, false, lead, b.row_words);
+    const i64 n = lead.at(0);
+    b.rows = static_cast<u64>(n);
+    b.first = first;
+    if (b.row_words < t->suite()->words())
+        throw nb::value_error("mymyr: match_first: rows are narrower than the template source");
+    b.task_ids = in.get<const i32>(task_ids, "task_ids", {i32t}, {n}, false);
+    if (task_ids.is_none() && t->num_instances() != 1)
+        throw nb::value_error("mymyr: match_first: task_ids are required for several instances");
+    b.derived = in.words_nd(derived, "derived", {n}, false, lead, b.derived_words);
+    if (t->needs_derived() && (derived.is_none() || b.derived_words < t->suite()->derived_words()))
+        throw nb::value_error("mymyr: match_first: derived words are required and must cover the template source");
+    b.found = in.get<u8>(found, "found", {boolt, u8t}, {n, -1}, true, &ext);
+    b.capacity = static_cast<u32>(ext.at(1));
+    if (first && b.capacity != 1)
+        throw nb::value_error("mymyr: match_first: first=True requires capacity 1");
+    b.binding = in.get<i32>(binding, "binding", {i32t}, {n, b.capacity, t->max_vars()}, true);
+    b.template_id = in.get<i32>(template_id, "template_id", {i32t}, {n, b.capacity}, true);
+    b.count = in.get<i32>(count, "count", {i32t}, {n}, true);
+    b.status = in.get<u64>(status, "status", {i64t, u64t}, {}, true);
+    if (found.is_none() || binding.is_none() || template_id.is_none() || count.is_none() || status.is_none())
+        throw nb::value_error("mymyr: match_first: all output buffers are required");
+    [[maybe_unused]] const auto* packed = in.get<const u8>(block, "block", {u8t}, {static_cast<i64>(t->arrays().bytes())}, false);
+#if defined(MYMYR_HAS_CUDA)
+    if (pl.device >= 0)
+    {
+        if (block.is_none())
+            throw nb::value_error("mymyr: match_first: CUDA templates must be uploaded before matching");
+        const auto view = t->view(reinterpret_cast<const std::byte*>(packed));
+        return launch(pl, "match_first", [&](cudaStream_t cs) { return cuda::launch_match_first(view, b, cs); });
+    }
+#endif
+    if (!block.is_none())
+        throw nb::value_error("mymyr: match_first: block is only used for CUDA templates");
+    nb::gil_scoped_release release;
+    rl::match_first(t->view(), b);
+}
+
 rl::HerStrategy her_strategy(const std::string& s)
 {
     if (s == "future")
@@ -261,6 +311,11 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
 void bind_rl_ops(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
+    m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
+          "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
+          "derived"_a = nb::none(), "stream"_a = nb::none(),
+          "Destination-passing lifted matching; outputs are padded [N, C], bindings [N, C, V], counts [N], status scalar. "
+          "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, 2 invalid instance.");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),
           "stream"_a = nb::none(),
           "Width-1 novelty update in place: reward[i] = popcount(states[i] & ~seen[i]) over the first S "

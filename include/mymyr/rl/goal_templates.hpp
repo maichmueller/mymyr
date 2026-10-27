@@ -51,6 +51,7 @@
 // with the scalars num_instances, num_templates, num_literals, max_vars, max_arity.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/rl/match.hpp"
 #include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/successor/conditions.hpp"
@@ -127,6 +128,10 @@ public:
     [[nodiscard]] u32 num_literals() const noexcept { return m_literal_offsets.back(); }
     [[nodiscard]] u32 max_vars() const noexcept { return m_max_vars; }
     [[nodiscard]] u32 max_arity() const noexcept { return m_max_arity; }
+    [[nodiscard]] u32 capacity() const noexcept { return m_capacity; }
+    [[nodiscard]] bool needs_derived() const noexcept { return m_needs_derived; }
+    /// POD pointers into arrays() or its byte-for-byte copy at block (for device launchers).
+    [[nodiscard]] MatchTemplates view(const std::byte* block = nullptr) const noexcept;
     /// Instance g's templates: [first(g), first(g + 1)).
     [[nodiscard]] u32 first(u32 instance) const { return m_instance_offsets.at(instance); }
     /// The options of generate() (from_conditions and from_arrays: none).
@@ -148,7 +153,8 @@ private:
     TaskSuitePtr m_suite;
     std::shared_ptr<const ArrayBundle> m_arrays;
     std::vector<u32> m_instance_offsets{0}, m_literal_offsets{0};
-    u32 m_max_vars = 0, m_max_arity = 0;
+    u32 m_max_vars = 0, m_max_arity = 0, m_capacity = 0, m_index_arity = 1, m_predicates = 0;
+    bool m_needs_derived = false;
     TemplateOptions m_options;
     bool m_generated = false;
 };

@@ -7,6 +7,7 @@
 // Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/rl/her.hpp"
+#include "mymyr/rl/match.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
 
@@ -14,6 +15,9 @@
 
 namespace mymyr::cuda
 {
+/// Lifted goal matching on caller-owned arrays; no allocation or host synchronization.
+cudaError_t launch_match_first(const rl::MatchTemplates& templates, const rl::MatchBatch& batch, cudaStream_t s);
+
 /// rl::novelty_update on device arrays: seen [rows, words] (in place), states [rows, state_stride], reward [rows].
 cudaError_t launch_novelty_update(u64* seen, const u64* states, u64 rows, u32 words, u32 state_stride, i32* reward,
                                   cudaStream_t s);

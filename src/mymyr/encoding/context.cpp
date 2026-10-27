@@ -338,48 +338,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
     };
     // The literal section: where the atoms of every domain predicate are, whatever the options leave out of the cells.
     auto fill_literal_ranges = [&]
-    {
-        const u32 domain_predicates = table.num_domain_predicates();
-        out.literal_ranges.assign(u64{domain_predicates} * detail::k_literal_columns, 0);
-        for (u32 tp = 0; tp < domain_predicates; ++tp)
-        {
-            u32* r = out.literal_ranges.data() + u64{tp} * detail::k_literal_columns;
-            r[detail::k_literal_arity] = table.predicate_arities()[tp];
-            r[detail::k_literal_predicate_kind] = detail::k_literal_absent_predicate;
-        }
-        for (u32 ip = 0; ip < predicates; ++ip)
-        {
-            const u32 tp = instance.pred_map[ip];
-            if (tp >= domain_predicates)
-                continue;
-            u32* r = out.literal_ranges.data() + u64{tp} * detail::k_literal_columns;
-            const u32 logical = static_cast<u32>(arity[ip]);
-            const std::string& name = table.predicate_names()[tp];
-            r[detail::k_literal_arity] = logical;
-            if (kind[ip] == rl::k_pred_static)
-            {
-                r[detail::k_literal_predicate_kind] = detail::k_literal_static_predicate;
-                std::tie(r[detail::k_literal_static_begin], r[detail::k_literal_static_end]) =
-                    static_rows_of(ip, logical);
-            }
-            else if (kind[ip] == rl::k_pred_derived)
-            {
-                r[detail::k_literal_predicate_kind] = detail::k_literal_derived_predicate;
-                r[detail::k_literal_derived_begin] = static_cast<u32>(derived_offsets[ip]);
-                r[detail::k_literal_derived_end] = static_cast<u32>(derived_offsets[ip + 1]);
-                detail::check_slot_range(derived_pred, derived_padded, derived_width, r[detail::k_literal_derived_begin],
-                                         r[detail::k_literal_derived_end], ip, logical, name);
-            }
-            else
-            {
-                r[detail::k_literal_predicate_kind] = detail::k_literal_fluent_predicate;
-                r[detail::k_literal_fluent_begin] = static_cast<u32>(fluent_offsets[ip]);
-                r[detail::k_literal_fluent_end] = static_cast<u32>(fluent_offsets[ip + 1]);
-                detail::check_slot_range(atom_pred, atom_padded, fluent_width, r[detail::k_literal_fluent_begin],
-                                         r[detail::k_literal_fluent_end], ip, logical, name);
-            }
-        }
-    };
+    { out.literal_ranges = detail::build_literal_ranges(table, index, meta, static_rows_of); };
     for (u32 ip = 0; ip < predicates && !horizon; ++ip)
     {
         const u32 tp = instance.pred_map[ip];
@@ -770,24 +729,6 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
     return out;
 }
 }  // namespace
-
-void detail::check_slot_range(std::span<const i32> pred, std::span<const i32> padded, u32 width, u32 begin, u32 end,
-                              u32 predicate, u32 arity, const std::string& name)
-{
-    auto not_a_range = [&]
-    { throw std::logic_error("mymyr: encoding: the atom slots of predicate " + name + " are not one ascending range"); };
-    for (u32 slot = begin; slot < end; ++slot)
-    {
-        if (static_cast<u32>(pred[slot]) != predicate)
-            not_a_range();
-        if (slot > begin &&
-            !std::lexicographical_compare(padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width}),
-                                          padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width} + arity),
-                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width}),
-                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width} + arity)))
-            not_a_range();
-    }
-}
 
 std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr table,
                                                               std::shared_ptr<const EncodingSchema> schema)
