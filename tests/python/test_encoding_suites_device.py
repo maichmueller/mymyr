@@ -78,6 +78,7 @@ def test_device_suite_batches_equal_cpu(sets, domains, layout, actions, capacity
 
 @pytest.mark.parametrize("actions", [False, True])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.jax_on_cpu
 def test_capacity_suite_capture_replays_changed_domain_counts_without_host_downloads(sets, actions, layout, monkeypatch):  # noqa: F811
     device = gpu()
     suite = suite_of(sets, "gripper+blocks")
@@ -332,6 +333,7 @@ def test_bounded_labels_preserve_raw_overflow_and_allocate_no_successors(monkeyp
 
 
 
+@pytest.mark.jax_on_cpu
 def test_captured_expansions_have_distinct_workspaces_and_refuse_workspace_growth():
     from mymyr.encoding._device_actions import bounded_actions
 
@@ -380,6 +382,7 @@ def test_captured_expansions_have_distinct_workspaces_and_refuse_workspace_growt
 
 @pytest.mark.parametrize("capacity", [20, 21, 40, 60])
 @pytest.mark.parametrize("captured", [False, True])
+@pytest.mark.jax_on_cpu
 def test_action_expansion_ignores_padding(sets, capacity, captured):  # noqa: F811
     import mymyr
 
@@ -442,6 +445,7 @@ def _wait_workspace_release(reference):
     assert _cuda._expansion_workspace_released(reference)
 
 
+@pytest.mark.jax_on_cpu
 def test_graph_retains_expansion_after_all_results_are_dropped():
     device = gpu()
     import gc
@@ -483,6 +487,7 @@ def test_graph_retains_expansion_after_all_results_are_dropped():
 
 
 @pytest.mark.parametrize("drop_results_first", [False, True])
+@pytest.mark.jax_on_cpu
 def test_workspace_survives_graph_destruction_during_side_stream_replay(drop_results_first):
     device = gpu()
     import gc
@@ -603,6 +608,7 @@ def test_repeated_capture_destruction_releases_workspace_memory(release_during_c
 
 @pytest.mark.parametrize("captured", [False, True])
 @pytest.mark.parametrize("entities", [30, 4000])
+@pytest.mark.jax_on_cpu
 def test_suite_multi_instance_toggle_padding(sets, captured, entities):  # noqa: F811
     """A suite domain of several instances (multi-instance kernels) whose zero state has applicable actions."""
     device = gpu()
@@ -648,6 +654,7 @@ def _gripper_setup(device):
 
 
 @pytest.mark.parametrize("how", ["reset", "del"])
+@pytest.mark.jax_on_cpu
 def test_queued_replays_keep_workspace_until_last_completes(how):
     """Three replays queued behind a sleep on another stream; graph destroyed and results dropped at once."""
     device = gpu()
@@ -716,6 +723,7 @@ def _threads():
     return -1
 
 
+@pytest.mark.jax_on_cpu
 def test_many_capture_destroy_cycles_no_growth():
     """60 cycles: pool usage back to zero, one host worker, no thread or RSS growth."""
     device = gpu()
