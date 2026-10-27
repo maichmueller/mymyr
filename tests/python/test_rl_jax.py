@@ -739,20 +739,22 @@ def test_visited_overflow_clear_reset_and_scan():
 def test_visited_vmap_keeps_each_batch_status():
     task = text_task("gripper__prob05")
     env = rj.Env(task, device="cpu", track_visited=2, sampler=None, dead_end="none")
-    starts, _ = jax.jit(jax.vmap(lambda key: env.reset(key, 3)))(jnp.array([8, 9], jnp.int32))
+    cpu = jax.devices("cpu")[0]  # the CPU environment's arrays, also beside a GPU
+    keys = jax.device_put(np.array([8, 9], np.int32), cpu)
+    starts, _ = jax.jit(jax.vmap(lambda key: env.reset(key, 3)))(keys)
     # The first batch stays in place; the second inserts new states and overflows.
     exp = rl.expand(task, [task.initial_state])
     initial = task.encode([task.initial_state])[0]
     move = int(np.flatnonzero(np.any(np.asarray(exp.succ) != initial, axis=1))[0])
-    actions = jnp.array([[-1, -1, -1], [move, move, move]], jnp.int32)
-    out = jax.jit(jax.vmap(env.step))(jnp.array([8, 9], jnp.int32), starts, actions)
+    actions = jax.device_put(np.array([[-1, -1, -1], [move, move, move]], np.int32), cpu)
+    out = jax.jit(jax.vmap(env.step))(keys, starts, actions)
     np.testing.assert_array_equal(out[0].visited_status, [[0, 0, 0], [1, 1, 1]])
     for i, key in enumerate([8, 9]):
         start = jax.tree.map(lambda x: x[i], starts)
         single = jax.jit(env.step)(key, start, actions[i])
         for a, b in zip(jax.tree.leaves(single), jax.tree.leaves(out)):
             np.testing.assert_array_equal(a, b[i])
-    reset, _ = jax.jit(jax.vmap(env.reset_where))(out[0], jnp.ones((2, 3), jnp.bool_))
+    reset, _ = jax.jit(jax.vmap(env.reset_where))(out[0], jax.device_put(np.ones((2, 3), bool), cpu))
     np.testing.assert_array_equal(reset.visited_count, np.ones((2, 3), np.int32))
     np.testing.assert_array_equal(reset.visited_status, [[0, 0, 0], [1, 1, 1]])
     cleared = jax.jit(jax.vmap(env.clear_visited))(out[0])

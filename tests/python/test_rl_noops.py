@@ -186,7 +186,7 @@ def test_jax_cpu_matches_numpy(drop, hashes, noops):
     expected = rl.expand(task, rows, hashes=hashes, noops=noops, drop_noops=drop)
     opts = dict(hashes=hashes, noops=noops, drop_noops=drop)
     env = Env(task, device="cpu")
-    source = jnp.asarray(rows.view(np.uint32))
+    source = jax.device_put(rows.view(np.uint32), jax.devices("cpu")[0])  # the CPU environment, also beside a GPU
     actual = jax.jit(lambda s: env.expand_flat(s, expected.generated + 3, **opts))(source)
     generic = rl.expand(task, source, **opts)
     if hashes:
@@ -278,7 +278,7 @@ def test_jax_cpu_numeric_and_derived_digests(name):
     states = walk(task, steps=3, walks=1)
     expected = rl.expand(task, states, hashes=True, noops=True, drop_noops=True, derived=True, goal=True)
     env = Env(task, device="cpu")
-    source = jnp.asarray(np.asarray(task.encode(states)).view(np.uint32))
+    source = jax.device_put(np.asarray(task.encode(states)).view(np.uint32), jax.devices("cpu")[0])
     actual = jax.jit(lambda s: env.expand_flat(s, expected.generated + 2, hashes=True, noops=True,
                                              drop_noops=True, derived=True))(source)
     m = expected.total
