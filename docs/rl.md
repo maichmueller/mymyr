@@ -136,6 +136,55 @@ expansion = rl.expand(task, [task.initial_state], derived=True)
 print(expansion.derived.shape)
 ```
 
+## Successor hashes and no-op actions
+
+On the host, `rl.expand(..., hashes=True, noops=True)` returns `succ_hash` (uint64; torch uses int64 bit patterns)
+and `noop` (bool), one per successor. The hash is the native state hash: trimmed atom words seeded by the numeric
+words. For instances with the same numeric width it equals
+`mymyr.hash_rows(exp.succ, numeric_words=exp.numeric_words)`. For mixed numeric widths, use each instance's numeric
+prefix, omitting its padding, when hashing rows separately. `mymyr.hash_rows(states)` over a list of States hashes
+each with its own numeric words. It excludes derived atoms and differs from Python's task-aware `hash(state)`. No-op equality includes the numeric words bit for bit: changing the sign of
+zero or a NaN payload is a change. Derived words do not enter equality.
+
+`drop_noops=True` removes no-op successors separately for each parent, keeping all successors when every one is a
+no-op. Parents with no successors stay empty. Kept rows retain their order, and `exp.index` gives each row's position
+in its parent's full successor order, so that it can be used as an environment action. With `canonical_order=False`
+or witness pruning, it refers to that expansion's own order. Filtering also returns `noop` even without `noops=True`.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import rl
+
+task = mymyr.Task.from_pddl("tests/data/pddl/blocks/domain.pddl",
+                           "tests/data/pddl/blocks/probBLOCKS-8-0.pddl")
+full = rl.expand(task, [task.initial_state], hashes=True, noops=True)
+assert np.array_equal(full.succ_hash, mymyr.hash_rows(full.succ, numeric_words=full.numeric_words))
+kept = rl.expand(task, [task.initial_state], hashes=True, drop_noops=True)
+assert np.array_equal(kept.succ, full.succ[full.offsets[kept.parent] + kept.index])
+assert kept.generated == full.total
+padded = kept.pad()
+assert np.array_equal(padded.succ_hash[padded.mask], kept.succ_hash)
+assert np.array_equal(padded.canonical[padded.mask], kept.index)
+```
+
+`generated` counts successors before filtering; `total` and `offsets` count kept successors. A fixed `capacity` bounds
+`generated`, so filtering cannot hide an overflow (`generated > capacity`). On that overflow with filtering,
+`generated` stays exact, but `total`, `offsets` and the kept rows are undefined: size `capacity` from `generated`.
+`expand_into` accepts `succ_hash=`, `noop=` and `index=` destinations; `drop_noops=True` requires `index=` when it
+writes any per-successor array (counting with `offsets=` alone needs none). Digests work with `succ=None`, without
+storing successor rows; they are exact for every stored row, also one too wide for `words` (`words_needed`), and the
+width bounds stored rows only, so a label-only call never reports a width overflow. A single `Task` may use lazy atom slots: expansion
+uses its live slot layout, counts new atoms as changes, and grows output rows automatically unless `words=` fixes
+the width. Tables require fixed atom slots. Every requested array is filtered alike, including goal
+flags and derived words. The padded view adds zero-padded hashes and no-op flags and, when filtering, `canonical`:
+each kept successor's position in its parent's full order, -1 padding. Its `index` is always the flat row.
+
+JAX CPU `Env.expand` and `Env.expand_flat` accept `hashes`, `noops` and `drop_noops` under `jit` and `vmap`; hashes
+use uint32 pairs (low word first), the padded result names the positions `canonical` and the flat one `index`, and
+`generated` is a scalar pre-drop count. Flat capacity bounds the pre-drop count there too.
+Absent digests are `None` and cost no digest work.
+
 ## JAX and PyTorch
 
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under

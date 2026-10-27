@@ -111,6 +111,10 @@ class PaddedExpansion(NamedTuple):
     mask: Any
     count: Any
     derived: Any = None  # [N, K, 2 D] uint32 derived words of the successors (expand(..., derived=True))
+    succ_hash: Any = None  # [N, K, 2] uint32 pairs
+    noop: Any = None  # [N, K] bool
+    canonical: Any = None  # [N, K] position in the parent's full successor order (drop_noops=True), -1 padding
+    generated: Any = None  # scalar: successors before drop_noops
 
 
 class FlatExpansion(NamedTuple):
@@ -125,6 +129,10 @@ class FlatExpansion(NamedTuple):
     goal: Any
     offsets: Any
     derived: Any = None  # [M, 2 D] uint32 derived words of the successors (expand_flat(..., derived=True))
+    succ_hash: Any = None  # [M, 2] uint32 pairs
+    noop: Any = None  # [M] bool
+    index: Any = None  # [M] canonical successor positions, -1 padding
+    generated: Any = None  # scalar pre-drop count
 
 
 def key_seed(key: Any) -> Any:
@@ -578,25 +586,39 @@ class Env:
 
     # ---------------------------------------------------------------------------------------------- expansions
 
-    def expand(self, states: Any, k: int, task_ids: Optional[Any] = None, derived: bool = False) -> PaddedExpansion:
+    def expand(self, states: Any, k: int, task_ids: Optional[Any] = None, derived: bool = False, *, hashes: bool = False, noops: bool = False, drop_noops: bool = False) -> PaddedExpansion:
         """The padded expansion [N, K] of uint32 state rows [N, 2 row_words] of instances ``task_ids`` [N] (None: a
         table of one) in canonical order (count > K overflows). On a CUDA device it synchronizes on the successor count
         (it is not the environment step). ``derived=True`` adds the successors' derived words (``table.derived_words``
-        words, as uint32 pairs), the result's ``derived`` field."""
+        words, as uint32 pairs), the result's ``derived`` field. ``hashes``, ``noops`` and ``drop_noops`` add
+        ``succ_hash`` (uint32 pairs), ``noop`` and ``canonical`` (each kept successor's position in its parent's full
+        order) as :func:`mymyr.rl.expand` does; ``generated`` counts the successors before dropping."""
         with self._dev():
             ids = self._ids(task_ids, states.shape[0])
             dw = self.derived_words if derived else None
-            return PaddedExpansion(*_ffi.expand(self.handle, states, ids, int(k), self.label_width, dw))
+            out = _ffi.expand(self.handle, states, ids, int(k), self.label_width, dw,
+                              hashes=hashes, noops=noops, drop_noops=drop_noops)
+            if hashes or noops or drop_noops:
+                return PaddedExpansion(*out[:6], out[6] if derived else None, out[7] if hashes else None,
+                                       out[8] if noops or drop_noops else None, out[9] if drop_noops else None,
+                                       jnp.sum(out[10]))
+            return PaddedExpansion(*out, generated=jnp.sum(out[5]))
 
     def expand_flat(
-        self, states: Any, capacity: int, task_ids: Optional[Any] = None, derived: bool = False
+        self, states: Any, capacity: int, task_ids: Optional[Any] = None, derived: bool = False, *,
+        hashes: bool = False, noops: bool = False, drop_noops: bool = False
     ) -> FlatExpansion:
         """The flat expansion of states [N, 2 row_words] of instances ``task_ids`` into ``capacity`` rows (see
         :class:`FlatExpansion`)."""
         with self._dev():
             ids = self._ids(task_ids, states.shape[0])
             dw = self.derived_words if derived else None
-            return FlatExpansion(*_ffi.expand_flat(self.handle, states, ids, int(capacity), self.label_width, dw))
+            out = _ffi.expand_flat(self.handle, states, ids, int(capacity), self.label_width, dw,
+                                   hashes=hashes, noops=noops, drop_noops=drop_noops)
+            if hashes or noops or drop_noops:
+                return FlatExpansion(*out[:6], out[6] if derived else None, out[7] if hashes else None,
+                                     out[8] if noops or drop_noops else None, out[9] if drop_noops else None, out[10][0])
+            return FlatExpansion(*out, generated=out[5][-1])
 
     def set_launch(self, launch: str) -> None:
         """'widest' or 'per_bucket': how the device calls launch over a table's row-width buckets."""
