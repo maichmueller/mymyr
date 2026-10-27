@@ -175,6 +175,19 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
         if (variable < 0 || binding[variable] >= 0)
             continue;
         const i32 predicate = t.predicate[l];
+        bool shared = false;
+        for (u32 other = l + 1; other < end; ++other)
+        {
+            const i32 term = t.terms[u64{other} * t.max_arity];
+            if (t.polarity[other] && t.arity[other] == 1 && t.predicate[other] == predicate &&
+                term >= 0 && term != variable && binding[term] < 0)
+            {
+                shared = true;
+                break;
+            }
+        }
+        if (!shared)
+            continue;
         bool seen = false;
         for (u32 before = begin; before < l; ++before)
         {
@@ -242,7 +255,8 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         binding[variable] = -1;
         if (enter)
         {
-            if (t.distinct[k] && !domains_possible(grp, t, g, k, objects, binding, state, derived, budget))
+            if (t.distinct[k] && static_cast<u32>(depth + 1) < vars &&
+                !domains_possible(grp, t, g, k, objects, binding, state, derived, budget))
             {
                 --depth;
                 enter = false;
