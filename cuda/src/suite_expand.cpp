@@ -354,6 +354,7 @@ void SuiteExpander::write(rl::Expansion& out)
         I.write_runs(out);
     else
         I.write_gathered(out);
+    out.generated = I.total;
 }
 
 void SuiteExpander::expand(rl::StateBatchView in, const i32* task_ids, rl::Expansion& out, const rl::ExpandOptions& options)
