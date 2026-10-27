@@ -15,35 +15,9 @@ def task_of(name):
 
 
 def state_hashes(states, tasks):
-    """The raw row hash, with numeric words seeding the trimmed atom words."""
-    mask = (1 << 64) - 1
-
-    def mix(x):
-        x = ((x ^ (x >> 30)) * 0xbf58476d1ce4e5b9) & mask
-        x = ((x ^ (x >> 27)) * 0x94d049bb133111eb) & mask
-        return x ^ (x >> 31)
-
-    def words_hash(words, seed=0x2d358dccaa6c78a5):
-        words = [int(x) for x in words]
-        p1, p2 = 0x8bb84b93962eacc9, 0x4b33a62ed433d4a3
-        h = seed ^ ((len(words) * p1) & mask)
-        for i in range(0, len(words), 2):
-            product = (h ^ words[i] ^ p1) * (words[i + 1] ^ p2 if i + 1 < len(words) else p2)
-            h = ((product & mask) ^ (product >> 64)) & mask
-        return mix(h)
-
-    hashes = []
-    for state, task in zip(states, tasks):
-        row = task.encode([state])[0]
-        if not task.numeric_words:
-            hashes.append(int(mymyr.hash_rows(row[None, :])[0]))
-            continue
-        width = max(1, task.words)
-        bits = list(row[:width])
-        while bits and bits[-1] == 0:
-            bits.pop()
-        hashes.append(words_hash(bits, words_hash(row[width:])))
-    return np.asarray(hashes, np.uint64)
+    """The visited-table keys of States: their rows hashed with their task's numeric words."""
+    return np.concatenate([np.asarray(mymyr.hash_rows(task.encode([state]), numeric_words=task.numeric_words), np.uint64)
+                           for state, task in zip(states, tasks)])
 
 
 def decoded(table, batch):
@@ -102,10 +76,11 @@ def test_rollouts_match_state_sets(name, threads, autoreset):
                 history[int(i)] = {state}
                 absorbing[int(i)] = False
         if step % 9 == 0:
-            exp = rl.expand(table, env.states, env._ids(), framework="numpy")
+            exp = rl.expand(table, env.states, env._ids(), framework="numpy", hashes=True)
             parent = np.asarray(exp.parent)
             successors = rl.decode(table, np.asarray(exp.succ), ids[parent])
-            hashes = state_hashes(successors, [tasks[int(ids[p])] for p in parent])
+            hashes = np.asarray(exp.succ_hash)
+            np.testing.assert_array_equal(hashes, state_hashes(successors, [tasks[int(ids[p])] for p in parent]))
             got = rl.visited_mask(env.visited.numpy(), env.visited_count.numpy(), hashes, parent)
             np.testing.assert_array_equal(got, [s in history[int(p)] for s, p in zip(successors, parent)])
         assert not env.visited_status.any()
@@ -158,15 +133,15 @@ def test_masks_and_clear_after_state_writes():
     env.clear_visited(torch.tensor([True] * 3 + [False] * 3))
     assert torch.equal(env.visited[3:], old[3:])
     assert torch.all(env.visited_count[:3] == 1)
-    exp = rl.expand(task, env.states, framework="numpy")
+    exp = rl.expand(task, env.states, framework="numpy", hashes=True)
     parent = np.asarray(exp.parent)
     states = task.decode(np.asarray(exp.succ))
-    hashes = state_hashes(states, [task] * len(states))
+    hashes = np.asarray(exp.succ_hash)
     mask = rl.visited_mask(env.visited.numpy(), env.visited_count.numpy(), hashes, parent)
     expected = []
-    for state, p in zip(states, parent):
+    for k, (state, p) in enumerate(zip(states, parent)):
         expected.append(state == task.initial_state if p < 3 else bool(rl.visited_mask(
-            old.numpy(), old_count.numpy(), state_hashes([state], [task]), np.array([p], np.int32))[0]))
+            old.numpy(), old_count.numpy(), hashes[k : k + 1], np.array([p], np.int32))[0]))
     np.testing.assert_array_equal(mask, expected)
     thashes = torch.from_numpy(hashes.view(np.int64))
     np.testing.assert_array_equal(rl.visited_mask(env.visited, env.visited_count, thashes, torch.from_numpy(parent)), mask)
@@ -319,3 +294,25 @@ def test_autoreset_changes_domain_and_inserts_new_initial_hash():
         assert states == [tasks[int(i)].initial_state for i in ids]
         hashes = state_hashes(states, [tasks[int(i)] for i in ids])
         assert rl.visited_mask(env.visited.numpy(), env.visited_count.numpy(), hashes, np.arange(2, dtype=np.int32)).all()
+
+
+def test_numeric_successor_hashes_find_visited_states():
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import BatchedEnv
+
+    task = task_of("numeric")
+    assert task.numeric_words
+    env = BatchedEnv(task, 4, track_visited=64, autoreset=False, dead_end="none", seed=5, sampler=None)
+    history = [{s} for s in task.decode(env.states.numpy().view(np.uint64))]
+    for _ in range(6):
+        env.step()
+        for i, state in enumerate(task.decode(env.states.numpy().view(np.uint64))):
+            history[i].add(state)
+    exp = rl.expand(task, env.states, framework="numpy", hashes=True)
+    parent = np.asarray(exp.parent)
+    expected = [s in history[int(p)] for s, p in zip(task.decode(np.asarray(exp.succ)), parent)]
+    assert any(expected)
+    got = rl.visited_mask(env.visited.numpy(), env.visited_count.numpy(), np.asarray(exp.succ_hash), parent)
+    np.testing.assert_array_equal(got, expected)
+    np.testing.assert_array_equal(exp.succ_hash, mymyr.hash_rows(np.asarray(exp.succ), numeric_words=exp.numeric_words))
+    env.close()

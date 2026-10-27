@@ -282,13 +282,15 @@ step, then inserts it. This includes invalid actions that stay in place. Absorbi
 false and insert nothing. An autoreset first records the reached state's membership, then clears its table and inserts
 the new initial state. Tables are independent across environment rows, including rows from different domains.
 
-The keys equal the native state content hash and include numeric words. Equal 64-bit hashes count as one entry; zero shares the
-reserved key `0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and
-sets bit 0 of the sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot
-invent one, apart from hash collisions. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32
-`[N]`) and `env.visited_status` (int32 `[1]`) expose the live storage; treat the table and counts as read-only. The
-pool exposes the same status as an integer `pool.visited_status`. Resets and clears leave status set; torch callers
-can acknowledge it with `env.visited_status.zero_()`.
+The keys are the state content hashes, numeric words included: the successor hashes `succ_hash` of `rl.expand(...,
+hashes=True)`, equal to `mymyr.hash_rows(rows, numeric_words=k)` with the rows' numeric width `k` (`hash_rows` without
+`numeric_words` keys classical rows only). Equal 64-bit hashes count as one entry; zero shares the reserved key
+`0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and sets bit 0 of the
+sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot invent one, apart from
+hash collisions. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
+`env.visited_status` (int32 `[1]`) expose the live storage; treat the table and counts as read-only. The pool exposes
+the same status as an integer `pool.visited_status`. Resets and clears leave status set; torch callers can acknowledge
+it with `env.visited_status.zero_()`.
 
 `refresh()` keeps visit history. After writing state rows directly, use `env.clear_visited(mask=None)` to clear all
 or selected rows and insert their current states. The pool's `clear_visited(env_ids=None)` accepts selected idle
@@ -298,19 +300,16 @@ environments, like `reset`. Table storage uses `8 * N * H` bytes plus counts and
 `-1` denotes padding. With a subset expansion, `rows` maps its parent ids to environment rows (mapped `-1` is also
 padding). NumPy and torch CPU inputs are supported, including `mymyr::visited_mask` under `torch.compile`.
 
-For a soft policy, suppress visited successors' scores. The example computes hashes from the expanded States:
+For a soft policy, suppress visited successors' scores. The example takes the successor hashes of the expansion:
 
 ```python needs-torch
-import numpy as np
 import torch
 from mymyr.rl.torch import BatchedEnv
 
 visit_task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
 visit_env = BatchedEnv(visit_task, 4, max_steps=20, track_visited=True, autoreset=False)
-visit_exp = rl.expand(visit_task, visit_env.states, framework="torch")
-visit_hashes = mymyr.hash_rows(visit_exp.succ.numpy().view(np.uint64))
-action_visited = rl.visited_mask(visit_env.visited, visit_env.visited_count,
-                               torch.from_numpy(visit_hashes.view(np.int64)), visit_exp.parent)
+visit_exp = rl.expand(visit_task, visit_env.states, framework="torch", hashes=True)
+action_visited = rl.visited_mask(visit_env.visited, visit_env.visited_count, visit_exp.succ_hash, visit_exp.parent)
 q = torch.zeros(len(action_visited))
 soft_scores = q.masked_fill(action_visited, -1e6)
 assert soft_scores.shape == action_visited.shape
