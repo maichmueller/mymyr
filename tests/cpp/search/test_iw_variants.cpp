@@ -1036,6 +1036,8 @@ void expect_same_nodes(const IwResult& a, const IwResult& b)
         {
             const SearchTree& x = *a.passes[i].tree;
             const SearchTree& y = *b.passes[i].tree;
+            ASSERT_EQ(x.num_nodes(), y.num_nodes());
+            ASSERT_EQ(x.numeric_words, y.numeric_words);
             EXPECT_EQ(x.parent, y.parent);
             EXPECT_EQ(x.depth, y.depth);
             EXPECT_EQ(x.schema, y.schema);

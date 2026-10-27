@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -33,7 +34,8 @@ inline void check_iw1_actions(const Task& task, bool incremental, bool precheck,
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects do not support conditional effects");
     if (landmarks || deferred)
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects require atom novelty without landmark novelty or transition ordering");
-    if (incremental && (layers.kind != LayerOrdering::Kind::Queue || layers.beam() || threads > 1))
+    if (incremental && (layers.kind != LayerOrdering::Kind::Queue || layers.beam() ||
+                        layers.max_next_layer_states != ~u32{0} || threads != 1))
         throw std::invalid_argument("incremental_first_applicability requires queued layers and one thread");
 }
 
@@ -43,13 +45,25 @@ class Iw1Actions
 {
     struct Hash
     {
-        usize operator()(const Action& a) const noexcept
+        using is_transparent = void;
+        usize operator()(ActionLabel a) const noexcept
         {
             usize h = a.schema.v;
             for (ObjectId o : a.binding)
                 h = h * 1000003 + o.v + 1;
             return h;
         }
+        usize operator()(const Action& a) const noexcept { return (*this)(a.label()); }
+    };
+    struct Equal
+    {
+        using is_transparent = void;
+        bool operator()(const Action& a, const Action& b) const { return a == b; }
+        bool operator()(const Action& a, ActionLabel b) const
+        {
+            return a.schema == b.schema && std::equal(a.binding.begin(), a.binding.end(), b.binding.begin(), b.binding.end());
+        }
+        bool operator()(ActionLabel a, const Action& b) const { return (*this)(b, a); }
     };
     struct Trigger
     {
@@ -77,11 +91,33 @@ public:
 
     [[nodiscard]] bool contains(u32 s, const ObjectId* b) const
     {
-        return m_tested.contains(Action(SchemaId{s}, std::vector<ObjectId>(b, b + m_succ.arity(s))));
+        return m_tested.contains(ActionLabel{SchemaId{s}, {b, m_succ.arity(s)}});
     }
     void tested(u32 s, const ObjectId* b)
     {
         m_tested.emplace(SchemaId{s}, std::vector<ObjectId>(b, b + m_succ.arity(s)));
+    }
+    [[nodiscard]] u64 bytes() const
+    {
+        auto storage = [](const auto& v) { return v.capacity() * sizeof(typename std::remove_cvref_t<decltype(v)>::value_type); };
+        u64 n = m_tested.bucket_count() * sizeof(void*) + m_tested.size() * (sizeof(Action) + sizeof(void*));
+        for (const Action& a : m_tested)
+            n += storage(a.binding);
+        n += storage(m_candidates) + storage(m_matchers) + storage(m_positive) + storage(m_negative);
+        for (const Action& a : m_candidates)
+            n += storage(a.binding);
+        for (const auto& row : m_positive)
+            n += storage(row);
+        for (const auto& row : m_negative)
+            n += storage(row);
+        for (const auto& m : m_matchers)
+            if (m)
+            {
+                const auto& x = m->exec;
+                n += sizeof(Matcher) + storage(m->domains) + storage(x.unary) + storage(x.rows) + storage(x.fc_out) +
+                     storage(x.fc_pre) + storage(x.steps) + storage(x.cand) + storage(x.dom1) + storage(x.fc_doms) + storage(x.bound);
+            }
+        return n;
     }
 
     /// Parent and child are the incoming tree edge. Null parent: root, fully enumerate. Derived and numeric
@@ -202,7 +238,7 @@ private:
     const Task& m_task;
     std::vector<std::vector<Trigger>> m_positive, m_negative;
     std::vector<std::unique_ptr<Matcher>> m_matchers;
-    std::unordered_set<Action, Hash> m_tested;
+    std::unordered_set<Action, Hash, Equal> m_tested;
     std::vector<Action> m_candidates;
 };
 }  // namespace mymyr::search::detail

@@ -342,7 +342,7 @@ private:
 };
 
 /// One IW pass. Slow: an observer or blocked states are set (every successor is materialized).
-template<bool Slow>
+template<bool Slow, bool Filtering = false>
 void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& ps, PassOut& out)
 {
     const auto t0 = Clock::now();
@@ -358,8 +358,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
     const bool root_only = o.width_zero == WidthZero::RootOnly;
     std::unique_ptr<Iw1Actions> actions;
-    if (o.incremental_first_applicability && k == 1)
-        actions = std::make_unique<Iw1Actions>(succ);
+    if constexpr (Filtering)
+        if (o.incremental_first_applicability && k == 1)
+            actions = std::make_unique<Iw1Actions>(succ);
 
     std::optional<TreeSink> sink;
     if (o.tree != TreeRecord::None)
@@ -477,8 +478,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         // every process counts its transition in st.generated: the check every k_check_transitions of them
         auto checked = [&](u32 s, const ObjectId* b, const Delta& d) -> bool
         {
-            if (actions && actions->contains(s, b))
-                return true;
+            if constexpr (Filtering)
+                if (actions && actions->contains(s, b))
+                    return true;
             return process(s, b, d) && (st.generated % k_check_transitions != 0 || !interrupted());
         };
         if constexpr (Slow)
@@ -533,16 +535,22 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     if (!checked(buf_actions[i].schema.v, static_cast<const ObjectId*>(buf_actions[i].binding.data()), d))
                         return;
                 }
+                if constexpr (Filtering)
+                    if (actions && !stop)
+                        (void) interrupted();
                 return;
             }
         }
-        if (actions)
-        {
-            const StateView parent = id == 0 ? StateView{} : StateView{tree.words(tree.parent(id)), tree.stride(), nullptr, 0};
-            actions->run(parent, cv, id == 0, witness, canonical, !c.blocked.empty(), checked, interrupted);
-        }
-        else
-            succ.generate<true>(checked, witness, canonical);
+        if constexpr (Filtering)
+            if (actions)
+            {
+                const StateView parent = id == 0 ? StateView{} : StateView{tree.words(tree.parent(id)), tree.stride(), nullptr, 0};
+                actions->run(parent, cv, id == 0, witness, canonical, !c.blocked.empty(), checked, interrupted);
+                if (!stop)
+                    (void) interrupted();
+                return;
+            }
+        succ.generate<true>(checked, witness, canonical);
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
@@ -1041,12 +1049,14 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         }
                     if (child == cv)
                     {
-                        if (actions)
-                            actions->tested(s, b);
+                        if constexpr (Filtering)
+                            if (actions)
+                                actions->tested(s, b);
                         return reject(TransitionOutcome::SelfLoop);
                     }
-                    if (actions)
-                        actions->tested(s, b);
+                    if constexpr (Filtering)
+                        if (actions)
+                            actions->tested(s, b);
                     const u32 dup = seen.find(tree, child);
                     if (k == 0)
                     {
@@ -1093,8 +1103,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         else if (k == 0)
         {
             // width 0 below the root: every successor is pruned
-            if (o.incremental_first_applicability || o.precheck_add_effects)
-                continue;
+            if constexpr (Filtering)
+                if (o.incremental_first_applicability || o.precheck_add_effects)
+                    continue;
             drive(cv, id,
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
@@ -1121,7 +1132,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 {
                     ++st.generated;
                     compute_add(d, n);
-                    if constexpr (Slow)
+                    if constexpr (Slow && Filtering)
                         if (o.precheck_add_effects)
                         {
                             reserve_for_add();
@@ -1134,8 +1145,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         }
                     if constexpr (!Slow)
                     {
-                        if (actions)
-                            actions->tested(s, b);
+                        if constexpr (Filtering)
+                            if (actions)
+                                actions->tested(s, b);
                         if (add.empty())
                             return true;  // no added atom: no new tuple
                         reserve_for_add();
@@ -1177,15 +1189,17 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         }
                         else if (add.empty())
                         {
-                            if (actions)
-                                actions->tested(s, b);
+                            if constexpr (Filtering)
+                                if (actions)
+                                    actions->tested(s, b);
                             if (child == cv)
                                 outcome = TransitionOutcome::SelfLoop;  // a self loop adds no atom
                         }
                         else
                         {
-                            if (actions)
-                                actions->tested(s, b);
+                            if constexpr (Filtering)
+                                if (actions)
+                                    actions->tested(s, b);
                             reserve_for_add();
                             admitted = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
                                                  : table->test<true>(cur.data(), n, next.data(), nn, add);
@@ -1220,6 +1234,8 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     if (beam)
         st.generated_in_tree -= next_layer.size();  // candidates of a next layer that was never selected
     out.table_bytes = table ? table->bytes() : 0;
+    if constexpr (Filtering)
+        out.table_bytes += actions ? actions->bytes() : 0;
     out.node_bytes = tree.bytes();
     if (sink)
     {
@@ -1237,15 +1253,15 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
 {
     IwResult r;
     const IwOptions& o = c.options;
+    const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_width;
+    check_iw1_actions(c.task, o.incremental_first_applicability, o.precheck_add_effects, top,
+                     false, static_cast<bool>(o.transition_ordering), o.layers, o.threads);
     if (!c.error.empty())
     {
         r.status = SearchStatus::Failed;
         r.message = c.error;
         return r;
     }
-    const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_width;
-    check_iw1_actions(c.task, o.incremental_first_applicability, o.precheck_add_effects, top,
-                     false, static_cast<bool>(o.transition_ordering), o.layers, o.threads);
     if (top > novelty::k_max_arity)
     {
         r.status = SearchStatus::Failed;
@@ -1303,9 +1319,19 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
                 po = {std::move(oo.st), std::move(oo.plan), std::move(oo.goal_state), oo.table_bytes, oo.node_bytes};
             }
             else if (slow)
-                run_pass<true>(c, root, goal, ps, po);
+            {
+                if (o.incremental_first_applicability || o.precheck_add_effects)
+                    run_pass<true, true>(c, root, goal, ps, po);
+                else
+                    run_pass<true>(c, root, goal, ps, po);
+            }
             else
-                run_pass<false>(c, root, goal, ps, po);
+            {
+                if (o.incremental_first_applicability || o.precheck_add_effects)
+                    run_pass<false, true>(c, root, goal, ps, po);
+                else
+                    run_pass<false>(c, root, goal, ps, po);
+            }
         }
         catch (const std::length_error& e)
         {

@@ -649,11 +649,13 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
                                         [&](u32 k, detail::PassOut& po)
                                         {
                                             detail::AbstractedPruner p(task, cfg, coords ? &*coords : nullptr);
-                                            detail::novelty_pass(env, root, p,
-                                                                 detail::PassConfig{.arity = k,
-                                                                                    .root = detail::RootRule::Continuation,
-                                                                                    .keep_depth_one = o.keep_depth_one_novel},
-                                                                 po);
+                                            const detail::PassConfig pc{.arity = k,
+                                                                        .root = detail::RootRule::Continuation,
+                                                                        .keep_depth_one = o.keep_depth_one_novel};
+                                            if (o.incremental_first_applicability || o.precheck_add_effects)
+                                                detail::novelty_pass<detail::AbstractedPruner, true>(env, root, p, pc, po);
+                                            else
+                                                detail::novelty_pass(env, root, p, pc, po);
                                         });
     detail::finish_result(env, root, r);
     return r;
