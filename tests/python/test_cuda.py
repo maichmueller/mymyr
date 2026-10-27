@@ -12,7 +12,6 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # JAX would take 75% of the GPU otherwise
 
-import gc  # noqa: E402
 import random  # noqa: E402
 import threading  # noqa: E402
 
@@ -44,87 +43,108 @@ def torch_cuda():
     return torch
 
 
+# Drops mymyr outputs of one kind (argv: the task file, the kind, "thread" or "inline") while torch captures a CUDA
+# graph in the default global mode on a side stream, from the capturing thread or from another thread; then replays
+# the graph and checks that the context and torch hold the same memory after every cycle.
+CAPTURE_CHILD = """
+import gc, threading
+import numpy as np, torch
+import mymyr.cuda as mc
+from mymyr import encoding, rl
+
+path, source, capture_thread = sys.argv[1], sys.argv[2], sys.argv[3] == "thread"
+task = mymyr.Task.from_text(path, atoms="dense")
+table = rl.as_table(task)
+ctx = mc.Context(0, max_bytes=64 << 20)
+states = torch.from_numpy(np.asarray(table.initial_states()).view(np.int64).copy()).cuda()
+if source == "encoding":
+    ctx = rl.expand(table, states).context
+marker = torch.zeros(1, device="cuda", dtype=torch.int32)
+side = torch.cuda.Stream()
+side.wait_stream(torch.cuda.current_stream())
+torch.cuda.synchronize()
+used, torch_used = [], []
+for cycle in range(12):
+    if source in ("expand", "expand_dlpack"):
+        output = rl.expand(table, states, ctx=ctx, framework="dlpack" if source == "expand_dlpack" else "torch")
+    elif source == "encoding":
+        encoder = encoding.FlatRelationEncoder(table)
+        output = (encoder, encoder.encode(states))
+        del encoder
+    elif source == "brfs":
+        result = mc.brfs(task, ctx=ctx, max_states=128)
+        output = (result, result.state_words("torch"))
+        del result
+    elif source == "last_context":
+        owner = mc.Context(0, max_bytes=64 << 20)
+        output = mc.to_memory(np.zeros(64, dtype=np.int64), "device", owner)
+        del owner
+    else:
+        output = mc.to_memory(np.zeros(64, dtype=np.int64), source, ctx)
+    garbage = [output]
+    garbage.append(garbage)
+    del output
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    started, released = threading.Event(), threading.Event()
+    errors = []
+
+    def capture():
+        try:
+            with torch.cuda.graph(graph, stream=side):
+                marker.add_(1)
+                if capture_thread:
+                    started.set()
+                    assert released.wait(10)
+                else:
+                    garbage.clear()
+                    gc.collect()
+        except BaseException as error:
+            errors.append(error)
+            started.set()
+
+    if capture_thread:
+        worker = threading.Thread(target=capture)
+        worker.start()
+        try:
+            assert started.wait(10)
+            garbage.clear()
+            gc.collect()
+        finally:
+            released.set()
+            worker.join()
+    else:
+        capture()
+    if errors:
+        raise errors[0]
+    for replay in range(3):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert marker.item() == cycle * 3 + replay + 1
+    graph.reset()
+    ctx.synchronize()
+    used.append(ctx.usage()["used"])
+    torch_used.append(torch.cuda.memory_allocated())
+assert used[1:] == [used[1]] * (len(used) - 1), used
+assert torch_used[1:] == [torch_used[1]] * (len(torch_used) - 1), torch_used
+"""
+
+
 @pytest.mark.parametrize("source", ["expand", "expand_dlpack", "encoding", "brfs", "device", "pinned", "managed",
                                     "last_context"])
 @pytest.mark.parametrize("capture_thread", [False, True])
 def test_outputs_collected_during_unrelated_capture(source, capture_thread):
-    torch = torch_cuda()
-    from mymyr import encoding
+    """Runs in a process of its own: a global-mode capture is invalidated by a capture-unsafe call of any thread,
+    including another CUDA client's (an XLA GPU client polls its streams), and an invalidated capture can leave that
+    client's streams in an error state."""
+    torch_cuda()
+    from conftest import TASKS
+    from python_children import run_code
 
-    task = text_task("gripper__prob05", atoms="dense")
-    table = rl.as_table(task)
-    ctx = mc.Context(0, max_bytes=64 << 20)
-    states = torch.from_numpy(np.asarray(table.initial_states()).view(np.int64).copy()).cuda()
-    if source == "encoding":
-        ctx = rl.expand(table, states).context
-    marker = torch.zeros(1, device="cuda", dtype=torch.int32)
-    side = torch.cuda.Stream()
-    side.wait_stream(torch.cuda.current_stream())
-    torch.cuda.synchronize()
-    used, torch_used = [], []
-    for cycle in range(12):
-        if source in ("expand", "expand_dlpack"):
-            output = rl.expand(table, states, ctx=ctx, framework="dlpack" if source == "expand_dlpack" else "torch")
-        elif source == "encoding":
-            encoder = encoding.FlatRelationEncoder(table)
-            output = (encoder, encoder.encode(states))
-            del encoder
-        elif source == "brfs":
-            result = mc.brfs(task, ctx=ctx, max_states=128)
-            output = (result, result.state_words("torch"))
-            del result
-        elif source == "last_context":
-            owner = mc.Context(0, max_bytes=64 << 20)
-            output = mc.to_memory(np.zeros(64, dtype=np.int64), "device", owner)
-            del owner
-        else:
-            output = mc.to_memory(np.zeros(64, dtype=np.int64), source, ctx)
-        garbage = [output]
-        garbage.append(garbage)
-        del output
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        started, released = threading.Event(), threading.Event()
-        errors = []
-
-        def capture():
-            try:
-                with torch.cuda.graph(graph, stream=side):
-                    marker.add_(1)
-                    if capture_thread:
-                        started.set()
-                        assert released.wait(10)
-                    else:
-                        garbage.clear()
-                        gc.collect()
-            except BaseException as error:
-                errors.append(error)
-                started.set()
-
-        if capture_thread:
-            worker = threading.Thread(target=capture)
-            worker.start()
-            try:
-                assert started.wait(10)
-                garbage.clear()
-                gc.collect()
-            finally:
-                released.set()
-                worker.join()
-        else:
-            capture()
-        if errors:
-            raise errors[0]
-        for replay in range(3):
-            graph.replay()
-            torch.cuda.synchronize()
-            assert marker.item() == cycle * 3 + replay + 1
-        graph.reset()
-        ctx.synchronize()
-        used.append(ctx.usage()["used"])
-        torch_used.append(torch.cuda.memory_allocated())
-    assert used[1:] == [used[1]] * (len(used) - 1)
-    assert torch_used[1:] == [torch_used[1]] * (len(torch_used) - 1)
+    env = dict(os.environ, JAX_PLATFORMS="cpu")
+    r = run_code(CAPTURE_CHILD, str(TASKS / "gripper__prob05.txt"), source, "thread" if capture_thread else "inline",
+                 env=env, timeout=None, capture_output=True, check=False)  # fmt: skip
+    assert r.returncode == 0, r.stderr[-4000:]
 
 
 def jax_gpu():
