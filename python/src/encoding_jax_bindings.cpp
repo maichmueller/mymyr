@@ -182,7 +182,11 @@ struct EncoderEntry : FfiEntry
                 retiring = std::make_shared<Resources>();
                 retiring->ctx = ctx;
                 retiring->encoder = std::move(encoder);
-                retiring->held = std::move(held);
+                if (held)
+                {
+                    retiring->held.emplace(std::move(*held));
+                    held.reset();
+                }
                 ctx->release_after(retiring);
             }
             catch (...)
