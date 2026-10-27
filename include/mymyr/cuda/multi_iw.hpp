@@ -20,6 +20,10 @@
 // group size and chunk size. The budgets are exact too: max_expanded and a goal stop at their row, max_states (tree
 // nodes, per pass) at the admission that reaches it. MultiIwOptions::exact = false is relaxed batch novelty (opt-in:
 // one atomicOr pass; IW(k)'s guarantees hold but the kept set depends on timing).
+// With max_next_layer_states set, the CPU equivalent uses LayerOrdering::Kind::InOrder and the same layer limit:
+// filling the next layer ends the current expansion and drops the remaining current-layer entries. With seeds,
+// use Kind::Randomized and the same per-search seed instead. Positive max_seconds limits depend on elapsed wall
+// time, so searches interrupted by them need not have equal trees or counts across backends or launch configurations.
 //
 // Rollouts (cuda/rollouts.hpp; search::find_rollouts_parallel): with per-search seeds, every next layer is shuffled by
 // the search's own SplitMix64 stream (cuda/device_rng.hpp) before it is popped, and max_next_layer_states truncates the
@@ -64,11 +68,11 @@ struct MultiIwOptions
     bool canonical_order = true;
     bool exact = true;             // exact batch novelty; false: relaxed (nondeterministic kept sets)
     search::Budget budget;         // per search and pass as in search::iw(); max_seconds spans the whole call
-    u32 max_next_layer_states = ~u32{0};  // truncated next layers (with seeds, as the CPU's ordered layers)
+    u32 max_next_layer_states = ~u32{0};  // CPU layers: InOrder, or Randomized with seeds; stop generation at this size
     bool track_reached = false;    // the fluent atoms of every state each search created (the rollouts' report)
     bool plans = true;             // plans and goal states of the solved searches
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
-    // launch configuration: in exact mode no result depends on it
+    // launch configuration: exact results are independent of it unless a wall-time limit interrupts the search
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
     // Novelty tables of a group. A pass whose one table exceeds it is refused when a search reaches that pass: the
     // searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep the

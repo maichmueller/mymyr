@@ -57,6 +57,18 @@ fallback. Numeric goal expressions use at most 64 stack values. Callable goals a
 search require CPU search; device A*/GBFS use the task goal. See [Formula values](formulas.md) for goal construction.
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
+Exact device IW reproduces each CPU search's status, plan, goal state and per-pass counts with matching options,
+including `max_states`, `max_expanded` and `max_depth`, unless a pass's novelty table exceeds `table_bytes` (see
+below). Python `multi_iw` and `batched_iw1` have no next-layer limit and equal `search.iw` with the default `"queue"`
+order. The C++ `MultiIwOptions::max_next_layer_states` corresponds to
+CPU `IwOptions::layers` with `Kind::InOrder` and the same limit (in Python `search.iw(layer_order="in_order",
+max_next_layer_states=...)`); for rollouts it corresponds to `Kind::Randomized` with the same seed, and `rollouts`
+and `search.find_rollouts_parallel` take the same `max_next_layer_states=`. Filling the next layer stops generation
+and discards the rest of the current layer; it can change the tree even when `max_states` is identical. An unlimited
+CPU queue is therefore a different search from a device search with a finite next-layer limit. Positive
+`max_seconds` limits depend on elapsed wall time and do not guarantee equal trees or counts between backends or launch
+configurations.
+
 `cuda.liw(task_or_table, starts, landmarks=graph, ...)` runs the width-0 pass and then LIW(1) from every start:
 search i has the status, plan, goal state and per-pass counts of `search.liw(task, start=starts[i], max_width=1, ...)`
 whatever the group and chunk sizes. `landmarks` is one `search.FactLandmarkGraph` shared by every search or a sequence

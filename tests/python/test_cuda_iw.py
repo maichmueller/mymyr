@@ -309,6 +309,19 @@ def test_ipc_iw_equals_cpu(ctx, rovers_task, width):
         assert {task.atom(slot) for slot in batch.reached_slots(i)} == set(rollout.reached_fluent_atoms)
 
 
+@pytest.mark.parametrize("budget", [{"max_states": 1}, {"max_states": 2}, {"max_states": 64},
+                                   {"max_expanded": 2}, {"max_depth": 1}])
+def test_ipc_wide_iw_budgets_equal_cpu(ctx, blocksworld_wide, budget):
+    task = blocksworld_wide
+    assert task.words == 78
+    starts = [task.initial_state, task.successor_states(task.initial_state)[0]]
+    cpu = [mymyr.search.iw(task, start=start, max_width=1, **budget) for start in starts]
+    for run, launch in ((mc.multi_iw, {}), (mc.batched_iw1, {"max_searches": 1, "chunk_states": 1})):
+        batch = run(task, starts, ctx=ctx, **budget, **launch)
+        for i, result in enumerate(cpu):
+            assert_equal(batch, i, result)
+
+
 def one_atom_goal(task):
     """A goal of one atom that the first successor of the initial state adds (IW(1) reaches it)."""
     s = task.initial_state

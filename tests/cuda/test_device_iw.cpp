@@ -29,6 +29,10 @@
 #include "mymyr/successor/conditions.hpp"
 #include "mymyr/successor/successors.hpp"
 
+#ifdef MYMYR_HAS_FRONTEND
+#include "mymyr/frontend/domain.hpp"
+#endif
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -96,6 +100,8 @@ search::IwOptions cpu_options(const cuda::MultiIwOptions& d, const State& start)
     o.witness_pruning = d.witness_pruning;
     o.canonical_order = d.canonical_order;
     o.control.budget = d.budget;
+    if (d.max_next_layer_states != ~u32{0})
+        o.layers = {.kind = search::LayerOrdering::Kind::InOrder, .max_next_layer_states = d.max_next_layer_states};
     o.start = start;
     return o;
 }
@@ -671,6 +677,60 @@ TEST(CudaMultiIw, BatchedIw1FromDeviceRows)
         }
     }
 }
+
+#ifdef MYMYR_HAS_FRONTEND
+TEST(CudaMultiIw, WideLayerAndStateLimitsEqualCpu)
+{
+    SKIP_WITHOUT_GPU();
+    const std::string directory = std::string(MYMYR_SOURCE_DIR) + "/tests/data/ipc/blocksworld-ipc/test/";
+    const auto domain = frontend::Domain::from_file(directory + "domain.pddl");
+    TaskOptions options;
+    options.atoms = TaskOptions::Atoms::Dense;
+    const auto task = Task::create(*domain->instantiate_file(directory + "p10-medium.pddl"), options);
+    ASSERT_EQ(task->words(), 78u);
+    const std::vector<State> starts = device_ref_walks(*task, 1, 1, 13);
+    ASSERT_EQ(starts.size(), 2u);
+    const auto ctx = context();
+    const u32 W = task->words();
+    std::vector<u64> rows(starts.size() * W, 0);
+    for (usize i = 0; i < starts.size(); ++i)
+        std::copy_n(starts[i].data(), starts[i].size_words(), rows.begin() + static_cast<std::ptrdiff_t>(i * W));
+    cuda::DeviceBuffer dev(ctx, rows.size() * sizeof(u64), ctx->stream());
+    cuda::check(cudaMemcpyAsync(dev.data(), rows.data(), rows.size() * sizeof(u64), cudaMemcpyHostToDevice, ctx->stream()), "H2D");
+    cuda::check(cudaStreamSynchronize(ctx->stream()), "sync");
+    const cuda::DeviceStarts ds{static_cast<const u64*>(dev.data()), W, W, static_cast<u32>(starts.size())};
+    bool layer_limit_changed_search = false;
+    for (u32 next : {1u, 8u, 64u, ~u32{0}})
+        for (u64 states : {8u, 96u})
+        {
+            SCOPED_TRACE("next " + std::to_string(next) + " states " + std::to_string(states));
+            cuda::MultiIwOptions o;
+            o.max_next_layer_states = next;
+            o.budget.max_states = states;
+            std::vector<search::IwResult> cpu;
+            for (const State& start : starts)
+            {
+                const search::IwOptions c = cpu_options(o, start);
+                cpu.push_back(search::iw(*task, c));
+                search::IwOptions unlimited = c;
+                unlimited.layers = {};
+                const search::IwResult other = search::iw(*task, unlimited);
+                layer_limit_changed_search |= other.stats.generated != cpu.back().stats.generated;
+            }
+            cuda::DeviceMultiIw run(ctx, task, o);
+            const cuda::MultiIwBatch batch = run.run(starts);
+            o.chunk_states = 1;
+            o.max_searches = 1;
+            const cuda::MultiIwBatch single = cuda::batched_iw1(ctx, task, ds, o, ctx->stream());
+            expect_same_batch(batch, single, "host starts and device rows with separate searches and one-row chunks");
+            for (u32 i = 0; i < starts.size(); ++i)
+                expect_same(batch.result(i, *task, starts[i], true), cpu[i], "start " + std::to_string(i));
+            if (HasFailure())
+                return;
+        }
+    EXPECT_TRUE(layer_limit_changed_search);
+}
+#endif
 
 TEST(CudaMultiIw, RelaxedNoveltyReturnsValidPlans)
 {

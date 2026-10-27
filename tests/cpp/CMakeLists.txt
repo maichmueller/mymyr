@@ -120,6 +120,7 @@ if(TARGET mymyr_cuda)
     gtest_discover_tests(mymyr_cuda_tests DISCOVERY_TIMEOUT 60
         PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
     if(TARGET mymyr_frontend)
+        target_link_libraries(mymyr_cuda_tests PRIVATE mymyr::frontend)
         add_executable(mymyr_device_numeric_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_numeric.cpp)
         target_link_libraries(mymyr_device_numeric_tests PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings GTest::gtest_main)
         target_compile_definitions(mymyr_device_numeric_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
