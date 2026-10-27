@@ -635,7 +635,8 @@ def cuda_match_runtime():
 
 
 @pytest.mark.parametrize("first", [False, True])
-def test_match_first_device_suite_and_capture(first):
+@pytest.mark.parametrize("via_op", [False, True])
+def test_match_first_device_suite_and_capture(first, via_op):
     torch = cuda_match_runtime()
     tasks = [text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")]
     states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=12, walks=1)]
@@ -646,16 +647,24 @@ def test_match_first_device_suite_and_capture(first):
         device = templates.to("cuda:0")
         x = torch.tensor(rows.view(np.int64), device="cuda:0")
         task_ids = torch.tensor(ids, device="cuda:0")
+        from mymyr.rl.torch import register, unregister
+        handle = register(device) if via_op else None
+
+        def run():
+            if via_op:
+                return rl.MatchResult(*torch.ops.mymyr.match_first(handle, x, task_ids, first))
+            return rl.match_first(x, task_ids, device, first=first)
+
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            result = rl.match_first(x, task_ids, device, first=first)
+            result = run()
         stream.synchronize()
         for host, gpu in zip(expected, result):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            captured = rl.match_first(x, task_ids, device, first=first)
+            captured = run()
         graph.replay()
         for host, gpu in zip(expected, captured):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
@@ -669,6 +678,8 @@ def test_match_first_device_suite_and_capture(first):
         for host, gpu in zip(changed, captured):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
         assert device.nbytes == templates.nbytes
+        if handle is not None:
+            unregister(handle)
 
 
 @needs_frontend
@@ -691,7 +702,8 @@ def test_match_first_device_literal_kinds(first):
                                   small.count.cpu().numpy())
 
 
-def test_match_first_torch_op_fake_and_compile():
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_torch_op_fake_and_compile(first):
     torch = pytest.importorskip("torch", exc_type=ImportError)
     from mymyr.rl.torch._ops import match_first as op, register, unregister
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -701,12 +713,12 @@ def test_match_first_torch_op_fake_and_compile():
     rows = torch.tensor(np.asarray(task.encode(walk(task, steps=3, walks=1))).view(np.int64))
     handle = register(templates)
     try:
-        expected = rl.match_first(rows.numpy(), None, templates, first=True)
-        eager = op(handle, rows, first=True)
+        expected = rl.match_first(rows.numpy(), None, templates, first=first)
+        eager = op(handle, rows, first=first)
         with FakeTensorMode() as mode:
-            fake = op(handle, mode.from_tensor(rows), first=True)
+            fake = op(handle, mode.from_tensor(rows), first=first)
             assert [(v.shape, v.dtype) for v in fake] == [(v.shape, v.dtype) for v in eager]
-        compiled = torch.compile(lambda x: op(handle, x, first=True), backend="eager", fullgraph=True)(rows)
+        compiled = torch.compile(lambda x: op(handle, x, first=first), backend="eager", fullgraph=True)(rows)
         for host, eager_tensor, compiled_tensor in zip(expected, eager, compiled):
             np.testing.assert_array_equal(host, eager_tensor.numpy())
             assert torch.equal(eager_tensor, compiled_tensor)
