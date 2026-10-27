@@ -6,6 +6,7 @@
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "deferred_release.hpp"
 #include "mymyr/cuda/arena.hpp"
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/kernels.hpp"
@@ -15,8 +16,10 @@
 
 #include <cstring>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -68,6 +71,94 @@ cuda::DeviceBuffer to_device(const cuda::ContextPtr& ctx, const std::vector<T>& 
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ runtime
+
+namespace
+{
+class ReleaseGate
+{
+    struct State
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool entered = false;
+        bool open = false;
+    };
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+
+public:
+    ~ReleaseGate() { open(); }
+    void block(const cuda::ContextPtr& ctx)
+    {
+        ctx->release_after(std::shared_ptr<void>(m_state.get(), [state = m_state](void*) {
+            std::unique_lock lock(state->mutex);
+            state->entered = true;
+            state->changed.notify_all();
+            state->changed.wait(lock, [&] { return state->open; });
+        }));
+    }
+    bool entered()
+    {
+        std::unique_lock lock(m_state->mutex);
+        return m_state->changed.wait_for(lock, std::chrono::seconds(3), [&] { return m_state->entered; });
+    }
+    void open()
+    {
+        std::lock_guard lock(m_state->mutex);
+        m_state->open = true;
+        m_state->changed.notify_all();
+    }
+};
+}  // namespace
+
+TEST(CudaRuntime, RetiredBuffersKeepTheirLastUseSnapshotAcrossCaptures)
+{
+    SKIP_WITHOUT_GPU();
+    for (bool captured_record : {false, true})
+    {
+        SCOPED_TRACE(captured_record);
+        auto ctx = context(), gate_ctx = context();
+        const auto baseline = ctx->usage().used;
+        cuda::Stream side;
+        cuda::DeviceBuffer buffer(ctx, 4096);
+        auto last = std::make_shared<cuda::LastUse>(ctx->device());
+        buffer.track(last);
+        if (!captured_record)
+        {
+            last->record(ctx->stream());
+            buffer.record_stream(side);
+        }
+        ctx->synchronize();
+        ReleaseGate gate;
+        gate.block(gate_ctx);
+        ASSERT_TRUE(gate.entered());
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "begin first capture");
+        if (captured_record)
+            last->record(side);
+        buffer.reset();
+        cudaGraph_t first = nullptr;
+        const auto first_end = cudaStreamEndCapture(side, &first);
+        if (first)
+            cuda::check(cudaGraphDestroy(first), "destroy first capture");
+        ASSERT_EQ(first_end, cudaSuccess);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cuda::check(cudaStreamBeginCapture(side, cudaStreamCaptureModeGlobal), "begin second capture");
+        last->record(side);
+        gate.open();
+        cuda::detail::drain_releases(*ctx);
+        cudaGraph_t second = nullptr;
+        const auto second_end = cudaStreamEndCapture(side, &second);
+        if (second)
+            cuda::check(cudaGraphDestroy(second), "destroy second capture");
+        EXPECT_EQ(second_end, cudaSuccess);
+        (void)cudaGetLastError();
+        side.synchronize();
+        for (int retry = 0; retry < 200 && ctx->usage().used != baseline; ++retry)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ctx->synchronize();
+        gate_ctx->synchronize();
+        EXPECT_EQ(ctx->usage().used, baseline);
+    }
+}
 
 TEST(CudaRuntime, ContextPoolAndBuffers)
 {

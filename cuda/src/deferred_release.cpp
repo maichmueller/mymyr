@@ -15,7 +15,6 @@ struct Release
     ContextPtr ctx;
     void* pointer = nullptr;
     std::vector<Event> events;
-    std::vector<std::shared_ptr<const LastUse>> lasts;
     std::vector<CapturePtr> captures;
     std::shared_ptr<void> owner;
     void (*on_failure)() noexcept = nullptr;
@@ -87,8 +86,6 @@ private:
                     Stream stream;
                     for (const auto& e : release->events)
                         e.wait_on(stream);
-                    for (const auto& last : release->lasts)
-                        last->wait_on(stream);
                     if (release->pointer)
                         check(cudaFreeAsync(release->pointer, stream), "cudaFreeAsync (deferred release)");
                     stream.synchronize();
@@ -154,14 +151,12 @@ CapturePtr capture_lifetime(cudaStream_t stream)
     return lifetime;
 }
 
-void release_deferred(ContextPtr ctx, void* pointer, std::vector<Event> events,
-                      std::vector<std::shared_ptr<const LastUse>> lasts, std::vector<CapturePtr> captures)
+void release_deferred(ContextPtr ctx, void* pointer, std::vector<Event> events, std::vector<CapturePtr> captures)
 {
     auto release = std::make_unique<Release>();
     release->ctx = std::move(ctx);
     release->pointer = pointer;
     release->events = std::move(events);
-    release->lasts = std::move(lasts);
     release->captures = std::move(captures);
     start_reclaimer().submit(std::move(release));
 }

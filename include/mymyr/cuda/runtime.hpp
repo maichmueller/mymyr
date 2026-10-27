@@ -234,10 +234,11 @@ public:
 
 private:
     friend class DeviceBuffer;
-    void append_captures(std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const;
+    void snapshot(cudaStream_t stream, std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const;
     int m_device = 0;
     cudaEvent_t m_event = nullptr;
     bool m_recorded = false;
+    std::shared_ptr<detail::CaptureLifetime> m_record_capture;
     std::vector<std::shared_ptr<detail::CaptureLifetime>> m_captures;
     mutable std::mutex m_mutex;
 };

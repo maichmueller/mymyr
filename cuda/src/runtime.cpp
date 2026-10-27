@@ -306,7 +306,7 @@ void DeviceContext::deallocate(void* p, cudaStream_t s) noexcept
         DeviceGuard guard(m_device);
         s = s ? s : m_stream;
         if (auto capture = detail::capture_lifetime(s))
-            detail::release_deferred(shared_from_this(), p, {}, {}, {std::move(capture)});
+            detail::release_deferred(shared_from_this(), p, {}, {std::move(capture)});
         else
             check(cudaFreeAsync(p, s), "cudaFreeAsync");
     }
@@ -509,7 +509,7 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
                 uncaptured.push_back(s);
         }
         for (const auto& last : m_lasts)
-            last->append_captures(captures);
+            last->snapshot(fs, captures);
         if (!captures.empty())
         {
             std::vector<Event> events;
@@ -518,15 +518,13 @@ void DeviceBuffer::reset(cudaStream_t release) noexcept
                 events.emplace_back();
                 events.back().record(s);
             }
-            detail::release_deferred(m_ctx, m_ptr, std::move(events), m_lasts, std::move(captures));
+            detail::release_deferred(m_ctx, m_ptr, std::move(events), std::move(captures));
         }
         else
         {
             for (cudaStream_t s : m_users)
                 if (s != fs)
                     order_after(fs, s);  // (the users must exist now)
-            for (const auto& l : m_lasts)
-                l->wait_on(fs);
             if (!m_free_live && fs != m_stream)
                 order_after(fs, m_stream);
             m_ctx->deallocate(m_ptr, fs);
@@ -620,18 +618,24 @@ void LastUse::record(cudaStream_t s)
     std::lock_guard lock(m_mutex);
     DeviceGuard g(m_device);
     std::erase_if(m_captures, [](const auto& c) { return c->complete.load(std::memory_order_acquire); });
-    if (auto capture = detail::capture_lifetime(s))
-        m_captures.push_back(std::move(capture));
+    auto capture = detail::capture_lifetime(s);
+    if (capture)
+        m_captures.push_back(capture);
     check(cudaEventRecord(m_event, s), "cudaEventRecord (last use)");
+    m_record_capture = std::move(capture);
     m_recorded = true;
 }
 
-void LastUse::append_captures(std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const
+void LastUse::snapshot(cudaStream_t stream, std::vector<std::shared_ptr<detail::CaptureLifetime>>& captures) const
 {
     std::lock_guard lock(m_mutex);
     for (const auto& c : m_captures)
         if (!c->complete.load(std::memory_order_acquire))
             captures.push_back(c);
+    // A captured record completes with its graph's lifetime. Ordinary records are copied into stream order while
+    // locked, so a subsequent record cannot change the retirement dependency.
+    if (m_recorded && !m_record_capture)
+        check(cudaStreamWaitEvent(stream, m_event, 0), "cudaStreamWaitEvent (last use snapshot)");
 }
 
 bool LastUse::recorded() const noexcept
