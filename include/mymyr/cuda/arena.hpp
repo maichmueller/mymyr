@@ -62,9 +62,10 @@ public:
 
     /// Makes room for `more` records past device_size() (a new generation when full; capacity at least doubles, but
     /// stays at or below `most` records when that holds device_size() + more). The new generation is allocated while
-    /// the old one is still held. The mirror grows with it to at least twice its own capacity, so that it is
-    /// reallocated a logarithmic number of times however small the device steps are. Throws std::length_error, leaving the arena unchanged, when the records or their
-    /// bytes exceed 2^64 - 1 (and the context's error, leaving it unchanged, when the allocation fails).
+    /// the old one is still held. A full mirror grows to at least twice its own capacity, so that it is reallocated a
+    /// logarithmic number of times however small the device steps are. Throws std::length_error, leaving the arena
+    /// unchanged, when the records or their bytes exceed 2^64 - 1 (and the context's error, leaving it unchanged, when
+    /// an allocation fails).
     void reserve(u64 more, u64 most = ~u64{0});
     /// The bytes reserve(more, most) allocates (0: the records fit).
     [[nodiscard]] u64 growth_bytes(u64 more, u64 most = ~u64{0}) const;
