@@ -835,9 +835,10 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
         return;
     }
     // the lists without conditional effects label their rows, launch_put writes the successors one thread each
-    // (a state with many successors does not bound the launch with its one thread's writes)
+    // (a state with many successors does not bound the launch with its one thread's writes); digests without stored
+    // rows are a few bytes per row, cheaper where the labeling thread builds the successor anyway
     lifted::SuccessorRows dout = out;
-    dout.deferred = labels.binding && (words || hashes || noops) && fixed.count + fc.count + deep.count + deep_fc.count ? 1 : 0;
+    dout.deferred = labels.binding && words && fixed.count + fc.count + deep.count + deep_fc.count ? 1 : 0;
     if (fixed.count)
         check(lifted::launch_write(m_view, m_parents, views, fixed, seg_offsets(), labels, dout, m_s), "launch_write");
     if (fixed_ce.count)

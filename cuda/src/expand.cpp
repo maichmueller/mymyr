@@ -488,7 +488,7 @@ struct DeviceExpander::Impl
             rows.words_needed = d + k_words_needed;
             // the successors after the labels, by launch_put_multi: the widest instance's long segments do not
             // bound the launch; the labels it reads are the caller's or scratch
-            const bool defer = map || rows.words || rows.hash || rows.noop;
+            const bool defer = map || rows.words;
             rows.deferred = defer ? 1 : 0;
             lifted::Labels lab;
             lab.binding = !map && out.binding ? reinterpret_cast<u32*>(out.binding) + base * L
@@ -708,7 +708,7 @@ struct DeviceExpander::Impl
         rows.noop = n ? out.noop : nullptr;
         rows.out_words = W;
         rows.words_needed = d + k_words_needed;
-        const bool defer = rows.words || rows.hash || rows.noop;
+        const bool defer = rows.words != nullptr;
         rows.deferred = defer ? 1 : 0;
         lifted::Labels lab = async_labels(out, d, L, sc);
         if (defer)
