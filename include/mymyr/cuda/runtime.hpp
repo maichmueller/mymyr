@@ -1,6 +1,6 @@
 #pragma once
 // The CUDA backend's runtime layer:
-//   - DeviceContext: a user-owned device context (no global state): the device ordinal, its own stream-ordered
+//   - DeviceContext: a user-owned device context: the device ordinal, its own stream-ordered
 //     memory pool (cudaMemPoolCreate, not the device's default pool), a compute stream and a copy stream. Everything
 //     that allocates device memory holds a shared_ptr to its context, so the pool outlives every buffer;
 //   - memory resources over the context (core/memory.hpp's MemoryResource: Device, Pinned, Managed);
