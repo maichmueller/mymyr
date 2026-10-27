@@ -34,7 +34,8 @@ For `iw(max_width=1)`, `iw_pass(width=1)` and `abstracted_iw(width=1)`,
 `incremental_first_applicability=True` processes a ground action only until its add features have been
 novelty-tested. Below the root, bindings are discovered from added positive preconditions and deleted negative
 preconditions. Numeric or derived applicability, witness pruning, noncanonical order and blocked states retain
-full enumeration with the same action filter. Incremental discovery requires queued layers and one thread.
+full enumeration with the same action filter. Incremental discovery supports every layer order with one thread,
+unbounded layers and all-tested novelty; caps and beams are unsupported.
 `precheck_add_effects=True` rejects a successor before constructing its state when all its add features are already
 marked, including with an observer. Abstracted IW checks abstracted features; plain IW checks atoms. The unobserved
 fast path uses the precheck automatically, falling back on conditional-effect tasks for abstracted IW.

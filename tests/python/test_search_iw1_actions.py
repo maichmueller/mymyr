@@ -166,11 +166,33 @@ def test_cost_effect_applicability(kind, effect, valid):
 
 def test_incremental_layer_restrictions():
     task = text_task('gripper__prob05')
-    for fn, width in [(search.iw, dict(max_width=1)), (search.abstracted_iw, dict(width=1))]:
-        for kw in [dict(layer_order='reverse'), dict(threads=0), dict(threads=2),
-                   dict(max_next_layer_states=3), dict(layer_order='in_order', beam_width=2)]:
-            with pytest.raises(ValueError, match='queued layers and one thread'):
+    for fn, width in [(search.iw, dict(max_width=1)), (search.iw_pass, dict(width=1)),
+                      (search.abstracted_iw, dict(width=1))]:
+        for kw in [dict(threads=0), dict(threads=2), dict(layer_order='in_order', max_next_layer_states=3),
+                   dict(layer_order='in_order', beam_width=2),
+                   dict(layer_order='in_order', beam_width=2, beam_novelty='survivors_only'),
+                   dict(layer_order='goal_count', beam_width=2, beam_novelty='relaxed_survivors_only')]:
+            with pytest.raises(ValueError, match='unbounded layers, all-tested novelty and one thread'):
                 fn(task, **width, incremental_first_applicability=True, **kw)
+
+
+@pytest.mark.parametrize('kind', ['pass', 'ladder', 'optimized', 'abstracted'])
+@pytest.mark.parametrize('order', ['in_order', 'reverse', 'randomized', 'goal_count'])
+@pytest.mark.parametrize('observed', [False, True])
+def test_incremental_ordered_layers(kind, order, observed):
+    task = text_task('gripper__prob05')
+    kw = dict(tree='transitions' if observed else 'nodes', goal=lambda s: False,
+              layer_order=order, seed=7, randomize_ties=order == 'goal_count', progress_interval=1)
+    baseline_obs = Capture(True) if observed else None
+    baseline = run(task, kind, observer=baseline_obs, **kw)
+    for precheck in (False, True):
+        obs = Capture(True) if observed else None
+        result = run(task, kind, observer=obs, incremental_first_applicability=True,
+                     precheck_add_effects=precheck, **kw)
+        assert result.status == baseline.status == search.Status.EXHAUSTED
+        assert node_key(result) == node_key(baseline)
+        if observed:
+            assert obs.passes == baseline_obs.passes
 
 
 @pytest.mark.parametrize('kind', ['pass', 'ladder', 'optimized', 'abstracted'])

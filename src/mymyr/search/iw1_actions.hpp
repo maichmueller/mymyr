@@ -34,9 +34,9 @@ inline void check_iw1_actions(const Task& task, bool incremental, bool precheck,
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects do not support conditional effects");
     if (landmarks || deferred)
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects require atom novelty without landmark novelty or transition ordering");
-    if (incremental && (layers.kind != LayerOrdering::Kind::Queue || layers.beam() ||
-                        layers.max_next_layer_states != ~u32{0} || threads != 1))
-        throw std::invalid_argument("incremental_first_applicability requires queued layers and one thread");
+    if (incremental && (layers.beam() || layers.max_next_layer_states != ~u32{0} ||
+                        layers.beam_novelty != LayerOrdering::BeamNovelty::AllTested || threads != 1))
+        throw std::invalid_argument("incremental_first_applicability requires unbounded layers, all-tested novelty and one thread (no caps or beams)");
 }
 
 /// Width-1 actions whose effects have not yet been novelty-tested. Once tested, every add feature is marked,
