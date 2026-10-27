@@ -38,6 +38,7 @@ class Rollout(NamedTuple):
     at_goal: Tensor  # bool [K, N]: the observed state after each step is a goal
     obs: Optional[tuple] = None  # the K steps' encoded observations
     final_obs: Optional[tuple] = None  # the K steps' encoded final observations (final=True)
+    revisited: Optional[Tensor] = None  # bool [K, N]: false when visit tracking is disabled
 
 
 class CapturedRollout:
@@ -119,7 +120,7 @@ class CapturedRollout:
                 torch.empty((K, n), dtype=torch.int32, device=dev),
                 torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
                 torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
-                torch.empty_like(b),
+                torch.empty_like(b), revisited=torch.zeros_like(b),
             )  # fmt: skip
             actions = None if policy is None else torch.empty((K, n), dtype=torch.int64, device=dev)
             for k in range(K):
@@ -127,11 +128,13 @@ class CapturedRollout:
                 if actions is not None:
                     a = actions[k]
                     a.copy_(policy(env).reshape(n))
-                step_obs, step_final = env._step_into(StepResult(*(x[k] for x in out[:14])), a, next_task_ids, final)
+                step_obs, step_final = env._step_into(
+                    StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
+                )
                 obs.append(step_obs)
                 final_obs.append(step_final)
             self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,
-                                   tuple(final_obs) if observer is not None and final else None)
+                                   tuple(final_obs) if observer is not None and final else None, out.revisited)
 
     @property
     def result(self) -> Rollout:
