@@ -200,6 +200,18 @@ def reference(task, seed=0):
     )
 
 
+def test_build_info_names_the_toolkit_and_the_device_code(ctx):
+    info = mymyr.build_info()
+    assert info.startswith(f"mymyr {mymyr.__version__} (")
+    cuda = info[info.index(", CUDA ") + 2 : -1]
+    toolkit, code = cuda.split(", ")
+    assert toolkit.split()[0] == "CUDA" and toolkit.split()[1][0].isdigit()
+    # the device runs SASS built for its architecture or PTX of an older one
+    cc = ctx.compute_capability
+    entries = code.split()
+    assert f"sm_{cc}" in entries or any(e.startswith("compute_") and int(e[8:].rstrip("af")) <= cc for e in entries)
+
+
 # ------------------------------------------------------------------------------------------------ upload and kernels
 
 

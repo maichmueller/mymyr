@@ -44,6 +44,7 @@ struct GroundingBudget
     u64 max_operators = 5'000'000;    // relaxed operators (one per ground action and effect instance, plus axioms)
     u64 max_bindings = 100'000'000;   // relaxed bindings enumerated by the exploration rounds
     double max_seconds = 60;          // wall time of the whole grounding
+    u64 max_ground_actions = ~u64{0};  // ground actions (the size of a landmark graph's achiever index); ~0: unbounded
 };
 
 struct GroundingStats

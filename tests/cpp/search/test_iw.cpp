@@ -6,6 +6,7 @@
 //   - SIW against a reference built on the oracle.
 
 #include "../support/suite.hpp"
+#include "../support/search_tree.hpp"
 #include "../support/text.hpp"
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/search/iw.hpp"
@@ -895,3 +896,100 @@ TEST(Siw, EqualsAReferenceOnTheOracle)
     }
 }
 }  // namespace
+
+TEST(IwSearchTree, MatchesObserverAcrossWidthsAndBudgets)
+{
+    const auto task = line_task();
+    for (u32 width : {0u, 1u, 2u})
+        for (u64 limit : {1u, 3u, 100u})
+        {
+            TreeObserver obs;
+            IwOptions o;
+            o.tree = TreeRecord::Transitions;
+            o.control.observer = &obs;
+            o.control.budget.max_states = limit;
+            const auto r = iw_pass(*task, width, o);
+            ASSERT_EQ(r.passes.size(), 1u);
+            ASSERT_EQ(obs.passes.size(), 1u);
+            expect_tree_events(*task, r.passes[0], obs.passes[0]);
+            o.tree = TreeRecord::Nodes;
+            o.control.observer = nullptr;
+            const auto nodes = iw_pass(*task, width, o);
+            ASSERT_TRUE(nodes.passes[0].tree);
+            const auto& a = *r.passes[0].tree;
+            const auto& b = *nodes.passes[0].tree;
+            EXPECT_EQ(a.parent, b.parent);
+            EXPECT_EQ(a.depth, b.depth);
+            EXPECT_EQ(a.schema, b.schema);
+            EXPECT_EQ(a.binding, b.binding);
+            EXPECT_EQ(a.node_flags, b.node_flags);
+            EXPECT_EQ(b.rows.size(), b.num_nodes() * (b.words + b.numeric_words));
+        }
+}
+
+TEST(IwSearchTree, SuccessorOrderingAndDuplicateEntriesKeepObserverIds)
+{
+    const auto task = Task::create(line_task_data("G 1\n2 1 4\n", 2));
+    TreeObserver obs;
+    IwOptions o;
+    o.tree = TreeRecord::Transitions;
+    o.control.observer = &obs;
+    o.successor_order = [](StateView, std::span<const Action> actions, std::vector<u32>& order)
+    {
+        for (usize i = actions.size(); i > 0; --i)
+            order.push_back(static_cast<u32>(i - 1));
+    };
+    const auto r = iw_pass(*task, 0, o);
+    ASSERT_EQ(r.passes.size(), 1u);
+    expect_tree_events(*task, r.passes[0], obs.passes[0]);
+    const auto& t = *r.passes[0].tree;
+    EXPECT_LT(t.num_nodes(), r.passes[0].generated_in_tree + 1);
+    ASSERT_GT(t.num_nodes(), 1u);
+    EXPECT_NE(t.node_flags[1] & static_cast<u8>(TreeNodeFlag::DuplicateEntry), 0);
+    EXPECT_EQ(t.t_schema[0], 1);
+}
+
+TEST(IwSearchTree, StaticallyFalseGoalRetainsTheRoot)
+{
+    const auto task = line_task("G 1\n0 1 0 4\n");
+    IwOptions o;
+    o.tree = TreeRecord::Transitions;
+    const auto r = iw_pass(*task, 1, o);
+    ASSERT_EQ(r.status, SearchStatus::Unsolvable);
+    ASSERT_EQ(r.passes.size(), 1u);
+    ASSERT_TRUE(r.passes[0].tree);
+    const auto& t = *r.passes[0].tree;
+    EXPECT_EQ(t.num_nodes(), 1u);
+    EXPECT_EQ(t.row_goal, std::vector<u8>{0});
+    EXPECT_EQ(t.offsets, (std::vector<i64>{0, 0}));
+}
+
+TEST(IwSearchTree, UntestedRowsUsePositiveNegativeAndStaticGoals)
+{
+    const auto task = line_task("G 3\n2 1 1\n0 1 0 1\n1 0 0\n");
+    IwOptions o;
+    o.tree = TreeRecord::Transitions;
+    o.control.budget.max_states = 2;
+    const auto r = iw_pass(*task, 1, o);
+    ASSERT_EQ(r.status, SearchStatus::OutOfStates);
+    ASSERT_TRUE(r.passes[0].tree);
+    const auto& t = *r.passes[0].tree;
+    EXPECT_EQ(t.row_goal, (std::vector<u8>{0, 1}));
+    EXPECT_NE(t.node_flags[1] & static_cast<u8>(TreeNodeFlag::Goal), 0);
+    EXPECT_EQ(t.node_flags[1] & static_cast<u8>(TreeNodeFlag::Expanded), 0);
+}
+
+TEST(IwSearchTree, EmptyStateHasZeroWordRows)
+{
+    const auto task = Task::create(formalism::TaskData{});
+    IwOptions o;
+    o.tree = TreeRecord::Transitions;
+    const auto r = iw_pass(*task, 1, o);
+    ASSERT_EQ(r.status, SearchStatus::Solved);
+    ASSERT_TRUE(r.passes[0].tree);
+    const auto& t = *r.passes[0].tree;
+    EXPECT_EQ(t.words, 0u);
+    EXPECT_TRUE(t.rows.empty());
+    EXPECT_EQ(t.num_nodes(), 1u);
+    EXPECT_EQ(t.row_goal, std::vector<u8>{1});
+}

@@ -4,6 +4,7 @@
 #include "iw_detail.hpp"
 #include "beam_detail.hpp"
 #include "layer_order_detail.hpp"
+#include "tree_sink.hpp"
 
 #include "mymyr/search/goal.hpp"
 #include "mymyr/task/task.hpp"
@@ -153,16 +154,17 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
             layers = std::make_unique<LayerOrderer>(t, o.layers);
     }
     const u32 T = resolve_threads(o.threads);
-    const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order);
+    const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
     if (!error.empty())
         return;
     if (T > 1 && !o.layers.beam())
         error = "IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)";
     else if (layers && layers->relaxed() && slow)
-        error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a "
-                "successor order";
-    else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()))
-        team = std::make_unique<BeamTeam>(t, T);
+        error = "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+                "successor order or a transition tree (tree='transitions')";
+    else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
+             (o.tree == TreeRecord::None || layers->relaxed()))
+        team = std::make_unique<BeamTeam>(t, o.tree == TreeRecord::None ? T : 1);
 }
 
 Context::~Context() = default;
@@ -175,6 +177,29 @@ void add_pass(SearchStatistics& total, const IwPassStatistics& p)
     total.states += s.states;
     total.pruned += s.pruned;
     total.seconds += s.seconds;
+}
+
+void normalize_trees(std::span<IwPassStatistics> passes, u32 words)
+{
+    for (auto& p : passes)
+        if (p.tree && p.tree->words < words)
+        {
+            auto t = std::make_shared<SearchTree>(*p.tree);
+            const usize R = usize{words} + t->numeric_words;
+            std::vector<u64> rows(t->row_goal.size() * R, 0);
+            for (usize i = 0; i < t->row_goal.size(); ++i)
+            {
+                const u64* src = t->rows.empty() ? nullptr : t->rows.data() + i * (t->words + t->numeric_words);
+                u64* dst = rows.data() + i * R;
+                if (t->words)
+                    std::copy_n(src, t->words, dst);
+                if (t->numeric_words)
+                    std::copy_n(src + t->words, t->numeric_words, dst + words);
+            }
+            t->rows = std::move(rows);
+            t->words = words;
+            p.tree = std::move(t);
+        }
 }
 
 namespace
@@ -217,9 +242,9 @@ public:
         MYMYR_NOVECTOR
         for (u32 i = 0; i < m_NN; ++i)
             dst[m_W + i] = num[i];
-        m_parent.push_back(parent);
-        m_schema.push_back(schema);
-        m_depth.push_back(depth);
+        m_parent.push_back(static_cast<i32>(parent));
+        m_schema.push_back(static_cast<i32>(schema));
+        m_depth.push_back(static_cast<i32>(depth));
         m_skip.push_back(skip ? 1 : 0);
         m_boff.push_back(m_binding.size());
         if (arity)
@@ -229,7 +254,7 @@ public:
     [[nodiscard]] std::vector<Action> plan(u32 id, const Successors& succ) const
     {
         std::vector<Action> out;
-        for (u32 v = id; m_parent[v] != k_none; v = m_parent[v])
+        for (u32 v = id; m_parent[v] != -1; v = m_parent[v])
         {
             const u32 s = m_schema[v];
             const ObjectId* b = m_binding.data() + m_boff[v];
@@ -243,6 +268,11 @@ public:
     {
         return m_words.capacity() * 8 + (m_parent.capacity() + m_schema.capacity() + m_depth.capacity()) * 4 + m_skip.capacity() +
                m_boff.capacity() * 8 + m_binding.capacity() * sizeof(ObjectId);
+    }
+
+    void release(TreeSink& sink)
+    {
+        sink.nodes(std::move(m_words), m_W, std::move(m_parent), std::move(m_depth), std::move(m_schema), m_boff, m_binding);
     }
 
 private:
@@ -265,7 +295,7 @@ private:
     u32 m_W;
     u32 m_NN = 0;
     std::vector<u64> m_words;
-    std::vector<u32> m_parent, m_schema, m_depth;
+    std::vector<i32> m_parent, m_schema, m_depth;
     std::vector<u8> m_skip;
     std::vector<u64> m_boff;
     std::vector<ObjectId> m_binding;
@@ -327,6 +357,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
     const bool root_only = o.width_zero == WidthZero::RootOnly;
 
+    std::optional<TreeSink> sink;
+    if (o.tree != TreeRecord::None)
+        sink.emplace(o.tree, task, k);
     const u32 NN = task.numeric_words();
     Tree tree(std::max(task.words(), root.nw), NN);
     tree.push(root.w, bits::trimmed_size(root.w, root.nw), root.num, k_none, k_none, nullptr, 0, 0, false);
@@ -683,6 +716,8 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             }
             is_goal = goal.test(succ, cv, prepared);
         }
+        if (sink)
+            sink->goal(e, is_goal);
         if (is_goal)
         {
             finish(SearchStatus::Solved);
@@ -699,8 +734,12 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         if (!x.expanded)
         {
             ++st.skipped;
+            if (sink)
+                sink->flag(e, TreeNodeFlag::Skipped);
             return true;
         }
+        if (sink)
+            sink->flag(e, TreeNodeFlag::Expanded);
         expanded = true;
         return true;
     };
@@ -834,6 +873,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             {
                 if (next_layer.empty())
                     break;
+                const std::vector<u32> candidates = sink ? next_layer : std::vector<u32>{};
                 if (preselected)
                     preselected = false;
                 else if (team && lo->scored())
@@ -856,9 +896,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 if (survivors && k >= 1)
                 {
                     replay();
-                    if (next_layer.empty())
-                        break;
                 }
+                if (sink)
+                    sink->selected(candidates, next_layer);
+                if (next_layer.empty())
+                    break;
                 layer.swap(next_layer);
                 next_layer.clear();
                 lpos = 0;
@@ -906,7 +948,10 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             succ.prepare(cv);
             prepared = true;
         }
-        if (goal.test(succ, cv, prepared))
+        const bool is_goal = goal.test(succ, cv, prepared);
+        if (sink)
+            sink->goal(id, is_goal);
+        if (is_goal)
         {
             finish(SearchStatus::Solved);
             out.plan = tree.plan(id, succ);
@@ -936,12 +981,29 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         if (tree.skip(id) || depth >= budget.max_depth)
         {
             ++st.skipped;
+            if (sink)
+                sink->flag(id, TreeNodeFlag::Skipped);
             continue;
         }
         if (!prepared)
             succ.prepare(cv);
+        if (sink)
+            sink->flag(id, TreeNodeFlag::Expanded);
         const u32 cdepth = depth + 1;
 
+        auto report = [&](u32 s, const ObjectId* b, StateView child, u32 nid, TransitionOutcome outcome, bool admitted)
+        {
+            if (sink)
+                sink->transition(id, s, b, succ.arity(s), child, nid, outcome);
+            if (obs)
+            {
+                const Action a = action_of(s, b);
+                obs->on_generate(id, a, nid == k_none ? ~u64{0} : nid, child, admitted);
+                if (!admitted)
+                    obs->on_prune(id, a, child);
+                obs->on_transition(id, a, nid == k_none ? ~u64{0} : nid, child, outcome);
+            }
+        };
         if (id == 0 && (k == 0 || ps.root_continuation))
         {
             // the root of a width-0 pass or of an optimized IW(1) pass
@@ -951,49 +1013,46 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     ++st.generated;
                     const u32 nn = apply_delta(cur.data(), n, d, next);
                     const StateView child{next.data(), nn, d.num, NN};
-                    auto reject = [&]()
+                    auto reject = [&](TransitionOutcome outcome)
                     {
                         if constexpr (Slow)
-                            if (obs)
-                            {
-                                const Action a = action_of(s, b);
-                                obs->on_generate(id, a, ~u64{0}, child, false);
-                                obs->on_prune(id, a, child);
-                            }
+                            report(s, b, child, k_none, outcome, false);
                         return true;
                     };
                     if constexpr (Slow)
                         if (!c.blocked.empty() && c.blocked.contains(child))
                         {
                             ++st.blocked;
-                            return reject();
+                            return reject(TransitionOutcome::Blocked);
                         }
                     if (child == cv)
-                        return reject();  // self loop
+                        return reject(TransitionOutcome::SelfLoop);
                     const u32 dup = seen.find(tree, child);
                     if (k == 0)
                     {
                         if (dup != k_none && survivors)
-                            return reject();  // the arity-zero beam selection: not new
+                            return reject(TransitionOutcome::Duplicate);  // the arity-zero beam selection: not new
                         if (dup != k_none)
                         {
                             // it is admitted again (counted in the tree) but popped as closed: no second node
                             ++st.generated_in_tree;
+                            if (sink)
+                                sink->flag(dup, TreeNodeFlag::DuplicateEntry);
                             if constexpr (Slow)
-                                if (obs)
-                                    obs->on_generate(id, action_of(s, b), dup, child, true);
+                                report(s, b, child, dup, TransitionOutcome::Duplicate, true);
                             return !lo || enter(dup);
                         }
                         const u32 nid = tree.size();
                         seen.insert(child, nid);
                         if constexpr (Slow)
-                            if (obs)
-                                obs->on_generate(id, action_of(s, b), nid, child, true);
+                            report(s, b, child, tree.size() < budget.max_states ? nid : k_none,
+                                   tree.size() < budget.max_states ? TransitionOutcome::Opened : TransitionOutcome::Pruned,
+                                   tree.size() < budget.max_states);
                         return admit(next.data(), nn, d.num, id, s, b, cdepth, root_only);
                     }
                     // optimized IW(1): every new root successor enters; the non-novel ones are not expanded
                     if (dup != k_none)
-                        return reject();
+                        return reject(TransitionOutcome::Duplicate);
                     compute_add(d, n);
                     bool novel = false;
                     if (!add.empty())
@@ -1005,8 +1064,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     const u32 nid = tree.size();
                     seen.insert(child, nid);
                     if constexpr (Slow)
-                        if (obs)
-                            obs->on_generate(id, action_of(s, b), nid, child, true);
+                        report(s, b, child, tree.size() < budget.max_states ? nid : k_none,
+                               tree.size() < budget.max_states ? TransitionOutcome::Opened : TransitionOutcome::Pruned,
+                               tree.size() < budget.max_states);
                     return admit(next.data(), nn, d.num, id, s, b, cdepth, !novel);
                 });
         }
@@ -1021,14 +1081,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     {
                         const u32 nn = apply_delta(cur.data(), n, d, next);
                         const StateView child{next.data(), nn, d.num, NN};
+                        TransitionOutcome outcome = child == cv ? TransitionOutcome::SelfLoop : TransitionOutcome::Pruned;
                         if (!c.blocked.empty() && c.blocked.contains(child))
-                            ++st.blocked;
-                        if (obs)
                         {
-                            const Action a = action_of(s, b);
-                            obs->on_generate(id, a, ~u64{0}, child, false);
-                            obs->on_prune(id, a, child);
+                            ++st.blocked;
+                            outcome = TransitionOutcome::Blocked;
                         }
+                        report(s, b, child, k_none, outcome, false);
                     }
                     return true;
                 });
@@ -1075,9 +1134,18 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         const u32 nn = apply_delta(cur.data(), n, d, next);
                         const StateView child{next.data(), nn, d.num, NN};
                         bool admitted = false;
+                        TransitionOutcome outcome = TransitionOutcome::Pruned;
                         if (!c.blocked.empty() && c.blocked.contains(child))
+                        {
                             ++st.blocked;  // checked first: a blocked state marks no tuple
-                        else if (!add.empty())
+                            outcome = TransitionOutcome::Blocked;
+                        }
+                        else if (add.empty())
+                        {
+                            if (child == cv)
+                                outcome = TransitionOutcome::SelfLoop;  // a self loop adds no atom
+                        }
+                        else
                         {
                             reserve_for_add();
                             admitted = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
@@ -1087,20 +1155,18 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                                 admitted = seen.find(tree, child) == k_none;
                                 if (admitted)
                                     seen.insert(child, tree.size());
+                                else
+                                    outcome = TransitionOutcome::Duplicate;  // a candidate before
                             }
                         }
                         if (!admitted)
                         {
-                            if (obs)
-                            {
-                                const Action a = action_of(s, b);
-                                obs->on_generate(id, a, ~u64{0}, child, false);
-                                obs->on_prune(id, a, child);
-                            }
+                            report(s, b, child, k_none, outcome, false);
                             return true;
                         }
-                        if (obs)
-                            obs->on_generate(id, action_of(s, b), tree.size(), child, true);
+                        report(s, b, child, tree.size() < budget.max_states ? tree.size() : k_none,
+                               tree.size() < budget.max_states ? TransitionOutcome::Opened : TransitionOutcome::Pruned,
+                               tree.size() < budget.max_states);
                         return admit(next.data(), nn, d.num, id, s, b, cdepth, false);
                     }
                 });
@@ -1114,9 +1180,17 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         st.status = SearchStatus::Exhausted;
     if (beam)
         st.generated_in_tree -= next_layer.size();  // candidates of a next layer that was never selected
-    st.seconds = seconds_since(t0);
     out.table_bytes = table ? table->bytes() : 0;
     out.node_bytes = tree.bytes();
+    if (sink)
+    {
+        if (beam)
+            sink->selected(next_layer, {});
+        tree.release(*sink);
+        st.tree = sink->finish(succ, goal);
+        out.node_bytes = std::max(out.node_bytes, tree_bytes(*st.tree));
+    }
+    st.seconds = seconds_since(t0);
 }
 }  // namespace
 
@@ -1159,11 +1233,12 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
         IwPassStatistics p;
         p.width = first;
         p.status = SearchStatus::Unsolvable;
+        p.tree = record_root(o.tree, c.task, root, first, c.succ, goal);
         push(p);
         r.status = SearchStatus::Unsolvable;
         return r;
     }
-    const bool slow = c.observer != nullptr || !c.blocked.empty() || static_cast<bool>(o.successor_order);
+    const bool slow = c.observer != nullptr || !c.blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
     for (u32 k = first; k <= top; ++k)
     {
         if (c.out_of_time())
@@ -1235,6 +1310,7 @@ IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
         const detail::PlanCost pc(task);
         r.cost = pc.apply(succ, root, r.plan);
     }
+    detail::normalize_trees(r.passes, task.words());
     r.fluent_slots = task.atoms().fluent_slots();
     if (c.observer)
     {

@@ -402,12 +402,14 @@ def layered_kwargs(case, options, **kwargs):
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
-def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index, options, n):
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
+def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index, options, n, policy):
     dev = gpu()
     for case in cases.values():
         if n is not None:
             case = sliced(case, n)
-        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **options)
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index,
+            **({"repeated_literals": policy} if policy is not None else {}), **options)
         kwargs = layered_kwargs(case, options)
         host = host_encode(encoder, case, **kwargs)
         batch = device_encode(encoder, case, dev, **kwargs)
@@ -426,14 +428,16 @@ def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index,
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_layers_and_history_with_row_goals_equal_host(cases, layout):
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
+def test_subgoal_layers_and_history_with_row_goals_equal_host(cases, layout, policy):
     dev = gpu()
     options = LAYERED_OPTION_SETS["levels_history_virtual"]
     for name in ("gripper", "blocks_table", "philosophers_table"):
         if name not in cases:
             continue
         case = cases[name]
-        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout,
+            **({"repeated_literals": policy} if policy is not None else {}), **options)
         goals = fluent_goals(case)
         kwargs = layered_kwargs(case, options)
         same_batch(host_encode(encoder, case, goals, **kwargs), device_encode(encoder, case, dev, goals, **kwargs))

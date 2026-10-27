@@ -6,6 +6,38 @@
 
 namespace mymyr::cuda
 {
+/// Contiguous device arrays of N atoms: table domain predicate ids and instance-local objects, padded with -1.
+struct DeviceLiteralInput
+{
+    u64 count = 0;
+    u32 width = 0;
+    const i32* predicates = nullptr;
+    const i32* objects = nullptr;
+    const i32* task_ids = nullptr;
+};
+
+/// Each literal's sign, row and optional layer; task_ids in DeviceLiteralInput is per row for mask building.
+struct DeviceLiteralPlacement
+{
+    const u8* positive = nullptr;
+    const i32* rows = nullptr;
+    const i32* layers = nullptr;
+    u32 num_rows = 0, num_layers = 1;
+};
+
+/// Zero-initialized device destinations. Masks are [rows, layers, words], unsatisfiable is u32 [rows, layers].
+/// Status is one u64: bit 2 (value 4) reports an invalid literal, task id, row or layer; invalid entries are skipped.
+struct DeviceLiteralMasks
+{
+    u64* pos = nullptr;
+    u64* neg = nullptr;
+    u64* derived_pos = nullptr;
+    u64* derived_neg = nullptr;
+    u32* unsatisfiable = nullptr;
+    u64* status = nullptr;
+    u32 words = 0, derived_words = 0;
+};
+
 /// Which arrays a batch stores (see encoding/encoder.hpp). entity_role and entity_ref come together, as do the three
 /// target arrays.
 struct OutputArrays

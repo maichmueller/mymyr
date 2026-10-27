@@ -296,6 +296,12 @@ public:
                     m_reason = "more than " + std::to_string(m_budget.max_operators) + " relaxed operators";
                     return false;
                 }
+                if (m_out.m_ga_schema.size() > m_budget.max_ground_actions)
+                {
+                    stop = true;
+                    m_reason = "more than " + std::to_string(m_budget.max_ground_actions) + " ground actions";
+                    return false;
+                }
                 return true;
             },
             false, false);

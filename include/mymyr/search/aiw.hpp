@@ -43,6 +43,7 @@ struct AbstractedIwOptions
     LandmarkNovelty landmarks;
     bool preserve_landmark_atoms = true;  // with a graph: landmark atoms keep their full identity
     LayerOrdering layers;
+    TreeRecord tree = TreeRecord::None;
     u32 threads = 1;  // as IwOptions::threads
     bool witness_pruning = false;
     bool canonical_order = true;

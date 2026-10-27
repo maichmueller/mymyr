@@ -1,6 +1,6 @@
 """BatchedEnv: N planning environments whose state lives in torch tensors, stepped through the custom ops."""
 
-from typing import Any, Callable, NamedTuple, Optional, Union
+from typing import Any, Callable, Literal, NamedTuple, Optional, Union
 
 import torch
 from torch import Tensor
@@ -44,11 +44,11 @@ class StepResult(NamedTuple):
     terminated: Tensor  # bool: goal reached, or a dead end (dead_end_terminal)
     truncated: Tensor  # bool: max_steps reached (not terminated)
     goal: Tensor  # bool: the reached state is a goal
-    invalid: Tensor  # bool: the given action was outside [0, count)
+    invalid: Tensor  # bool: an out-of-range index or inapplicable label in a nonterminal, non-stuck row
     schema: Tensor  # int32: the label of the step's action (-1: no move)
     binding: Tensor  # [N, label_width] int32 objects of the row's instance (-1 padding)
     final_states: Tensor  # [N, row_words] int64 with final=True (the reached states before the autoreset), else [0, *]
-    count: Tensor  # int32: successors of the state after the step (a copy)
+    count: Tensor  # int32: successors of the state after the step (Label: 0/1; a copy)
     states: Tensor
     task_ids: Tensor
     goal_pos: Tensor
@@ -56,6 +56,7 @@ class StepResult(NamedTuple):
     at_goal: Tensor  # bool: the next observation's state is a goal (an autoreset into a solved initial state)
     obs: Any = None  # the encoding of the next observation
     final_obs: Any = None  # the encoding of the reached states before the autoreset (final=True)
+    revisited: Optional[Tensor] = None  # bool [N]: reached state was visited before this step
 
 
 def _mark_static(t: Tensor) -> None:
@@ -125,6 +126,20 @@ class BatchedEnv:
     ``reset(mask)``. ``step(action=None)`` is the random policy: a uniform successor from the counter-based RNG (seed,
     env id ``first_env + i``, draw counter), the same on the CPU and on any device and batch split.
 
+    ``actions="label"`` runs on the CPU and takes ``step((schema, binding))`` with int32 tensors [N] and [N, L],
+    where L is at least the largest schema arity. It validates and applies the label directly, without enumerating
+    successors. ``count`` is then 0/1 (whether an applicable action exists); ``step(None)`` and ``random_actions``
+    are unavailable. Inapplicable labels do not move and set ``invalid`` in a nonterminal state with applicable
+    actions. Padding past a schema's arity is ignored. Labels use each row's domain's schemas and instance's objects.
+
+    ``track_visited=H`` keeps CPU hash tables ``visited`` int64 [N, H], ``visited_count`` int32 [N], and
+    ``visited_status`` int32 [1] (sticky bit 0: overflow). H is a power of two in [2, 2^20]; True selects the next
+    power of two at least 2 * (max_steps + 1), requiring bounded episodes. Reset inserts the initial state;
+    step reports ``revisited`` before inserting the reached state and before any autoreset clears its table.
+    Equal state hashes share one entry. Above 3/4 occupancy new keys are skipped, so membership can miss revisits.
+    ``clear_visited(mask)`` clears selected histories and inserts their current states; refresh keeps histories.
+    The table and counts are borrowed read-only views; status can be acknowledged with ``visited_status.zero_()``.
+
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over a
     suite of several domains: one encoder per domain, in the suite's order). Every step then encodes the next
     observation (``StepResult.obs``) and, with ``final=True``, the reached states before the autoreset
@@ -174,8 +189,18 @@ class BatchedEnv:
         observation: Any = None,
         obs_capacities: Any = None,
         obs_actions: bool = False,
+        actions: Literal["index", "label"] = "index",
+        track_visited: bool | int = False,
     ) -> None:
         self.device = torch.device(device)
+        if actions not in ("index", "label"):
+            raise ValueError("mymyr: actions must be 'index' or 'label'")
+        if actions == "label" and self.device.type != "cpu":
+            raise ValueError("mymyr: label actions run on the CPU; use device='cpu'")
+        self.visited_capacity = _rl._visited_capacity(track_visited, max_steps)
+        if self.visited_capacity and self.device.type != "cpu":
+            raise ValueError("mymyr: visited tracking requires device='cpu'")
+        self.actions = actions
         index = _device_index(self.device)
         if index is not None:
             self.device = torch.device("cuda", index)
@@ -183,7 +208,7 @@ class BatchedEnv:
             table, device=index, ctx=ctx, seed=seed, max_steps=max_steps, step_reward=step_reward,
             goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
             dead_end_terminal=dead_end_terminal, autoreset=autoreset, witness_pruning=witness_pruning, path=path,
-            threads=threads,
+            threads=threads, actions=actions,
         )  # fmt: skip
         self.handle = _ops.register(self.core)
         self.num_envs = int(num_envs)
@@ -198,6 +223,10 @@ class BatchedEnv:
         self._sampling_seed = torch.tensor([int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=d)
         self._sampling_env_ids = torch.arange(self.first_env, self.first_env + n, dtype=torch.int64, device=d)
         self._sampling_arrays = None if self.sampler is None else self.sampler._arrays(self.task_ids)
+        H = self.visited_capacity
+        self.visited = torch.zeros((n, H), dtype=torch.int64, device=d) if H else None
+        self.visited_count = torch.zeros(n, dtype=torch.int32, device=d) if H else None
+        self.visited_status = torch.zeros(1, dtype=torch.int32, device=d) if H else None
         self.steps = torch.zeros(n, dtype=torch.int32, device=d)
         self.draws = torch.zeros(n, dtype=torch.int64, device=d)
         self.counts = torch.zeros((n, self.core.cache_schemas), dtype=torch.int32, device=d)
@@ -321,7 +350,9 @@ class BatchedEnv:
     def _tensors(self) -> list[Tensor]:
         t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count, self.at_goal,
              self._reset_counts, self._sampling_seed, self._sampling_env_ids]
-        return t + ([self.goal_pos, self.goal_neg] if self.goals else [])
+        return t + ([self.goal_pos, self.goal_neg] if self.goals else []) + (
+            [self.visited, self.visited_count, self.visited_status] if self.visited_capacity else []
+        )
 
     def _sample_task_ids(self) -> Tensor:
         return self.sampler.sample(
@@ -361,7 +392,7 @@ class BatchedEnv:
             self.goal_neg.copy_(_where(mask, goal_neg.to(self.goal_neg), self.goal_neg))
         args = (
             self.handle, self.states, self._ids(), self.steps, self.counts, self.views, self.goal_pos, self.goal_neg,
-            self.count, self.at_goal, mask, keep,
+            self.count, self.at_goal, mask, keep, self.visited, self.visited_count, self.visited_status,
         )  # fmt: skip
         if torch.compiler.is_compiling():
             torch.ops.mymyr.reset(*args)
@@ -369,6 +400,19 @@ class BatchedEnv:
             _ops.reset_impl(*args)  # eager: without the dispatcher's round trip
         self._advance_resets(mask)
         return self.count
+
+    def clear_visited(self, mask: Optional[Tensor] = None) -> None:
+        """Clear all tables, or rows selected by bool mask [N], and insert their current states.
+
+        Use after writing states directly; refresh() only updates the action and goal caches. Overflow status is
+        sticky across resets and clears; visited_status.zero_() explicitly acknowledges it.
+        """
+        if not self.visited_capacity:
+            return
+        if mask is not None:
+            mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
+        _ops.clear_visited(self.handle, self.states, self._ids(), self.visited, self.visited_count,
+                           self.visited_status, mask)
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
@@ -384,11 +428,12 @@ class BatchedEnv:
         return self.count
 
     def step(
-        self, action: Optional[Tensor] = None, *, next_task_ids: Optional[Tensor] = None, final: bool = True,
+        self, action: Tensor | tuple[Tensor, Tensor] | None = None, *, next_task_ids: Optional[Tensor] = None, final: bool = True,
         copy: bool = True,
     ) -> StepResult:
         """One step of every environment; ``action`` [N] int64 indexes the canonical successor order (None: the
-        random policy); ``next_task_ids`` [N] overrides sampling for autoresetting environments (None: sample,
+        random policy). With ``actions="label"``, action is a tuple (int32 [N] schema, int32 [N, L] binding),
+        checked and applied directly; None is refused and count is 0/1. ``next_task_ids`` [N] overrides sampling for autoresetting environments (None: sample,
         or keep their instances with sampler=None). ``final=True`` retains the reached state before reset;
         ``copy=True`` owns the next observation. ``copy=False`` explicitly borrows live observation buffers."""
         args = self._step_args(action, next_task_ids, final)
@@ -403,10 +448,24 @@ class BatchedEnv:
         final_obs = self._final_obs(before, r[7], observation.encoding, final)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
                           observation.goal_pos, observation.goal_neg, observation.at_goal, observation.encoding,
-                          final_obs)
+                          final_obs, args[-1])
 
-    def _step_args(self, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool) -> tuple:
-        if action is not None:
+    def _step_args(self, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool,
+                   revisited: Optional[Tensor] = None) -> tuple:
+        if revisited is None:
+            revisited = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        schema, binding = None, None
+        if self.actions == "label":
+            if not isinstance(action, tuple) or len(action) != 2:
+                raise ValueError("mymyr: label mode requires action=(schema, binding); the random policy is unavailable")
+            schema, binding = action
+            if not isinstance(schema, Tensor) or not isinstance(binding, Tensor):
+                raise ValueError("mymyr: label actions require schema and binding tensors")
+            schema, binding = schema.contiguous(), binding.contiguous()
+            action = None
+        elif isinstance(action, tuple):
+            raise ValueError("mymyr: label actions require actions='label'")
+        elif action is not None:
             action = action.reshape(self.num_envs).to(device=self.device, dtype=torch.int64).contiguous()
         sampled = next_task_ids is None and self.sampler is not None and self._autoreset
         if sampled:
@@ -418,16 +477,17 @@ class BatchedEnv:
                 next_task_ids = None  # a table of one: every instance is 0
         return (
             self.handle, self.states, self._ids(), self.steps, self.draws, self.counts, self.views, self.count,
-            self.at_goal, self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final,
+            self.at_goal, self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final, schema, binding,
+            self.visited, self.visited_count, self.visited_status, revisited,
         )  # fmt: skip
 
     def _step_into(
-        self, out: StepResult, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool
+        self, out: StepResult, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool
     ) -> tuple[Any, Any]:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
         outputs); returns the step's ``obs`` and ``final_obs``."""
         before = self._before_step(final)
-        _ops.step_impl(*self._step_args(action, next_task_ids, final), out=tuple(out)[:8])
+        _ops.step_impl(*self._step_args(action, next_task_ids, final, out.revisited), out=tuple(out)[:8])
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
         out.count.copy_(self.count)
@@ -446,6 +506,8 @@ class BatchedEnv:
         successors (None: no limit); 0 where there is none. ``step(random_actions())`` equals ``step(None)`` when no
         count exceeds max_actions. No host synchronization; the custom op ``mymyr::random_actions`` under
         torch.compile."""
+        if self.actions == "label":
+            raise ValueError("mymyr: label mode has no random policy")
         if max_actions is not None and int(max_actions) < 1:
             raise ValueError("mymyr: max_actions must be None or positive")
         args = (self.handle, self.draws, self.count, self.first_env, None if max_actions is None else int(max_actions))

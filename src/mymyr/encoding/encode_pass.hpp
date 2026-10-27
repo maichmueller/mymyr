@@ -54,6 +54,7 @@ struct alignas(k_cache_line) Member
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
     std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
+    std::vector<u64> mapped_state;     // one destination-width atom row, reused for count and fill
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice

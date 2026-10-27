@@ -34,8 +34,9 @@ class Observer:
     - ``on_prune`` for a successor that is not entered (not novel, blocked, a dead end), after its ``on_generate``;
     - ``on_pass``: after every IW(k) pass (iw, siw, the IW family variants: the width and the pass's statistics) and
       after every layer of ``brfs`` (its depth and the layer's statistics);
-    - ``on_transition``: every transition of an expanded state with a :class:`TransitionOutcome` (the IW family
-      variants, astar_iw).
+    - ``on_transition``: every transition of an expanded state with the most specific :class:`TransitionOutcome`
+      (``BLOCKED`` and ``SELF_LOOP`` before the other reasons; iw, iw_pass, siw, the IW family variants, astar_iw,
+      rollout_iw, find_rollouts_parallel, atomic_goal_portfolio).
 
     Threads. Every event runs with the thread state attached, on the thread that called the search, except in the
     parallel searches (``brfs`` with ``threads > 1``, ``find_rollouts_parallel``, ``atomic_goal_portfolio``): there
@@ -73,7 +74,8 @@ class Observer:
     def on_transition(
         self, parent: int, action: Action, child: int | None, state: State, outcome: TransitionOutcome
     ) -> None:
-        """What became of a successor (the IW family variants, astar_iw); ``child`` is None when it got no id."""
+        """What became of a successor (``iw``, ``iw_pass``, ``siw``, the IW family variants, ``astar_iw``,
+        ``rollout_iw``, ``find_rollouts_parallel``, ``atomic_goal_portfolio``); ``child`` is None when it got no id."""
 
     @_default_event
     def on_pass(self, width: int, stats: Statistics) -> None:

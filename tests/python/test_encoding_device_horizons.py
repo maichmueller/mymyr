@@ -284,3 +284,28 @@ def test_deep_torch_op_compiles_and_replays_with_cousins(layout, index):
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, output))
     finally:
         rt.unregister(handle)
+
+
+@pytest.mark.parametrize("policy", [None, "every", "lowest", "highest"])
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+@pytest.mark.parametrize("root", ["include", "exclude", "encode_only"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_subgoal_placement_matches_host(policy, mode, root, layout):
+    device = gpu()
+    task = text_task("blocks__probBLOCKS-8-0")
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    view = encoding.horizon(task, rows, depth=2)
+    pos, neg = rl.goal_masks(task, np.zeros(len(rows), np.int32))
+    layers = np.repeat(pos[:, None, :], 3, axis=1)
+    negative = np.repeat(neg[:, None, :], 3, axis=1)
+    layers[:, 0] |= rows
+    layers[:, 2] |= rows
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode=mode, root_policy=root, layout=layout,
+        max_goal_level=3, goal_derivations=("plain", "satisfied", "unsatisfied", *ADDED)
+        if mode == "delta" else ("plain", "satisfied", "unsatisfied"),
+        **({"repeated_literals": policy} if policy is not None else {}))
+    host = encoder.encode(view, subgoals=(layers, negative))
+    inputs = upload(view, device)
+    kwargs = dict(subgoals=(tensor(layers, device), tensor(negative, device)))
+    same(host, encoder.encode(inputs, **kwargs))
+    same(host, encoder.encode(inputs, capacities=caps(host), **kwargs))

@@ -1,0 +1,40 @@
+name: Restore a CUDA wheel build
+description: >-
+  Restore the CUDA wheel build and its toolchain that save-cuda-build handed on as the artifact <artifact>, at the
+  paths they had. The parts go to /mnt when it has the room, and each is removed as soon as it is extracted; the job
+  fails before the download if the runner lacks the room.
+
+inputs:
+  artifact:
+    description: Name of the artifact
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download the manifest
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact }}-manifest
+        path: ${{ runner.temp }}/cuda-build-manifest
+    - name: Choose where to receive the parts
+      id: room
+      shell: bash
+      run: |
+        state=$(bash ci/build_state.sh room "$RUNNER_TEMP/cuda-build-manifest/manifest" \
+          /mnt/cuda-build-state "$RUNNER_TEMP/cuda-build-state")
+        sudo mkdir -p "$state"
+        sudo chown "$(id -u):$(id -g)" "$state"
+        echo "state=$state" >> "$GITHUB_OUTPUT"
+    - name: Download the parts
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ steps.room.outputs.state }}
+    - name: Unpack the build tree and the toolchain
+      shell: bash
+      env:
+        STATE: ${{ steps.room.outputs.state }}
+      run: |
+        sudo bash ci/build_state.sh unpack "$STATE"
+        df -h / /mnt 2> /dev/null || true

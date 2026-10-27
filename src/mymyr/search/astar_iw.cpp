@@ -168,7 +168,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                 {
                     const Action a = c.action(schema, binding);
                     c.obs->on_prune(e.id, a, child);
-                    c.obs->on_transition(e.id, a, ~u64{0}, child, TransitionOutcome::Pruned);
+                    c.obs->on_transition(e.id, a, ~u64{0}, child, TransitionOutcome::Blocked);
                 }
                 return true;
             }
@@ -207,7 +207,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             }
             if (!(t.g < nodes.g[t.child]))
             {
-                outcome(TransitionOutcome::Duplicate);
+                outcome(t.child == e.id ? TransitionOutcome::SelfLoop : TransitionOutcome::Duplicate);
                 continue;
             }
             const bool was_closed = nodes.status(t.child) == Nodes::Closed;

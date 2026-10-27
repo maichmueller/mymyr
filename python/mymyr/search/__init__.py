@@ -114,8 +114,9 @@ run at once on one task (free-threaded CPython). Common keyword arguments:
 - ``observer``: a :class:`Observer` subclass that overrides the events it needs: ``on_start(state)``,
   ``on_expand(id, state)``, ``on_generate(parent, action, child, state, is_new)``, ``on_prune(parent, action, state)``,
   ``on_pass(width, stats)``, ``on_solution(plan, cost)``, ``on_progress(stats) -> bool`` (False stops the search),
-  ``on_end(status, stats)``, and for the IW family variants ``on_transition(parent, action, child, state, outcome)``
-  (a :class:`TransitionOutcome`). Events it does not override are never called. Any object with some of these
+  ``on_end(status, stats)``, and for iw, iw_pass, siw, the IW family variants, astar_iw, rollout_iw,
+  find_rollouts_parallel and atomic_goal_portfolio ``on_transition(parent, action, child, state, outcome)`` (the most
+  specific :class:`TransitionOutcome`). Events it does not override are never called. Any object with some of these
   methods works too:
 
     class Counter(mymyr.search.Observer):
@@ -170,6 +171,7 @@ from mymyr._core._search import (
     RolloutIwResult,
     RolloutIwStatistics,
     RolloutResult,
+    SearchTree,
     SiwResult,
     SiwSubproblem,
     Statistics,
@@ -240,6 +242,7 @@ __all__ = [
     "RolloutIwResult",
     "RolloutIwStatistics",
     "RolloutResult",
+    "SearchTree",
     "SiwResult",
     "SiwSubproblem",
     "Statistics",

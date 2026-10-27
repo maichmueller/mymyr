@@ -256,6 +256,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         env.root = nullptr;  // lifecycle events are replayed on the calling thread
         env.coord = nullptr;
         env.witness = o.iw.witness_pruning;
+        env.tree = o.iw.tree;
         env.canonical = o.iw.canonical_order;
         env.successor_order = &o.iw.successor_order;
         env.timed = timed;
@@ -327,6 +328,8 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         }
         root->on_end(solved ? SearchStatus::Solved : status, total);
     }
+    for (auto& rollout : out.rollouts)
+        detail::normalize_trees(rollout.search.passes, task.words());
     return out;
 }
 

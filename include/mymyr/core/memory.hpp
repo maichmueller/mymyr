@@ -6,6 +6,7 @@
 
 #include "mymyr/core/types.hpp"
 
+#include <iterator>
 #include <new>
 #include <vector>
 
@@ -68,6 +69,26 @@ private:
 /// A vector of per-thread hot scratch (see LineAllocator).
 template<class T>
 using LineVector = std::vector<T, LineAllocator<T>>;
+
+/// Hints that the whole huge pages inside [p, p + bytes) be backed by transparent huge pages, where the system offers
+/// them (Linux): filling fresh memory then takes a page fault per 2 MiB instead of per 4 KiB. Contents are unchanged;
+/// ranges shorter than a huge page and systems without the hint are left alone.
+void advise_huge_pages(void* p, usize bytes) noexcept;
+
+/// Makes room for at least `n` elements of `v`, growing its capacity at least twofold. A new buffer of at least a huge
+/// page is advised for huge pages (advise_huge_pages) before the elements move in, so neither the move nor the
+/// later appends fault per 4 KiB page. For vectors that grow to many megabytes while being filled.
+template<class T>
+void reserve_huge(std::vector<T>& v, usize n)
+{
+    if (n <= v.capacity())
+        return;
+    std::vector<T> fresh;
+    fresh.reserve(n > v.capacity() * 2 ? n : v.capacity() * 2);
+    advise_huge_pages(fresh.data(), fresh.capacity() * sizeof(T));
+    fresh.insert(fresh.end(), std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+    v.swap(fresh);
+}
 
 /// Process-wide unique, never reused 64-bit ids for tasks, stores and registries. This atomic counter is the only
 /// process-global state in mymyr: everything else is owned by the object that uses it, with no global repositories

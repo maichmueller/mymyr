@@ -10,9 +10,11 @@ encoder.stream() and encoder.mutable_stream() collect rows over time and encode 
 (FlatStream, FlatMutableStream); encoder.entity_names(batch, g) and encoder.describe(batch, g) name the entities and
 tuples of one graph. An encoder pickles as its table and options.
 
-The rows of an encoding can carry subgoal layers and a history (``encode(..., subgoals=..., history=...)``, also on the
-streams): arrays of masks over the atom slots, which ``subgoal_masks`` and ``history_masks`` build from lists of
-literals.
+The rows of an encoding can carry goals of their own, subgoal layers and a history (``encode(..., goals=...,
+subgoals=..., history=...)``, also on the streams): arrays of masks over the atom slots, which ``goal_masks``,
+``subgoal_masks`` and ``history_masks`` build from lists of literals and ``literal_masks`` from arrays of predicate and
+object ids. ``literal_slots`` resolves literals to their slots, or to a ``LiteralKind`` of fixed truth (static, or an
+atom without a slot) that the masks leave out or report as unsatisfiable (``fixed=``).
 
 FlatHorizonEncoder encodes horizons: a root state and the nodes below it, given as a HorizonView (node rows, offsets and
 edges; ``rl.expand`` rows have this form), into one graph each with the facts of the nodes, the goal's satisfaction at
@@ -65,7 +67,17 @@ from mymyr.encoding._actions import action_entities, action_indices, action_rows
 from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
 from mymyr.encoding._hgraph import DeviceHGraphView, hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
-from mymyr.encoding._literals import history_masks, subgoal_masks
+from mymyr.encoding._literals import (
+    GoalMasks,
+    LayerMasks,
+    LiteralKind,
+    goal_masks,
+    history_masks,
+    literal_masks,
+    literal_slots,
+    subgoal_masks,
+)
+from mymyr.encoding._metadata import entity_counts, entity_graph, entity_roles, object_entities, object_mask, tuple_counts
 from mymyr.encoding._names import GraphDescription
 from mymyr.encoding._record import schema_from_dict, schema_to_dict
 from mymyr.encoding._suite import SuiteBatch, SuiteEncoder
@@ -84,9 +96,12 @@ __all__ = [
     "FlatStream",
     "FlatTransitionEffectsEncoder",
     "FlatTransitionEncoder",
+    "GoalMasks",
     "GraphDescription",
     "HGraphView",
     "HorizonView",
+    "LayerMasks",
+    "LiteralKind",
     "SimpleEncoder",
     "SuiteBatch",
     "SuiteEncoder",
@@ -94,13 +109,22 @@ __all__ = [
     "action_indices",
     "action_rows",
     "collate",
+    "entity_counts",
+    "entity_graph",
+    "entity_roles",
+    "goal_masks",
     "hgraph",
     "history_masks",
     "horizon",
     "horizon_of_space",
+    "literal_masks",
+    "literal_slots",
+    "object_entities",
+    "object_mask",
     "schema_from_dict",
     "schema_to_dict",
     "subgoal_masks",
+    "tuple_counts",
 ]
 
 

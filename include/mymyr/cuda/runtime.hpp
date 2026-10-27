@@ -19,6 +19,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mymyr::cuda
@@ -38,6 +39,11 @@ void check(cudaError_t e, const char* what);
 
 /// Number of visible CUDA devices (0 without a driver or device; never throws).
 [[nodiscard]] int device_count() noexcept;
+
+/// The toolkit and the GPU code of this build: "CUDA <nvcc version>, <code>", the code as sm_<n> for SASS and
+/// compute_<n> for PTX, e.g. "CUDA 13.4.92, sm_89 sm_90". A GPU runs the build if the code holds SASS for its
+/// architecture or PTX the driver can compile for it.
+[[nodiscard]] std::string_view build_info() noexcept;
 
 /// Sets the calling thread's current device for a scope and restores the previous one (the runtime's current device
 /// is per-thread state; mymyr never leaves it changed).

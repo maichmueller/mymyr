@@ -41,9 +41,13 @@ import numpy as np
 
 from mymyr._core import _encoding_jax
 from mymyr.encoding import _device
+from mymyr.encoding._literals import GoalMasks, LayerMasks
 from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
+
+jax.tree_util.register_pytree_node_class(GoalMasks)
+jax.tree_util.register_pytree_node_class(LayerMasks)
 
 _ARRAYS = tuple(name for name in _device._ARRAYS
                 if name not in (*_device._SIMPLE_ARRAYS, "numeric_values", *_device._STATIC_ARRAYS))
@@ -170,24 +174,27 @@ class JaxFlatBatch:
     the variable-size arrays have the capacities' sizes and ``device_sizes`` holds the true sizes and flags; ``sizes``
     reads them on the host."""
 
-    __slots__ = ("_arrays", "_graphs", "_sizes", "_static")
+    __slots__ = ("_arrays", "_graphs", "_sizes", "_static", "_entity_capacity")
 
     # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, schema,
     # table fingerprint)
-    def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple, graphs: Optional[Any] = None):
+    def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple, graphs: Optional[Any] = None,
+                 *, entity_capacity: Optional[int] = None):
         self._arrays = arrays
         self._sizes = sizes
         self._static = static
         self._graphs = graphs
+        self._entity_capacity = entity_capacity
 
     def tree_flatten(self) -> tuple[tuple, tuple]:
         names = self._static[0]
-        return (*(self._arrays[n] for n in names), self._sizes, self._graphs), self._static
+        return (*(self._arrays[n] for n in names), self._sizes, self._graphs), (*self._static, self._entity_capacity)
 
     @classmethod
     def tree_unflatten(cls, static: tuple, children: tuple) -> "JaxFlatBatch":
         names = static[0]
-        return cls(dict(zip(names, children[:-2], strict=True)), children[-2], static, children[-1])
+        return cls(dict(zip(names, children[:-2], strict=True)), children[-2], static[:-1], children[-1],
+                   entity_capacity=static[-1])
 
     @property
     def nbytes_by_array(self) -> dict[str, int]:
@@ -393,7 +400,7 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     empty = jnp.zeros((0,), jnp.uint32)
     if goals is None:
         return empty, empty, empty, empty
-    if not isinstance(goals, (tuple, list)) or len(goals) not in (2, 4):
+    if isinstance(goals, str) or not hasattr(goals, "__len__") or len(goals) not in (2, 4):
         raise _error("goals are (goal_pos, goal_neg) or (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)")
     names = ("goal_pos", "goal_neg", "goal_derived_pos", "goal_derived_neg")
     masks = [_halves(g, names[k], True) for k, g in enumerate(goals)]
@@ -721,7 +728,7 @@ def encode(
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
         arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)
-        return JaxFlatBatch(arrays, sizes, static, live_count)
+        return JaxFlatBatch(arrays, sizes, static, live_count, entity_capacity=entities)
     if _traced(*operands):
         raise _error("capacities are required under jax.jit and other transformations (the arrays need static shapes): "
                      "pass capacities=dict(graphs=, entities=, args=, targets=, history=)")
@@ -729,7 +736,7 @@ def encode(
     cut = {"entity_role": "entities", "entity_ref": "entities", "relation_args": "args", "target_entity": "targets",
            "target_group": "targets", "history_entity": "history", "history_dt": "history"}  # fmt: skip
     arrays = {name: a[: sizes[cut[name]]] if name in cut else a for name, a in arrays.items()}
-    return JaxFlatBatch(arrays, None, static)
+    return JaxFlatBatch(arrays, None, static, entity_capacity=sizes["entities"])
 
 
 def _eager(handle: int, reg: _Registration, operands: tuple, graphs: int, threads: int) -> tuple[dict[str, Any], dict]:

@@ -4,6 +4,7 @@
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "typing.hpp"
 
 #include <nanobind/nanobind.h>
 
@@ -12,6 +13,27 @@
 
 namespace mymyr::python
 {
+/// Validates a visited-table capacity; True chooses room for every state of a bounded episode.
+inline u32 visited_capacity_arg(nanobind::handle value, u32 max_steps)
+{
+    namespace nb = nanobind;
+    if (nb::isinstance<nb::bool_>(value))
+    {
+        if (!nb::cast<bool>(value))
+            return 0;
+        if (!max_steps || max_steps > (1u << 19) - 1)
+            throw nb::value_error("mymyr: track_visited=True needs max_steps in [1, 524287]; pass an explicit capacity otherwise");
+        u32 H = 2;
+        while (H < 2 * (max_steps + 1))
+            H *= 2;
+        return H;
+    }
+    const u32 H = int_arg<u32>(value, "track_visited", 2, 1u << 20);
+    if (H & (H - 1))
+        throw nb::value_error("mymyr: track_visited must be a power of two in [2, 2^20]");
+    return H;
+}
+
 struct PyPool
 {
     explicit PyPool(u32 threads) : pool(std::make_unique<ThreadPool>(threads)) {}

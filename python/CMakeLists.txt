@@ -13,6 +13,7 @@ nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/formula_bindings.cpp
     src/ext_api.cpp
     src/arrays.cpp
+    src/translate_bindings.cpp
     src/task_bindings.cpp
     src/rl_bindings.cpp
     src/rl_torch_bindings.cpp

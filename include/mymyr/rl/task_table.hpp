@@ -112,7 +112,7 @@ public:
     /// The domain predicates: table predicate ids [0, num_domain_predicates()).
     [[nodiscard]] u32 num_domain_predicates() const noexcept { return m_domain_preds; }
 
-    /// A hash of the instances' fingerprints in table order (Task::fingerprint).
+    /// A hash of the instances' content and encoding fingerprints in table order.
     [[nodiscard]] u64 fingerprint() const;
 
     /// Throws std::invalid_argument unless every id of `task_ids` [n] names an instance (null: instance 0, valid).

@@ -1,6 +1,12 @@
 """mymyr.search.Observer: event counts, errors, threads, and the control of brfs (max_seconds, cancel)."""
 
+import gc
+import os
+from pathlib import Path
+import statistics
+import sys
 import threading
+import time
 
 import pytest
 
@@ -143,6 +149,98 @@ def test_brfs_threads_without_make_worker_run_on_one_thread(task):
     assert r.threads_used == 1 and o.threads == {threading.get_ident()}
     assert (o.expanded, o.generated) == (r.stats.expanded, r.stats.generated)
     assert r.status == Status.SOLVED and o.solutions[0][0] == r.plan
+
+
+def test_worker_callbacks_keep_thread_locals_and_saved_values():
+    class Saved(Observer):
+        def __init__(self):
+            self.local = threading.local()
+            self.starts = 0
+            self.generated = 0
+            self.saved = []
+
+        def on_expand(self, id, state):
+            self.parent = state
+
+        def on_generate(self, parent, action, child, state, is_new):
+            if not hasattr(self.local, "started"):
+                self.local.started = True
+                self.starts += 1
+            self.generated += 1
+            if len(self.saved) < 8:
+                self.saved.append((self.parent, action, state, tuple(state.words), str(action)))
+                if len(self.saved) == 1:
+                    gc.collect()
+
+    class Factory(Observer):
+        def __init__(self):
+            self.workers = []
+
+        def make_worker(self, k):
+            w = Saved()
+            self.workers.append(w)
+            return w
+
+    def collect():
+        task = text_task("blocks__probBLOCKS-8-0")
+        root = Factory()
+        result = search.find_rollouts_parallel(task, list(range(8)), threads=4, max_width=1,
+                                               max_states=500, observer=root)
+        assert result.threads_used == 4
+        assert sum(w.generated for w in root.workers) == sum(r.stats.generated for r in result)
+        return root.workers
+
+    workers = collect()
+    gc.collect()
+    for worker in workers:
+        assert worker.generated > 1 and worker.starts == 1
+        for parent, action, state, words, name in worker.saved:
+            assert tuple(state.words) == words and str(action) == name
+            assert state.task.apply(parent, action) == state
+
+
+def test_worker_observer_throughput_scales():
+    if not hasattr(sys, "_is_gil_enabled") or sys._is_gil_enabled():
+        pytest.skip("requires Python without the GIL")
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    if cores < 2:
+        pytest.skip("requires at least two CPU cores")
+    threads = min(4, cores)
+
+    class Count(Observer):
+        def __init__(self):
+            self.generated = 0
+            self.workers = []
+
+        def on_generate(self, parent, action, child, state, is_new):
+            self.generated += 1
+
+        def make_worker(self, k):
+            w = Count()
+            self.workers.append(w)
+            return w
+
+    task = mymyr.Task.from_text(str(Path(__file__).parents[1] / "data/tasks_iw/ipc__childsnack-ipc__p05-medium.txt"))
+
+    def rate(threads):
+        root = Count()
+        start = time.perf_counter()
+        result = search.find_rollouts_parallel(task, list(range(8)), threads=threads, max_width=1,
+                                               max_states=5000, observer=root)
+        elapsed = time.perf_counter() - start
+        events = sum(w.generated for w in root.workers)
+        assert result.threads_used == threads
+        assert events == sum(r.stats.generated for r in result) > 10000
+        return events / elapsed
+
+    rate(1)
+    rate(threads)
+    rates = {1: [], threads: []}
+    for order in ((1, threads), (threads, 1), (1, threads)):
+        for t in order:
+            rates[t].append(rate(t))
+    # callbacks contending for one lock run at a fraction of one thread's rate; the margin absorbs a loaded machine
+    assert statistics.median(rates[threads]) >= 0.5 * statistics.median(rates[1])
 
 
 def test_brfs_threads_return_a_shortest_plan(task):

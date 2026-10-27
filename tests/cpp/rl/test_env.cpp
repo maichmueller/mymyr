@@ -11,6 +11,7 @@
 #include "mymyr/rl/env.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/rl/visited.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/task/task.hpp"
 
@@ -471,4 +472,135 @@ TEST(HostEnv, NumericTasks)
         env.step(x.b, x.out);
         check_random_step(env, x, before, draws, 0, 8);  // rows [bits | numeric slots]
     }
+}
+
+TEST(HostEnv, LabelsFollowIndexedTransitions)
+{
+    for (const char* name : {"gripper__prob05", "miconic-simpleadl__s10-2", "philosophers__p03-phil4",
+                             "pegsol-08-strips__p22"})
+    {
+        SCOPED_TRACE(name);
+        const auto table = rl::TaskTable::single(load(name));
+        rl::EnvConfig cfg;
+        cfg.seed = 17;
+        cfg.max_steps = 9;
+        cfg.step_reward = -1.0f;
+        rl::HostEnv index(table, cfg);
+        cfg.actions = rl::ActionSpace::Label;
+        cfg.witness_pruning = true;
+        rl::HostEnv label(table, cfg);
+        Batch x(index, 8), y(label, 8);
+        index.reset(x.b, nullptr, x.count.data());
+        label.reset(y.b, nullptr, y.count.data());
+        EXPECT_EQ(label.initial_count(0), index.initial_count(0) ? 1u : 0u);
+        ThreadPool pool(3);
+        for (int t = 0; t < 30; ++t)
+        {
+            index.step(x.b, x.out);
+            label.step(y.b, y.out, rl::Labels{x.schema.data(), x.binding.data(), x.L}, nullptr, &pool);
+            EXPECT_EQ(x.states, y.states);
+            EXPECT_EQ(x.final_states, y.final_states);
+            EXPECT_EQ(x.reward, y.reward);
+            EXPECT_EQ(x.terminated, y.terminated);
+            EXPECT_EQ(x.truncated, y.truncated);
+            EXPECT_EQ(x.goal, y.goal);
+            EXPECT_EQ(x.invalid, y.invalid);
+            EXPECT_EQ(x.schema, y.schema);
+            EXPECT_EQ(x.binding, y.binding);
+            EXPECT_EQ(x.steps, y.steps);
+            EXPECT_EQ(x.draws, y.draws);
+            for (usize i = 0; i < x.count.size(); ++i)
+                EXPECT_EQ(y.count[i], x.count[i] ? 1 : 0);
+        }
+    }
+}
+
+TEST(HostEnv, InvalidLabelsDoNotMove)
+{
+    const auto table = rl::TaskTable::single(load("blocks__probBLOCKS-8-0"));
+    rl::EnvConfig cfg;
+    cfg.actions = rl::ActionSpace::Label;
+    cfg.step_reward = -3.0f;
+    rl::HostEnv env(table, cfg);
+    Batch x(env, 3);
+    env.reset(x.b, nullptr, x.count.data());
+    const auto before = x.states;
+    const std::vector<i32> schemas{-1, 1000000, 0};
+    const std::vector<i32> binding(3 * x.L, -1);
+    env.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), x.L});
+    EXPECT_EQ(x.states, before);
+    for (usize i = 0; i < x.count.size(); ++i)
+    {
+        EXPECT_EQ(x.invalid[i], 1);
+        EXPECT_EQ(x.reward[i], -3.0f);
+        EXPECT_EQ(x.schema[i], -1);
+        EXPECT_EQ(x.count[i], 1);
+    }
+    EXPECT_THROW(env.step(x.b, x.out), std::invalid_argument);
+    EXPECT_THROW(env.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), 0}), std::invalid_argument);
+    EXPECT_THROW(env.step(x.b, x.out, rl::Labels{nullptr, binding.data(), x.L}), std::invalid_argument);
+    rl::HostEnv indexed(table, {});
+    EXPECT_THROW(indexed.step(x.b, x.out, rl::Labels{schemas.data(), binding.data(), x.L}), std::invalid_argument);
+}
+
+TEST(Visited, ReservedKeyAndWraparound)
+{
+    constexpr u32 H = 8;
+    std::array<u64, H> table{};
+    i32 count = 0;
+    EXPECT_FALSE(rl::visited_insert(table.data(), H, count, 0));
+    EXPECT_TRUE(rl::visited_contains(table.data(), H, count, rl::k_visited_zero));
+    EXPECT_TRUE(rl::visited_insert(table.data(), H, count, rl::k_visited_zero));
+    EXPECT_EQ(count, 1);
+    for (u64 key : {7, 15, 23, 31, 39})
+        EXPECT_FALSE(rl::visited_insert(table.data(), H, count, key));
+    EXPECT_EQ(table[7], 7);
+    EXPECT_EQ(table[0], 15);
+    EXPECT_EQ(table[1], 23);
+    EXPECT_EQ(count, 6);
+    EXPECT_FALSE(rl::visited_insert(table.data(), H, count, 47));
+    EXPECT_EQ(count, 8);
+    EXPECT_FALSE(rl::visited_contains(table.data(), H, count, 47));
+    EXPECT_TRUE(rl::visited_contains(table.data(), H, count, 39));
+    EXPECT_TRUE(rl::visited_insert(table.data(), H, count, 15));
+    rl::visited_clear(table.data(), H, count);
+    EXPECT_EQ(count, 0);
+    EXPECT_EQ(table, (std::array<u64, H>{}));
+}
+
+TEST(Visited, TinyTableAndPadding)
+{
+    std::array<u64, 2> table{};
+    i32 count = 0;
+    EXPECT_FALSE(rl::visited_insert(table.data(), 2, count, 1));
+    EXPECT_FALSE(rl::visited_insert(table.data(), 2, count, 3));
+    EXPECT_EQ(count, 2);
+    std::array<u64, 3> hashes{1, 3, 1};
+    std::array<i32, 3> parent{0, 0, -1};
+    std::array<u8, 3> mask{};
+    rl::visited_mask(table.data(), &count, 2, hashes.data(), parent.data(), nullptr, 3, mask.data());
+    EXPECT_EQ(mask, (std::array<u8, 3>{1, 0, 0}));
+}
+
+TEST(HostEnv, ClearVisitedOnlyReadsSelectedRows)
+{
+    auto task = load("gripper__prob05");
+    rl::HostEnv env(rl::TaskTable::single(task), {});
+    Batch x(env, 2);
+    std::array<u64, 16> visited{};
+    std::array<i32, 2> count{};
+    std::array<i32, 2> ids{};
+    i32 status = 0;
+    x.b.task_ids = ids.data();
+    x.b.visited = visited.data();
+    x.b.visited_count = count.data();
+    x.b.visited_capacity = 8;
+    x.b.visited_status = &status;
+    env.reset(x.b);
+    const auto before = visited;
+    ids[0] = -1;
+    const std::array<u8, 2> mask{0, 1};
+    EXPECT_NO_THROW(env.clear_visited(x.b, mask.data()));
+    EXPECT_EQ(count[1], 1);
+    EXPECT_EQ(visited, before);
 }

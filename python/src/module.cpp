@@ -17,10 +17,15 @@
 
 #include "arrays.hpp"
 #include "py_task.hpp"
+#include "translate_bindings.hpp"
+#include "typing.hpp"
 
 #include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/hash.hpp"
 #include "mymyr/version.hpp"
+#if defined(MYMYR_HAS_CUDA)
+#include "mymyr/cuda/runtime.hpp"
+#endif
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -52,22 +57,58 @@ void bind_encoding_device(nb::module_& parent);
 
 namespace
 {
-using WordMatrix = nb::ndarray<const mymyr::u64, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
-using HashVector = nb::ndarray<nb::numpy, mymyr::u64, nb::ndim<1>>;
-
-HashVector hash_rows(WordMatrix states)
+mymyr::python::Arg<mymyr::python::ann::Any> hash_rows(mymyr::python::Arg<mymyr::python::ann::ArrayLike> states, mymyr::u32 numeric_words, mymyr::python::StreamArg stream)
 {
-    const size_t n = states.shape(0);
-    const auto w = static_cast<mymyr::u32>(states.shape(1));
-    auto* out = new mymyr::u64[n];
+    using namespace mymyr;
+    using namespace mymyr::python;
+    if (!stream.is_none())
+        throw nb::type_error("mymyr: hash_rows: stream requires device rows");
+    if (nb::isinstance<nb::list>(states) || nb::isinstance<nb::tuple>(states))
     {
-        nb::gil_scoped_release release;  // no-op on free-threaded builds, required on GIL builds
-        const mymyr::u64* data = states.data();
-        for (size_t i = 0; i < n; ++i)
-            out[i] = mymyr::hash::state_words(data + i * w, w);
+        // States carry their own numeric words: State::hash(), the hash of their rows with those numeric words.
+        nb::sequence seq = nb::borrow<nb::sequence>(states);
+        const usize n = nb::len(seq);
+        if (n > 0 && is_state(seq[0]))
+        {
+            if (numeric_words != 0)
+                throw nb::value_error("mymyr: hash_rows: numeric_words applies to arrays of state words; States hash "
+                                      "with their own numeric words");
+            auto block = Block::make(n * sizeof(u64));
+            auto* out = reinterpret_cast<u64*>(block->data());
+            for (usize i = 0; i < n; ++i)
+            {
+                nb::handle item = seq[i];
+                if (!is_state(item))
+                    throw nb::type_error("mymyr: expected an array of state words, a State, or a sequence of States");
+                out[i] = state_of(item).s.hash();
+            }
+            ArraySpec spec{block, out, rl::DType::U64, {static_cast<i64>(n)}, {}, false, false};
+            return export_array(std::move(spec), Framework::Numpy, WordEncoding{64, false});
+        }
     }
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<mymyr::u64*>(p); });
-    return HashVector(out, {n}, owner);
+    const StateBatch in = import_states(states, 0);
+    if (in.single)
+        throw nb::type_error("mymyr: hash_rows: states must be a matrix");
+    if (numeric_words > in.view.words)
+        throw nb::value_error("mymyr: hash_rows: numeric_words exceeds the row width");
+    const u32 W = in.view.words - numeric_words;
+    auto block = Block::make(in.view.rows * sizeof(u64));
+    auto* out = reinterpret_cast<u64*>(block->data());
+    {
+        nb::gil_scoped_release release;
+        for (u64 i = 0; i < in.view.rows; ++i)
+        {
+            const u64* row = in.view.row(i);
+            out[i] = hash::state(row, W, numeric_words ? row + W : nullptr, numeric_words);
+        }
+    }
+    ArraySpec spec{block, out, in.fw == Framework::Torch ? rl::DType::I64 : rl::DType::U64, {static_cast<i64>(in.view.rows)}, {}, false, false};
+    if (in.fw == Framework::Jax)
+    {
+        spec.shape.push_back(1);
+        spec.words = true;
+    }
+    return export_array(std::move(spec), in.fw, in.enc);
 }
 
 #if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
@@ -110,8 +151,18 @@ NB_MODULE(_core, m)
 {
     m.doc() = "mymyr native core";
     m.attr("__version__") = std::string(mymyr::version());
-    m.def("build_info", [] { return std::string(mymyr::build_info()); },
-          "How the extension was built: 'mymyr <version> (<build type>, <compiler>)'.");
+    m.def(
+        "build_info",
+        [] {
+            std::string info(mymyr::build_info());
+#if defined(MYMYR_HAS_CUDA)
+            info.insert(info.size() - 1, std::string(", ") + std::string(mymyr::cuda::build_info()));
+#endif
+            return info;
+        },
+        "How the extension was built: 'mymyr <version> (<build type>, <compiler>)'; a CUDA build adds its toolkit "
+        "and GPU code inside the parentheses: ', CUDA <nvcc version>, sm_89 sm_90' (SASS as sm_<n>, PTX as "
+        "compute_<n>).");
     m.def("free_threaded_build", [] {
 #ifdef Py_GIL_DISABLED
         return true;
@@ -130,8 +181,8 @@ NB_MODULE(_core, m)
           "freed when those threads end, and arrays that still use a block keep it.");
     m.def("block_cache_bytes", [] { return mymyr::block_cache_bytes(); },
           "The bytes that the calling thread's block cache and the shared block cache hold (see trim_block_cache).");
-    m.def("hash_rows", &hash_rows, "states"_a,
-          "Hash each row of a (N, W) uint64 state-word matrix (trailing zero words ignored). Zero-copy input.");
+    m.def("hash_rows", &hash_rows, "states"_a, nb::kw_only(), "numeric_words"_a = 0, "stream"_a = nb::none(),
+          "Hash each row of a (N, W) uint64 state-word matrix (trailing zero words ignored). Numeric words follow atom words and seed the hash. Same framework output. A sequence of States hashes each with its own numeric words (State::hash(); numeric_words must be 0), into a NumPy uint64 array.");
     mymyr::python::bind_formalism(m);
 #if defined(MYMYR_HAS_FRONTEND)
     mymyr::python::bind_frontend(m);
@@ -139,6 +190,7 @@ NB_MODULE(_core, m)
     mymyr::python::bind_arrays(m);
     mymyr::python::bind_task(m);
     mymyr::python::bind_rl(m);
+    mymyr::python::bind_translate(m);
     mymyr::python::bind_rl_torch(m);
     mymyr::python::bind_rl_jax(m);
     mymyr::python::bind_rl_ops(m);

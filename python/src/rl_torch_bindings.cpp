@@ -89,6 +89,8 @@ public:
         m_init_count.resize(t->size());
         if (!device.is_none())
         {
+            if (cfg.actions == rl::ActionSpace::Label)
+                throw nb::value_error("mymyr: label actions run on the CPU; use device=None");
             m_device = int_arg<int>(device, "device", 0);
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
@@ -240,10 +242,11 @@ public:
 
     void reset(nb::handle states, nb::handle task_ids, nb::handle steps, nb::handle counts, nb::handle views,
                nb::handle goal_pos, nb::handle goal_neg, nb::handle count, nb::handle mask, bool keep_goals,
-               nb::handle at_goal, nb::handle stream)
+               nb::handle at_goal, nb::handle stream, nb::handle visited, nb::handle visited_count, nb::handle visited_status)
     {
         Call c(*this, stream);
         rl::EnvBatch b = batch(c.in, states, task_ids, steps, nb::none(), counts, views, goal_pos, goal_neg, at_goal);
+        track(c.in, b, visited, visited_count, visited_status);
         const i64 n = static_cast<i64>(b.rows);
         const u8* m = c.in.get<const u8>(mask, "mask", {boolt, u8t}, {n}, false);
         i32* cnt = c.in.get<i32>(count, "count", {i32t}, {n}, true);
@@ -279,14 +282,31 @@ public:
               nb::handle views, nb::handle goal_pos, nb::handle goal_neg, nb::handle action, nb::handle next_task_ids,
               nb::handle reward, nb::handle terminated, nb::handle truncated, nb::handle count, nb::handle final_states,
               nb::handle schema, nb::handle binding, nb::handle invalid, nb::handle goal, nb::handle at_goal,
-              u64 first_env, nb::handle stream)
+              u64 first_env, nb::handle stream, nb::handle visited, nb::handle visited_count,
+              nb::handle visited_status, nb::handle revisited)
     {
         Call c(*this, stream);
         rl::EnvBatch b = batch(c.in, states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, at_goal);
+        track(c.in, b, visited, visited_count, visited_status);
         b.first_env = first_env;
         const i64 n = static_cast<i64>(b.rows);
-        const i64* act = c.in.get<const i64>(action, "action", {i64t}, {n}, false);
-        if (!act && !b.draws && n > 0)
+        const i64* act = nullptr;
+        rl::Labels labels{nullptr, nullptr, 0};
+        const bool labelled = config().actions == rl::ActionSpace::Label;
+        if (labelled)
+        {
+            if (!nb::isinstance<nb::tuple>(action) || nb::len(action) != 2)
+                throw nb::value_error("mymyr: label mode requires action=(schema, binding); the random policy is unavailable");
+            labels.schema = c.in.get<const i32>(action[nb::int_(0)], "action_schema", {i32t}, {n}, false);
+            std::vector<i64> ext;
+            labels.binding = c.in.get<const i32>(action[nb::int_(1)], "action_binding", {i32t}, {n, -1}, false, &ext);
+            if (ext.empty())
+                throw nb::value_error("mymyr: label mode requires a binding array");
+            labels.stride = static_cast<u32>(ext[1]);
+        }
+        else
+            act = c.in.get<const i64>(action, "action", {i64t}, {n}, false);
+        if (!labelled && !act && !b.draws && n > 0)
             throw nb::value_error("mymyr: step: the random policy (action=None) needs the draw counters 'draws'");
         const i32* next = c.in.get<const i32>(next_task_ids, "next_task_ids", {i32t}, {n}, false);
         rl::StepOutputs o;
@@ -301,7 +321,8 @@ public:
         o.label_width = o.binding ? static_cast<u32>(ext[1]) : 0;
         o.invalid = c.in.get<u8>(invalid, "invalid", {boolt, u8t}, {n}, true);
         o.goal = c.in.get<u8>(goal, "goal", {boolt, u8t}, {n}, true);
-        c.run([&] { run_step(b, o, act, next); });
+        o.revisited = c.in.get<u8>(revisited, "revisited", {boolt, u8t}, {n}, true);
+        c.run([&] { run_step(b, o, act, next, labelled ? &labels : nullptr); });
     }
 
     // The entry points of the torch ops (mymyr.rl.torch._ops): the same calls on the data pointers of tensors that
@@ -310,12 +331,13 @@ public:
     // DLPack imports (about 10 us per torch tensor).
     using Ptrs = std::vector<std::uintptr_t>;
 
-    // states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal
-    void reset_ptrs(u64 rows, const Ptrs& p, bool keep_goals, StreamArg stream)
+    // states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal, visited, visited_count, visited_status
+    void reset_ptrs(u64 rows, const Ptrs& p, bool keep_goals, StreamArg stream, u32 visited_capacity)
     {
-        check_ptrs(p, 10);
+        check_ptrs(p, 13);
         Call c(*this, stream);
         rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], 0, p[3], p[4], p[5], p[6], p[9]);
+        track_raw(b, visited_capacity, p[10], p[11], p[12]);
         c.run([&] { run_reset(b, ptr<const u8>(p[8]), ptr<i32>(p[7]), keep_goals); });
     }
 
@@ -329,15 +351,17 @@ public:
     }
 
     // states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, next_task_ids, reward, terminated,
-    // truncated, count, final_states, schema, binding, invalid, goal, at_goal
-    void step_ptrs(u64 rows, const Ptrs& p, u32 label_width, u64 first_env, StreamArg stream)
+    // truncated, count, final_states, schema, binding, invalid, goal, at_goal, action_schema, action_binding,
+    // visited, visited_count, visited_status, revisited
+    void step_ptrs(u64 rows, const Ptrs& p, u32 label_width, u64 first_env, StreamArg stream, u32 binding_stride, u32 visited_capacity)
     {
-        check_ptrs(p, 20);
+        check_ptrs(p, 26);
         Call c(*this, stream);
         rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[19]);
+        track_raw(b, visited_capacity, p[22], p[23], p[24]);
         b.first_env = first_env;
         const i64* act = ptr<const i64>(p[8]);
-        if (!act && !b.draws && rows > 0)
+        if (config().actions == rl::ActionSpace::Index && !act && !b.draws && rows > 0)
             throw nb::value_error("mymyr: step: the random policy (action=None) needs the draw counters 'draws'");
         rl::StepOutputs o;
         o.reward = ptr<f32>(p[10]);
@@ -350,7 +374,14 @@ public:
         o.label_width = o.binding ? label_width : 0;
         o.invalid = ptr<u8>(p[17]);
         o.goal = ptr<u8>(p[18]);
-        c.run([&] { run_step(b, o, act, ptr<const i32>(p[9])); });
+        o.revisited = ptr<u8>(p[25]);
+        const rl::Labels labels{ptr<const i32>(p[20]), ptr<const i32>(p[21]), binding_stride};
+        if (act && config().actions == rl::ActionSpace::Label)
+            throw nb::value_error("mymyr: label mode requires explicit labels, not action indices");
+        if ((labels.schema || labels.binding) && config().actions != rl::ActionSpace::Label)
+            throw nb::value_error("mymyr: explicit labels require actions='label'");
+        c.run([&] { run_step(b, o, act, ptr<const i32>(p[9]),
+                            config().actions == rl::ActionSpace::Label ? &labels : nullptr); });
     }
 
     /// The random policy's next choices (rl::rng::successor_index at the current draw counters), limited to
@@ -378,6 +409,19 @@ public:
         const u32 max_actions = max_actions_arg(max_actions_in);
         Call c(*this, stream);
         c.run([&] { run_random_actions(ptr<const u64>(p[0]), ptr<const i32>(p[1]), rows, first_env, max_actions, ptr<i64>(p[2])); });
+    }
+
+    void clear_visited(nb::handle states, nb::handle task_ids, nb::handle visited, nb::handle visited_count,
+                       nb::handle visited_status, nb::handle mask)
+    {
+        Call c(*this, nb::none());
+        rl::EnvBatch b = batch(c.in, states, task_ids, nb::none(), nb::none(), nb::none(), nb::none(),
+                               nb::none(), nb::none(), nb::none());
+        track(c.in, b, visited, visited_count, visited_status);
+        const u8* m = c.in.get<const u8>(mask, "mask", {boolt}, {static_cast<i64>(b.rows)}, false);
+        if (on_device())
+            throw nb::value_error("mymyr: clear_visited requires a CPU environment");
+        c.run([&] { m_host->clear_visited(b, m); });
     }
 
     void check_errors()
@@ -441,8 +485,11 @@ private:
 #endif
         m_host->refresh(b, count, m_pool.get());
     }
-    void run_step(rl::EnvBatch& b, const rl::StepOutputs& o, const i64* action, const i32* next_task_ids)
+    void run_step(rl::EnvBatch& b, const rl::StepOutputs& o, const i64* action, const i32* next_task_ids,
+                  const rl::Labels* labels = nullptr)
     {
+        if (labels)
+            return m_host->step(b, o, *labels, next_task_ids, m_pool.get());
 #if defined(MYMYR_HAS_CUDA)
         if (m_dev)
             return m_dev->step(b, o, rl::Actions{action, nullptr}, next_task_ids);
@@ -451,6 +498,8 @@ private:
     }
     void run_random_actions(const u64* d, const i32* cnt, u64 rows, u64 first_env, u32 max_actions, i64* o)
     {
+        if (config().actions == rl::ActionSpace::Label)
+            throw nb::value_error("mymyr: label mode has no random policy");
         const u64 seed = config().seed;
 #if defined(MYMYR_HAS_CUDA)
         if (m_dev)
@@ -478,6 +527,35 @@ private:
         if (p.size() != n)
             throw nb::value_error(("mymyr: expected " + std::to_string(n) + " data pointers").c_str());
     }
+    void track_raw(rl::EnvBatch& b, u32 H, std::uintptr_t table, std::uintptr_t count, std::uintptr_t status) const
+    {
+        if (H && on_device())
+            throw nb::value_error("mymyr: visited tracking requires a CPU environment");
+        b.visited_capacity = H;
+        b.visited = ptr<u64>(table);
+        b.visited_count = ptr<i32>(count);
+        b.visited_status = ptr<i32>(status);
+    }
+
+    void track(Imports& in, rl::EnvBatch& b, nb::handle table, nb::handle count, nb::handle status) const
+    {
+        if (table.is_none())
+        {
+            if (!count.is_none() || !status.is_none())
+                throw nb::value_error("mymyr: visited tracking needs table, count and status arrays");
+            return;
+        }
+        if (on_device())
+            throw nb::value_error("mymyr: visited tracking requires a CPU environment");
+        std::vector<i64> ext;
+        b.visited = in.get<u64>(table, "visited", {i64t, u64t}, {static_cast<i64>(b.rows), -1}, true, &ext);
+        if (ext[1] < 2 || ext[1] > (1 << 20))
+            throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+        b.visited_capacity = static_cast<u32>(ext[1]);
+        b.visited_count = in.get<i32>(count, "visited_count", {i32t}, {static_cast<i64>(b.rows)}, true);
+        b.visited_status = in.get<i32>(status, "visited_status", {i32t}, {1}, true);
+    }
+
     rl::EnvBatch raw_batch(u64 rows, std::uintptr_t states, std::uintptr_t task_ids, std::uintptr_t steps,
                            std::uintptr_t draws, std::uintptr_t counts, std::uintptr_t views, std::uintptr_t goal_pos,
                            std::uintptr_t goal_neg, std::uintptr_t at_goal) const
@@ -638,11 +716,15 @@ void bind_rl_torch(nb::module_& parent)
             "__init__",
             [](PyEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg seed_in, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
-               bool canonical, bool witness, PathArg path, IntArg threads_in) {
+               bool canonical, bool witness, PathArg path, IntArg threads_in, Arg<ann::ActionSpace> actions) {
                 const u64 seed = int_arg<u64>(seed_in, "seed");
                 const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 const u32 threads = threads_arg(threads_in);
                 rl::EnvConfig c;
+                const std::string action_space = nb::cast<std::string>(actions);
+                if (action_space != "index" && action_space != "label")
+                    throw nb::value_error("mymyr: actions must be 'index' or 'label'");
+                c.actions = action_space == "label" ? rl::ActionSpace::Label : rl::ActionSpace::Index;
                 c.seed = seed;
                 c.max_steps = max_steps;
                 c.step_reward = step_reward;
@@ -658,7 +740,9 @@ void bind_rl_torch(nb::module_& parent)
             "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
-            "path"_a = "auto", "threads"_a = 1)
+            "path"_a = "auto", "threads"_a = 1, "actions"_a = "index")
+        .def_prop_ro("actions", [](const PyEnv& e) { return e.config().actions == rl::ActionSpace::Label ? "label" : "index"; },
+                     "Action representation: 'index' (successor count) or 'label' (0/1 applicability count).")
         .def_prop_ro("table", [](const PyEnv& e) { return SuiteArg(e.ref.obj); },
                      "The Task, TaskTable or TaskSuite of the instances.")
         .def_prop_ro("num_instances", &PyEnv::num_instances,
@@ -717,13 +801,14 @@ void bind_rl_torch(nb::module_& parent)
             "reset",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg counts, ArrayArg views,
                ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg count, ArrayArg mask, bool keep_goals, ArrayArg at_goal,
-               StreamArg stream) {
+               StreamArg stream, ArrayArg visited, ArrayArg visited_count, ArrayArg visited_status) {
                 e.reset(states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals, at_goal,
-                        stream);
+                        stream, visited, visited_count, visited_status);
             },
             "states"_a, "task_ids"_a = nb::none(), "steps"_a = nb::none(), nb::kw_only(), "counts"_a = nb::none(),
             "views"_a = nb::none(), "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "count"_a = nb::none(),
             "mask"_a = nb::none(), "keep_goals"_a = false, "at_goal"_a = nb::none(), "stream"_a = nb::none(),
+            "visited"_a = nb::none(), "visited_count"_a = nb::none(), "visited_status"_a = nb::none(),
             "Resets the rows with mask[i] (all rows without a mask) to the initial states of their instances "
             "(task_ids [N] int32, set by the caller first; None over a table of one): states [N, row_words], steps [N] "
             "int32 (0), the fast path's cache counts [N, cache_schemas] and views [N, cache_view_words], per-env goal "
@@ -744,14 +829,14 @@ void bind_rl_torch(nb::module_& parent)
         .def(
             "step",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg draws, ArrayArg counts,
-               ArrayArg views, ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg action, ArrayArg next_task_ids,
+               ArrayArg views, ArrayArg goal_pos, ArrayArg goal_neg, Arg<ann::EnvAction> action, ArrayArg next_task_ids,
                ArrayArg reward, ArrayArg terminated, ArrayArg truncated, ArrayArg count, ArrayArg final_states,
                ArrayArg schema, ArrayArg binding, ArrayArg invalid, ArrayArg goal, ArrayArg at_goal, IntArg first_env_in,
-               StreamArg stream) {
+               StreamArg stream, ArrayArg visited, ArrayArg visited_count, ArrayArg visited_status, ArrayArg revisited) {
                 const u64 first_env = int_arg<u64>(first_env_in, "first_env");
                 e.step(states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, next_task_ids, reward,
                        terminated, truncated, count, final_states, schema, binding, invalid, goal, at_goal, first_env,
-                       stream);
+                       stream, visited, visited_count, visited_status, revisited);
             },
             "states"_a, "task_ids"_a = nb::none(), "steps"_a = nb::none(), "draws"_a = nb::none(), nb::kw_only(),
             "counts"_a = nb::none(), "views"_a = nb::none(), "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(),
@@ -759,24 +844,31 @@ void bind_rl_torch(nb::module_& parent)
             "terminated"_a = nb::none(), "truncated"_a = nb::none(), "count"_a = nb::none(),
             "final_states"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(), "invalid"_a = nb::none(),
             "goal"_a = nb::none(), "at_goal"_a = nb::none(), "first_env"_a = 0, "stream"_a = nb::none(),
-            "One step of every environment: action [N] int64 indexes the canonical successor order "
+            "visited"_a = nb::none(), "visited_count"_a = nb::none(), "visited_status"_a = nb::none(), "revisited"_a = nb::none(),
+            "One step of every environment: in index mode action [N] int64 indexes the canonical successor order "
             "(None: the random policy, drawing from draws [N] (u)int64 with the env ids first_env + i); next_task_ids "
             "[N] int32 names the instances autoresetting rows restart in. In place: states, task_ids, steps, draws, "
             "the cache, the goal masks and at_goal [N] bool (the rows at a goal, which the step absorbs; required on a "
             "device); outputs (None: not written): reward [N] float32, terminated, truncated, "
             "invalid and goal [N] bool, count [N] int32, final_states [N, row_words], schema [N] int32, binding "
-            "[N, >= label_width] int32.")
-        .def("_reset_ptrs", &PyEnv::reset_ptrs, "rows"_a, "ptrs"_a, "keep_goals"_a = false, "stream"_a = nb::none(),
-             "reset() on data pointers (states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal; "
+            "[N, >= label_width] int32. Label mode takes action=(schema int32 [N], binding int32 [N, L]); "
+            "inapplicable labels do not move, count is 0/1, and action=None is refused.")
+        .def("clear_visited", [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg visited,
+                                 ArrayArg visited_count, ArrayArg visited_status, ArrayArg mask) {
+            e.clear_visited(states, task_ids, visited, visited_count, visited_status, mask);
+        }, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "visited"_a, "visited_count"_a, "visited_status"_a, "mask"_a = nb::none(),
+             "Clear masked host visited tables and insert their current states.")
+        .def("_reset_ptrs", &PyEnv::reset_ptrs, "rows"_a, "ptrs"_a, "keep_goals"_a = false, "stream"_a = nb::none(), "visited_capacity"_a = 0,
+             "reset() on data pointers (states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal, visited, visited_count, visited_status; "
              "0: None) of checked tensors; the torch ops' entry point.")
         .def("_refresh_ptrs", &PyEnv::refresh_ptrs, "rows"_a, "ptrs"_a, "stream"_a = nb::none(),
              "refresh() on data pointers (states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal; 0: "
              "None) of checked tensors.")
         .def("_step_ptrs", &PyEnv::step_ptrs, "rows"_a, "ptrs"_a, "label_width"_a, "first_env"_a = 0,
-             "stream"_a = nb::none(),
+             "stream"_a = nb::none(), "binding_stride"_a = 0, "visited_capacity"_a = 0,
              "step() on data pointers (states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, "
              "next_task_ids, reward, terminated, truncated, count, final_states, schema, binding, invalid, goal, "
-             "at_goal; 0: None) of checked tensors.")
+             "at_goal, action_schema, action_binding, visited, visited_count, visited_status, revisited; 0: None) of checked tensors; binding_stride is the input binding width.")
         .def("_random_actions_ptrs", &PyEnv::random_actions_ptrs, "rows"_a, "ptrs"_a, "first_env"_a = 0,
              "max_actions"_a = nb::none(), "stream"_a = nb::none(),
              "random_actions() on data pointers (draws, count, out) of checked tensors.")

@@ -19,7 +19,8 @@ of one):
   random_actions`` on an environment handle, and ``torch.ops.mymyr.expand`` (padded [N, K]) / ``expand_flat`` (CSR;
   ``capacity=None``: the row count is an unbacked symbolic size under ``torch.compile``; ``expand_derived`` /
   ``expand_flat_derived`` add the derived words of the successors) on a table or suite handle
-  (:func:`register`). All have fake implementations: they trace under ``torch.compile`` without graph breaks
+  (:func:`register`); ``literal_slots`` / ``literal_masks`` resolve CUDA literals on an encoder handle.
+  All have fake implementations: they trace under ``torch.compile`` without graph breaks
   (``fullgraph=True`` works for loops of ``step``; the TorchRL env's own Python and TensorDict code is not meant to be
   compiled).
 
@@ -64,6 +65,8 @@ from ._ops import (
     expand_flat,
     expand_flat_derived,
     lookup,
+    literal_masks,
+    literal_slots,
     random_actions,
     refresh,
     refresh_sync,
@@ -75,6 +78,8 @@ from ._ops import (
 )
 
 __all__ = [
+    "literal_masks",
+    "literal_slots",
     "BatchedEnv",
     "CapturedRollout",
     "Env",

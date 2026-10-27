@@ -128,13 +128,21 @@ public:
                         " is below the table's largest action arity " + std::to_string(m_label_width));
             given.actions = true;
         }
+        std::vector<u64> mapped_state;
         for (u64 g = 0; g < n; ++g)
         {
             const rl::TaskTable::Instance& instance = table.instance(in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0);
-            if (in.states.words < instance.words)
+            const SlotMapView map = in.slot_maps ? in.slot_maps[g] : SlotMapView{in.slot_map, in.slot_map_size};
+            if (map.data)
+            {
+                mapped_state.resize(instance.words);
+                map_fluent_words(map, {in.states.row(g), in.states.words}, mapped_state,
+                                 instance.task->atoms().fluent_slots());
+            }
+            if (!map.data && in.states.words < instance.words)
                 invalid("state " + std::to_string(g) + " has " + std::to_string(in.states.words) +
                         " words, its instance needs " + std::to_string(instance.words));
-            if (!zero_tail(in.states.row(g), in.states.words, m_words))
+            if (!map.data && !zero_tail(in.states.row(g), in.states.words, m_words))
                 invalid("state " + std::to_string(g) + " sets an atom bit its instance does not have");
             if (in.goal_pos)
             {
@@ -299,7 +307,15 @@ public:
     void write(u32 slot, const EncodeInput& in, u64 g)
     {
         u64* row = &m_states[usize{slot} * m_row_words];
-        copy_words(row, m_words, in.states.row(g), in.states.words);
+        const SlotMapView map = in.slot_maps ? in.slot_maps[g] : SlotMapView{in.slot_map, in.slot_map_size};
+        if (map.data)
+        {
+            const u32 instance = in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0;
+            map_fluent_words(map, {in.states.row(g), in.states.words}, {row, m_words},
+                             m_encoder.table().task(instance)->atoms().fluent_slots());
+        }
+        else
+            copy_words(row, m_words, in.states.row(g), in.states.words);
         if (m_numeric_words)
             std::memcpy(row + m_words, in.states.row(g) + in.states.words, usize{m_numeric_words} * sizeof(u64));
         m_task_ids[slot] = in.task_ids ? in.task_ids[g] : 0;

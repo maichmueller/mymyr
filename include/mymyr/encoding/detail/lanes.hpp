@@ -34,9 +34,8 @@
 // the slots between the first and the last literal of its mask, and the goal cells of row goals are those of every
 // predicate that has slots, over the predicate's whole slot range.
 //   - Subgoal cells (goal relations of a level above 0) have the cells of the goal's three variants, with the layer's
-//     masks in place of the goal's: layer l of the row's subgoals (RowInput::layers) fills level l + 1, minus every
-//     literal of the same sign at a lower level, the goal included, so that a literal appears once, at its lowest
-//     level. They have no constant part;
+//     masks in place of the goal's: layer l of the row's subgoals (RowInput::layers) fills level l + 1, with
+//     repeated_literals deciding the placement of literals listed at several levels. They have no constant part;
 //   - History cell `[+]p[hist]` / `[-]p[hist]`: for each used step of the row's history in order (the newest steps,
 //     oldest first), the step's positive (negative) literals of the cell's predicate in ascending slot order; a tuple
 //     is [history target]? + [history step] + [predicate]? + objects. With history targets each tuple has its own
@@ -99,6 +98,7 @@
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/encoding/layers.hpp"
+#include "mymyr/encoding/repeated_literals.hpp"
 
 #if defined(__CUDACC__)
 #define MYMYR_NOINLINE __host__ __device__ __noinline__
@@ -263,7 +263,12 @@ struct ContextView
     u32 num_static = 0;
     const i32* numeric_args = nullptr;  // [numeric slots of all instances, max_arity]: the objects of each numeric slot's
                                         // function term, -1 padded
+    RepeatedLiterals repeated_literals = k_default_repeated_literals;
     u32 numeric_storage = 0;            // how the rows store numeric values: k_numeric_storage_f64 or _i32
+    // Literal resolution (literals.hpp): per instance and table domain predicate, its arity, its kind and the ranges
+    // of its fluent slots, derived slots and static tuples (null: a view without the section).
+    const u32* literal_ranges = nullptr;  // [num_instances, num_predicates, k_literal_columns]
+    u32 num_predicates = 0;               // the table's domain predicates
 };
 
 /// One instance of a context, resolved to pointers and counts.
@@ -297,6 +302,7 @@ struct InstanceView
     const i32* numeric_args;  // the context's numeric slot rows, max_arity entries each; the instance's start at
                               // numeric_arg_row(*this)
     u32 numeric_storage;
+    RepeatedLiterals repeated_literals = k_default_repeated_literals;
 };
 
 /// Column `k` of the instance, one of the columns from k_ext_lists to k_instance_columns.
@@ -349,6 +355,7 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.num_virtual = c.num_virtual;
     v.numeric_args = c.numeric_args;
     v.numeric_storage = c.numeric_storage;
+    v.repeated_literals = c.repeated_literals;
     return v;
 }
 
@@ -474,17 +481,19 @@ struct LevelPlanes
 {
     const u64* storage = nullptr;
     u64 present = 0;
-    u64 fluent = 0;
+    u32 fluent = 0;  // at most eight planes of ceil(fluent_slots / 64) words; fits u32
     u32 words = 0, derived_words = 0;
+    u32 goal_plane = 0;  // nonzero: the filtered goal follows this many subgoal planes per sign
 
-    /// The plain mask of the level, sign and slot kind of goal cell kind `kind` (16 to 63), null if the cell takes no
+    /// The plain mask of the level, sign and slot kind of goal cell kind `kind` (0 to 63), null if the cell takes no
     /// literal.
     [[nodiscard]] MYMYR_HD const u64* plane(u32 kind) const
     {
         if (((present >> kind) & 1u) == 0)
             return nullptr;
         const bool derived_slots = (kind & 8u) != 0;
-        const u64 level_sign = u64{(kind >> 4) - 1u} * 2u + ((kind >> 2) & 1u);
+        const u32 plane = kind < 16u ? goal_plane : (kind >> 4) - 1u;
+        const u64 level_sign = u64{plane} * 2u + ((kind >> 2) & 1u);
         return storage + (derived_slots ? fluent : 0u) + level_sign * (derived_slots ? derived_words : words);
     }
 };
@@ -1112,32 +1121,50 @@ MYMYR_HD u32 level_count(const MaskLayers& raw)
 /// The 64-bit words `effective_layers` needs for the subgoal layers `raw` of an instance.
 MYMYR_HD u64 effective_layer_words(const InstanceView& v, const MaskLayers& raw)
 {
-    return u64{level_count(raw)} * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
+    const u32 goal = v.repeated_literals == RepeatedLiterals::Highest && raw.layers != 0 ? 1u : 0u;
+    return u64{level_count(raw) + goal} *
+           (2u * v.words + (raw.derived_pos || goal ? 2u * v.derived_words : 0u));
 }
 
 /// Where the plain mask of level l (0-based: layer l) and one sign over the fluent or the derived slots begins in the
 /// storage of effective_layer_words: the slots' words, the masks over the fluent slots of all levels and signs first.
 MYMYR_HD u64 level_plane_offset(const InstanceView& v, const MaskLayers& raw, bool derived_slots, u32 l, u32 negative)
 {
-    const u64 fluent = raw.pos && raw.neg ? u64{level_count(raw)} * 2u * v.words : 0u;
+    const u32 goal = v.repeated_literals == RepeatedLiterals::Highest && raw.layers != 0 ? 1u : 0u;
+    const u64 fluent = u64{level_count(raw) + goal} * 2u * v.words;
     return (derived_slots ? fluent : 0u) + (u64{l} * 2u + negative) * (derived_slots ? v.derived_words : v.words);
 }
 
-/// The words first, first + step, ... of the plain mask at `plain` of level l (0-based) and one sign: the words of `layer`
-/// (layer l of `layers` words each, masks of one sign) without the literals of `lowest` (the goal's, null: none) and of
-/// the layers below l. Returns the bits 1, 2 and 4: the mask has a literal among these words, one that the state `state`
-/// (null: all clear) satisfies, one that it does not (a positive literal holds iff its bit is set, a negative one iff it
-/// is clear).
-MYMYR_HD u32 level_plane_words(const u64* layer, u32 layer_words, u32 l, const u64* lowest, const u64* state,
-                               bool negative, u32 words, u64* plain, u32 first, u32 step)
+/// Word w of a listing level after placement: level 0 is the goal, level l + 1 is layer l. Subtraction only
+/// compares literals of the same sign and slot kind. A missing layer plane contains no literals.
+MYMYR_HD u64 placed_level_word(RepeatedLiterals policy, const u64* layer, u32 stride, u32 levels, u32 level,
+                               const u64* goal, u32 w)
+{
+    u64 m = level == 0 ? (goal ? goal[w] : u64{0})
+                      : (layer ? layer[u64{level - 1u} * stride + w] : u64{0});
+    if (policy == RepeatedLiterals::Lowest && level != 0)
+    {
+        m &= ~(goal ? goal[w] : u64{0});
+        if (layer)
+            for (u32 l = 0; l + 1u < level; ++l)
+                m &= ~layer[u64{l} * stride + w];
+    }
+    else if (policy == RepeatedLiterals::Highest && layer)
+        for (u32 l = level; l < levels; ++l)
+            m &= ~layer[u64{l} * stride + w];
+    return m;
+}
+
+/// Writes the words first, first + step, ... of one placed level and sign to `plain`. Returns bits 1, 2 and 4:
+/// the plane has a literal, a satisfied literal, an unsatisfied literal (a null state has all bits clear).
+MYMYR_HD u32 level_plane_words(RepeatedLiterals policy, const u64* layer, u32 layer_words, u32 levels, u32 level,
+                               const u64* goal, const u64* state, bool negative, u32 words, u64* plain,
+                               u32 first, u32 step)
 {
     u64 any = 0, any_satisfied = 0, any_unsatisfied = 0;
     for (u32 w = first; w < words; w += step)
     {
-        u64 lower = lowest ? lowest[w] : u64{0};
-        for (u32 k = 0; k < l; ++k)
-            lower |= layer[u64{k} * layer_words + w];
-        const u64 m = layer[u64{l} * layer_words + w] & ~lower;
+        const u64 m = placed_level_word(policy, layer, layer_words, levels, level, goal, w);
         const u64 x = state ? state[w] : u64{0};
         plain[w] = m;
         any |= m;
@@ -1147,8 +1174,8 @@ MYMYR_HD u32 level_plane_words(const u64* layer, u32 layer_words, u32 l, const u
     return (any ? 1u : 0u) | (any_satisfied ? 2u : 0u) | (any_unsatisfied ? 4u : 0u);
 }
 
-/// The levels of a row's subgoal layers: level l (layer l - 1) holds the literals of that layer that neither the goal
-/// nor a layer below it has with the same sign, over the instance's words (derived words). The goal is the row's own or
+/// The placed levels of a row's subgoal layers, over the instance's words (derived words). Highest also writes a
+/// filtered level-0 plane after the subgoal planes of each slot kind. The goal is the row's own or
 /// the instance's (goal_words). For each level and sign the plain mask is written to `storage` (effective_layer_words,
 /// laid out by level_plane_offset); whether it, the part of it whose literals the state (`atoms`, `derived`: null is all
 /// clear) satisfies and the part it does not have a literal goes to LevelPlanes::present.
@@ -1160,20 +1187,23 @@ MYMYR_HD LevelPlanes effective_layers_group(const Group& grp, const InstanceView
 {
     LevelPlanes out{};
     out.storage = storage;
-    out.fluent = level_plane_offset(v, raw, true, 0, 0);
+    out.fluent = static_cast<u32>(level_plane_offset(v, raw, true, 0, 0));
     out.words = v.words;
     out.derived_words = v.derived_words;
+    out.goal_plane = v.repeated_literals == RepeatedLiterals::Highest ? level_count(raw) : 0u;
     const auto fill = [&](bool derived_slots, const u64* layer_pos, const u64* layer_neg, u32 layer_words, u32 words,
                           const u64* goal_pos, const u64* goal_neg, const u64* state)
     {
-        for (u32 l = 0, levels = level_count(raw); l < levels; ++l)
+        const u32 levels = level_count(raw);
+        for (u32 l = 0; l < levels + (out.goal_plane ? 1u : 0u); ++l)
             for (u32 sign = 0; sign < 2; ++sign)
             {
                 u64* plain = storage + level_plane_offset(v, raw, derived_slots, l, sign);
-                const u32 flags = grp.bit_or(level_plane_words(sign ? layer_neg : layer_pos, layer_words, l,
-                                                               sign ? goal_neg : goal_pos, state, sign != 0, words, plain,
-                                                               grp.lane(), grp.size()));
-                const u32 kind = ((l + 1u) << 4) | (derived_slots ? 8u : 0u) | (sign ? 4u : 0u);
+                const u32 level = l == levels ? 0u : l + 1u;
+                const u32 flags = grp.bit_or(level_plane_words(v.repeated_literals, sign ? layer_neg : layer_pos,
+                                                               layer_words, levels, level, sign ? goal_neg : goal_pos,
+                                                               state, sign != 0, words, plain, grp.lane(), grp.size()));
+                const u32 kind = (level << 4) | (derived_slots ? 8u : 0u) | (sign ? 4u : 0u);
                 const u64 modes = ((flags & 1u) ? (u64{1} << static_cast<u32>(GoalMode::Plain)) |
                                                       (u64{1} << static_cast<u32>(GoalMode::PlainTarget))
                                                 : u64{0}) |
@@ -1184,7 +1214,7 @@ MYMYR_HD LevelPlanes effective_layers_group(const Group& grp, const InstanceView
     };
     if (raw.pos && raw.neg)
         fill(false, raw.pos, raw.neg, raw.words, v.words, goal.pos, goal.neg, atoms);
-    if (raw.derived_pos && raw.derived_neg)
+    if ((raw.derived_pos && raw.derived_neg) || out.goal_plane)
         fill(true, raw.derived_pos, raw.derived_neg, raw.derived_words, v.derived_words, goal.derived_pos,
              goal.derived_neg, derived);
     grp.sync();
@@ -1217,8 +1247,10 @@ MYMYR_HD void bind_stored_levels(const InstanceView& v, const RowInput& row, Row
 {
     if (row.layers != &layers || layers.subgoals.layers == 0)
         return;
-    layers.levels = LevelPlanes{storage, present, level_plane_offset(v, layers.subgoals, true, 0, 0), v.words,
-                                v.derived_words};
+    layers.levels = LevelPlanes{storage, present,
+                                static_cast<u32>(level_plane_offset(v, layers.subgoals, true, 0, 0)), v.words,
+                                v.derived_words,
+                                v.repeated_literals == RepeatedLiterals::Highest ? level_count(layers.subgoals) : 0u};
 }
 
 /// The mask a goal cell takes its literals from: the positive or negative literals over the fluent or derived slots of
@@ -1228,8 +1260,10 @@ template<bool Layered>
 MYMYR_HD_HOT const u64* goal_cell_mask(const Cell& c, const GoalWords& g, const RowInput& in)
 {
     const u32 kind = c.op - k_goal_op_base;
+    if (Layered && in.layers && (kind >= 16u || in.layers->levels.goal_plane))
+        return in.layers->levels.plane(kind & 63u);
     if (Layered && kind >= 16u)
-        return in.layers ? in.layers->levels.plane(kind & 63u) : nullptr;
+        return nullptr;
     return (kind & 8u) ? ((kind & 4u) ? g.derived_neg : g.derived_pos) : ((kind & 4u) ? g.neg : g.pos);
 }
 

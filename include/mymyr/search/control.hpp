@@ -133,15 +133,20 @@ struct SearchStatistics
     u64 memory_bytes = 0;
 };
 
-/// What became of the successor of a transition, reported by SearchObserver::on_transition.
+/// What became of the successor of a transition, reported by SearchObserver::on_transition. Every search that reports
+/// transitions gives the most specific outcome: a blocked successor is Blocked and a self loop is SelfLoop, whatever
+/// else would also have rejected it; Pruned covers the remaining reasons.
 enum class TransitionOutcome : u8
 {
     Opened,     // a new state entered the search (open list, IW tree, rollout tree)
     Reopened,   // a known state was reached on a cheaper path and re-entered the open list
-    Duplicate,  // a known state; nothing changed (a width-0 duplicate entry, an existing rollout child)
-    Pruned,     // not entered: not novel, blocked, a self loop, beyond a depth bound, or cut by a budget
+    Duplicate,  // a known state; nothing changed (a width-0 duplicate entry, a state already in the tree or already
+                // a candidate of the next layer, a stored state not reached on a cheaper path)
+    Pruned,     // not entered: not novel, beyond a depth or incumbent bound, or cut by a budget
     DeadEnd,    // not entered: recognized as a dead end (infinite heuristic value, no applicable action)
     Goal,       // a goal state, found by a search that tests the goal on generation (Rollout IW)
+    Blocked,    // not entered: one of SearchControl::blocked_states
+    SelfLoop,   // not entered: the successor equals the state it was generated from
 };
 
 /// Event hooks: the public extension point (`hierarchical` implements a native tree capture on
@@ -162,7 +167,9 @@ public:
     virtual void on_end(SearchStatus /*status*/, const SearchStatistics& /*total*/) {}
     /// Every transition of an expanded state with what became of its successor (TransitionOutcome).
     /// Called after on_generate / on_prune, which are kept. `child` is the successor's id, or ~0
-    /// when it got none (pruned). Emitted by the searches that document it (the IW family variants).
+    /// when it got none (rejected). Emitted by iw, siw, the IW family variants (search/iw_family.hpp), astar_iw,
+    /// Rollout IW and the atomic-goal portfolio, whose workers are IW and Rollout IW searches; the other searches do
+    /// not call it.
     virtual void on_transition(u64 /*parent*/, const Action& /*action*/, u64 /*child*/, StateView /*child_state*/, TransitionOutcome /*outcome*/) {}
     /// Per-worker observers for parallel searches. A parallel search calls make_worker(w)
     /// once per worker w on the calling thread before any worker runs. Worker w then sends its hot events (on_expand,

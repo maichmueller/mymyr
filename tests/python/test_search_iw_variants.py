@@ -277,6 +277,49 @@ def test_observer_transition_events(blocks):
     assert sum(o.outcomes.values()) == r.rollout.generated
 
 
+def test_transition_outcomes_are_the_same_in_every_search(gripper):
+    """Every search that sends on_transition reports a blocked successor as BLOCKED and a self loop as SELF_LOOP,
+    before any other reason, and never uses either outcome for anything else."""
+    blocked = search.iw(gripper, max_width=1, tree="nodes", max_states=3).passes[-1].tree.states()[1:3]
+    assert len(blocked) == 2
+
+    class Obs:
+        def __init__(self):
+            self.states, self.outcomes = {}, []
+
+        def on_expand(self, i, state):
+            self.states[i] = state
+
+        def on_transition(self, parent, action, child, state, outcome):
+            self.outcomes.append(outcome)
+            if any(state == b for b in blocked):
+                assert outcome == TransitionOutcome.BLOCKED
+            elif state == self.states[parent]:
+                assert outcome == TransitionOutcome.SELF_LOOP
+            else:
+                assert outcome not in (TransitionOutcome.BLOCKED, TransitionOutcome.SELF_LOOP)
+
+    runs = {
+        "iw": lambda o: search.iw(gripper, max_width=2, observer=o, blocked_states=blocked),
+        "iw1": lambda o: search.iw(gripper, max_width=1, optimize_iw1=False, observer=o, blocked_states=blocked),
+        "iw_beam": lambda o: search.iw(gripper, max_width=1, layer_order="in_order", beam_width=2,
+                                       beam_novelty="survivors_only", observer=o, blocked_states=blocked),
+        "iw_pass": lambda o: search.iw_pass(gripper, 1, observer=o, blocked_states=blocked),
+        "siw": lambda o: search.siw(gripper, max_width=2, observer=o, blocked_states=blocked),
+        "liw": lambda o: search.liw(gripper, max_width=1, landmarks="approximate", observer=o, blocked_states=blocked),
+        "abstracted_iw": lambda o: search.abstracted_iw(gripper, width=1, observer=o, blocked_states=blocked),
+        "astar_iw": lambda o: search.astar_iw(gripper, heuristic="blind", observer=o, blocked_states=blocked),
+        "rollout_iw": lambda o: search.rollout_iw(gripper, seed=3, observer=o, blocked_states=blocked,
+                                                  max_states=300),
+    }
+    for name, run in runs.items():
+        o = Obs()
+        r = run(o)
+        assert r.status != Status.FAILED, name
+        assert TransitionOutcome.BLOCKED in o.outcomes, name
+        assert TransitionOutcome.SELF_LOOP in o.outcomes, name
+
+
 def test_make_worker_protocol(blocks):
     """An observer with make_worker(k) runs the batch on several threads, each worker's hot events on its own object;
     without it the batch runs on the calling thread alone."""

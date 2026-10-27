@@ -13,13 +13,19 @@ can store by reference (native nanobind functions cannot be pickled).
   its arrays (rows included); loading validates the arrays against the task (mymyr.datasets.StateSpace.from_arrays).
 - A TupleGraph pickles as its state space, root, options and arrays; a GeneralizedStateSpace as its state spaces; a
   KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
+- A SearchTree pickles as its task, fingerprint and flat arrays, with the task's lazy slot numbering preserved.
 - A search result pickles as its task, the fingerprint and its fields: the plan as action labels (schema, objects),
   states as States, statistics and statuses as numbers; loading checks the labels and atoms against the task.
 - A mymyr.encoding encoder (FlatRelationEncoder, SimpleEncoder, FlatHorizonEncoder, FlatRootedHorizonEncoder,
   FlatTransitionEncoder, FlatTransitionEffectsEncoder) pickles as its class, its table, its options and its schema's
   fingerprint; loading builds the encoder again and checks the fingerprint.
+- A FactLandmarkGraph pickles as its task, the task's content fingerprint and its arrays (FactLandmarkGraph.to_arrays:
+  canonical atom ids, the same under lazy atom slots); loading checks the fingerprint and validates the arrays
+  (FactLandmarkGraph.from_arrays). The achiever index travels as computed; nothing is grounded again.
 - A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
   space and costs) and is built again when loaded.
+- A mymyr.rl.GoalTemplates pickles as its source, its generator options (None for templates from conditions) and its
+  packed arrays; loading validates the arrays against the source (nothing is generated again).
 """
 
 from mymyr import _core
@@ -27,6 +33,10 @@ from mymyr import _core
 
 def _restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding):
     return _core._restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding)
+
+
+def _restore_frozen_task(source, atoms):
+    return source.frozen(atoms)
 
 
 def _restore_state(task, fingerprint, kind, payload):
@@ -65,6 +75,10 @@ def _restore_search_result(kind, task, fingerprint, fields):
     return _core._search._restore_search_result(kind, task, fingerprint, fields)
 
 
+def _restore_landmark_graph(task, fingerprint, arrays):
+    return _core._search._restore_landmark_graph(task, fingerprint, arrays)
+
+
 def _restore_heuristic(task, kind, costs, evaluation):
     return _core._search.Heuristic(task, kind, costs=costs, evaluation=evaluation)
 
@@ -95,3 +109,7 @@ def _restore_flat_encoder(name, table, options, fingerprint):
             f"its table and options has {encoder.schema_fingerprint:#018x} (the catalog or its rules differ)"
         )
     return encoder
+
+
+def _restore_goal_templates(source, options, state):
+    return _core._rl.GoalTemplates._restore(source, options, state)

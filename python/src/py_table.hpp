@@ -35,6 +35,8 @@ struct PyTable
     std::mutex meta_mutex;
     std::shared_ptr<const rl::ArrayBundle> meta;  // table_atom_metadata, rebuilt when lazy slots grew
     u64 meta_key = ~u64{0};
+    std::mutex encoding_mutex;  // the encoding context of the table with the default options, as PyTaskCore's
+    std::shared_ptr<const void> encoding_context;
 };
 
 struct PySuite
@@ -70,6 +72,11 @@ struct TableRef
     [[nodiscard]] std::atomic<u32>& branching() const { return py ? py->branching : core->branching; }
     [[nodiscard]] std::mutex& cuda_mutex() const { return py ? py->cuda_mutex : core->cuda_mutex; }
     [[nodiscard]] std::shared_ptr<void>& cuda() const { return py ? py->cuda : core->cuda; }
+    [[nodiscard]] std::mutex& encoding_mutex() const { return py ? py->encoding_mutex : core->encoding_mutex; }
+    [[nodiscard]] std::shared_ptr<const void>& encoding_context() const
+    {
+        return py ? py->encoding_context : core->encoding_context;
+    }
 };
 
 /// A suite argument, resolved: global instance ids (rl::TaskSuite).

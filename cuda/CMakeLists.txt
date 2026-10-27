@@ -22,10 +22,36 @@ add_library(mymyr_cuda STATIC
     src/expand.cpp
     src/multi_iw.cu
     src/multi_iw.cpp
+    src/translate.cu
     src/rollouts.cpp
 )
 add_library(mymyr::cuda ALIAS mymyr_cuda)
 set_target_properties(mymyr_cuda PROPERTIES EXPORT_NAME cuda)
+# The toolkit version and GPU code that cuda::build_info() reports: SASS as sm_<n>, PTX as compute_<n>; native, all and
+# all-major as the architectures CMake resolved them to.
+set(_mymyr_cuda_archs "${CMAKE_CUDA_ARCHITECTURES}")
+if(_mymyr_cuda_archs STREQUAL "native" AND CMAKE_CUDA_ARCHITECTURES_NATIVE)
+    set(_mymyr_cuda_archs "${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+elseif(_mymyr_cuda_archs STREQUAL "all" AND CMAKE_CUDA_ARCHITECTURES_ALL)
+    set(_mymyr_cuda_archs "${CMAKE_CUDA_ARCHITECTURES_ALL}")
+elseif(_mymyr_cuda_archs STREQUAL "all-major" AND CMAKE_CUDA_ARCHITECTURES_ALL_MAJOR)
+    set(_mymyr_cuda_archs "${CMAKE_CUDA_ARCHITECTURES_ALL_MAJOR}")
+endif()
+set(_mymyr_cuda_code "")
+foreach(_arch IN LISTS _mymyr_cuda_archs)
+    if(_arch MATCHES "^([0-9]+[a-z]?)-real$")
+        list(APPEND _mymyr_cuda_code "sm_${CMAKE_MATCH_1}")
+    elseif(_arch MATCHES "^([0-9]+[a-z]?)-virtual$")
+        list(APPEND _mymyr_cuda_code "compute_${CMAKE_MATCH_1}")
+    elseif(_arch MATCHES "^([0-9]+[a-z]?)$")
+        list(APPEND _mymyr_cuda_code "sm_${CMAKE_MATCH_1}" "compute_${CMAKE_MATCH_1}")
+    else()
+        list(APPEND _mymyr_cuda_code "${_arch}")
+    endif()
+endforeach()
+list(JOIN _mymyr_cuda_code " " _mymyr_cuda_code)
+set_source_files_properties(src/runtime.cpp PROPERTIES COMPILE_DEFINITIONS
+    "MYMYR_CUDA_TOOLKIT_VERSION=\"${CMAKE_CUDA_COMPILER_VERSION}\";MYMYR_CUDA_CODE=\"${_mymyr_cuda_code}\"")
 # the environment step on the device (cuda/env.hpp, cuda/env_kernels.hpp)
 target_sources(mymyr_cuda PRIVATE src/env.cu src/env.cpp)
 # novelty rewards, prefix masks and hindsight relabels on the device (cuda/rl_ops.hpp)
@@ -64,7 +90,7 @@ target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
 # IW over task tables (cuda/multi_iw.hpp: the searches grouped by instance)
 target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
 # the relational encoder on the device: its context, scratch and kernels (cuda/encoding.hpp)
-target_sources(mymyr_cuda PRIVATE src/encoding.cpp src/encoding.cu src/encoding_horizon.cu src/encoding_space_horizon.cu src/encoding_rows.cu src/encoding_stream.cpp src/encoding_collate.cpp src/encoding_collate.cu)
+target_sources(mymyr_cuda PRIVATE src/encoding.cpp src/encoding.cu src/encoding_literals.cu src/encoding_horizon.cu src/encoding_space_horizon.cu src/encoding_rows.cu src/encoding_stream.cpp src/encoding_collate.cpp src/encoding_collate.cu)
 # task suites (several domains) on the device: the suite expand and the domain split of a batch
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
 # device action costs (cuda/cost_program.hpp: programs over static functions, the state spaces and A*)

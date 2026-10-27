@@ -170,18 +170,177 @@ TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
     const rl::StateBatchView in{rows.data(), states.size(), W, 0};
 
     Buffers one(states.size(), ref.actions.size() + 5, W, L);
+    std::vector<u64> hashes(one.x.capacity);
+    std::vector<u8> noops(one.x.capacity);
+    one.x.succ_hash = hashes.data();
+    one.x.noop = noops.data();
     rl::expand(*rl::TaskTable::single(task), in, nullptr, one.x);
     expect_equal(*task, ref, one, states.size());
+    for (usize j = 0; j < ref.succ.size(); ++j)
+    {
+        EXPECT_EQ(hashes[j], ref.succ[j].hash());
+        EXPECT_EQ(noops[j], ref.succ[j] == states[static_cast<usize>(ref.parent[j])]);
+    }
 
     for (u32 T : {2u, 3u, 8u})
     {
         ThreadPool pool(T);
         rl::ExpandScratch scratch;
         Buffers many(states.size(), ref.actions.size() + 5, W, L);
+        std::vector<u64> pooled_hashes(many.x.capacity);
+        std::vector<u8> pooled_noops(many.x.capacity);
+        many.x.succ_hash = pooled_hashes.data();
+        many.x.noop = pooled_noops.data();
         rl::expand(*rl::TaskTable::single(task), in, nullptr, many.x, {}, pool, scratch);
         expect_equal(*task, ref, many, states.size());
         rl::expand(*rl::TaskTable::single(task), in, nullptr, many.x, {}, pool, scratch);  // scratch reuse
         expect_equal(*task, ref, many, states.size());
+        EXPECT_EQ(pooled_hashes, hashes);
+        EXPECT_EQ(pooled_noops, noops);
+    }
+}
+
+TEST(RlExpandDigests, FiltersNoopsWithCanonicalIndicesAndPreDropCapacity)
+{
+    const auto task = load("rovers__p02", TaskOptions::Atoms::Reachable);
+    const auto table = rl::TaskTable::single(task);
+    const auto states = walk_states(*task, 2, 30, 19);
+    const auto ref = reference(*task, states);
+    const u32 W = task->words(), L = rl::max_label_width(*task);
+    const auto rows = pack(states, W);
+    const rl::StateBatchView in{rows.data(), states.size(), W};
+    Buffers full(states.size(), ref.succ.size(), W, L);
+    std::vector<u64> hashes(ref.succ.size());
+    std::vector<u8> noops(ref.succ.size());
+    full.x.succ_hash = hashes.data();
+    full.x.noop = noops.data();
+    rl::expand(*table, in, nullptr, full.x);
+    ASSERT_EQ(full.x.generated, ref.succ.size());
+    u64 noop_count = 0;
+    for (usize j = 0; j < ref.succ.size(); ++j)
+    {
+        EXPECT_EQ(hashes[j], ref.succ[j].hash());
+        EXPECT_EQ(noops[j], ref.succ[j] == states[static_cast<usize>(ref.parent[j])]);
+        noop_count += noops[j];
+    }
+    ASSERT_GT(noop_count, 0);
+    for (bool pooled : {false, true})
+    {
+        Buffers kept(states.size(), ref.succ.size(), W, L);
+        std::vector<i32> indices(ref.succ.size());
+        std::vector<u64> kh(ref.succ.size());
+        std::vector<u8> kn(ref.succ.size());
+        kept.x.index = indices.data();
+        kept.x.succ_hash = kh.data();
+        kept.x.noop = kn.data();
+        rl::ExpandOptions opt;
+        opt.drop_noops = true;
+        ThreadPool pool(3);
+        rl::ExpandScratch scratch;
+        auto run_into = [&](rl::Expansion& x)
+        {
+            if (pooled)
+                rl::expand(*table, in, nullptr, x, opt, pool, scratch);
+            else
+                rl::expand(*table, in, nullptr, x, opt);
+        };
+        auto run = [&] { run_into(kept.x); };
+        run();
+        EXPECT_EQ(kept.x.generated, full.x.total);
+        EXPECT_LT(kept.x.total, full.x.total);
+        for (usize p = 0; p < states.size(); ++p)
+        {
+            const i32 b = full.offsets[p], e = full.offsets[p + 1];
+            const bool all_noop = std::all_of(noops.begin() + b, noops.begin() + e, [](u8 v) { return v != 0; });
+            i32 next = kept.offsets[p];
+            for (i32 j = b; j < e; ++j)
+                if (all_noop || !noops[j])
+                {
+                    ASSERT_LT(next, kept.offsets[p + 1]);
+                    EXPECT_EQ(indices[next], j - b);
+                    EXPECT_EQ(kh[next], hashes[j]);
+                    EXPECT_EQ(kn[next], noops[j]);
+                    EXPECT_TRUE(std::equal(full.succ.data() + j * W, full.succ.data() + (j + 1) * W,
+                                           kept.succ.data() + next * W));
+                    ++next;
+                }
+            EXPECT_EQ(next, kept.offsets[p + 1]);
+        }
+        // Label-only: the same digests, flags and positions without stored rows; no width applies to them.
+        std::vector<i32> label_index(ref.succ.size()), label_offsets(states.size() + 1);
+        std::vector<u64> label_hashes(ref.succ.size());
+        std::vector<u8> label_noops(ref.succ.size());
+        rl::Expansion labels;
+        labels.capacity = ref.succ.size();
+        labels.index = label_index.data();
+        labels.succ_hash = label_hashes.data();
+        labels.noop = label_noops.data();
+        labels.offsets = label_offsets.data();
+        run_into(labels);
+        EXPECT_FALSE(labels.overflow());
+        EXPECT_EQ(labels.words_needed, 0u);
+        EXPECT_EQ(labels.generated, full.x.total);
+        const auto kept_rows = static_cast<std::ptrdiff_t>(kept.x.total);  // rows past it are scratch
+        EXPECT_TRUE(std::equal(indices.begin(), indices.begin() + kept_rows, label_index.begin()));
+        EXPECT_TRUE(std::equal(kh.begin(), kh.begin() + kept_rows, label_hashes.begin()));
+        EXPECT_TRUE(std::equal(kn.begin(), kn.begin() + kept_rows, label_noops.begin()));
+        EXPECT_EQ(label_offsets, kept.offsets);
+        // The padded view: `index` is the flat row, `canonical` the position in the parent's full order.
+        const u32 K = 8;
+        std::vector<i32> pad_index(states.size() * K), pad_canonical(states.size() * K), pad_count(states.size());
+        std::vector<u8> pad_mask(states.size() * K);
+        rl::PaddedExpansion padded;
+        padded.k = K;
+        padded.index = pad_index.data();
+        padded.canonical = pad_canonical.data();
+        padded.mask = pad_mask.data();
+        padded.count = pad_count.data();
+        rl::pad(kept.x, states.size(), padded);
+        for (usize p = 0; p < states.size(); ++p)
+            for (u32 k = 0; k < K; ++k)
+            {
+                const usize at = p * K + k;
+                const i32 j = kept.offsets[p] + static_cast<i32>(k);
+                const bool valid = j < kept.offsets[p + 1];
+                EXPECT_EQ(pad_mask[at], valid ? 1 : 0);
+                EXPECT_EQ(pad_index[at], valid ? j : -1);
+                EXPECT_EQ(pad_canonical[at], valid ? indices[static_cast<usize>(j)] : -1);
+            }
+        kept.x.capacity = kept.x.total;
+        run();
+        EXPECT_TRUE(kept.x.overflow());
+        EXPECT_GT(kept.x.generated, kept.x.capacity);
+    }
+}
+
+TEST(RlExpandDigests, NumericSuccessorsMatchNativeStateHashes)
+{
+    for (auto storage : {TaskOptions::NumericStorageMode::I32, TaskOptions::NumericStorageMode::F64})
+    {
+        TaskOptions options;
+        options.numeric_storage = storage;
+        const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt", options);
+        const State initial = task->initial_state();
+        const Reference ref = reference(*task, {initial});
+        const u32 W = std::max<u32>(task->words(), 1), NN = task->numeric_words(), RW = W + NN;
+        std::vector<u64> row(RW, 0), successors(ref.succ.size() * RW), hashes(ref.succ.size());
+        std::vector<u8> noops(ref.succ.size());
+        std::copy_n(initial.data(), initial.size_words(), row.data());
+        std::copy(initial.numeric().begin(), initial.numeric().end(), row.begin() + W);
+        rl::Expansion out;
+        out.capacity = ref.succ.size();
+        out.words = W;
+        out.numeric_words = NN;
+        out.succ = successors.data();
+        out.succ_hash = hashes.data();
+        out.noop = noops.data();
+        rl::expand(*task, rl::StateBatchView{row.data(), 1, W, 0, NN}, nullptr, out);
+        ASSERT_EQ(out.generated, ref.succ.size());
+        for (usize j = 0; j < ref.succ.size(); ++j)
+        {
+            EXPECT_EQ(hashes[j], ref.succ[j].hash());
+            EXPECT_EQ(noops[j], ref.succ[j] == initial);
+        }
     }
 }
 

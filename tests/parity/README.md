@@ -157,7 +157,7 @@ Encodings
   node's state entity and the auxiliary entity in mymyr and empty in the reference. The reference lists delta relations
   of static predicates, always empty; mymyr has none. The reference evaluates the goal at the nodes below the root
   without the static atoms (a positive static literal that holds is unsatisfied there, a negative one satisfied); mymyr
-  uses them. A literal that two goal levels list is at the highest level, once per level, in the reference and at the
-  lowest, once, in mymyr.
+  uses them. A literal that several goal levels list is at the highest level, once per listing level, in the reference;
+  mymyr's default `repeated_literals='every'` keeps one tuple at each listing level.
 - Helper predicates for quantified conditions order their parameters by name in mymyr and by the reference's own
   traversal there; the fixtures map them.

@@ -407,6 +407,37 @@ public:
                 slot->syncs};
     }
 
+    void literal_slots(std::intptr_t stream, u64 count, u32 width,
+                       const std::vector<std::uintptr_t>& inputs, const std::vector<std::uintptr_t>& outputs)
+    {
+        if (inputs.size() != 3 || outputs.size() != 3) refuse("expected three literal inputs and outputs");
+        const cuda::DeviceLiteralInput in{count, width, ptr<const i32>(inputs[0]), ptr<const i32>(inputs[1]),
+                                          ptr<const i32>(inputs[2])};
+        nb::gil_scoped_release release;
+        const auto slot = slot_of(stream);
+        std::lock_guard lock(slot->mutex);
+        ensure_context(*slot, cuda_stream(stream));
+        cuda::literal_slots(*slot->context, in, ptr<u8>(outputs[0]), ptr<i32>(outputs[1]), ptr<u64>(outputs[2]));
+    }
+
+    void literal_masks(std::intptr_t stream, u64 count, u32 width, u32 rows, u32 layers,
+                       const std::vector<std::uintptr_t>& inputs, const std::vector<std::uintptr_t>& outputs)
+    {
+        if (inputs.size() != 6 || outputs.size() != 6) refuse("expected six literal inputs and outputs");
+        const cuda::DeviceLiteralInput in{count, width, ptr<const i32>(inputs[0]), ptr<const i32>(inputs[1]),
+                                          ptr<const i32>(inputs[2])};
+        const cuda::DeviceLiteralPlacement placement{ptr<const u8>(inputs[3]), ptr<const i32>(inputs[4]),
+                                                     ptr<const i32>(inputs[5]), rows, layers};
+        const cuda::DeviceLiteralMasks out{ptr<u64>(outputs[0]), ptr<u64>(outputs[1]), ptr<u64>(outputs[2]),
+                                          ptr<u64>(outputs[3]), ptr<u32>(outputs[4]), ptr<u64>(outputs[5]),
+                                          m_encoder->table().words(), m_encoder->table().derived_words()};
+        nb::gil_scoped_release release;
+        const auto slot = slot_of(stream);
+        std::lock_guard lock(slot->mutex);
+        ensure_context(*slot, cuda_stream(stream));
+        cuda::literal_masks(*slot->context, in, placement, out);
+    }
+
     /// Scratch bytes for these rows and this stream's acquired generation. No workspace reservation.
     u64 scratch_bytes(std::intptr_t stream, u64 graphs, bool derived)
     {
@@ -642,6 +673,12 @@ void bind_encoding_device(nb::module_& parent)
              "Uploads the encoder's context to `device` (on `ctx`, a mymyr.cuda.Context, or the table's default context). "
              "Raises ValueError for options the device does not encode.")
         .def_prop_ro("device", &DeviceEncoderHandle::device, "The CUDA device index.")
+        .def("literal_slots", &DeviceEncoderHandle::literal_slots, "stream"_a, "count"_a, "width"_a,
+             "inputs"_a, "outputs"_a,
+             "Resolves device literals into kinds, slots and status on the named stream; no host wait.")
+        .def("literal_masks", &DeviceEncoderHandle::literal_masks, "stream"_a, "count"_a, "width"_a,
+             "rows"_a, "layers"_a, "inputs"_a, "outputs"_a,
+             "ORs literal bits into zeroed masks and flags fixed false literals and invalid inputs; no host wait.")
         .def("build_space_horizons", &DeviceEncoderHandle::build_space_horizons, "stream"_a, "inputs"_a,
              "outputs"_a, "states"_a, "edges"_a, "words"_a, "label_width"_a, "graphs"_a, "depth"_a,
              "limit"_a, "truncate"_a, "scratch_bytes"_a, "Traverses recorded state ids into compact device horizon slices on the stream.")

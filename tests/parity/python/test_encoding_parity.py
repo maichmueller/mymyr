@@ -17,7 +17,7 @@ from encoding_hgraph_parity import HGRAPH_CONFIGS
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    goal_literals, literal_text, needed_differences,
+    goal_literals, is_horizon, layer_inputs, literal_text, needed_differences,
     lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
     sources_of, is_transition, recorded_successor,
 )
@@ -394,7 +394,7 @@ def test_the_history_of_a_record_keeps_only_its_newest_steps():
     assert {m.kind for m in compare(expected, older, context)} >= {"entity"}
 
 
-def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
+def test_a_goal_literal_that_a_layer_lists_is_expected_once_at_each_level():
     expected, actual, context = goal_case("C4_L1", "s2", "f01")
     assert "repeated_literal" in needed_differences(expected, actual, context)
     assert compare(expected, actual, context) == []
@@ -410,12 +410,14 @@ def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
     twice = copy(actual)
     twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
     assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+    subgoal = ("subgoal", entity.replace("[g]", "[sg]"))
+    assert subgoal in actual.entities
     level = copy(actual)
-    level.entities.append(("subgoal", entity.replace("[g]", "[sg]")))
+    level.entities.remove(subgoal)
     assert {m.kind for m in compare(expected, level, context)} == {"entity"}
 
 
-def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
+def test_a_literal_in_two_layers_is_expected_once_in_each_layer():
     expected, actual, context = goal_case("C4_L2", "s3", "f09")
     assert "repeated_literal" in needed_differences(expected, actual, context)
     assert compare(expected, actual, context) == []
@@ -423,10 +425,40 @@ def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
                     key=repr)
     assert shared and not set(shared) & goal_literals(context)
     name = literal_text(*shared[0])
-    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") not in actual.entities
+    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") in actual.entities
     higher = copy(actual)
     higher.entities[higher.entities.index(("subgoal", f"{name}[sg]"))] = ("subgoal", f"{name}[ssg]")
     assert {m.kind for m in compare(expected, higher, context)} == {"entity"}
+
+
+@pytest.mark.parametrize("prefix, config, state", [
+    ("f01", "C4_L1", "s2"), ("f09", "C4_L2", "s3"),
+    ("f01", "C7T", "s2"), ("f01", "C7S", "s2"),
+])
+def test_highest_placement_matches_the_reference_with_duplicate_tuples_collapsed(prefix, config, state):
+    fixture, task = load(prefix_path(prefix))
+    record = next(r for r in fixture["encodings"] if r["config"] == config and r["state"] == state)
+    recorded_state = next(s for s in fixture["states"] if s["id"] == state)
+    encoder = native_encoder(task, config, repeated_literals="highest")
+    arguments, dropped = layer_inputs(encoder, record["inputs"])
+    if is_horizon(config):
+        table = rl.as_table(task)
+        rows = horizon_view(table, [horizon_dag(task, table, record["inputs"]["dag"])])
+    else:
+        rows = [replay(task, recorded_state["path"])]
+    batch = encoder.encode(rows, **arguments)
+    actual = native_graph(encoder, batch, 0, [task], lanes_of(config))
+    expected = fixture_graph(fixture, record, sources_of(config))
+    collapsed = copy(expected)
+    collapsed.tuples = {name: list(dict.fromkeys(tuples)) for name, tuples in expected.tuples.items()}
+    assert collapsed.tuples != expected.tuples
+    context = record_context(fixture, task, recorded_state, config, record, dropped)
+    allowed = [name for name in NAMES if name not in ("repeated_literal", "repeated_literal_horizon")]
+    assert compare(collapsed, actual, context, allowed) == []
+    duplicate = next(name for name, tuples in expected.tuples.items() if len(tuples) != len(collapsed.tuples[name]))
+    twice = copy(actual)
+    twice.tuples[duplicate] += twice.tuples[duplicate][:1]
+    assert any(m.kind == "tuple" and m.where == duplicate for m in compare(collapsed, twice, context, allowed))
 
 
 def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
@@ -903,17 +935,17 @@ def test_the_relations_no_graph_fills_are_excused_only_while_empty_and_missing()
     assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
 
 
-def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horizon():
+def test_a_literal_in_two_levels_is_expected_once_at_each_level_of_a_horizon():
     expected, actual, context = horizon_case("C7T", "f01", "s2")
     assert ("target:0", "c", "b") in actual.tuples["[+]on[g]"]
-    assert "[+]on[sg]" not in actual.tuples
+    assert ("target:0", "c", "b") in actual.tuples["[+]on[sg]"]
     assert "repeated_literal_horizon" in needed_differences(expected, actual, context)
     lost = copy(actual)
     lost.tuples["[+]on[g]"] = [t for t in actual.tuples["[+]on[g]"] if t != ("target:0", "c", "b")]
     assert any(m.where == "[+]on[g]" for m in compare(expected, lost, context))
-    moved = copy(actual)
-    moved.tuples["[+]on[sg]"] = [("target:0", "c", "b")]
-    assert any(m.kind == "tuple" for m in compare(expected, moved, context))
+    twice = copy(actual)
+    twice.tuples["[+]on[sg]"] = actual.tuples["[+]on[sg]"] + [("target:0", "c", "b")]
+    assert any(m.kind == "tuple" for m in compare(expected, twice, context))
 
 
 def test_the_edge_arrays_give_the_action_and_parent_tuples_whatever_the_order_and_multiplicity_of_the_edges():
