@@ -129,8 +129,10 @@ def test_wide_label_only_digests_and_narrow_destinations(objects):
 def test_fallback_schema_digests():
     task = pddl_task("""(define (domain many) (:requirements :strips)
       (:predicates (p)) (:action idle :parameters (?p0 ?p1 ?p2 ?p3 ?p4 ?p5 ?p6 ?p7 ?p8 ?p9 ?p10 ?p11 ?p12 ?p13 ?p14 ?p15 ?p16 ?p17 ?p18 ?p19 ?p20 ?p21 ?p22 ?p23 ?p24 ?p25 ?p26 ?p27 ?p28 ?p29 ?p30 ?p31 ?p32)
-      :precondition (and) :effect (and)))""",
+      :precondition (and) :effect (and))
+      (:action set :parameters () :precondition (and) :effect (p)))""",
       """(define (problem many) (:domain many) (:objects x) (:init) (:goal (p)))""", atoms="dense")
+    # the idle action has more parameters than the device kernels take: its successors are built on the host
     compare(task, np.asarray(task.encode([task.initial_state])))
 
 
@@ -218,6 +220,7 @@ def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
             return torch.ops.mymyr.expand(handle, s, None, 4, capacity=16, **opts)
         return torch.ops.mymyr.expand_flat(handle, s, None, 16, **opts)
     eager = run(source)
+    torch._dynamo.reset()  # each case registers its own handle: keep it a constant, not a dynamic integer
     compiled = torch.compile(run, backend="eager", fullgraph=True)
     actual = compiled(source)
     assert len(actual) == 11
@@ -247,9 +250,11 @@ def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
 
 def test_all_noop_fallback_empty_parents_and_zero_capacity():
     task = pddl_task("""(define (domain idle) (:requirements :strips)
-      (:predicates (p)) (:action idle :parameters () :precondition (and) :effect (and)))""",
-      """(define (problem idle) (:domain idle) (:init) (:goal (p)))""", atoms="dense")
-    rows = np.asarray(task.encode([task.initial_state] * 3))
+      (:predicates (p) (q)) (:action set :parameters () :precondition (and) :effect (p)))""",
+      """(define (problem idle) (:domain idle) (:init) (:goal (q)))""", atoms="dense")
+    # from the state with p set, the only successor is that state again
+    done = next(state for _, state in task.successors(task.initial_state))
+    rows = np.asarray(task.encode([done] * 3))
     compare(task, rows)
     source = torch.as_tensor(rows.view(np.int64), device="cuda")
     empty = rl.expand(task, source[:0], hashes=True, drop_noops=True)
@@ -343,7 +348,7 @@ def test_device_hashes_key_the_visited_tables():
     # every table holds the device hash of its environment's current state
     reached = mymyr.hash_rows(env.states.cuda(), stream=torch.cuda.current_stream()).cpu()
     for i in range(4):
-        assert int(reached[i]) in env.visited[i, :int(env.visited_count[i])].tolist()
+        assert int(reached[i]) in env.visited[i].tolist()
     env.close()
 
 
@@ -423,7 +428,7 @@ def test_bounded_observation_actions_digest_without_successor_rows(drop):
     from mymyr import encoding
     from mymyr.encoding._device_actions import bounded_actions
     task = pddl_task(atoms="dense")
-    encoder = encoding.FlatRelationEncoder(task)
+    encoder = encoding.FlatRelationEncoder(rl.TaskTable([task]))  # one table across the captured calls
     rows = np.asarray(task.encode([task.initial_state] * 2))
     source = torch.as_tensor(rows.view(np.int64), device="cuda")
     expected = rl.expand(task, rows, hashes=True, noops=True, drop_noops=drop)

@@ -349,9 +349,9 @@ cudaError_t launch_part_scatter(const PartScatter& p, cudaStream_t s)
         return cudaSuccess;
     if (!p.rows || !p.offsets || !p.batch_offsets || !p.parent || (p.out_succ && (!p.succ || p.words > p.out_words)) ||
         (p.out_schema && !p.schema) || (p.out_binding && (!p.binding || p.label_width > p.out_label_width)) ||
-        (p.out_goal && !p.goal))
+        (p.out_goal && !p.goal) || (p.out_hash && !p.hash) || (p.out_noop && !p.noop))
         return cudaErrorInvalidValue;
-    if (!p.out_succ && !p.out_schema && !p.out_binding && !p.out_parent && !p.out_goal)
+    if (!p.out_succ && !p.out_schema && !p.out_binding && !p.out_parent && !p.out_goal && !p.out_hash && !p.out_noop)
         return cudaSuccess;
     const u32 rw = p.out_succ ? p.out_words : 1u, lw = p.out_binding ? p.out_label_width : 1u;
     const u32 width = rw > lw ? rw : lw;
