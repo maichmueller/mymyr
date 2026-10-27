@@ -755,7 +755,7 @@ struct DeviceFlat
 {
     std::shared_ptr<cuda::DeviceBuffer> buf;
     OpStream os;
-    u64 rows = 0, capacity = 0, total = 0;
+    u64 rows = 0, capacity = 0, total = 0, generated = 0;
     u32 words = 0, label_width = 0, words_needed = 0, numeric_words = 0;
     u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0, off_offsets = 0;
     u32 derived_words = 0;
@@ -783,6 +783,7 @@ struct DeviceFlat
         x.derived_words = derived_words;
         x.offsets = at<i32>(off_offsets);
         x.total = total;
+        x.generated = generated;
         x.words_needed = words_needed;
         return x;
     }
@@ -956,6 +957,7 @@ nb::object device_expand(const ExpandArgs& a)
             rl::Expansion x = f.view();
             ex->write(x);
             f.total = x.total;
+            f.generated = x.generated;
             f.words_needed = x.words_needed;
             if (x.words_needed <= W || fixed_words || attempt >= 3)
                 break;
@@ -1199,6 +1201,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         if (waited)
         {
             r["total"] = x.total;
+            r["generated"] = x.generated;
             r["words_needed"] = x.words_needed;
             r["overflow"] = x.overflow();
         }
@@ -1214,6 +1217,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     c->release_after(os.s, std::move(keep));
     nb::dict r;
     r["total"] = x.total;
+    r["generated"] = x.generated;
     r["words_needed"] = x.words_needed;
     r["overflow"] = x.overflow();
     r["capacity"] = x.capacity;
@@ -2067,6 +2071,8 @@ void bind_cuda(nb::module_& parent)
         }, "[N] int32 successors per state (a fresh array)")
         .def_prop_ro("total", [](const PyDeviceExpansion& e) { return e.flat.total; },
                      "The successor rows of the batch, those beyond the capacity included.")
+        .def_prop_ro("generated", [](const PyDeviceExpansion& e) { return e.flat.generated; },
+                     "Successors before drop_noops; generated > capacity is an overflow.")
         .def_prop_ro("capacity", [](const PyDeviceExpansion& e) { return e.flat.capacity; },
                      "The successor rows the outputs hold; total > capacity is an overflow.")
         .def_prop_ro("num_states", [](const PyDeviceExpansion& e) { return e.flat.rows; },
