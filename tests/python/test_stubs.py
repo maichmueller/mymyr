@@ -44,6 +44,10 @@ def test_stubs_parse_and_are_typed():
     assert "def plan(self) -> list[mymyr._core.Action]" in search
     assert "def goal_state(self) -> mymyr._core.State | None" in search
     assert "class SearchTree:" in search
+    for name in ("iw", "iw_pass", "abstracted_iw"):
+        signature = next(line for line in search.splitlines() if line.startswith(f"def {name}("))
+        assert "incremental_first_applicability: bool = False" in signature
+        assert "precheck_add_effects: bool = False" in signature
     assert "def tree(self) -> SearchTree | None" in search
     assert search.count("tree: Literal['nodes', 'transitions'] | None = None") == 7
     # the IW family variants, landmarks and relaxed reachability (search_bindings.cpp, landmarks_bindings.cpp)

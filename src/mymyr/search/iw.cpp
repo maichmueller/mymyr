@@ -2,6 +2,7 @@
 // arity-k novelty pruning strategies): goal test on pop, blocked states before the novelty test, the width-0 and optimized-IW(1) root rules.
 
 #include "iw_detail.hpp"
+#include "iw1_actions.hpp"
 #include "beam_detail.hpp"
 #include "layer_order_detail.hpp"
 #include "tree_sink.hpp"
@@ -356,6 +357,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const u32 k = ps.arity;
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
     const bool root_only = o.width_zero == WidthZero::RootOnly;
+    std::unique_ptr<Iw1Actions> actions;
+    if (o.incremental_first_applicability && k == 1)
+        actions = std::make_unique<Iw1Actions>(succ);
 
     std::optional<TreeSink> sink;
     if (o.tree != TreeRecord::None)
@@ -468,11 +472,15 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         stop = true;
         return true;
     };
-    auto drive = [&](StateView cv, auto&& process)
+    auto drive = [&](StateView cv, u32 id, auto&& process)
     {
         // every process counts its transition in st.generated: the check every k_check_transitions of them
         auto checked = [&](u32 s, const ObjectId* b, const Delta& d) -> bool
-        { return process(s, b, d) && (st.generated % k_check_transitions != 0 || !interrupted()); };
+        {
+            if (actions && actions->contains(s, b))
+                return true;
+            return process(s, b, d) && (st.generated % k_check_transitions != 0 || !interrupted());
+        };
         if constexpr (Slow)
         {
             if (o.successor_order)
@@ -528,7 +536,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 return;
             }
         }
-        succ.generate<true>(checked, witness, canonical);
+        if (actions)
+        {
+            const StateView parent = id == 0 ? StateView{} : StateView{tree.words(tree.parent(id)), tree.stride(), nullptr, 0};
+            actions->run(parent, cv, id == 0, witness, canonical, !c.blocked.empty(), checked, interrupted);
+        }
+        else
+            succ.generate<true>(checked, witness, canonical);
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
@@ -1007,7 +1021,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         if (id == 0 && (k == 0 || ps.root_continuation))
         {
             // the root of a width-0 pass or of an optimized IW(1) pass
-            drive(cv,
+            drive(cv, id,
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
                     ++st.generated;
@@ -1026,7 +1040,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                             return reject(TransitionOutcome::Blocked);
                         }
                     if (child == cv)
+                    {
+                        if (actions)
+                            actions->tested(s, b);
                         return reject(TransitionOutcome::SelfLoop);
+                    }
+                    if (actions)
+                        actions->tested(s, b);
                     const u32 dup = seen.find(tree, child);
                     if (k == 0)
                     {
@@ -1073,7 +1093,9 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         else if (k == 0)
         {
             // width 0 below the root: every successor is pruned
-            drive(cv,
+            if (o.incremental_first_applicability || o.precheck_add_effects)
+                continue;
+            drive(cv, id,
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
                     ++st.generated;
@@ -1094,13 +1116,26 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         }
         else
         {
-            drive(cv,
+            drive(cv, id,
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
                     ++st.generated;
                     compute_add(d, n);
+                    if constexpr (Slow)
+                        if (o.precheck_add_effects)
+                        {
+                            reserve_for_add();
+                            if (!table->any_new1(add))
+                            {
+                                if (actions)
+                                    actions->tested(s, b);
+                                return true;
+                            }
+                        }
                     if constexpr (!Slow)
                     {
+                        if (actions)
+                            actions->tested(s, b);
                         if (add.empty())
                             return true;  // no added atom: no new tuple
                         reserve_for_add();
@@ -1142,11 +1177,15 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         }
                         else if (add.empty())
                         {
+                            if (actions)
+                                actions->tested(s, b);
                             if (child == cv)
                                 outcome = TransitionOutcome::SelfLoop;  // a self loop adds no atom
                         }
                         else
                         {
+                            if (actions)
+                                actions->tested(s, b);
                             reserve_for_add();
                             admitted = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
                                                  : table->test<true>(cur.data(), n, next.data(), nn, add);
@@ -1205,6 +1244,8 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
         return r;
     }
     const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_width;
+    check_iw1_actions(c.task, o.incremental_first_applicability, o.precheck_add_effects, top,
+                     false, static_cast<bool>(o.transition_ordering), o.layers, o.threads);
     if (top > novelty::k_max_arity)
     {
         r.status = SearchStatus::Failed;

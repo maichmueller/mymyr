@@ -35,6 +35,7 @@ public:
         : m_features(task, cfg.base_abstracted, cfg.preserve_goal_atoms, coords, cfg.preserve_landmark_atoms), m_cfg(cfg),
           m_coords(coords), m_single(coords ? coords->num_ranks() : 1)
     {
+        m_precheck = !has_conditional_effects(task);
         if (coords)
         {
             m_pmask.resize(coords->mask_words());
@@ -77,6 +78,16 @@ public:
     bool peek(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d)
     {
         return run<false>(pw, pn, cw, cn, add, d);
+    }
+    bool quick_reject(std::span<const u32> add, const Delta&)
+    {
+        if (m_cfg.width != 1 || m_coords || !m_precheck)
+            return false;
+        for (u32 a : add)
+            for (u32 f : features(a))
+                if (touch1<false>(0, f))
+                    return false;
+        return true;
     }
     [[nodiscard]] u64 bytes() const
     {
@@ -564,6 +575,7 @@ private:
     }
 
     AbstractedFeatures m_features;
+    bool m_precheck = true;
     AbstractedConfig m_cfg;
     const novelty::LandmarkCoordinates* m_coords;
     std::vector<std::vector<u64>> m_single;    // per rank: bitset over feature ids
@@ -594,6 +606,8 @@ private:
 
 IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
 {
+    detail::check_iw1_actions(task, o.incremental_first_applicability, o.precheck_add_effects, o.width,
+                             static_cast<bool>(o.landmarks.graph), false, o.layers, o.threads);
     if (task.numeric_slots() > 0)
         throw std::invalid_argument("mymyr: abstracted IW does not support tasks with numeric fluents (IW and SIW do)");
     if (o.width < 1 || o.width > 3)
@@ -607,6 +621,8 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     env.tree = o.tree;
     env.canonical = o.canonical_order;
     env.successor_order = &o.successor_order;
+    env.incremental_first_applicability = o.incremental_first_applicability;
+    env.precheck_add_effects = o.precheck_add_effects;
     detail::LayerOrderer layers;
     std::unique_ptr<detail::BeamTeam> team;
     if (std::string e = detail::apply_layers(env, o.layers, layers, o.threads, team); !e.empty())

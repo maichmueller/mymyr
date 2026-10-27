@@ -104,6 +104,14 @@ struct IwOptions
     /// Threads of a beam's layer step (search/layer_ordering.hpp, "Threads"; 0: std::thread::hardware_concurrency()).
     /// More than one needs a beam (layers.beam_width).
     u32 threads = 1;
+    /// Width 1 only: process an action only until its add atoms have been novelty-tested. Uses changed
+    /// preconditions for incremental binding discovery where applicability is propositional.
+    bool incremental_first_applicability = false;
+    /// Width 1 only: precheck add atoms on the observed path too. Both options omit skipped transitions from
+    /// observer events and transition trees; on_expand/on_progress and admitted node ids retain their order.
+    /// Width 0 below the root generates no transitions when either option is enabled. Conditional effects,
+    /// landmark novelty and transition ordering are unsupported; incremental discovery requires queued layers.
+    bool precheck_add_effects = false;
 };
 
 struct IwPassStatistics

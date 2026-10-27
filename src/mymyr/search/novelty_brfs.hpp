@@ -41,6 +41,7 @@
 
 #include "beam_detail.hpp"
 #include "iw_detail.hpp"
+#include "iw1_actions.hpp"
 #include "layer_order_detail.hpp"
 #include "tree_sink.hpp"
 
@@ -224,6 +225,8 @@ struct Env
     bool witness = false;
     bool canonical = true;
     const SuccessorOrder* successor_order = nullptr;  // null or empty: generation order
+    bool incremental_first_applicability = false;
+    bool precheck_add_effects = false;
     Clock::time_point deadline{};
     bool timed = false;
     SearchObserver* obs = nullptr;   // hot events (expand, generate, prune, transition, progress): a worker observer
@@ -392,7 +395,7 @@ class Driver
 {
 public:
     template<class Process>
-    void run(Env& env, StateView cv, Process&& process)
+    void run(Env& env, StateView cv, Process&& process, Iw1Actions* actions = nullptr, StateView parent = {}, bool root = true)
     {
         Successors& succ = env.succ;
         if (env.successor_order && *env.successor_order)
@@ -426,6 +429,8 @@ public:
                     m_perm.push_back(i);
             for (u32 i : m_perm)
             {
+                if (actions && actions->contains(m_actions[i].schema.v, m_actions[i].binding.data()))
+                    continue;
                 const std::array<u32, 3>& r = m_ranges[i];
                 const Delta d{{m_slots.data() + r[0], r[1]}, {m_slots.data() + r[0] + r[1], r[2]}};
                 if (!process(m_actions[i].schema.v, static_cast<const ObjectId*>(m_actions[i].binding.data()), d))
@@ -433,7 +438,11 @@ public:
             }
             return;
         }
-        succ.generate<true>(process, env.witness, env.canonical);
+        if (actions)
+            actions->run(parent, cv, root, env.witness, env.canonical, !env.blocked.empty(), process,
+                         [&] { return env.out_of_time() || env.cancelled(); });
+        else
+            succ.generate<true>(process, env.witness, env.canonical);
     }
 
 private:
@@ -466,6 +475,9 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     IwPassStatistics& st = out.st;
     st.width = pc.arity;
     const bool slow = env.slow();
+    std::unique_ptr<Iw1Actions> actions;
+    if (env.incremental_first_applicability && pc.arity == 1)
+        actions = std::make_unique<Iw1Actions>(succ);
     const bool ordered = env.layers && env.layers->ordered();
     const bool limit_layer = ordered && env.layers->limited();
     const bool beam = ordered && env.layers->beam();
@@ -1058,8 +1070,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                 if (!bits::test(cw, n, x.v) && std::find(add.begin(), add.end(), x.v) == add.end())
                     add.push_back(x.v);
             if constexpr (QuickRejecting<Pruner>)
-                if (!slow && rule == RootRule::Normal && pruner.quick_reject(add, d))
+                if ((!slow || env.precheck_add_effects) && rule == RootRule::Normal && pruner.quick_reject(add, d))
+                {
+                    if (actions)
+                        actions->tested(s, b);
                     return true;
+                }
             const u32 nn = apply_delta(cw, n, d, child);
             const u64* w = child.data();
             if (env.tracker)
@@ -1069,6 +1085,8 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                 ++st.blocked;  // checked first: a blocked state marks nothing
                 return reject(s, b, w, nn, TransitionOutcome::Blocked);
             }
+            if (actions)
+                actions->tested(s, b);
             if (add.empty() && bits::equal(w, nn, cw, n))
                 return reject(s, b, w, nn, TransitionOutcome::SelfLoop);
             if (rule == RootRule::ArityZero && !at_root)
@@ -1117,7 +1135,9 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         };
         // inside the expansion: the time and the token every k_check_transitions transitions (process counts each in
         // st.generated)
-        driver.run(env, cv,
+        const StateView parent = actions && !at_root ? StateView{tree.words(tree.parent(id)), tree.stride(), nullptr, 0} : StateView{};
+        if (!(rule == RootRule::ArityZero && !at_root && (env.incremental_first_applicability || env.precheck_add_effects)))
+            driver.run(env, cv,
                    [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                    {
                        if (!process(s, b, d))
@@ -1129,7 +1149,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                        finish(env.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
                        stop = true;
                        return false;
-                   });
+                   }, actions.get(), parent, at_root);
+        if (actions && !stop && (env.out_of_time() || env.cancelled()))
+        {
+            finish(env.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
+            stop = true;
+        }
         if (env.tracker && env.tracker->pending())
             env.tracker->flush_derived(succ);
         if (truncated)
