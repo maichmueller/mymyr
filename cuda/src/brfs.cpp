@@ -88,11 +88,23 @@ struct DeviceBrfs::Impl
         next_event = 0;
     }
 
+    /// A table of `n` slots (the search is unchanged when the allocation fails).
     void alloc_table(u64 n)
     {
+        DeviceBuffer t(ctx, n * sizeof(u64), s);
+        check(cudaMemsetAsync(t.data(), 0, n * sizeof(u64), s), "cudaMemsetAsync (state table)");
+        table = std::move(t);
         slots = n;
-        table = DeviceBuffer(ctx, slots * sizeof(u64), s);
-        check(cudaMemsetAsync(table.data(), 0, slots * sizeof(u64), s), "cudaMemsetAsync (state table)");
+    }
+    /// The slots ensure_table(count, more) grows the table to (0: it has room).
+    [[nodiscard]] u64 table_growth(u64 count, u64 more) const
+    {
+        if (count + more <= table_limit())
+            return 0;
+        u64 n = slots;
+        while (count + more > n / 4)
+            n *= 2;
+        return n;
     }
 
     /// Makes room for `more` new states (an upper bound: the chunk's candidates) at load <= 3/4, growing to load
@@ -101,11 +113,9 @@ struct DeviceBrfs::Impl
     /// the table grows where and as it would chunk by chunk.
     void ensure_table(u64 count, u64 more)
     {
-        if (count + more <= table_limit())
+        const u64 n = table_growth(count, more);
+        if (n == 0)
             return;
-        u64 n = slots;
-        while (count + more > n / 4)
-            n *= 2;
         alloc_table(n);
         check(state_set::launch_rehash(tab(), rows(), count, s), "launch_rehash");
         ++st.rehashes;
@@ -150,6 +160,7 @@ struct DeviceBrfs::Impl
         bool counted = false;
         u32 goals = 0;
         u32 first = 0;
+        bool exact = false;  // sized after its count, alone (its group's estimated reservations did not fit)
     };
 
     /// Pinned room for the control block and `n` records.
@@ -163,6 +174,41 @@ struct DeviceBrfs::Impl
         }
     }
     u64 pin_bytes = 0;
+
+    /// Grows an arena for `more` records: doubling while the doubled arena takes at most a third of what the context
+    /// can still allocate, otherwise to what that third holds, but at least to what it needs (the old generation is
+    /// held until the copy is done).
+    void grow(DeviceArena& a, u64 more) const
+    {
+        if (a.device_size() + more <= a.capacity())
+            return;
+        a.reserve(more, device_room(*ctx) / 3 / a.record_bytes());
+    }
+    /// At least `bytes` of `x`; with `exact`, exactly max(bytes, 64): a buffer of another size is freed first (no
+    /// growth margin, and the old one is not held while the new one is allocated).
+    void* size_buffer(Scratch& x, u64 bytes, bool exact) const
+    {
+        if (exact && x.size() != std::max<u64>(bytes, 64))
+            x.reset();
+        return x.ensure(ctx, bytes, s);
+    }
+    [[nodiscard]] u64 buffer_bytes() const
+    {
+        u64 n = 0;
+        for (const Scratch* x : {&sort, &parent, &cand, &result, &rank, &scan, &ctl, &window_row, &window_total})
+            n += x->size();
+        return n;
+    }
+    /// What the search holds of the context's memory (refusals).
+    [[nodiscard]] std::string held() const
+    {
+        return held_text(*ctx, {{"states", states ? states->capacity() * states->record_bytes() : 0},
+                                {"search nodes", nodes ? nodes->capacity() * nodes->record_bytes() : 0},
+                                {"state table", table.size()},
+                                {"candidate buffers", buffer_bytes()}});
+    }
+    /// What the search was allocating (refusals of an allocation that failed).
+    const char* phase = "the task's device tables and the successor generator";
 
     DeviceBrfsResult run();
     std::vector<Action> plan_to(u64 id);
@@ -212,7 +258,20 @@ const DeviceArena& DeviceBrfs::nodes() const
 }
 u32 DeviceBrfs::words() const noexcept { return m->W; }
 std::vector<Action> DeviceBrfs::plan_to(u64 id) const { return m->plan_to(id); }
-DeviceBrfsResult DeviceBrfs::run() { return m->run(); }
+DeviceBrfsResult DeviceBrfs::run()
+{
+    try
+    {
+        return m->run();
+    }
+    catch (const CudaError& e)
+    {
+        // (an allocation the search did not size against the context's room: its phase and what it holds)
+        if (!out_of_memory(e))
+            throw;
+        refuse_memory(*m->ctx, "device BrFS", m->phase, m->held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
+    }
+}
 
 DeviceBrfsResult brfs(ContextPtr ctx, TaskPtr task, const DeviceBrfsOptions& options)
 {
@@ -245,10 +304,18 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     const u64 budget = std::clamp<u64>(o.max_states, 1, state_set::k_max_states);
     const u64 expected = o.expected_states ? o.expected_states : (o.max_states != ~u64{0} ? budget : 0);
     const u64 initial = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
-    const u64 cap0 = !lifted::wide_row(W) ? initial : std::min(initial, std::max<u64>(1, (u64{16} << 20) / (u64{W} * 8)));
+    // the arenas and the table start within a quarter of what the context can still allocate each (they grow as the
+    // states need)
+    phase = "the search's initial arenas and state table";
+    const u64 room0 = device_room(*ctx);
+    const u64 cap0 = std::clamp<u64>(!lifted::wide_row(W) ? initial : std::min(initial, (u64{16} << 20) / (u64{W} * 8)), 1,
+                                     std::max<u64>(1, room0 / 4 / (u64{W} * 8 + 8)));
     states = std::make_unique<DeviceArena>(ctx, W * 8, cap0, host);  // the mirror only when the CPU reads parents
     nodes = std::make_unique<DeviceArena>(ctx, 8, cap0, false);
-    alloc_table(expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * expected + 2)) : u64{1} << 20);
+    u64 slots0 = expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 2 * expected + 2)) : u64{1} << 20;
+    while (slots0 > 1024 && slots0 * sizeof(u64) > room0 / 4)
+        slots0 /= 2;
+    alloc_table(slots0);
 
     // the root
     {
@@ -264,13 +331,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     }
     // chunk size: the views of a chunk (and its derived bitsets) fit the budget (by default half of L2, so they are
     // read from L2, not DRAM), but a chunk has at least 65536 parents while their views take at most 256 MB: with
-    // views of kilobytes (philosophers: 3.5-4 KB) an L2-sized chunk would leave most of the device idle
-    u64 chunk_cap = 0;
+    // views of kilobytes (philosophers: 3.5-4 KB) an L2-sized chunk would leave most of the device idle; and the
+    // views of a chunk take at most an eighth of what the context can still hold (view_parents)
+    u64 chunk_cap = 0, view_per = 8;
     {
         int l2 = 0;
         check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, ctx->device()), "cudaDeviceGetAttribute");
         const u64 dw = gen->device_axioms() ? std::max<u32>(1, bits::words_for(task->atoms().max_derived_slots())) : 0;
         const u64 per = std::max<u64>(8, (gen->view_words() + dw + (lifted::wide_row(W) ? W : 0)) * 8);
+        view_per = per;
         const u64 floor = std::min<u64>(65536, (u64{256} << 20) / per);
         chunk_cap = o.view_bytes ? std::max<u64>(1, o.view_bytes / per)
                                  : std::max<u64>({lifted::wide_row(W) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
@@ -311,22 +380,29 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         const u64 est = static_cast<u64>(std::ceil(*std::ranges::max_element(ratios) * 1.25 * static_cast<double>(ns))) + 256;
         return std::min(est, std::max<u64>(lifted::wide_row(W) ? 1u : 256u, o.candidate_bytes / (u64{W} * sizeof(u64))));
     };
-    auto capacity = [&](const Chunk& k) { return k.known ? k.known : estimate(k.ns); };
+    // (estimates are cut to what the context can still hold, cap_cut, set per group: a chunk past its capacity halts
+    // and is redone at its exact size)
+    u64 cap_cut = ~u64{0};
+    auto capacity = [&](const Chunk& k) { return k.known ? k.known : std::min(estimate(k.ns), cap_cut); };
     std::vector<Chunk> plan;
     // the scratch of a chunk's candidates (one chunk at a time on the stream)
     u32 *d_parent = nullptr, *d_sort = nullptr, *d_result = nullptr, *d_rank = nullptr;
     u64* d_cand = nullptr;
     void* d_scan = nullptr;
     u64 tb = 0;
-    auto size_scratch = [&](u64 n)
+    // (exact: buffers that grow are freed first and take exactly what n rows need, size_buffer; sort_rows: the sort
+    // scratch's rows when they are not n, a successor window's)
+    auto size_scratch = [&](u64 n, bool exact = false, u64 sort_rows = 0)
     {
-        d_parent = static_cast<u32*>(parent.ensure(ctx, n * sizeof(u32), s));
-        d_cand = static_cast<u64*>(cand.ensure(ctx, n * W * sizeof(u64), s));
-        d_sort = canonical && gen->sorts(witness) ? static_cast<u32*>(sort.ensure(ctx, n * L * sizeof(u32), s)) : nullptr;
-        d_result = static_cast<u32*>(result.ensure(ctx, n * sizeof(u32), s));
-        d_rank = static_cast<u32*>(rank.ensure(ctx, (n + 1) * sizeof(u32), s));
+        d_parent = static_cast<u32*>(size_buffer(parent, n * sizeof(u32), exact));
+        d_cand = static_cast<u64*>(size_buffer(cand, n * W * sizeof(u64), exact));
+        d_sort = canonical && gen->sorts(witness)
+                     ? static_cast<u32*>(size_buffer(sort, (sort_rows ? sort_rows : n) * L * sizeof(u32), exact))
+                     : nullptr;
+        d_result = static_cast<u32*>(size_buffer(result, n * sizeof(u32), exact));
+        d_rank = static_cast<u32*>(size_buffer(rank, (n + 1) * sizeof(u32), exact));
         tb = state_set::rank_temp_bytes(n);
-        d_scan = scan.ensure(ctx, tb, s);
+        d_scan = size_buffer(scan, tb, exact);
     };
     // the halt of a chunk: the record's reason, applied to its plan entry (redone with room, the parents before its
     // first goal state, or the search stops); `resumes`: the generator still holds its count
@@ -367,15 +443,17 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     };
 
     // Device memory per candidate row of a chunk: its row, parent, result and rank, and at most a new state of the
-    // arenas with its table slots (load 1/4 after growth); sort rows apart.
+    // arenas with its table slots (load 1/4 after growth); sort rows apart. At the current width (lazy slots widen it).
     const bool sorting = canonical && gen->sorts(witness);
-    const u64 per_candidate = u64{W} * 16 + 4 * 3 + 8 + 32 + (sorting ? u64{L} * 4 : 0);
+    auto per_candidate = [&] { return u64{W} * 16 + 4 * 3 + 8 + 32 + (sorting ? u64{L} * 4 : 0); };
     // What a chunk's candidates may take: what the context can still allocate, with the candidate buffers the chunk
     // reuses; a chunk holds a quarter of it (the arenas and the table grow in steps, and a grown buffer is allocated
     // before the one it replaces is freed).
     auto reused_bytes = [&] { return parent.size() + cand.size() + sort.size() + result.size() + rank.size() + scan.size(); };
     auto room_bytes = [&] { return device_room(*ctx) + reused_bytes(); };
-    auto room_rows = [&] { return room_bytes() / 4 / per_candidate; };
+    auto room_rows = [&] { return room_bytes() / 4 / per_candidate(); };
+    // the most parents whose views take an eighth of the room (the generator's buffers of a chunk follow its parents)
+    auto view_parents = [&] { return std::max<u64>(1, room_bytes() / 8 / view_per); };
     // A state whose successors exceed room_rows(): its successors a window at a time (lifted::Labels::first), each
     // window deduplicated and committed before the next, so that ids, counts and the plan are the ones of a chunk
     // that holds them all. The generator reads the state from a copy of its own (arena growth moves the arena).
@@ -421,6 +499,66 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         windowed_transitions = M;
         if (M > 0x7FFFFFFFu)  // (the counts' prefixes saturate past the device's 31-bit row index)
             throw std::length_error("mymyr: device BrFS: a state has more than 2^31 - 1 successors; use the CPU BrFS");
+        phase = "a successor window";
+        // A window's buffers at their exact sizes: the candidate buffers (those of another size are freed first,
+        // window_room counts them as free), the table's growth, and the arenas' growth when they have no room for its
+        // new states.
+        Scratch* const buffers[] = {&parent, &cand, &sort, &result, &rank, &scan};
+        auto window_room = [&]
+        {
+            u64 n = device_room(*ctx);
+            for (const Scratch* x : buffers)
+                n += x->size();
+            return n;
+        };
+        auto window_buffers = [&](const SuccessorWindow& w)
+        {
+            const u64 n = w.rows;
+            auto at_least = [](u64 x) { return std::max<u64>(x, 64); };
+            u64 bytes = at_least(n * sizeof(u32)) * 2 + at_least(n * W * sizeof(u64)) + at_least((n + 1) * sizeof(u32)) +
+                        at_least(state_set::rank_temp_bytes(n)) + table_growth(count, n) * sizeof(u64);
+            if (sorting)
+                bytes += at_least(std::max<u64>(w.scratch_rows, 1) * L * sizeof(u32));
+            return bytes;
+        };
+        auto window_bytes = [&](const SuccessorWindow& w)
+        {
+            return window_buffers(w) + states->growth_bytes(w.rows, count + w.rows) + nodes->growth_bytes(w.rows, count + w.rows);
+        };
+        // Every new state of the state in arenas reserved at once, with an eighth more for the states after it, as far
+        // as they fit beside a sixteenth of the room for the windows, and as many again (as doubling would) as far as
+        // they fit beside a quarter: arenas grown per window, or for the next layer's first states, would hold the
+        // stored states twice at each growth. A window adds at most as many states as the arenas have room for, so that only a partial
+        // reservation grows them again.
+        {
+            for (Scratch* x : buffers)
+                x->reset();
+            const u64 room = device_room(*ctx), row = states->record_bytes() + nodes->record_bytes();
+            const u64 one = window_buffers(successor_window(off, 0, 1)), limit = std::max<u64>(budget, count + 1);
+            auto rows_beside = [&](u64 keep) { return room > keep ? (room - keep) / row : 0; };
+            const u64 total = std::max(std::min({count + M + M / 8, limit, rows_beside(std::max(one, room / 16))}),
+                                       std::min({2 * (count + M), limit, rows_beside(std::max(one, room / 4))}));
+            if (total > states->capacity())
+                (void)try_allocate(*ctx, [&](int)
+                                   {
+                                       states->reserve(total - count, total);
+                                       nodes->reserve(total - count, total);
+                                   });
+        }
+        // a window of one successor that does not fit: the arenas' growth when they have no room for it (they hold the
+        // stored states twice while they grow), otherwise the successor's own buffers (`failed`: their allocation
+        // failed although the bytes are free: the pool holds them in smaller pieces)
+        auto refuse_window = [&](const SuccessorWindow& w1, u64 room, bool failed)
+        {
+            const u64 bytes = window_bytes(w1);
+            if (states->growth_bytes(1, count + 1) + nodes->growth_bytes(1, count + 1) != 0)
+                refuse_memory(*ctx, "device BrFS",
+                              "the arenas of more than " + std::to_string(count) + " states with a successor's buffers (" +
+                                  std::to_string(bytes) + (failed ? " bytes, which the pool could not allocate in its free pieces)" : " bytes)"),
+                              held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
+            refuse_successors(*ctx, "device BrFS", "a state", M, failed ? 0 : bytes, room,
+                              "Raise the Context's max_bytes, or use the CPU BrFS.", per_candidate(), held());
+        };
         u64 window_cap = M;  // halved when a window's buffers do not fit after all
         for (u64 f = 0; f < M;)
         {
@@ -434,39 +572,47 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 stop = true;
                 return false;
             }
-            const u64 room = room_bytes(), rows_fit = std::min(room / 4 / per_candidate, window_cap);
-            const SuccessorWindow w = successor_window(off, f, rows_fit);
-            const u64 sort_bytes = sorting ? w.scratch_rows * L * sizeof(u32) : 0;
+            // the window: the most rows whose buffers fit 15/16 of the room (a margin for the pool's granularity)
+            const u64 room = window_room(), usable = room - room / 16;
+            u64 hi = std::min(window_cap, M - f);
+            if (const u64 spare = std::min(states->capacity(), nodes->capacity()) - count; spare > 0)
+                hi = std::min(hi, spare);
+            SuccessorWindow w = successor_window(off, f, 1);
+            if (window_bytes(w) > usable)
+                refuse_window(w, room, false);
+            for (u64 lo = 1; lo < hi;)
+            {
+                const u64 mid = lo + (hi - lo + 1) / 2;
+                if (const SuccessorWindow x = successor_window(off, f, mid); window_bytes(x) <= usable)
+                {
+                    lo = mid;
+                    w = x;
+                }
+                else
+                    hi = mid - 1;
+            }
             // (numeric successor rows are written whole: a numeric state's successors fit at once or are refused)
-            const bool numeric = task->numeric_slots() != 0;
-            if (rows_fit == 0 || sort_bytes > room / 2 || (numeric && w.rows < M))
-                refuse_successors(*ctx, "device BrFS", "a state", M,
-                                  (numeric ? M : std::max<u64>(w.rows, 1)) * per_candidate + sort_bytes, room,
-                                  "Raise the Context's max_bytes, or use the CPU BrFS.");
+            if (task->numeric_slots() && w.rows < M)
+                refuse_successors(*ctx, "device BrFS", "a state", M, window_bytes(successor_window(off, 0, M)), room,
+                                  "Raise the Context's max_bytes, or use the CPU BrFS.", per_candidate(), held());
             if (count + w.rows > state_set::k_max_states)
                 throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states (with a chunk's candidates)");
-            try
-            {
-                ensure_table(count, w.rows);
-                d_parent = static_cast<u32*>(parent.ensure(ctx, w.rows * sizeof(u32), s));
-                d_cand = static_cast<u64*>(cand.ensure(ctx, w.rows * W * sizeof(u64), s));
-                d_sort = sorting ? static_cast<u32*>(sort.ensure(ctx, std::max<u64>(sort_bytes, 1), s)) : nullptr;
-                d_result = static_cast<u32*>(result.ensure(ctx, w.rows * sizeof(u32), s));
-                d_rank = static_cast<u32*>(rank.ensure(ctx, (w.rows + 1) * sizeof(u32), s));
-                tb = state_set::rank_temp_bytes(w.rows);
-                d_scan = scan.ensure(ctx, tb, s);
-                states->reserve(w.rows);
-                nodes->reserve(w.rows);
-            }
-            catch (const CudaError& e)
+            // (the largest first: freed candidate buffers and the arenas' growth, then the table and the buffers)
+            const bool fits = try_allocate(*ctx, [&](int)
+                                           {
+                                               if (states->growth_bytes(w.rows, count + w.rows) != 0)
+                                                   for (Scratch* x : buffers)
+                                                       x->reset();
+                                               states->reserve(w.rows, count + w.rows);
+                                               nodes->reserve(w.rows, count + w.rows);
+                                               ensure_table(count, w.rows);
+                                               size_scratch(w.rows, true, std::max<u64>(w.scratch_rows, 1));
+                                           });
+            if (!fits)
             {
                 // (nothing of the window ran: a smaller one, down to a single successor)
-                if (e.code() != cudaErrorMemoryAllocation)
-                    throw;
-                (void)cudaGetLastError();
                 if (w.rows == 1)
-                    refuse_successors(*ctx, "device BrFS", "a state", M, 0, room_bytes(),
-                                      "Raise the Context's max_bytes, or use the CPU BrFS.");
+                    refuse_window(w, window_room(), true);
                 window_cap = w.rows / 2;
                 continue;
             }
@@ -613,16 +759,28 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     PinnedLease loop_pin;
     // runs the loop from the cursor; false when it ended at a halted chunk (the cursor's; its record in `halted`)
     // the loop's chunk (parents) and its candidates' capacity at the cursor: the layer twice over (shapes repeat)
-    auto loop_chunk = [&] { return std::min<u64>({o.chunk_states, chunk_cap, k_loop_layer, std::bit_ceil(std::max<u64>(2048, 2 * (le - lb)))}); };
+    auto loop_chunk = [&]
+    { return std::min<u64>({o.chunk_states, chunk_cap, view_parents(), k_loop_layer, std::bit_ceil(std::max<u64>(2048, 2 * (le - lb)))}); };
     auto loop_capacity = [&](u64 C) { return std::bit_ceil(estimate(C)); };
     // the arenas' room for a loop: four chunks' capacities (a loop ends when the next chunk might not fit, k_loop_room;
     // the next one starts in a grown arena), but no more than o.candidate_bytes of rows past one chunk's (organic-
     // synthesis' 64-word rows: four 65536-row chunks would hold 128 MB of arena and its mirror for 41311 states)
     auto loop_room = [&](u64 cap) { return std::max(cap, std::min(4 * cap, o.candidate_bytes / (u64{W} * sizeof(u64)))); };
+    // the loop's arenas and buffers; false when the context cannot hold them (the host then sizes the chunks)
+    auto loop_fits = [&](u64 C, u64 cap)
+    {
+        return try_allocate(*ctx, [&](int)
+                            {
+                                grow(*states, loop_room(cap));
+                                grow(*nodes, loop_room(cap));
+                                size_scratch(cap);
+                                (void)loop_rows.ensure(ctx, C * W * sizeof(u64), s);
+                            });
+    };
     auto device_loop = [&](u64 C, u64 cap, state_set::ChunkRecord& halted, u32& halted_ns) -> bool
     {
-        states->reserve(loop_room(cap));
-        nodes->reserve(loop_room(cap));
+        grow(*states, loop_room(cap));
+        grow(*nodes, loop_room(cap));
         size_scratch(cap);
         auto* prow = static_cast<u64*>(loop_rows.ensure(ctx, C * W * sizeof(u64), s));
         auto* lc = static_cast<state_set::LoopCtl*>(loop_ctl.ensure(ctx, sizeof(state_set::LoopCtl), s));
@@ -775,16 +933,18 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         u32 halted_ns = 0;
         // (the loop leaves the table's growth to the host's chunks: it runs while a chunk fits the table)
         const u64 loop_c = loop_chunk(), loop_cap = loop_capacity(loop_c);
+        phase = "the successors of a chunk of states";
         const bool looped = loops && warm && le - b <= k_loop_layer && count + loop_cap <= table_limit() &&
-                            count + loop_room(loop_cap) < state_set::k_max_states;
+                            count + loop_room(loop_cap) < state_set::k_max_states && loop_fits(loop_c, loop_cap);
         if (looped && device_loop(loop_c, loop_cap, halted, halted_ns))
             continue;  // (the cursor moved)
         plan.clear();
+        const u64 parents = std::min(chunk_cap, view_parents());
         for (u64 x = b; x < le;)
         {
             // (a loop's halted chunk first: its parents, as the loop ran it, launch_loop_size, its record holds)
             const u64 most = looped && x == b ? halted_ns : o.chunk_states;
-            const u32 ns = static_cast<u32>(std::min<u64>({most, le - x, chunk_cap}));
+            const u32 ns = static_cast<u32>(std::min<u64>({most, le - x, parents}));
             plan.push_back({x, ns});
             x += ns;
         }
@@ -798,10 +958,18 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         {
             // the group [i, j): its candidates' room at most a quarter of the stored states (at least 2^20, at least
             // one chunk), so that the arena grows about as it would chunk by chunk; a chunk redone after it halted for
-            // room (its candidates known; resumed at its rows when counted) runs alone, sized as with exact capacities
-            const bool exact_group = exact || plan[i].known;
-            const u64 room_limit = lifted::wide_row(W) ? std::max<u64>(1, o.candidate_bytes / (u64{W} * 8))
-                                          : std::max<u64>(count / 4, u64{1} << 20);
+            // room (its candidates known; resumed at its rows when counted) runs alone, sized as with exact capacities.
+            // The estimates and the room stay within what the context can still hold (room_rows); a group whose
+            // reservations fail all the same runs its first chunk alone at its exact size.
+            const bool exact_group = exact || plan[i].known || plan[i].exact;
+            u64 room_limit = lifted::wide_row(W) ? std::max<u64>(1, o.candidate_bytes / (u64{W} * 8))
+                                    : std::max<u64>(count / 4, u64{1} << 20);
+            cap_cut = ~u64{0};
+            if (!exact_group)
+            {
+                cap_cut = std::max<u64>(1, room_rows());
+                room_limit = std::min(room_limit, cap_cut);
+            }
             usize j = i;
             u64 room = 0, cap_max = 0;
             while (j < plan.size() && (j == i || (grouped && !exact_group && room + capacity(plan[j]) <= room_limit)))
@@ -814,11 +982,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states (with a chunk's candidates)");
             // the scratch of the group's chunks and the arenas for its new states (the device checks the table's room
             // per chunk: ensure_table)
-            if (!exact_group)
+            if (!exact_group && !try_allocate(*ctx, [&](int)
+                                              {
+                                                  grow(*states, room);
+                                                  grow(*nodes, room);
+                                                  size_scratch(cap_max);
+                                              }))
             {
-                states->reserve(room);
-                nodes->reserve(room);
-                size_scratch(cap_max);
+                plan[i].exact = true;
+                continue;
             }
             const u32 G = static_cast<u32>(j - i);
             auto* d_ctl = static_cast<state_set::ChunkCtl*>(
@@ -896,6 +1068,44 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         else
                             gen->count();
                     }
+                    // more candidates than the device has room for (`fit` rows), found before anything of the chunk is
+                    // committed: fewer parents (the rest is the next chunk), or one parent's successors a window at a
+                    // time (run_windows)
+                    // the new states the chunk can add (none without candidates: its one-row buffers hold none)
+                    u64 adds = cap;
+                    auto split = [&](u64 fit)
+                    {
+                        if (o.timings)
+                            next_event -= 4;
+                        if (adds == 0)  // (a chunk without candidates needs only its one-row buffers)
+                            refuse_memory(*ctx, "device BrFS", "the candidate buffers of " + std::to_string(ns) + " states",
+                                          held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
+                        if (ns == 1)
+                        {
+                            windowed = true;
+                            return;
+                        }
+                        std::vector<u32> firsts(u64{ns} + 1);
+                        check(cudaMemcpy2DAsync(firsts.data(), sizeof(u32), gen->seg_offsets(), u64{S} * sizeof(u32), sizeof(u32),
+                                                u64{ns} + 1, cudaMemcpyDeviceToHost, s),
+                              "cudaMemcpy2DAsync (parent offsets)");
+                        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+                        u32 n1 = 1;
+                        while (n1 < ns && firsts[n1 + 1] <= fit)
+                            ++n1;
+                        if (n1 == ns)  // (fewer parents need no less: the chunk's own buffers do not fit)
+                            refuse_memory(*ctx, "device BrFS", "the candidate buffers of " + std::to_string(ns) + " states",
+                                          held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
+                        Chunk rest{b + n1, ns - n1};
+                        rest.before_goal = ck.before_goal;
+                        ck.ns = n1;
+                        ck.known = firsts[n1];
+                        ck.counted = false;
+                        ck.before_goal = false;
+                        plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(k) + 1, rest);
+                        ++st.redone;
+                        resplit = true;
+                    };
                     if (exact_group)
                     {
                         if (!ck.known)  // (CPU-fallback work: its candidates before its rows)
@@ -905,41 +1115,26 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                                   "cudaMemcpyAsync");
                             check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
                             cap = std::max<u64>(*h_cand, 1);
+                            adds = *h_cand;
                         }
-                        if (const u64 fit = cap * per_candidate > reused_bytes() ? room_rows() : cap; cap > fit)
+                        u64 fit = cap * per_candidate() > reused_bytes() ? room_rows() : cap;
+                        if (cap <= fit || adds == 0)
                         {
-                            // more candidates than the device has room for: fewer parents (the rest is the next
-                            // chunk), or one parent's successors a window at a time (run_windows)
-                            if (o.timings)
-                                next_event -= 4;
-                            if (ns == 1)
-                            {
-                                windowed = true;
-                                break;
-                            }
-                            std::vector<u32> firsts(u64{ns} + 1);
-                            check(cudaMemcpy2DAsync(firsts.data(), sizeof(u32), gen->seg_offsets(), u64{S} * sizeof(u32),
-                                                    sizeof(u32), u64{ns} + 1, cudaMemcpyDeviceToHost, s),
-                                  "cudaMemcpy2DAsync (parent offsets)");
-                            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
-                            u32 n1 = 1;
-                            while (n1 < ns && firsts[n1 + 1] <= fit)
-                                ++n1;
-                            Chunk rest{b + n1, ns - n1};
-                            rest.before_goal = ck.before_goal;
-                            ck.ns = n1;
-                            ck.known = firsts[n1];
-                            ck.counted = false;
-                            ck.before_goal = false;
-                            plan.insert(plan.begin() + static_cast<std::ptrdiff_t>(k) + 1, rest);
-                            ++st.redone;
-                            resplit = true;
+                            if (count + cap > state_set::k_max_states)
+                                throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states");
+                            fit = cap;
+                            if (!try_allocate(*ctx, [&](int attempt)
+                                              {
+                                                  ensure_table(count, adds);
+                                                  size_scratch(cap, attempt == 1);
+                                              }))
+                                fit = cap / 2;
+                        }
+                        if (cap > fit)
+                        {
+                            split(fit);
                             break;
                         }
-                        if (count + cap > state_set::k_max_states)
-                            throw std::length_error("mymyr: device BrFS: more than 2^31 - 2 states");
-                        ensure_table(count, cap);
-                        size_scratch(cap);
                     }
                     check(state_set::launch_chunk_size(d_ctl, rec, gen->seg_offsets() + u64{ns} * S,
                                                        {cap, table_limit(), budget, o.stop_at_goal}, s),
@@ -980,7 +1175,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                             next_event -= 4;  // the redo records this chunk's events again
                         if (!exact_group)
                         {
-                            states->reserve(room);
+                            grow(*states, room);
                             size_scratch(cap_max);  // (the rows are wider)
                         }
                         ck.counted = false;
@@ -989,11 +1184,15 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     }
                     if (ev[2])
                         ev[2]->record(s);
-                    if (exact_group)
+                    // after the rows: the parents' arena generation is read up to here
+                    if (exact_group && !try_allocate(*ctx, [&](int)
+                                                     {
+                                                         grow(*states, adds);
+                                                         grow(*nodes, adds);
+                                                     }))
                     {
-                        // after the rows: the parents' arena generation is read up to here
-                        states->reserve(cap);
-                        nodes->reserve(cap);
+                        split(cap / 2);
+                        break;
                     }
                     // dedup: deterministic ids in candidate order, the new states after the stored ones (device count)
                     const state_set::Live live{&d_ctl->live};

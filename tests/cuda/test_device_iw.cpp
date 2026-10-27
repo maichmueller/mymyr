@@ -913,7 +913,7 @@ TEST(DeviceIw, WideRowsEqualCpu)
     }
 }
 
-TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
+TEST(DeviceIw, WidePairTableFailsTheSearchesThatReachIt)
 {
     SKIP_WITHOUT_GPU();
     const auto task = wide_task(80);
@@ -922,18 +922,18 @@ TEST(DeviceIw, WidePairTableRefusesInsufficientBudget)
     o.table_bytes = 4096;  // the IW(1) table (800 bytes), not the IW(2) one
     cuda::DeviceMultiIw device(context(), task, o);
     const std::vector<State> starts{task->initial_state()};
-    try
-    {
-        (void)device.run(starts);
-        FAIL() << "expected the novelty table size refusal";
-    }
-    catch (const std::invalid_argument& error)
-    {
-        const std::string message = error.what();
-        EXPECT_NE(message.find("IW(2)"), std::string::npos);
-        EXPECT_NE(message.find("2560400 bytes per search"), std::string::npos);
-        EXPECT_NE(message.find("table_bytes is 4096"), std::string::npos);
-    }
+    const auto batch = device.run(starts);
+    ASSERT_EQ(batch.status[0], search::SearchStatus::Failed);
+    const auto passes = batch.passes(0);
+    ASSERT_FALSE(passes.empty());
+    EXPECT_EQ(passes.back().width, 2u);
+    EXPECT_EQ(passes.back().status, search::SearchStatus::Failed);
+    for (usize k = 0; k + 1 < passes.size(); ++k)
+        EXPECT_EQ(passes[k].status, search::SearchStatus::Exhausted);
+    EXPECT_NE(batch.message.find("IW(2)"), std::string::npos);
+    EXPECT_NE(batch.message.find("2560400 bytes per search"), std::string::npos);
+    EXPECT_NE(batch.message.find("table_bytes is 4096"), std::string::npos);
+    EXPECT_EQ(batch.result(0, *task, starts[0], true).message, batch.message);
 }
 
 TEST(DeviceIw, LazyGrowthShrinksTableGroups)

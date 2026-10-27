@@ -249,3 +249,33 @@ def fan_task(tmp_path, objects):
     path = tmp_path / "fan.txt"
     path.write_text(text)
     return mymyr.Task.from_text(path)
+
+
+def symfan_task(tmp_path, objects, drop=True):
+    """pick(?x ?y) adds left(x) and left(y): the initial state has objects * objects successors, of which
+    objects * (objects + 1) / 2 are distinct ((a, b) and (b, a) lie far apart in the successor order); drop(?x) turns
+    left(x) into done(x), a second layer with duplicates across parents. Goal: done(o[-1]) and left(o[-2])."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 3\nF 1 left\nF 0 free\nF 1 done\nSI 0\nFI 1\n1\nG 2\n2 1 {n - 1}\n0 1 {n - 2}\n"
+    text += f"A {2 if drop else 1}\npick 2\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n0 1 1\n"
+    if drop:
+        text += "drop 1\nL 1\n0 1 0\nE 1\n0\nL 0\nF 2\n0 0 0\n2 1 0\n"
+    path = tmp_path / f"symfan-{n}-{int(drop)}.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path)
+
+
+def wide_fan_task(tmp_path, objects=1100):
+    """Rows of objects * objects / 64 words or more: the initial state has `objects` successors; the goal follows
+    the last of them."""
+    import mymyr
+
+    n = objects
+    text = f"O {n}\nP 4\nF 1 picked\nF 0 free\nF 2 pad\nF 0 done\nSI 0\nFI 1\n1\nG 1\n3 1\n"
+    text += "A 2\npick 1\nL 1\n1 1\nE 1\n0\nL 0\nF 3\n1 0\n0 1 0\n2 1 0 0\n"
+    text += f"finish 0\nL 1\n0 1 {-n}\nE 1\n0\nL 0\nF 1\n3 1\n"
+    path = tmp_path / "wide-fan.txt"
+    path.write_text(text)
+    return mymyr.Task.from_text(path, atoms="dense")

@@ -1,6 +1,7 @@
 """Device landmark novelty equals CPU LIW, including launch grouping, budgets and seeded layer orders."""
 
 import os
+import re
 
 import numpy as np
 import pytest
@@ -172,8 +173,6 @@ def test_liw_refusals(ctx, tmp_path):
     graph = search.FactLandmarkGraph(task, [])
     with pytest.raises(ValueError, match="LIW arity 2.*CPU"):
         mc.liw(task, [task.initial_state], ctx=ctx, landmarks=graph, max_width=2)
-    with pytest.raises(ValueError, match=r"LIW\(1\).*table_bytes.*raise table_bytes"):
-        mc.liw(task, [task.initial_state], ctx=ctx, landmarks=graph, table_bytes=8)
     with pytest.raises(ValueError, match="one graph or one per search"):
         mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=[graph])
     other = text_task("gripper__prob05")
@@ -203,12 +202,43 @@ def test_liw_childsnack_ipc(ctx):
         assert_equal(batch, i, expected)
 
 
-def test_liw_context_table_refusal(tmp_path):
+def failed_at_width_one(batch, i, cpu):
+    """Search i ran the CPU's width-0 pass and was refused at the LIW(1) pass."""
+    assert batch.status[i] == search.Status.FAILED and not batch.solved[i] and batch.plan_length[i] == -1
+    passes = batch.passes(i)
+    assert [(p.width, p.status) for p in passes] == [(0, cpu.passes[0].status), (1, search.Status.FAILED)]
+    assert (passes[0].expanded, passes[0].generated) == (cpu.passes[0].expanded, cpu.passes[0].generated)
+
+
+def test_liw_table_beyond_table_bytes_fails_only_its_search(ctx):
+    task = text_task("blocks__probBLOCKS-8-0")
+    atoms = list(task.initial_state.atoms())
+    graphs = [search.FactLandmarkGraph(task, atoms[:1]), search.FactLandmarkGraph(task, atoms[:8])]
+    budget = 8 * 2 * (task.words + 1)  # the tables of one landmark and BOT
+    cpu = [search.liw(task, landmarks=graph, max_width=1, max_states=60) for graph in graphs]
+    assert len(cpu[1].passes) == 2
+    for group in (1, 2):
+        batch = mc.liw(task, [task.initial_state] * 2, ctx=ctx, landmarks=graphs, table_bytes=budget, max_states=60,
+                       max_searches=group)
+        assert_equal(batch, 0, cpu[0])
+        failed_at_width_one(batch, 1, cpu[1])
+        expected = (f"mymyr: device LIW(1): the novelty table requires {8 * 9 * (task.words + 1)} bytes per search for "
+                    f"{64 * task.words} atom slots and 9 landmark ranks, and table_bytes is {budget} (raise table_bytes=)")
+        assert batch.message == expected
+
+
+def test_liw_table_beyond_the_context_fails_its_search(tmp_path):
     task = wide_task(tmp_path, objects=192)
     graph = search.FactLandmarkGraph(task, [task.atom(slot) for slot in range(8191)])
+    cpu = search.liw(task, landmarks=graph, max_width=1)
     small = mc.Context(0, max_bytes=32 << 20)
-    with pytest.raises(ValueError, match=r"LIW\(1\).*novelty tables.*raise Context max_bytes"):
-        mc.liw(task, [task.initial_state], ctx=small, landmarks=graph)
+    batch = mc.liw(task, [task.initial_state] * 2, ctx=small, landmarks=graph)
+    for i in range(2):
+        failed_at_width_one(batch, i, cpu)
+    assert re.search(r"^mymyr: device LIW\(1\): the CUDA context has too little device memory left for the novelty "
+                     r"table of \d+ bytes: it can still allocate \d+ bytes \(max_bytes=33554432\), and \d+ bytes are in "
+                     r"use: search nodes \d+, novelty tables 0, .*Raise the Context's max_bytes, or use the CPU search\.$",
+                     batch.message), batch.message
     small.synchronize()
 
 

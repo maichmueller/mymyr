@@ -70,8 +70,10 @@ struct MultiIwOptions
     bool costs = true;             // plan costs (heuristics::plan_metric; may rewrite actions, as search::iw())
     // launch configuration: in exact mode no result depends on it
     u32 max_searches = 0;          // searches per group (0: as many as fit table_bytes)
-    // Novelty tables of a group. A pass whose one table exceeds it is refused (std::invalid_argument) when a search
-    // reaches that pass: the passes before it run, and searches they solve need no wider table.
+    // Novelty tables of a group. A pass whose one table exceeds it is refused when a search reaches that pass: the
+    // searches that reach it end with status Failed (the refusal in MultiIwBatch::message), and the others keep the
+    // results of the passes before it. Groups also shrink to what the context can still allocate, and a single
+    // search's table beyond that is refused the same way.
     u64 table_bytes = u64{1} << 30;
     u32 chunk_states = u32{1} << 20;  // layer entries per chunk at most
     u64 view_bytes = 0;            // per-chunk budget of the lifted views (0: half the device's L2 cache)

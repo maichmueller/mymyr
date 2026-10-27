@@ -12,6 +12,7 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # JAX would take 75% of the GPU otherwise
 
+import re  # noqa: E402
 import threading  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -402,11 +403,79 @@ def test_successor_windows_equal_cpu(tmp_path, kw):
     from conftest import fan_task
 
     task = fan_task(tmp_path, 400)
-    kw = {"max_states": 160_001} | kw  # (the arenas then hold the space without growing)
-    small = mc.Context(0, max_bytes=160 << 20)
+    kw = {"max_states": 160_001} | kw
+    small = mc.Context(0, max_bytes=40 << 20)
     cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
     dev = mc.brfs(task, ctx=small, fingerprint=True, **kw)
     brfs_matches(dev, cpu)
     assert dev.counters["windows"] >= (2 if kw["max_states"] == 160_001 else 1)
     small.synchronize()
+
+
+@pytest.mark.parametrize("drop, budget, windows", [(False, 16, 2), (True, 56, 1)])
+def test_search_runs_on_past_a_windowed_state(tmp_path, drop, budget, windows):
+    """The initial state's 90000 successors (45150 distinct) a window at a time in a small context, and the rest of
+    the search after them in the same context (with drop: 180001 states and duplicates across parents)."""
+    from conftest import symfan_task
+
+    task = symfan_task(tmp_path, 300, drop)
+    cpu = mymyr.search.brfs(task, stop_at_goal=False, fingerprint=True, threads=1)
+    small = mc.Context(0, max_bytes=budget << 20)
+    dev = mc.brfs(task, ctx=small, stop_at_goal=False, fingerprint=True)
+    brfs_matches(dev, cpu)
+    assert dev.stats.states == (180_001 if drop else 45_151)
+    assert dev.counters["windows"] >= windows
+    small.synchronize()
+
+
+def test_wide_fan_runs_in_twice_its_successor_bytes(tmp_path):
+    """1100 successors of 151 KB rows (159 MiB) in a context of twice that: windows sized by what they allocate. In
+    smaller contexts the search gives the CPU's result or refuses (the states after the fan have no successors: chunks
+    without candidates need no room for new states)."""
+    from conftest import wide_fan_task
+
+    task = wide_fan_task(tmp_path)
+    row = (task.words + 63) // 64 * 64 * 8
+    cpu = mymyr.search.brfs(task, fingerprint=True, threads=1)
+    for eighths in (16, 13, 10):
+        small = mc.Context(0, max_bytes=1100 * row * eighths // 8)
+        try:
+            dev = mc.brfs(task, ctx=small, fingerprint=True)
+            brfs_matches(dev, cpu)
+            assert dev.counters["windows"] >= 1
+        except ValueError as e:
+            assert eighths < 16
+            assert re.match(r"^mymyr: device BrFS: .*Raise the Context's max_bytes, or use the CPU BrFS\.$", str(e))
+        small.synchronize()
+
+
+def test_brfs_chunks_hold_the_parents_whose_views_fit(blocksworld_wide):
+    """20000 states of 69 blocks in 64 MiB: a chunk holds the parents whose views fit an eighth of what the context can
+    still allocate, not the 65536 parents of a large context."""
+    cpu = mymyr.search.brfs(blocksworld_wide, fingerprint=True, threads=1, max_states=20000)
+    small = mc.Context(0, max_bytes=64 << 20)
+    brfs_matches(mc.brfs(blocksworld_wide, ctx=small, fingerprint=True, max_states=20000), cpu)
+    small.synchronize()
+
+
+def test_brfs_under_tight_budgets_equals_cpu_or_refuses(tmp_path, blocksworld_wide):
+    """Every budget gives the CPU's result or a ValueError that names the memory, never an allocator error: the setup,
+    the windows of a state's successors, the chunks after them and the arenas' growth."""
+    from conftest import symfan_task
+
+    symfan = symfan_task(tmp_path, 300)
+    cases = [(symfan, {"stop_at_goal": False}), (symfan, {"max_states": 2000}), (blocksworld_wide, {"max_states": 2000})]
+    outcomes = []
+    for task, kw in cases:
+        cpu = mymyr.search.brfs(task, fingerprint=True, threads=1, **kw)
+        for budget in (1, 4, 8, 16, 32, 48):
+            small = mc.Context(0, max_bytes=budget << 20)
+            try:
+                brfs_matches(mc.brfs(task, ctx=small, fingerprint=True, **kw), cpu)
+                outcomes.append("equal")
+            except ValueError as e:
+                assert re.match(r"^mymyr: device BrFS: .*Raise the Context's max_bytes, or use the CPU BrFS\.$", str(e))
+                outcomes.append("refused")
+            small.synchronize()
+    assert "equal" in outcomes and "refused" in outcomes
 

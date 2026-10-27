@@ -65,8 +65,8 @@ with one graph per start (`None`: every state has the BOT coordinate); `disjunct
 instance. `cuda.rollouts(..., landmarks=...)` runs randomized LIW(1) with one graph for every seed or one per seed;
 rollout k equals `search.liw(..., max_width=1, layer_order="randomized", seed=k)`. LIW(2) and tasks with numeric
 fluents run on the host (`search.liw`). A search's novelty table holds, per landmark rank (BOT included), one bit per
-atom slot and one word for the empty tuple; groups shrink to `table_bytes`, and a table that cannot fit raises
-`ValueError` naming the option to raise.
+atom slot and one word for the empty tuple. Groups shrink to `table_bytes` as for IW; a search whose table cannot
+fit ends with status `FAILED` at the LIW(1) pass, and the batch's `message` names the option to raise.
 
 ```python skip-if-no-cuda
 from pathlib import Path
@@ -94,11 +94,17 @@ one chunk at a time. Numeric kernels hold whole rows and take states of at most 
 When a state's successors exceed what the context can still allocate, the device BrFS deduplicates and stores them
 a window at a time (the `windows` counter), with the ids, counts and plans of the CPU BrFS; device IW, rollouts and
 A*/GBFS expand a state's successors at once and raise `ValueError` naming the successor count, the bytes they need and
-what the context has left (raise the Context's `max_bytes`, or use the CPU search).
+what the context has left (raise the Context's `max_bytes`, or use the CPU search). The searches size their buffers by
+what the context can still allocate: the BrFS starts its arenas and state table within it, reserves the arenas for a
+windowed state's new states once and sizes each window by every buffer it allocates, and a chunk whose buffers do not
+fit runs with fewer parents. When the search's own buffers leave too little, or an allocation fails all the same, the
+`ValueError` names what holds the context's memory.
 IW(1) uses one novelty bit per slot per search. Wide IW(2) tables pack the symmetric slot pairs and diagonal
 into roughly `slots * (slots + 1) / 16` bytes per search. Groups shrink to `table_bytes` (an option of `multi_iw`,
-`batched_iw1`, `liw` and `rollouts`); a pass whose table cannot fit even one search raises `ValueError` with its required
-byte size and the budget when a search reaches that pass, so that searches solved at a lower width run. Wide exact novelty uses
+`batched_iw1`, `liw` and `rollouts`); a pass whose table cannot fit even one search ends the searches that reach it with
+status `FAILED`, and the batch's `message` gives its required byte size and the budget; the searches solved at a lower
+width keep their results. Groups also shrink to the memory the context can still allocate; a single search's table
+beyond it ends that search the same way, the `message` naming what holds the context's memory. Wide exact novelty uses
 full 32-bit atom slots and stable radix sorting, preserving CPU candidate order. A `DeviceExpander` expands an instance the
 kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
 host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only
