@@ -82,3 +82,39 @@ TEST(BrfsPddl, ConcurrentStoreGrowsInsideAnExpansion)
         }
     }
 }
+
+TEST(BrfsPddl, ConcurrentStoreDoesNotGrowAfterTheStateLimit)
+{
+    // the initial table of 2^18 entries wants to grow once the states counted in batches of 64 per thread exceed 60%
+    // of it. With one mode, one thread inserts the whole wide layer: a single thread reaches that point with exactly
+    // `grow` states, 8 threads with grow, grow + 1 or grow + 2 states (the thread expanding layer 1 inserted 0 to 2 of
+    // the states before it). A search stopped by max_states keeps its table; one that gets there earlier grows it.
+    constexpr u64 cap = u64{1} << 18;
+    u64 grow = 64;
+    while (grow * 10 <= cap * 6)
+        grow += 64;
+    const auto task = branching_task(1, 55);
+    ASSERT_GT(test::branching_states(1, 55), grow + 3);
+    BrfsOptions bo;
+    bo.stop_at_goal = false;
+    bo.store = BrfsOptions::Store::Concurrent;
+    const auto bytes_at = [&](u64 max_states)
+    {
+        bo.max_states = max_states;
+        const BrfsResult r = brfs(*task, bo);
+        EXPECT_EQ(r.status, search::SearchStatus::OutOfStates) << "max_states " << max_states;
+        EXPECT_EQ(r.states, max_states);
+        return r.memory_bytes;
+    };
+    for (const u32 T : {1u, 8u})
+    {
+        bo.threads = T;
+        const u64 below = bytes_at(grow - 1);
+        EXPECT_EQ(bytes_at(grow), below) << "T=" << T;
+        EXPECT_GT(bytes_at(grow + 3), below) << "T=" << T;
+        if (T == 1)
+        {
+            EXPECT_GT(bytes_at(grow + 1), below);
+        }
+    }
+}

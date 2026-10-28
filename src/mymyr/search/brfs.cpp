@@ -1190,7 +1190,9 @@ public:
             for (;;)
             {
                 m_team.run([&](u32 t) { work(t); });
-                if (!m_store.wants_rehash())
+                // a stopped search does not grow: the insert that reaches max_states may also ask for a rehash
+                if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed) ||
+                    !m_store.wants_rehash())
                     break;
                 m_store.rehash(m_team);
             }
