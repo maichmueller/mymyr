@@ -488,8 +488,9 @@ identical output. The torch `encode_flat` op accepts `action_schema`, `action_bi
 `action_parent`, `action_index` (the canonical index of each row) and `action_status` (the expansion's device status
 word, which the batch's overflow flags report) keyword tensors. The device takes
 action rows only for the relation arrays of a classical table, and the JAX FFI refuses them because its operand list
-has no expansion labels or offsets. The action mapping helpers return host NumPy indices;
-reading CUDA offsets or chosen entities through them copies those arrays to the host.
+has no expansion labels or offsets. `action_rows`, `action_indices` and `action_entities` return host NumPy indices;
+reading CUDA offsets or chosen entities through them copies those arrays to the host. `action_entities_of` of a
+device batch stays on the device: torch tensors in and out, no host read.
 
 ### Predicate virtual nodes
 
