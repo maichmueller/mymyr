@@ -4,6 +4,7 @@
 
 #include "support.hpp"
 #include "../support/benchmarks.hpp"
+#include "../support/branching.hpp"
 #include "../support/suite.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
 #include "mymyr/datasets/sampler.hpp"
@@ -70,6 +71,32 @@ TEST(StateSpace, ArraysIndependentOfThreadCount)
             }
             if (frozen)
                 check_invariants(*ref);
+        }
+    }
+}
+
+TEST(StateSpace, ConcurrentStoreGrowsInsideAnExpansion)
+{
+    // one expansion (modes 1) or the threads' concurrent expansions (modes 8) insert more states than the concurrent
+    // store's initial table holds: the threads pause inside them for the rehash, and the arrays equal one thread's
+    struct Case
+    {
+        u32 modes, n;
+    };
+    for (const Case c : {Case{1, 65}, Case{8, 35}})
+    {
+        const TaskPtr task =
+            pddl_task(test::branching_domain().c_str(), test::branching_problem(c.modes, c.n).c_str());
+        const StateSpacePtr ref = space_of(task, ss_options(1));
+        ASSERT_TRUE(ref);
+        ASSERT_EQ(ref->num_states(), test::branching_states(c.modes, c.n));
+        EXPECT_EQ(ref->num_transitions(), ref->num_states() - 1);
+        const u64 h = arrays_hash(*ref, true);
+        for (u32 T : {2u, 8u})
+        {
+            const StateSpacePtr s = space_of(task, ss_options(T));
+            ASSERT_TRUE(s);
+            EXPECT_EQ(arrays_hash(*s, true), h) << "modes " << c.modes << " T=" << T;
         }
     }
 }
