@@ -30,7 +30,7 @@ __global__ void initialize(rl::MatchTemplates t, rl::MatchBatch b)
         }
     }
 }
-template<u32 MaxVars>
+template<u32 MaxVars, bool First>
 __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
 {
     const MatchWarp grp;
@@ -38,8 +38,8 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
          job += u64{gridDim.x} * blockDim.x / 32)
     {
         const u32 width = t.capacity ? t.capacity : 1;
-        const u64 row = b.first ? job : job / width;
-        const u32 local = b.first ? 0 : static_cast<u32>(job % width);
+        const u64 row = First ? job : job / width;
+        const u32 local = First ? 0 : static_cast<u32>(job % width);
         const i32 g = b.task_ids ? b.task_ids[row] : 0;
         u64 flags = 0;
         if (g < 0 || static_cast<u32>(g) >= t.num_instances)
@@ -47,10 +47,10 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
         else
         {
             const i32 begin = t.instance_offsets[g], end = t.instance_offsets[g + 1];
-            if (!b.first && local >= static_cast<u32>(end - begin))
+            if (!First && local >= static_cast<u32>(end - begin))
                 continue;
             const i32 first = begin + static_cast<i32>(local);
-            const i32 last = b.first ? end : first + 1;
+            const i32 last = First ? end : first + 1;
             for (i32 k = first; k < last; ++k)
             {
                 if (t.num_vars[k] > static_cast<i32>(MaxVars))
@@ -68,12 +68,16 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
                     flags |= 8;
                 if (!found)
                     continue;
-                const u32 j = b.first ? 0 : local;
+                const u32 j = First ? 0 : local;
                 if (j >= b.capacity)
                     flags |= 1;
                 if (grp.lane() == 0)
                 {
-                    atomicAdd(b.count + row, 1);
+                    // A first-result row has one writer.
+                    if constexpr (First)
+                        b.count[row] = 1;
+                    else
+                        atomicAdd(b.count + row, 1);
                     if (j < b.capacity)
                     {
                         const u64 at = row * b.capacity + j;
@@ -83,7 +87,7 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
                             b.binding[at * t.max_vars + v] = binding[v];
                     }
                 }
-                if (b.first)
+                if (First)
                     break;
             }
         }
@@ -112,9 +116,19 @@ cudaError_t launch_match_first(const rl::MatchTemplates& t, const rl::MatchBatch
     {
         const u32 search_blocks = static_cast<u32>((jobs + 3) / 4 > 65535 ? 65535 : (jobs + 3) / 4);
         if (t.max_vars <= 2)
-            match<2><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+        {
+            if (b.first)
+                match<2, true><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+            else
+                match<2, false><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+        }
         else
-            match<64><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+        {
+            if (b.first)
+                match<64, true><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+            else
+                match<64, false><<<search_blocks, 128, 0, stream>>>(t, b, jobs);
+        }
     }
     return cudaGetLastError();
 }
