@@ -395,3 +395,187 @@ def test_suite_encoder_drops_noop_actions():
                       kept)
     with pytest.raises(ValueError, match="drop_noops needs actions=True"):
         encoder.encode(states, ids, drop_noops=True)
+
+
+# ------------------------------------------------------------------------------------------------ devices and observations
+def torch_or_skip():
+    return pytest.importorskip("torch")
+
+
+def cuda_or_skip():
+    from test_rl_table import gpu_device
+
+    return gpu_device()
+
+
+def noop_table(domain):
+    """The table of a no-op domain's first instance with fixed atom slots, as environments need it."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    base = ROOT / "tests/data/ipc" / f"{domain}-ipc" / "train"
+    return rl.TaskTable([mymyr.Task.from_pddl(base / "domain.pddl", base / "p01.pddl", atoms="dense")])
+
+
+def host_rows(states, task_ids):
+    return np.ascontiguousarray(states.cpu().numpy()), np.ascontiguousarray(task_ids.cpu().numpy())
+
+
+def check_observation(encoder, table, states, task_ids, batch, actions, drop):
+    """An observation (batch and ActionRows) against the host encoding of its rows' host expansion."""
+    from test_rl_torch_obs import assert_same
+
+    rows, ids = host_rows(states, task_ids)
+    want = rl.expand(table, rows, ids, hashes=True, noops=True, drop_noops=drop)
+    assert_same(batch, encoder.encode(rows, ids, actions=want))
+    total = int(want.total)
+    assert not actions.status.any()
+    np.testing.assert_array_equal(actions.offsets.cpu().numpy(), want.offsets)
+    for name in ("parent", "schema", "binding", "noop"):
+        np.testing.assert_array_equal(getattr(actions, name)[:total].cpu().numpy(), getattr(want, name), err_msg=name)
+    np.testing.assert_array_equal(actions.succ_hash[:total].cpu().numpy().view(np.uint64), want.succ_hash)
+    assert (actions.index is None) == (not drop)
+    if drop:
+        np.testing.assert_array_equal(actions.index[:total].cpu().numpy(), want.index)
+    return want
+
+
+def step_by_entities(env, batch, actions):
+    """Steps with the first action entity of each graph: the reached state is the successor its row names."""
+    torch = torch_or_skip()
+    entities = encoding.action_entities(batch)
+    graphs = np.searchsorted(np.asarray(batch.as_dict("numpy")["entity_offsets"]), entities, side="right") - 1
+    chosen = entities[np.searchsorted(graphs, np.arange(env.num_envs))]
+    rows = encoding.action_rows(batch, actions, chosen)
+    reached = actions.succ_hash[torch.as_tensor(rows, device=env.device)]
+    step = env.step(torch.as_tensor(encoding.action_indices(batch, chosen), device=env.device))
+    assert not step.invalid.any()
+    assert torch.equal(mymyr.hash_rows(step.final_states), reached)
+    return step
+
+
+@pytest.mark.parametrize("capacity", [False, True])
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_batched_env_observations_drop_noop_actions(dev, capacity):
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = torch.device("cpu") if dev == "cpu" else cuda_or_skip()
+    table = noop_table("floortile")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    caps = dict(entities=1 << 12, args=1 << 14, targets=1 << 12) if capacity else None
+    env = rt.BatchedEnv(table, 6, device=device, seed=5, max_steps=8, observation=encoder, obs_actions=True,
+                        obs_drop_noops=True, obs_capacities=caps)
+    observation = env.observation()
+    dropped = 0
+    for _ in range(4):
+        want = check_observation(encoder, table, observation.states, observation.task_ids, observation.encoding,
+                                 observation.actions, True)
+        dropped += int(want.generated - want.total)
+        step = step_by_entities(env, observation.encoding, observation.actions)
+        observation = env.observation()
+        check_observation(encoder, table, step.states, step.task_ids, step.obs, step.actions, True)
+    assert dropped
+    with pytest.raises(ValueError, match="obs_drop_noops needs obs_actions"):
+        rt.BatchedEnv(table, 2, device=device, observation=encoder, obs_drop_noops=True)
+    env.close()
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_captured_observations_drop_noop_actions(drop):
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = cuda_or_skip()
+    table = noop_table("rovers")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    env = rt.BatchedEnv(table, 8, device=device, seed=2, max_steps=5, observation=encoder, obs_actions=True,
+                        obs_drop_noops=drop, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    rollout = env.capture(3, final=True)
+    for _ in range(2):
+        out = rollout.replay()
+        torch.cuda.synchronize(device)
+        assert len(out.obs_actions) == 3
+        for k in range(3):
+            check_observation(encoder, table, out.states[k], out.task_ids[k], out.obs[k], out.obs_actions[k], drop)
+    env.close()
+
+
+@pytest.mark.needs_gil
+def test_traced_observations_drop_noop_actions():
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = cuda_or_skip()
+    table = noop_table("floortile")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    env = rt.BatchedEnv(table, 6, device=device, seed=7, max_steps=6, observation=encoder, obs_actions=True,
+                        obs_drop_noops=True, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    torch._dynamo.reset()
+    try:
+        step = torch.compile(lambda: env.step(final=False), fullgraph=True, backend="aot_eager")
+        for _ in range(3):
+            out = step()
+            check_observation(encoder, table, out.states, out.task_ids, out.obs, out.actions, True)
+    finally:
+        torch.cuda.synchronize(device)
+        env.close()
+        torch._dynamo.reset()
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("domain", NOOP_DOMAINS)
+def test_device_encodings_of_dropped_noops_equal_the_host(domain, layout):
+    torch = torch_or_skip()
+    device = cuda_or_skip()
+    from test_rl_torch_obs import assert_same
+    from mymyr.encoding._device_actions import bounded_actions
+
+    table, rows, full, kept = noop_rows(ipc_task(domain))
+    encoder = encoding.FlatRelationEncoder(table, layout=layout, **OPTIONS)
+    host = encoder.encode(rows, actions=kept)
+    states = torch.as_tensor(rows.view(np.int64), device=device)
+    exact = rl.expand(table, states, drop_noops=True, framework="torch")
+    batch = encoder.encode(states, actions=exact)
+    assert_same(batch, host)
+    caps = dict(entities=1 << 12, args=1 << 14, targets=1 << 12)
+    bounded = bounded_actions(encoder, states, None, caps["entities"], hashes=True, drop_noops=True)
+    assert_same(encoder.encode(states, actions=bounded, capacities=caps), host)
+    from mymyr.rl.torch import _ops
+
+    handle = _ops.register(table)
+    try:
+        flat = torch.ops.mymyr.expand_flat(handle, states, None, int(full.total), rows=False, hashes=True,
+                                           drop_noops=True)
+        assert_same(encoder.encode(states, actions=flat, capacities=caps), host)
+    finally:
+        _ops.unregister(handle)
+    # the inverse on the device, against the host's
+    counts = np.diff(full.offsets)
+    every = np.arange(counts.max() + 1)[None, :].repeat(len(rows), 0)
+    want = encoding.action_entities_of(host, every)
+    got = encoding.action_entities_of(batch, torch.as_tensor(every, device=device))
+    np.testing.assert_array_equal(got.cpu().numpy(), want)
+    graphs = torch.arange(len(rows), device=device).flip(0)
+    np.testing.assert_array_equal(encoding.action_entities_of(batch, torch.as_tensor(every[::-1].copy(), device=device),
+                                                              graphs).cpu().numpy(), want[::-1])
+    torch.cuda.synchronize(device)
+
+
+def test_device_collate_and_suites_drop_noop_actions():
+    torch = torch_or_skip()
+    device = cuda_or_skip()
+    from mymyr import datasets
+    from test_rl_torch_obs import assert_same
+
+    table, rows, full, kept = noop_rows(ipc_task("satellite"))
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    states = torch.as_tensor(rows.view(np.int64), device=device)
+    ids = torch.zeros(len(rows), dtype=torch.int32, device=device)
+    out = datasets.EncodingCollate(encoder, actions=True, drop_noops=True)(datasets.StateRows(states, ids))
+    assert_same(out.graphs, encoder.encode(rows, actions=kept))
+    suite = rl.TaskSuite([table, noop_table("rovers")])
+    suite_encoder = encoding.SuiteEncoder(suite, **OPTIONS)
+    words = torch.zeros((len(rows), suite.words), dtype=torch.int64, device=device)
+    words[:, :rows.shape[1]] = states
+    caps = {d: dict(graphs=len(rows), entities=1 << 12, args=1 << 14, targets=1 << 12) for d in range(2)}
+    for capacities in (None, caps):
+        batch = suite_encoder.encode(words, ids, actions=True, drop_noops=True, capacities=capacities)
+        assert_same(batch.batches[0], encoder.encode(rows, actions=kept))
+    torch.cuda.synchronize(device)

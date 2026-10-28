@@ -509,7 +509,15 @@ action targets chooses entities, and `mymyr.encoding` maps a chosen entity back 
 - `encoding.action_indices(batch, entities)` is each entity's position among its own state's successors, which is what
   `CpuEnvPool.step` (and every environment of `mymyr.rl`) takes as the action;
 - without `entities` both cover every action entity of the batch, in entity order
-  (`encoding.action_entities(batch)` lists their ids).
+  (`encoding.action_entities(batch)` lists their ids);
+- `encoding.action_entities_of(batch, indices, graphs=None)` is the inverse: the entity of each canonical successor
+  index (`[N]` or `[N, K]`, row `i` of graph `graphs[i]`, by default graph `i`), -1 where the graph has none. On a
+  device batch it is a torch computation on the device that waits for nothing.
+
+Encoded from an expansion that dropped its no-op actions (`rl.expand(..., drop_noops=True)`), the batch has no entity
+for them, and every other entity keeps its position in the full canonical order as `entity_ref` (the expansion's
+`index`): `action_indices` gives the same environment actions as with the full expansion, and `action_rows` finds the
+entity's row by its `index`.
 
 The targets of behaviour cloning are positions of this kind: `datasets.plan_rows` replays a plan into its states and,
 per step, the canonical successor index of the plan's action, the entity whose `action_indices` equals it
@@ -842,6 +850,17 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   synchronize the replay stream before freeing or reusing them.
   External CUDA streams must remain valid while arrays produced on them are retained. The JAX environments do not
   encode actions.
+- **Action rows and no-op actions.** With `obs_actions=True` the observation's expansion rows come along as
+  `Observation.actions` and `StepResult.actions` (`mymyr.rl.torch.ActionRows`; over a suite of several domains a tuple,
+  one per domain batch; `Rollout.obs_actions` for a captured rollout): `parent`, `schema`, `binding`, `offsets`, the
+  successor hash `succ_hash` (int64 bit patterns of `State.hash()`) and `noop` of every row, `index` and the device
+  `status`. `encoding.action_rows(obs, actions, entities)` gives the row of a chosen entity, so a policy reads the
+  label (Label mode) or the hash of the state an action reaches without a second expansion. `obs_drop_noops=True`
+  leaves out the actions whose successor equals the state, unless every successor of the state is one: their entities
+  are absent, `actions.index` is each kept row's canonical successor index, and `encoding.action_indices` of an entity
+  is still the action that `step` takes. It costs one compaction pass of the label-only expansion and captures like
+  it; under `torch.compile` the observation is traced as `mymyr::expand_flat(rows=False, hashes=True, noops=True,
+  drop_noops=...)` followed by `mymyr::encode_flat` with those rows.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
@@ -882,6 +901,27 @@ result = rollout.replay()
 batch = encoding.collate(result.obs)
 print(len(result.obs), batch.num_graphs, result.obs[0].device)
 assert result.obs[0].nbytes == sum(result.obs[0].nbytes_by_array.values())
+```
+
+Without no-op actions, a policy that picks an action entity steps to the successor whose hash the observation names:
+
+```python needs-torch
+import numpy as np
+import torch
+
+floortile = Path("tests/data/ipc/floortile-ipc/train")
+tiles = mymyr.Task.from_pddl(floortile / "domain.pddl", floortile / "p01.pddl", atoms="dense")
+tile_encoder = encoding.FlatRelationEncoder(tiles, target_sources=("action",))
+tile_env = BatchedEnv(tiles, 4, seed=1, observation=tile_encoder, obs_actions=True, obs_drop_noops=True)
+observation = tile_env.observation()
+batch, rows = observation.encoding, observation.actions
+entities = encoding.action_entities(batch)
+graphs = np.searchsorted(np.asarray(batch.entity_offsets), entities, side="right") - 1
+chosen = entities[np.searchsorted(graphs, np.arange(4))]       # the first action entity of each graph
+assert not rows.noop[encoding.action_rows(batch, rows, chosen)].any()
+reached = rows.succ_hash[encoding.action_rows(batch, rows, chosen)]
+step = tile_env.step(torch.as_tensor(encoding.action_indices(batch, chosen)))
+assert torch.equal(mymyr.hash_rows(step.final_states), reached)
 ```
 
 Action observations use the same capacity form, including the reached states before an autoreset:

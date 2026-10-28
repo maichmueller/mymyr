@@ -301,7 +301,7 @@ A graph's entities come in blocks, each present only when the options and the in
 | the auxiliary entity, when the graph has a nullary tuple | 8 `auxiliary` | -1 |
 | the goal entities | 2 `goal` | the tuple's index among the graph's tuples in graph-major order |
 | the subgoal entities | 3 `subgoal` | the same as a goal entity |
-| the action entities | 4 `action` | the action's row among its state's rows of `actions` |
+| the action entities | 4 `action` | the action's canonical successor index: its row among its state's rows of `actions`, or the row's `index` |
 | the history step entities | 5 `history` | the step's index among the row's valid steps |
 | the history target entities | 6 `history_target` | the tuple's index among the graph's tuples in graph-major order |
 | the state entities of a horizon | 7 `state` | the graph-local node index |
@@ -437,19 +437,56 @@ its schemas both give is one tuple: the relation lists each binding once. There 
 relation.
 
 The action entities exist whenever the batch has action tuples, with or without `target_sources=("action",)`. They are
-numbered in the order of the action relations (relation id, then tuple). The entity's `entity_ref` is the row of the
-action among the rows of its own state in the expansion (the first one for a binding listed by several schemas). The
-row of the expansion is `actions.offsets[g] + entity_ref`, so `actions.action(row)` is the action and
-`actions.succ[row]` its successor: a policy that picks an action entity picks that row (`encoding.action_rows`,
-`encoding.action_indices` and `encoding.action_entities` do the mapping; [Action entities](rl.md#action-entities)).
+numbered in the order of the action relations (relation id, then tuple). The entity's `entity_ref` is the **canonical
+successor index** of the action: its row among the rows of its own state in the expansion (the first one for a binding
+listed by several schemas), which is the action an environment takes. The row of the expansion is
+`actions.offsets[g] + entity_ref`, so `actions.action(row)` is the action and `actions.succ[row]` its successor: a
+policy that picks an action entity picks that row (`encoding.action_rows`, `encoding.action_indices` and
+`encoding.action_entities` do the mapping, `encoding.action_entities_of` the inverse; [Action
+entities](rl.md#action-entities)).
+
+An expansion that dropped its no-op successors (`rl.expand(..., drop_noops=True)`: the actions whose successor equals
+the state, unless every successor of the state is one) lists a subsequence of the canonical rows and carries `index`,
+each row's position in the full order. The encoder reads it: the entity of a kept action has the `entity_ref` it has
+in the encoding of the full expansion, so `action_indices` gives the same environment actions, and the dropped
+actions have no entity. `action_rows` finds the row of graph `g` whose `index` is the entity's reference, and
+`action_entities_of(batch, indices, graphs)` maps canonical indices (an `[N]` or `[N, K]` array, row `i` of graph
+`graphs[i]`, by default graph `i`) to their entities, -1 for an action without one. Streams store `index` with the
+labels, and the rows of every state must have a strictly ascending `index` (else `ValueError`).
+
+```python
+from pathlib import Path
+
+import numpy as np
+import mymyr
+from mymyr import encoding, rl
+
+floortile = Path("tests/data/ipc/floortile-ipc/train")
+tiles = mymyr.Task.from_pddl(floortile / "domain.pddl", floortile / "p01.pddl")
+table = rl.as_table(tiles)
+states = [tiles.initial_state, *tiles.successor_states(tiles.initial_state)]
+full = rl.expand(table, states, noops=True)
+kept = rl.expand(table, states, drop_noops=True)          # without the actions that change nothing
+encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+batch = encoder.encode(states, actions=kept)
+indices = encoding.action_indices(batch)                   # canonical successor indices, as for `full`
+rows = encoding.action_rows(batch, kept)
+assert np.array_equal(kept.index[rows], indices)
+entities = encoding.action_entities(batch)
+graphs = np.searchsorted(np.asarray(batch.entity_offsets), entities, side="right") - 1
+assert np.array_equal(encoding.action_entities_of(batch, indices, graphs), entities)
+print(full.total, kept.total, len(entities))
+```
 With `target_sources=("action",)` the batch also lists the action entities as targets of group 2, after the goal and
 subgoal targets of their graph; without it they are entities and tuple arguments only. A call without `actions` has no
 action tuples and no action entities.
 
 Device rows accept a CUDA expansion as `actions=` or `(schema, binding, offsets)` device tensors, including
-`expand_flat`'s six outputs. Split-schema runs use the same k-way merge as the host, and action targets, graph-local
-references, both layouts and both index widths have identical output. The torch `encode_flat` op accepts
-`action_schema`, `action_binding`, `action_offsets` and optional `action_parent` keyword tensors. The device takes
+`expand_flat`'s six or eleven outputs (with its `index` and `status`). Split-schema runs use the same k-way merge as the
+host, and action targets, graph-local references, canonical indices, both layouts and both index widths have
+identical output. The torch `encode_flat` op accepts `action_schema`, `action_binding`, `action_offsets` and optional
+`action_parent`, `action_index` (the canonical index of each row) and `action_status` (the expansion's device status
+word, which the batch's overflow flags report) keyword tensors. The device takes
 action rows only for the relation arrays of a classical table, and the JAX FFI refuses them because its operand list
 has no expansion labels or offsets. The action mapping helpers return host NumPy indices;
 reading CUDA offsets or chosen entities through them copies those arrays to the host.
