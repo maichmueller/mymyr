@@ -793,11 +793,17 @@ nb::object bool_array(std::shared_ptr<Block> block, u64 n, Framework fw)
     return export_array(std::move(s), fw, default_words(fw));
 }
 
-void mask_host_arrays(std::initializer_list<nb::handle> arrays)
+/// Whether an action-mask call runs on the device: some of its arrays are CUDA arrays (ValueError in a CPU build).
+bool device_masks(std::initializer_list<nb::handle> arrays)
 {
     for (nb::handle a : arrays)
         if (is_cuda_array(a))
-            throw nb::value_error("mymyr: action masking runs on the CPU; pass host rows");
+        {
+            if (!device_hooks().masks)
+                throw nb::value_error("mymyr: this build has no CUDA backend; action masks take host rows");
+            return true;
+        }
+    return false;
 }
 
 struct MaskSchema
@@ -2164,7 +2170,9 @@ void bind_rl(nb::module_& parent)
     m.def(
         "applicable_schemas",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, PoolArg pool) {
-            mask_host_arrays({states, task_ids});
+            if (device_masks({states, task_ids}))
+                return ArrayOut(device_hooks().masks(
+                    {MaskKind::Schemas, table, states, task_ids, nb::none(), nb::none(), nb::none(), nb::none()}));
             const SuiteRef ref = suite_of(table);
             StateBatch in = import_table_states(states, *ref.suite);
             const TaskIds ids(task_ids, in, *ref.suite);
@@ -2179,12 +2187,15 @@ void bind_rl(nb::module_& parent)
         },
         "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "pool"_a = nb::none(),
         "Applicable schemas [N, S] bool without an expansion. A schema is true iff an applicable full binding exists; "
-        "S is the table's maximum schema count, with zero padding for smaller domains. CPU inputs only.");
+        "S is the table's maximum schema count, with zero padding for smaller domains. On CUDA arrays it runs on "
+        "their device.");
     m.def(
         "applicable_objects",
         [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema,
            ArrayArg prefix, IntArg depth_in, TaskIdsArg task_ids, SizeArg num_objects, PoolArg pool) {
-            mask_host_arrays({states, task_ids, schema, prefix});
+            if (device_masks({states, task_ids, schema, prefix}))
+                return ArrayOut(device_hooks().masks(
+                    {MaskKind::Objects, table, states, task_ids, schema, prefix, depth_in, num_objects}));
             const SuiteRef ref = suite_of(table);
             const u32 depth = int_arg<u32>(depth_in, "depth");
             const u32 O = opt_int_arg<u32>(num_objects, "num_objects").value_or(ref.suite->max_objects());
@@ -2217,12 +2228,14 @@ void bind_rl(nb::module_& parent)
         "Objects extending prefix at depth to an applicable full binding, [N, O] bool without an expansion. "
         "schema is an int or int32 [N]; prefix is int32 [N, >= depth] (None at depth 0). Objects are instance-local; "
         "O defaults to the table's maximum object count. Invalid labels give zero rows; the scalar depth "
-        "must be below its arity. CPU inputs only.");
+        "must be below its arity. On CUDA arrays it runs on their device.");
     m.def(
         "is_applicable",
         [](SuiteArg table, StatesLike states, Arg<std::variant<int, ann::ArrayLike>> schema, ArrayArg binding,
            TaskIdsArg task_ids, PoolArg pool) {
-            mask_host_arrays({states, task_ids, schema, binding});
+            if (device_masks({states, task_ids, schema, binding}))
+                return ArrayOut(device_hooks().masks(
+                    {MaskKind::Applicable, table, states, task_ids, schema, binding, nb::none(), nb::none()}));
             const SuiteRef ref = suite_of(table);
             StateBatch in = import_table_states(states, *ref.suite);
             const TaskIds ids(task_ids, in, *ref.suite);
@@ -2246,7 +2259,7 @@ void bind_rl(nb::module_& parent)
         "Full-label applicability [N] bool without an expansion, including numeric effect applicability. "
         "schema is an int or int32 [N]; binding is int32 [N, L], with instance-local objects and ignored padding "
         "past the schema's arity. L below a valid selected schema's arity raises ValueError. "
-        "Invalid labels are false. CPU inputs only.");
+        "Invalid labels are false. On CUDA arrays it runs on their device.");
     m.def(
         "is_goal",
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {

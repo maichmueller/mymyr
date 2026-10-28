@@ -384,7 +384,63 @@ __global__ void k_random_actions(const u64* draws, const i32* count, u64 rows, u
 }
 
 __global__ void k_store(u64* dst, u64 value) { *dst = value; }
+__global__ void k_label_step(LabelStep p)
+{
+    u32 bind[rl::dev::k_max_matcher_depth];
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < p.rows; i += u64{gridDim.x} * blockDim.x)
+    {
+        u32 k = p.inst ? static_cast<u32>(p.inst[i]) : 0u;
+        if (k >= p.instances)
+            k = 0;  // launch_finish reports the task id
+        u8 st = k_goal;
+        if (!p.at_goal[i])
+        {
+            st = p.any[i * p.any_stride] ? k_invalid : k_stuck;
+            const i32 sc = p.schema[i];
+            const rl::dev::TaskView& t = p.views[k];
+            if (st == k_invalid && sc >= 0 && static_cast<u32>(sc) < t.num_schemas)
+            {
+                const u32 arity = t.schema[u64{static_cast<u32>(sc)} * rl::dev::k_sc_count + rl::dev::k_sc_arity];
+                bool ok = arity <= rl::dev::k_max_matcher_depth;
+                for (u32 j = 0; j < arity && ok; ++j)
+                {
+                    bind[j] = static_cast<u32>(p.binding[i * p.binding_stride + j]);
+                    ok = bind[j] < t.num_objects;
+                }
+                u64* row = p.states + i * p.words;
+                if (ok && rl::dev::is_applicable(t, static_cast<u32>(sc), bind, row, p.words, nullptr, 0))
+                {
+                    st = k_ok;
+                    if (rl::dev::apply_action(t, static_cast<u32>(sc), bind, row, p.words, row, p.words) !=
+                            rl::dev::k_apply_ok &&
+                        p.error)
+                        atomicOr(p.error, 8u);
+                    if (p.out_schema)
+                        p.out_schema[i] = sc;
+                    if (p.out_binding)
+                        for (u32 j = 0; j < p.out_width; ++j)
+                            p.out_binding[i * p.out_width + j] =
+                                j < p.label_width && j < arity ? static_cast<i32>(bind[j]) : -1;
+                }
+            }
+        }
+        if (p.draws)
+            ++p.draws[i];
+        p.status[i] = st;
+    }
+}
 }  // namespace
+
+cudaError_t launch_label_step(const LabelStep& p, cudaStream_t s)
+{
+    if (p.rows == 0)
+        return cudaSuccess;
+    if (!p.states || !p.views || !p.at_goal || !p.any || !p.schema || (p.binding_stride && !p.binding) || !p.status ||
+        (p.out_binding && p.out_width < p.label_width))
+        return cudaErrorInvalidValue;
+    k_label_step<<<grid_for(p.rows), k_block, 0, s>>>(p);
+    return cudaGetLastError();
+}
 
 cudaError_t launch_select(const Select& p, cudaStream_t s)
 {

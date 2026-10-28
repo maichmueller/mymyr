@@ -102,10 +102,6 @@ def test_label_invalid_and_random_policy_errors():
         env.step(torch.zeros(4, dtype=torch.int64))
     with pytest.raises(ValueError, match="actions"):
         rt.BatchedEnv(task, 1, actions="unknown")
-    with pytest.raises(ValueError, match="label.*CPU"):
-        rt.BatchedEnv(task, 1, actions="label", device="cuda")
-    with pytest.raises(ValueError, match="label.*CPU"):
-        rt.Env(task, actions="label", device=0)
     with pytest.raises(ValueError, match="label"):
         rt._ops.random_actions_impl(env.handle, env.draws, env.count, 0, None)
 

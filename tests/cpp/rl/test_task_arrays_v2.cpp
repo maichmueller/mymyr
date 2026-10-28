@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace mymyr;
@@ -58,7 +59,7 @@ TEST_P(TaskArraysV2, IsASupersetOfVersionOneAndDeterministic)
     EXPECT_EQ(v1.find("plan_matcher"), nullptr);
     EXPECT_EQ(v1.scalar("section_plan", -7), -7);
     EXPECT_EQ(v2.scalar("section_core"), 1);
-    EXPECT_EQ(v2.scalar("section_plan"), 2);
+    EXPECT_EQ(v2.scalar("section_plan"), 3);
     for (const rl::ArrayInfo& a : v1.arrays())
     {
         const rl::ArrayInfo* b = v2.find(a.name);
@@ -99,9 +100,12 @@ TEST_P(TaskArraysV2, ValidatesAndMatchesThePlan)
     EXPECT_EQ(v.max_bind, C.max_bind);
     EXPECT_EQ(v.atom_total, C.layout.total);
     usize matchers = 0, ces = 0, axioms = 0;
+    const bool masks = rl::exports_mask_matchers(*task);
+    EXPECT_EQ(masks, !task->numeric_slots() && !task->has_axioms() &&
+                         std::ranges::all_of(C.schemas, [](const plan::Schema& s) { return s.arity <= 16; }));
     for (const plan::Schema& s : C.schemas)
     {
-        matchers += 2 + s.ces.size();
+        matchers += 2 + (masks ? s.arity + 1 : 0) + s.ces.size();  // pre0, pre1, the mask matchers, the conditions
         ces += s.ces.size();
     }
     for (const plan::Stratum& st : C.strata)
@@ -112,6 +116,18 @@ TEST_P(TaskArraysV2, ValidatesAndMatchesThePlan)
     EXPECT_EQ(v.n_matchers, matchers);
     EXPECT_EQ(v.n_cond_effects, ces);
     EXPECT_EQ(v.n_axioms, axioms);
+    // the mask matchers: existence (nothing prebound), then parameter d with d parameters prebound
+    for (u32 s = 0; s < v.num_schemas; ++s)
+    {
+        const u32* sc = v.schema + static_cast<u64>(s) * rl::dev::k_sc_count;
+        EXPECT_EQ(sc[rl::dev::k_sc_masks] == rl::dev::k_none, !masks);
+        for (u32 e = 0; masks && e <= C.schemas[s].arity; ++e)
+        {
+            const u32* mx = v.matcher + (static_cast<u64>(sc[rl::dev::k_sc_masks]) + e) * rl::dev::k_mc_count;
+            EXPECT_EQ(mx[rl::dev::k_mc_total], C.schemas[s].arity);
+            EXPECT_EQ(mx[rl::dev::k_mc_first_free], e == 0 ? 0u : e - 1);
+        }
+    }
     EXPECT_EQ(v.goal_check_n, C.goal.lits.size());
     // every pattern key equals the engine's for a random binding (pattern vars resolved through plan_rs)
     std::mt19937_64 rng(11);
@@ -248,6 +264,23 @@ TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
         for (u32 s = 0; s < v.num_schemas; ++s)
             EXPECT_FALSE(rl::dev::device_fc(rl::dev::schema_matcher_flags(v, s, true), rl::dev::MatchOrder::Free)) << s;
     }
+}
+
+TEST(TaskArraysV2Masks, SkippedForSchemasOfMoreParametersThanTheDeviceTakes)
+{
+    // 52 schemas of up to 31 parameters: the device masks do not run it, the layout holds no mask matchers
+    const auto task = Task::from_text_file(task_path("organic-synthesis-opt18-strips__p20"));
+    ASSERT_FALSE(rl::exports_mask_matchers(*task));
+    const rl::ArrayBundle b = rl::device_arrays(*task, 2);
+    const rl::dev::TaskView v = rl::task_view(b);
+    for (u64 i = 0; i < rl::dev::validate_items(v); ++i)
+        ASSERT_EQ(rl::dev::validate_item(v, i), 0u) << "item " << i;
+    usize matchers = 0;
+    for (const plan::Schema& s : task->compiled().schemas)
+        matchers += 2 + s.ces.size();
+    EXPECT_EQ(v.n_matchers, matchers);
+    for (u32 s = 0; s < v.num_schemas; ++s)
+        EXPECT_EQ(v.schema[static_cast<u64>(s) * rl::dev::k_sc_count + rl::dev::k_sc_masks], rl::dev::k_none);
 }
 
 INSTANTIATE_TEST_SUITE_P(Suite, TaskArraysV2, ::testing::ValuesIn(params()),

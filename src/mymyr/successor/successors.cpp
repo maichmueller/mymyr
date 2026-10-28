@@ -302,14 +302,13 @@ detail::ExecMatcher& Successors::mask_matcher(u32 schema, u32 depth)
 {
     SchemaExec& se = m_schemas[schema];
     const u32 entry = depth == se.plan->arity ? 0 : depth + 1;
-    plan::MaskMatcher& cached = se.plan->masks[entry];
-    cached.once.call([&] { cached.matcher = std::make_unique<plan::Matcher>(detail::compile_mask(m_e.compiled(), schema, depth)); });
+    const plan::Matcher& matcher = detail::mask_matcher(m_e.compiled(), schema, entry);
     if (se.masks.empty())
         se.masks.resize(se.plan->arity + 1);
     if (!se.masks[entry])
     {
         auto x = std::make_unique<detail::ExecMatcher>();
-        m_e.instantiate(*x, *cached.matcher);
+        m_e.instantiate(*x, matcher);
         se.masks[entry] = std::move(x);
     }
     return *se.masks[entry];

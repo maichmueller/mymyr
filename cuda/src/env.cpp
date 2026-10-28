@@ -11,6 +11,7 @@
 #include "mymyr/cuda/expand.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/cuda/masks.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 #include "mymyr/cuda/suite_kernels.hpp"
 #include "table_launch.hpp"
@@ -126,6 +127,19 @@ std::vector<u32> rank_table(const rl::dev::TaskView& t, u32 k, bool witness, u32
     return table;
 }
 
+/// Why the label-mode step does not run a suite (empty: it does): the device masks' tasks (DeviceMasks::unsupported),
+/// whose schemas have no conditional effects.
+std::string label_why(const rl::TaskSuite& suite)
+{
+    if (std::string why = DeviceMasks::unsupported(suite); !why.empty())
+        return why;
+    for (u32 g = 0; g < suite.size(); ++g)
+        if (suite.task(g)->compiled().has_conditional_effects)
+            return (suite.size() > 1 ? "instance " + std::to_string(g) + ": " : std::string()) +
+                   "conditional effects (the label-mode step applies effects without conditions)";
+    return {};
+}
+
 /// Why the fast path does not run a table (empty: it does), for its first instance it does not run.
 std::string table_fast_why(const rl::TaskTable& table, const rl::EnvConfig& config)
 {
@@ -159,6 +173,11 @@ struct DeviceEnv::Impl
     rl::TaskSuitePtr suite;
     rl::EnvConfig cfg;
     bool fast = false;
+    // label mode (rl::ActionSpace::Label): the existence matchers and the instances' views, and the matcher views of a
+    // step's reached states (scratch); the count cache is one column, the 0/1 count, and the batch has no views
+    bool label = false;
+    std::unique_ptr<DeviceMasks> masks;
+    DeviceBuffer label_views;
     u32 I = 1, D = 1, W = 1, L = 1, S = 0;  // instances (global), domains, row words, label width, segments per state
     u32 NN = 0;
     u64 V = 0;
@@ -215,7 +234,8 @@ struct DeviceEnv::Impl
                                      &goal_never,  &okey,        &dom_of,      &loc_of,     &all_views, &init_ids,
                                      &iota,        &starts,      &seed,        &ctl,        &pick_schema, &pick_rank,
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
-                                     &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2};
+                                     &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2,
+                                     &label_views};
         for (Part& P : parts)
             for (DeviceBuffer* b : {&P.region, &P.rank, &P.rank_table, &P.sets, &P.fc_of})
                 v.push_back(b);
@@ -482,7 +502,7 @@ struct DeviceEnv::Impl
     /// rows are grouped by domain first.
     void order_rows(const i32* inst, u64 n, u32* counts)
     {
-        if (!multi() || !fast || n == 0)
+        if (!multi() || !fast || label || n == 0)
             return;
         const u64 tb = lifted::order_temp_bytes(n);
         const lifted::OrderKeys keys = order_keys();
@@ -548,7 +568,9 @@ struct DeviceEnv::Impl
         envk::Instances in;
         in.count = I;
         in.inst = inst;
-        in.views = fast && multi() && !several() ? parts[0].dt->device_views() : nullptr;
+        in.views = label                            ? masks->device_views()
+                   : fast && multi() && !several() ? parts[0].dt->device_views()
+                                                   : nullptr;
         in.init_row = static_cast<const u64*>(init_row.data());
         in.init_count = static_cast<const u32*>(init_counts.data());
         in.init_goal = static_cast<const u8*>(init_goal.data());
@@ -586,7 +608,7 @@ struct DeviceEnv::Impl
         query.error = dctl() + k_err;
         if (fast || batch.goals())
         {
-            const rl::dev::TaskView task = fast && !several() ? parts[0].dt->view(0) : rl::dev::TaskView{};
+            const rl::dev::TaskView task = fast && !label && !several() ? parts[0].dt->view(0) : rl::dev::TaskView{};
             check(envk::launch_goal(task, query, goal, s), "launch_goal");
             return;
         }
@@ -647,6 +669,75 @@ struct DeviceEnv::Impl
                                         std::to_string(C) + "], views [rows, " + std::to_string(V) + "])");
     }
 
+    /// The instances' goals as the words of their masks that are not zero (envk::Instances: goal_off, goal_word, ...),
+    /// for goals without derived literals (the fast path and label mode have no axioms).
+    void goal_words()
+    {
+        std::vector<u64> wpos, wneg;
+        std::vector<u32> off{0}, word;
+        std::vector<u8> never(I);
+        mask_goals = true;
+        for (u32 g = 0; g < I; ++g)
+        {
+            const rl::TaskTable::Instance& in = suite->instance(g);
+            never[g] = in.goal_unsatisfiable ? 1 : 0;
+            mask_goals = mask_goals && !in.goal_derived;
+            for (u32 w = 0; w < in.goal_pos.size(); ++w)
+                if (in.goal_pos[w] | in.goal_neg[w])
+                {
+                    word.push_back(w);
+                    wpos.push_back(in.goal_pos[w]);
+                    wneg.push_back(in.goal_neg[w]);
+                }
+            off.push_back(static_cast<u32>(word.size()));
+        }
+        if (!mask_goals)
+            throw std::logic_error("mymyr: device env: a goal with derived literals on the fast path (internal error)");
+        goal_off = upload(ctx, off, s);
+        goal_word = upload(ctx, word, s);
+        goal_wpos = upload(ctx, wpos, s);
+        goal_wneg = upload(ctx, wneg, s);
+        goal_never = upload(ctx, never, s);
+    }
+
+    /// Label mode's constants: the device masks of the suite, the goal words, and the initial states' 0/1 counts as
+    /// their count cache (the host's, checked against the device's existence test).
+    void setup_label()
+    {
+        masks = std::make_unique<DeviceMasks>(ctx, suite);
+        S = 1;
+        C0 = C = 1;
+        V = 0;
+        goal_words();
+        init_cache = upload(ctx, init_count, s);
+        init_view = DeviceBuffer(ctx, sizeof(u64), s);
+        std::vector<i32> ids(I);
+        std::iota(ids.begin(), ids.end(), 0);
+        iota = upload(ctx, ids, s);
+        DeviceBuffer got(ctx, u64{I} * sizeof(u32), s);
+        DeviceBuffer views(ctx, std::max<u64>(1, u64{I} * masks->view_words()) * sizeof(u64), s);
+        const DeviceMasks::Batch rows{static_cast<const u64*>(init_row.data()), I, W, W,
+                                      static_cast<const i32*>(iota.data())};
+        masks->any(rows, nullptr, static_cast<u32*>(got.data()), 1, static_cast<u64*>(views.data()), s);
+        std::vector<u32> counts(I);
+        check(cudaMemcpyAsync(counts.data(), got.data(), u64{I} * sizeof(u32), cudaMemcpyDeviceToHost, s),
+              "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        for (u32 g = 0; g < I; ++g)
+            if (counts[g] != init_count[g])
+                throw std::logic_error("mymyr: device env: the device finds " + std::string(counts[g] ? "an" : "no") +
+                                       " applicable action in the initial state of instance " + std::to_string(g) +
+                                       ", the host " + (init_count[g] ? "one" : "none") + " (internal error)");
+    }
+
+    /// Label mode: the 0/1 counts of rows [0, n) with skip[i] zero (null: every row) into the count cache, from their
+    /// matcher views (scratch).
+    void label_counts(const u64* states, u64 n, const i32* ids, const u8* skip, u32* counts)
+    {
+        const DeviceMasks::Batch rows{states, n, W, W, ids};
+        masks->any(rows, skip, counts, C, grow<u64>(label_views, std::max<u64>(1, n * masks->view_words())), s);
+    }
+
     /// The fast path's constants: per domain its device table, launch plan, schema sets and recorded regions; per
     /// instance its view words, goal words and initial cache (checked against the host's initial counts).
     void setup_fast()
@@ -662,36 +753,16 @@ struct DeviceEnv::Impl
             P.multi = several() || P.table->size() > 1;
         }
         const u32 wi = cfg.witness_pruning ? 0 : 1;
-        std::vector<u64> ivw(I), wpos, wneg;
-        std::vector<u32> off{0}, word;
-        std::vector<u8> never(I);
-        mask_goals = true;
+        std::vector<u64> ivw(I);
         for (u32 g = 0; g < I; ++g)
         {
             const rl::TaskSuite::Ref r = suite->ref(g);
             const rl::dev::TaskView& tv = parts[r.domain].dt->view(r.local);
-            const rl::TaskTable::Instance& in = suite->instance(g);
             ivw[g] = u64{tv.view_rows} * tv.ow;
             V = std::max<u64>(V, ivw[g]);
-            never[g] = in.goal_unsatisfiable ? 1 : 0;
-            mask_goals = mask_goals && !in.goal_derived;  // the fast path has no axioms
-            for (u32 w = 0; w < in.goal_pos.size(); ++w)
-                if (in.goal_pos[w] | in.goal_neg[w])
-                {
-                    word.push_back(w);
-                    wpos.push_back(in.goal_pos[w]);
-                    wneg.push_back(in.goal_neg[w]);
-                }
-            off.push_back(static_cast<u32>(word.size()));
         }
-        if (several() && !mask_goals)
-            throw std::logic_error("mymyr: device env: a goal with derived literals on the fast path (internal error)");
         inst_view_words = upload(ctx, ivw, s);
-        goal_off = upload(ctx, off, s);
-        goal_word = upload(ctx, word, s);
-        goal_wpos = upload(ctx, wpos, s);
-        goal_wneg = upload(ctx, wneg, s);
-        goal_never = upload(ctx, never, s);
+        goal_words();
         // the recorded schemas of each instance: those whose segments the device sorts (their picks would search every
         // binding), where the region holds their rank bitmap, or their keys pay for the region's traffic
         const rl::dev::MatchOrder order = env_order();
@@ -834,6 +905,8 @@ struct DeviceEnv::Impl
 
 std::string DeviceEnv::fast_unsupported(const rl::TaskSuite& suite, const rl::EnvConfig& config)
 {
+    if (config.actions == rl::ActionSpace::Label)
+        return label_why(suite);
     if (suite.single_domain())
         return table_fast_why(*suite.table(0), config);
     for (u32 d = 0; d < suite.num_domains(); ++d)
@@ -864,6 +937,11 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     I.NN = I.suite->numeric_words();
     I.L = std::max<u32>(1, I.suite->label_width());
     const std::string why = fast_unsupported(*I.suite, I.cfg);
+    I.label = I.cfg.actions == rl::ActionSpace::Label;
+    if (I.label && (path == Path::General || !why.empty()))
+        throw std::invalid_argument("mymyr: device env: label actions run on the device's fast path only; " +
+                                    (why.empty() ? std::string("path 'general' was chosen")
+                                                 : "it cannot run this " + std::string(I.suite->noun()) + ": " + why));
     if (path == Path::Fast && !why.empty())
         throw std::invalid_argument("mymyr: device env: the fast path cannot run this " + std::string(I.suite->noun()) +
                                     ": " + why);
@@ -900,6 +978,8 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     }
     if (!I.fast)
         I.x = std::make_unique<SuiteExpander>(I.ctx, I.suite, I.s);
+    else if (I.label)
+        I.setup_label();
     else
         I.setup_fast();
     set_stream(stream);
@@ -1006,6 +1086,11 @@ void DeviceEnv::reserve(u64 rows)
     DeviceGuard g(I.ctx->device());
     I.begin_call();
     (void)I.grow<u8>(I.status, rows);
+    if (I.label)
+    {
+        (void)I.grow<u64>(I.label_views, std::max<u64>(1, rows * I.masks->view_words()));
+        return;
+    }
     if (I.fast)
     {
         (void)I.grow<u32>(I.pick_schema, rows);
@@ -1038,6 +1123,8 @@ void DeviceEnv::goal(const rl::EnvBatch& batch, u8* goal)
 void DeviceEnv::random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out)
 {
     Impl& I = *m;
+    if (I.label)
+        throw std::invalid_argument("mymyr: env: label mode has no random policy");
     DeviceGuard g(I.ctx->device());
     check(envk::launch_random_actions(draws, count, rows, I.cfg.seed, I.dseed(), first_env, max_actions, out, I.s),
           "launch_random_actions");
@@ -1062,7 +1149,7 @@ void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goa
     {
         r.cache_counts = b.counts;
         r.count_stride = I.C;
-        r.views = b.views;
+        r.views = I.V ? b.views : nullptr;
     }
     r.goal_pos = b.goal_pos;
     r.goal_neg = b.goal_neg;
@@ -1079,6 +1166,14 @@ void DeviceEnv::refresh(rl::EnvBatch& b, i32* count)
     I.check_batch(b, nullptr);
     DeviceGuard g(I.ctx->device());
     I.begin_call();
+    if (I.label)
+    {
+        I.label_counts(b.states, b.rows, b.task_ids, nullptr, b.counts);
+        if (count)
+            check(envk::launch_row_counts(b.counts, 1, I.C, nullptr, b.rows, count, I.s), "launch_row_counts");
+        I.goals(b, b.at_goal);
+        return;
+    }
     if (I.fast)
     {
         I.order_rows(b.task_ids, b.rows, b.counts);
@@ -1110,6 +1205,8 @@ void DeviceEnv::refresh(rl::EnvBatch& b, i32* count)
 void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions action, const i32* next_task_ids)
 {
     Impl& I = *m;
+    if (I.label)
+        throw std::invalid_argument("mymyr: env: label mode requires explicit labels; the random policy is unavailable");
     I.check_batch(b, &out);
     if (action.v64 && action.v32)
         throw std::invalid_argument("mymyr: env: actions given as int64 and as int32");
@@ -1276,6 +1373,88 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     // 4. finish with the given goal flags
     f.offsets = off2;
     f.goal_flag = goal;
+    check(envk::launch_finish(rl::dev::TaskView{}, f, s), "launch_finish");
+}
+
+void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Labels labels, const i32* next_task_ids)
+{
+    Impl& I = *m;
+    if (!I.label)
+        throw std::invalid_argument("mymyr: env: explicit labels require actions=Label");
+    I.check_batch(b, &out);
+    if (b.rows && (!labels.schema || (I.suite->label_width() && !labels.binding)))
+        throw std::invalid_argument("mymyr: env: label mode needs schema and binding arrays");
+    if (labels.stride < I.suite->label_width())
+        throw std::invalid_argument("mymyr: env: label binding stride is below the suite's largest schema arity");
+    if (I.cfg.max_steps && b.rows && !b.steps)
+        throw std::invalid_argument("mymyr: env: truncation (max_steps) needs the step counters");
+    const u64 N = b.rows;
+    if (N == 0)
+        return;
+    DeviceGuard g(I.ctx->device());
+    I.begin_call();
+    const cudaStream_t s = I.s;
+    u32* ctl = I.dctl();
+    auto* status = I.grow<u8>(I.status, N);
+    // 1. choose and move: the label of each row that is not at a goal and has applicable actions, if applicable
+    envk::LabelStep ls;
+    ls.rows = N;
+    ls.words = I.W;
+    ls.states = b.states;
+    ls.inst = b.task_ids;
+    ls.views = I.masks->device_views();
+    ls.instances = I.I;
+    ls.at_goal = b.at_goal;
+    ls.any = b.counts;
+    ls.any_stride = I.C;
+    ls.schema = labels.schema;
+    ls.binding = labels.binding;
+    ls.binding_stride = labels.stride;
+    ls.draws = b.draws;
+    ls.status = status;
+    ls.out_schema = out.schema;
+    ls.out_binding = out.binding;
+    ls.out_width = out.binding ? out.label_width : 0;
+    ls.label_width = I.suite->label_width();
+    ls.error = ctl + k_words_needed;
+    check(envk::launch_label_step(ls, s), "launch_label_step");
+    // 2. the reached states' 0/1 counts (the rows that moved)
+    I.label_counts(b.states, N, b.task_ids, status, b.counts);
+    // 3. finish: goal test of the goal words; autoresets copy their instance's initial count
+    envk::Finish f;
+    f.rows = N;
+    f.words = I.W;
+    f.row_words = I.W;
+    f.states = b.states;
+    f.steps = b.steps;
+    f.status = status;
+    f.counts = b.counts;
+    f.num_schemas = 1;
+    f.count_stride = I.C;
+    f.goal_pos = b.goal_pos;
+    f.goal_neg = b.goal_neg;
+    f.step_reward = I.cfg.step_reward;
+    f.goal_reward = I.cfg.goal_reward;
+    f.dead_end_reward = I.cfg.dead_end_reward;
+    f.max_steps = I.cfg.max_steps;
+    f.autoreset = I.cfg.autoreset ? 1 : 0;
+    f.dead_end = I.cfg.dead_end == rl::DeadEnd::NoSuccessors ? 1 : 0;
+    f.dead_end_terminal = I.cfg.dead_end_terminal ? 1 : 0;
+    f.in = I.instances(b.task_ids);
+    f.next_task_ids = next_task_ids;
+    f.error = ctl + k_err;
+    f.reward = out.reward;
+    f.terminated = out.terminated;
+    f.truncated = out.truncated;
+    f.goal = out.goal;
+    f.invalid = out.invalid;
+    f.count = out.count;
+    f.final_states = out.final_states;
+    f.at_goal = b.at_goal;
+    f.schema = out.schema;
+    f.binding = out.binding;
+    f.label_width = out.label_width;
+    f.cache_counts = b.counts;
     check(envk::launch_finish(rl::dev::TaskView{}, f, s), "launch_finish");
 }
 

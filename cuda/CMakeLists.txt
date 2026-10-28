@@ -55,6 +55,8 @@ set_source_files_properties(src/runtime.cpp PROPERTIES COMPILE_DEFINITIONS
     "MYMYR_CUDA_TOOLKIT_VERSION=\"${CMAKE_CUDA_COMPILER_VERSION}\";MYMYR_CUDA_CODE=\"${_mymyr_cuda_code}\"")
 # the environment step on the device (cuda/env.hpp, cuda/env_kernels.hpp)
 target_sources(mymyr_cuda PRIVATE src/env.cu src/env.cpp)
+# lifted action masks and label applicability on the device (cuda/masks.hpp, cuda/mask_kernels.hpp)
+target_sources(mymyr_cuda PRIVATE src/masks.cu src/masks.cpp)
 # novelty rewards, prefix masks and hindsight relabels on the device (cuda/rl_ops.hpp)
 target_sources(mymyr_cuda PRIVATE src/rl_ops.cu src/rl_match.cu)
 # batched grounded heuristics, device A* and GBFS (cuda/heuristics.hpp, cuda/astar.hpp, cuda/gbfs.hpp)

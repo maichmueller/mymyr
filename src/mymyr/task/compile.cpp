@@ -1628,4 +1628,13 @@ plan::Matcher compile_mask(const plan::Compiled& C, u32 schema, u32 depth)
     }
     return m;
 }
+
+const plan::Matcher& mask_matcher(const plan::Compiled& C, u32 schema, u32 entry)
+{
+    const plan::Schema& ps = C.schemas.at(schema);
+    plan::MaskMatcher& cached = ps.masks[entry];
+    cached.once.call(
+        [&] { cached.matcher = std::make_unique<plan::Matcher>(compile_mask(C, schema, entry ? entry - 1 : ps.arity)); });
+    return *cached.matcher;
+}
 }  // namespace mymyr::detail
