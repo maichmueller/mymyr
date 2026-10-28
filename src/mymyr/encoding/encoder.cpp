@@ -211,7 +211,8 @@ struct Pass
                            static_cast<u32>(x.offsets[g + 1] - x.offsets[g]),
                            g,
                            starts,
-                           cursors};
+                           cursors,
+                           x.index ? x.index + first : nullptr};
         }
         if constexpr (Layered)
             attach_layers(g, layers, row);

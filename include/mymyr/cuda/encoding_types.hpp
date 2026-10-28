@@ -82,7 +82,8 @@ struct DeviceOutput
 };
 /// Device expansion labels. The offsets delimit one canonical (schema, binding) run per parent row; capacity bounds
 /// every label array, including unused capacity tails. Overflow is a device uint64 status word: bit 0 reports
-/// expansion capacity overflow, bit 1 reports invalid input.
+/// expansion capacity overflow, bit 1 reports invalid input. `index` (optional) is each row's position in its parent's
+/// full canonical successor order (a no-op-dropping expansion's rows), the `entity_ref` of its action entity.
 struct DeviceActionInput
 {
     const i32* offsets = nullptr;  // [graphs + 1]
@@ -92,6 +93,7 @@ struct DeviceActionInput
     u64 capacity = 0;
     u32 label_width = 0;
     const u64* overflow = nullptr;
+    const i32* index = nullptr;  // optional [capacity], strictly ascending within each parent's rows
 };
 
 /// A horizon in device memory. Edge endpoints are graph-local node indices. Node and edge offsets start at zero

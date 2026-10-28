@@ -9,15 +9,26 @@ from typing import Any
 from mymyr.encoding import _device as d
 
 _widths: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_tables: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _lock = threading.Lock()
+
+
+def table_of(encoder: Any) -> Any:
+    """The TaskTable of the encoder, one object per encoder: the table of an encoder over a single Task is made once,
+    so that the device expansions of every call (and every captured replay) share its device context."""
+    from mymyr import rl
+
+    with _lock:
+        table = _tables.get(encoder)
+        if table is None:
+            table = _tables[encoder] = rl.as_table(encoder.table)
+    return table
 
 
 def action_states(encoder: Any, states: Any, ids: Any) -> Any:
     """Clear words beyond each instance's atom width before the expansion validates its padded input."""
-    from mymyr import rl
-
     torch = d._torch()
-    table, device = rl.as_table(encoder.table), states.device
+    table, device = table_of(encoder), states.device
     if table.numeric or not len(table):
         return states
     stream = torch.cuda.current_stream(device)
@@ -58,7 +69,7 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
     from mymyr.rl.torch._ops import _stream
 
     torch = d._torch()
-    table, device = rl.as_table(encoder.table), states.device
+    table, device = table_of(encoder), states.device
     states = action_states(encoder, states, ids)
     # Split schemas can yield several expansion rows for one encoded action entity.
     multiplicity = max(Counter(encoder.schema_relations).values(), default=1)

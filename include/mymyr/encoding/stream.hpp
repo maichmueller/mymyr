@@ -16,11 +16,12 @@
 // are only stored when some instance of the table has derived words.
 //
 // Action rows. An appended expansion row names the state it belongs to; the stream stores the labels of the rows
-// (schema and binding) of each state and nothing else. A flush encodes with one expansion made of the stored rows,
-// graph after graph, so the entity_ref of an action entity reads as encode() gives it for an expansion of the same states:
-// the expansion row of an action entity of the state that was row k of an append with expansion x is
-// x.offsets[k] + entity_ref. Graph j of a flush is the j-th appended row (FlatStream) or the row of indices()[j]
-// (FlatMutableStream).
+// (schema and binding) of each state and their canonical index (the expansion's `index`, else the row's position among
+// its state's rows) and nothing else. A flush encodes with one expansion made of the stored rows, graph after graph, so
+// the entity_ref of an action entity reads as encode() gives it for an expansion of the same states: the canonical
+// successor index of its action, which for the state that was row k of an append with expansion x is the row
+// x.offsets[k] + entity_ref when x dropped no row. Graph j of a flush is the j-th appended row (FlatStream) or the row of
+// indices()[j] (FlatMutableStream).
 //
 // Errors. Invalid rows raise std::invalid_argument ("mymyr: encoding: ...") when they are appended where the rows alone
 // show it (a task id out of range, a row narrower than its instance, goal masks narrower than their instance, a

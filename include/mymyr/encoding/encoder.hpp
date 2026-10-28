@@ -18,10 +18,11 @@
 //                                      5 history step, 6 history target, 8 auxiliary (omitted: see below)
 //   entity_ref           I   [E]       object: its instance-local id; goal, subgoal and history target: the index of
 //                                      its tuple among the graph's tuples in graph-major order (the tuples of the
-//                                      graph's cells in relation order); action: the row of its ground action in the
-//                                      graph's expansion rows (counted from the graph's first row); history step: its
-//                                      index among the row's valid history steps; predicate virtual node: the id of
-//                                      the predicate's key relation; auxiliary: -1 (omitted: see below)
+//                                      graph's cells in relation order); action: the canonical successor index of its
+//                                      ground action (the expansion's `index` of its row, else the row counted from
+//                                      the graph's first row: the same for an expansion that dropped no row); history
+//                                      step: its index among the row's valid history steps; predicate virtual node: the
+//                                      id of the predicate's key relation; auxiliary: -1 (omitted: see below)
 //   relation_counts      I   [G, R]    the tuples of cell (g, r), indexed (g, r) in both layouts (omitted: see below)
 //   relation_offsets     I   [G * R + 1]      cell (g, r) is segment s: its tuples are [offsets[s], offsets[s + 1])
 //   relation_arg_offsets I   [G * R + 1]      the same for the argument array
@@ -112,8 +113,9 @@
 // or on the graph's place in the batch. The tuple of a goal (subgoal, history target) entity with reference k in graph
 // g is, in the graph-major layout, tuple relation_offsets[g * R] + k; in the relation-major layout subtract the counts
 // of the graph's cells (relation_counts[g, 0], relation_counts[g, 1], ...) from k until the rest j falls into a cell
-// (g, r), and the tuple is relation_offsets[r * G + g] + j. The expansion row of an action entity with reference k is
-// row offsets[g] + k of the expansion given as `actions`. The history step with reference k of graph g is the k-th valid
+// (g, r), and the tuple is relation_offsets[r * G + g] + j. An action entity with reference k stands for the k-th
+// successor of graph g's state in canonical order: row offsets[g] + k of an expansion given as `actions` that dropped no
+// row, else the row of graph g whose `index` is k. The history step with reference k of graph g is the k-th valid
 // step of the row's history input (counted before FlatOptions::history_max_steps drops the oldest steps): its dt is
 // history.dt[g * history.masks.layers + k] and its masks are at index k of the row's history masks.
 //
@@ -203,9 +205,11 @@ struct EncodeInput
     // The successors of each row, as rl::expand returns them (null: no action tuples). The graph of row g has one action
     // entity per distinct ground action among the expansion rows [offsets[g], offsets[g + 1]), which must be the rows of
     // the same state g: canonical order (by schema, then lexicographically by binding), the labels of the row's instance,
-    // and `parent` (when written) naming g. The expansion must not have overflowed, and needs `offsets`, `schema` and
-    // `binding`; `label_width` at least the table's. The schema must have action relations. The graph only reads the
-    // labels: the successor states, goal flags and derived words of the expansion are not used.
+    // and `parent` (when written) naming g. With `index` (rl::expand's drop_noops) the rows may be a subsequence of the
+    // canonical order: `index` is each row's position in it (strictly ascending per state), and it is the action
+    // entity's `entity_ref`. The expansion must not have overflowed, and needs `offsets`, `schema` and `binding`;
+    // `label_width` at least the table's. The schema must have action relations. The graph only reads the labels and
+    // `index`: the successor states, goal flags, digests and derived words of the expansion are not used.
     const rl::Expansion* actions = nullptr;
     // The subgoal layers of each row: layer l fills the subgoal relations of level l + 1 (at most max_goal_level
     // layers). repeated_literals places literals listed at several levels; each cell contains unique tuples.

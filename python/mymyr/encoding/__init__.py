@@ -39,7 +39,8 @@ DeviceHGraphView: the same types and arrays as torch tensors on the batch's devi
 device arguments.
 
 ``action_rows``, ``action_indices`` and ``action_entities`` map the action entities of a batch (the actions a policy
-chooses among) back to the rows of the expansion they were encoded from and to the actions an environment takes.
+chooses among) back to the rows of the expansion they were encoded from and to the actions an environment takes;
+``action_entities_of`` maps actions (canonical successor indices) to their entities.
 ``SuiteEncoder`` encodes the rows of a task suite, one encoder and one batch per domain, with each row's place in its
 batch (``SuiteBatch``). ``encode(..., capacities=..., into=batch)`` writes into the memory of an earlier batch of the
 same capacities (the arrays it exported change with it). ``schema_to_dict`` and ``schema_from_dict`` serialize a
@@ -63,7 +64,7 @@ from mymyr._core._encoding import (
     HGraphView,
     SimpleEncoder,
 )
-from mymyr.encoding._actions import action_entities, action_indices, action_rows
+from mymyr.encoding._actions import action_entities, action_entities_of, action_indices, action_rows
 from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
 from mymyr.encoding._hgraph import DeviceHGraphView, hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
@@ -106,6 +107,7 @@ __all__ = [
     "SuiteBatch",
     "SuiteEncoder",
     "action_entities",
+    "action_entities_of",
     "action_indices",
     "action_rows",
     "collate",

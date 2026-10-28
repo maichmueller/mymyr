@@ -67,15 +67,16 @@ _RELATION_SCRATCH = ("_relation_offsets", "_relation_arg_offsets", "_relation_ar
 _POINTER_FIELDS = len(_OUTPUTS) + len(_RELATION_SCRATCH) + 1
 # The row record (_Rows.fields) the native side decodes by position: the graph count; the states (pointer, row stride,
 # words), task ids and derived words (pointer, row stride); the goal masks (8), subgoal layers (9) and history steps
-# (11, with dt and count); the expansion rows (offsets, schema, binding, parent, capacity, label width, status); the
+# (11, with dt and count); the expansion rows (offsets, schema, binding, parent, capacity, label width, status,
+# canonical index); the
 # horizon view (node offsets, edge offsets, src, dst, schema, binding, nodes, edges, label width, scratch, scratch
 # words, status).
 _ROW_STATES = 1
 _ROW_DERIVED = 5
 _ROW_ACTIONS = 35
-_ROW_HORIZON = 42
+_ROW_HORIZON = 43
 _ROW_HORIZON_NODES = _ROW_HORIZON + 6
-_ROW_FIELDS = 54
+_ROW_FIELDS = 55
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
 _SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4

@@ -254,6 +254,7 @@ public:
         if (m_inputs.actions)
         {
             grow(m_schema, m_schema.size() + action_rows);
+            grow(m_index, m_index.size() + action_rows);
             grow(m_binding, (m_schema.size() + action_rows) * m_label_width);
         }
     }
@@ -349,6 +350,11 @@ public:
             const u64 begin = m_schema.size();
             m_spans[slot] = {begin, count};
             m_schema.insert(m_schema.end(), x.schema + first, x.schema + first + count);
+            if (x.index)
+                m_index.insert(m_index.end(), x.index + first, x.index + first + count);
+            else
+                for (u32 r = 0; r < count; ++r)
+                    m_index.push_back(static_cast<i32>(r));
             m_binding.resize((begin + count) * m_label_width);
             for (u32 r = 0; r < count && m_label_width; ++r)
                 std::memcpy(&m_binding[(begin + r) * m_label_width], x.binding + (first + r) * x.label_width,
@@ -381,6 +387,7 @@ public:
         m_goal_derived_neg.clear();
         m_spans.clear();
         m_schema.clear();
+        m_index.clear();
         m_binding.clear();
         m_sub_pos.clear();
         m_sub_neg.clear();
@@ -474,19 +481,23 @@ public:
         compact_history_if_sparse();
         if (!m_inputs.actions || m_garbage < k_compact_rows || m_garbage * 2 < m_schema.size())
             return;
-        std::vector<i32> schema, binding;
+        std::vector<i32> schema, index, binding;
         schema.reserve(m_schema.size() - m_garbage);
+        index.reserve(m_schema.size() - m_garbage);
         binding.reserve((m_schema.size() - m_garbage) * m_label_width);
         for (Span& span : m_spans)
         {
             const u64 begin = schema.size();
             schema.insert(schema.end(), m_schema.begin() + static_cast<std::ptrdiff_t>(span.begin),
                           m_schema.begin() + static_cast<std::ptrdiff_t>(span.begin + span.count));
+            index.insert(index.end(), m_index.begin() + static_cast<std::ptrdiff_t>(span.begin),
+                         m_index.begin() + static_cast<std::ptrdiff_t>(span.begin + span.count));
             binding.insert(binding.end(), m_binding.begin() + static_cast<std::ptrdiff_t>(span.begin * m_label_width),
                            m_binding.begin() + static_cast<std::ptrdiff_t>((span.begin + span.count) * m_label_width));
             span.begin = begin;
         }
         m_schema = std::move(schema);
+        m_index = std::move(index);
         m_binding = std::move(binding);
         m_garbage = 0;
     }
@@ -697,6 +708,7 @@ private:
         }
         m_action_offsets[n] = static_cast<i32>(total);
         const i32* schema = &k_empty;
+        const i32* index = &k_empty;
         const i32* binding = &k_empty;
         if (contiguous)
         {
@@ -704,12 +716,14 @@ private:
             if (total)
             {
                 schema = m_schema.data() + begin;
+                index = m_index.data() + begin;
                 binding = m_label_width ? m_binding.data() + begin * m_label_width : &k_empty;
             }
         }
         else
         {
             m_gather_schema.resize(total);
+            m_gather_index.resize(total);
             m_gather_binding.resize(total * m_label_width);
             for (u64 i = 0; i < n; ++i)
             {
@@ -717,6 +731,8 @@ private:
                 const u64 to = static_cast<u64>(m_action_offsets[i]);
                 std::copy_n(m_schema.begin() + static_cast<std::ptrdiff_t>(span.begin), span.count,
                             m_gather_schema.begin() + static_cast<std::ptrdiff_t>(to));
+                std::copy_n(m_index.begin() + static_cast<std::ptrdiff_t>(span.begin), span.count,
+                            m_gather_index.begin() + static_cast<std::ptrdiff_t>(to));
                 if (m_label_width)
                     std::copy_n(m_binding.begin() + static_cast<std::ptrdiff_t>(span.begin * m_label_width),
                                 span.count * m_label_width,
@@ -725,6 +741,7 @@ private:
             if (total)
             {
                 schema = m_gather_schema.data();
+                index = m_gather_index.data();
                 binding = m_label_width ? m_gather_binding.data() : &k_empty;
             }
         }
@@ -732,6 +749,7 @@ private:
         m_expansion.capacity = m_expansion.total = total;
         m_expansion.label_width = m_label_width;
         m_expansion.schema = const_cast<i32*>(schema);
+        m_expansion.index = const_cast<i32*>(index);
         m_expansion.binding = const_cast<i32*>(binding);
         m_expansion.offsets = m_action_offsets.data();
         in.actions = &m_expansion;
@@ -756,7 +774,9 @@ private:
     std::vector<u64> m_states, m_derived, m_goal_pos, m_goal_neg, m_goal_derived_pos, m_goal_derived_neg;
     std::vector<i32> m_task_ids;
     std::vector<Span> m_spans;
-    std::vector<i32> m_schema, m_binding;  // the action arena: the schema of each row, and its binding [rows, label width]
+    // the action arena: the schema of each row, its canonical index (its position in the full expansion of its state)
+    // and its binding [rows, label width]
+    std::vector<i32> m_schema, m_index, m_binding;
     u64 m_garbage = 0;                     // rows of the arena that no slot owns
     std::vector<u64> m_sub_pos, m_sub_neg, m_sub_derived_pos, m_sub_derived_neg;  // [slots, levels * words]
     std::vector<u8> m_has_layers;  // [slots] whether the row holds subgoal layers
@@ -773,7 +793,7 @@ private:
     std::vector<u64> m_gather_history_pos, m_gather_history_neg, m_gather_history_derived_pos,
         m_gather_history_derived_neg;
     std::vector<i32> m_gather_history_dt, m_gather_history_count;
-    std::vector<i32> m_gather_ids, m_gather_schema, m_gather_binding, m_action_offsets;
+    std::vector<i32> m_gather_ids, m_gather_schema, m_gather_index, m_gather_binding, m_action_offsets;
     rl::Expansion m_expansion;
 };
 
