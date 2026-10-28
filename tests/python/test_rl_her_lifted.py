@@ -1015,6 +1015,41 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
 
 @needs_frontend
 @pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_projection_filters_by_bound_arguments(on_device, first):
+    # Nine distinct tiles of one colour, with eight tiles of each colour: the tiles of all colours together would
+    # suffice, so only the projection filtered by the bound colour rejects the search without enumerating tiles.
+    domain = mymyr.Domain.from_string("""(define (domain paint)
+        (:requirements :adl :equality) (:predicates (ok) (painted ?t ?c))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    tiles = [f"t{i}" for i in range(16)]
+    painted = " ".join(f"(painted {t} {'white' if i < 8 else 'black'})" for i, t in enumerate(tiles))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem paint) (:domain paint)
+        (:objects white black {' '.join(tiles)}) (:init (ok) {painted}) (:goal (ok)))"""))
+    nine = [f"?t{i}" for i in range(9)]
+    variables = ["?c", *nine]
+    same = task.condition(variables, [f"(painted {t} ?c)" for t in nine],
+                          equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    eight = task.condition(variables[:9], [f"(painted {t} ?c)" for t in nine[:8]],
+                           equalities=[(a, b, False) for i, a in enumerate(variables[:9]) for b in variables[i + 1:9]])
+    templates = rl.GoalTemplates.from_conditions(task, [[same, eight]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=1000)
+    assert int(expected.status) == 0 and expected.count.tolist() == [1]
+    assert expected.template.tolist() == ([1] if first else [[-1, 1]])
+    canonical = next(iter(task.bindings(eight, task.initial_state, limit=1)))
+    bound = expected.binding[0] if first else expected.binding[0, 1]
+    assert bound.tolist() == [o.index for o in canonical] + [-1]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), first=first, max_steps=1000)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
 @pytest.mark.parametrize("padding", [False, True])
 @pytest.mark.parametrize("max_steps", [2, 3])
 def test_match_first_pair_budget_with_small_and_large_template_tables(on_device, padding, max_steps):
