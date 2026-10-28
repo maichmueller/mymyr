@@ -838,12 +838,14 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   wait for nothing and capture with the step. The buffers have the rows that the entity capacity's action entities
   can stand for (`entities` times the largest number of schemas that share an action relation): they bound the kept
   rows. `obs_capacities["successors"]` bounds the successors before `obs_drop_noops` drops the no-op rows (default:
-  the same rows), so with the drop set it to the most successors an observed state batch has. More kept rows or more
-  successors is an overflow, and the CPU environment reports it as a device does, for the same capacities. This
-  requires a table whose expansion runs asynchronously on the device; tables needing host expansion are rejected
-  before expansion. Insufficient action or
-  encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
-  zero unused output tails. These buffers store labels only; successor state rows are not allocated.
+  the same rows), so with the drop set it to the most successors an observed state batch has; it is at most
+  2**31 - 1, and with the drop a device holds that many working rows of about `38 + 8 * label_width` bytes each.
+  More kept rows or more successors is an overflow, and the CPU environment reports it as a device does, for the same
+  capacities: the capacity overflow flag, every output array and the batch's sizes zero (the encoding does not run).
+  This requires a table whose expansion runs asynchronously on the device; tables needing host expansion are rejected
+  before expansion. Insufficient encoding capacity sets the batch's capacity overflow flag and zeroes every output
+  array, with the true sizes. Successful capacity calls zero unused output tails. These buffers store labels only;
+  successor state rows are not allocated.
   A captured graph owns an exclusive expansion workspace per table; eager calls and other captures use their own.
   The workspace stays alive until the graph is destroyed and its last replay has completed, also for a manual
   `torch.cuda.CUDAGraph`. Callers may drop every result without releasing the workspace. Two instantiations of one
@@ -867,8 +869,9 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   it; under `torch.compile` the observation is traced as `mymyr::bounded_actions` followed by `mymyr::encode_flat`
   with those rows, neither tagged `cudagraph_unsafe`, so `mode="reduce-overhead"` keeps the step in CUDA graphs.
   With `obs_capacities` the row arrays have the capacity's rows on the CPU and on a device alike, every array zero
-  past `offsets[-1]` (so that `parent` there still names a state); `offsets` has an entry per graph of the batch and
-  one more. Without capacities they have exactly the rows.
+  past `offsets[-1]` (so that `parent` there still names a state); `offsets` has N + 1 entries, over a suite the
+  total repeated past a domain batch's graphs. Without capacities the row arrays have exactly the rows. After an
+  overflow the rows and `offsets` are unspecified.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`

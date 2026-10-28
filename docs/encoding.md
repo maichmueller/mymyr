@@ -1465,13 +1465,16 @@ torch.ops.mymyr.encode_flat(
     graphs, entities, args, targets, history, numeric=0, static_instances=0, static_args=0, *,
     action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None,
-    edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False)
+    edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False,
+    action_index=None, action_status=None)
 ```
 
 Absent input tensors are `None`. The capacities are `graphs, entities, args, targets, history`, with optional
 `numeric`, `static_instances` and `static_args`; unused capacities are zero. Optional keyword tensors supply
 `action_schema`, `action_binding`, `action_offsets`, `action_parent`, horizon node/edge columns or `action_succ`
-for transitions. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
+for transitions. `action_index` gives each expansion row's canonical successor index (a no-op-dropping expansion's
+`index`) and `action_status` the expansion's device status word, whose overflow and invalid-row bits the batch then
+reports. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
 arrays. Its fake implementation derives shapes from metadata, so `torch.compile(fullgraph=True)` can trace it.
 
 The result list is ordered by `DeviceFlatBatch.array_names`: output arrays, `static_sizes`, then `sizes`.
@@ -1495,6 +1498,22 @@ assert op_batch.nbytes == fixed.nbytes
 assert not op_batch.sizes["overflow"]
 rt.unregister(handle)
 ```
+
+The expansion rows of an observation come from `torch.ops.mymyr.bounded_actions`, a label-only expansion of a
+registered encoder's task into arrays of fixed shape, without a host wait and without the `cudagraph_unsafe` tag:
+
+```text
+torch.ops.mymyr.bounded_actions(encoder, states, task_ids, entities, successors=None, drop_noops=False)
+    -> (labels, binding, offsets, succ_hash, noop, status)
+```
+
+With `M` the rows that `entities` action entities can stand for (the entity capacity times the largest number of
+schemas that share an action relation), `labels` is int32 `[2, M]` (parent and schema; `[3, M]` with the canonical
+index as its third row with `drop_noops`), `binding` int32 `[M, label_width]`, `offsets` int32 `[N + 1]`,
+`succ_hash` int64 `[M]`, `noop` bool `[M]` and `status` int32 `[1]` (bit 0: more kept rows than `M` or more
+successors before the drop than `successors`, which defaults to `M`; bit 1: an invalid row). Every output is
+contiguous and zero past `offsets[N]`. Pass the rows to `encode_flat` as `action_parent`, `action_schema`,
+`action_binding`, `action_offsets`, `action_index` and `action_status`.
 
 ### Device row streams and collation
 
