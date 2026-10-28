@@ -195,9 +195,9 @@ class BatchedEnv:
         observation: Any = None,
         obs_capacities: Any = None,
         obs_actions: bool = False,
+        obs_drop_noops: bool = False,
         actions: Literal["index", "label"] = "index",
         track_visited: bool | int = False,
-        obs_drop_noops: bool = False,
     ) -> None:
         self.device = torch.device(device)
         if actions not in ("index", "label"):

@@ -68,7 +68,9 @@ class SupportsHorizonView(Protocol):
 
 
 class DeviceActionRows(Protocol):
-    """Expansion labels on one CUDA device. Offsets delimit the canonical rows of each parent state."""
+    """Expansion labels on one CUDA device. Offsets delimit the canonical rows of each parent state. An ``index``
+    attribute (int32, read when present and not None) gives each row's position in its state's full canonical order,
+    for rows that dropped no-op successors; a ``status`` attribute (one int32 or int64 word) the expansion's flags."""
 
     @property
     def schema(self) -> SupportsDLPack: ...
