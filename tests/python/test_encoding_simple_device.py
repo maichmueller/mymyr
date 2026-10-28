@@ -43,7 +43,7 @@ def capacities(batch, factor=1):
 OPTIONS = [
     dict(include_actions=False),
     dict(include_actions=False, goal_derivations=GOALS, target_sources=("goal",)),
-    dict(nullary=False, equality=True, include_static=False, include_derived=False),
+    dict(nullary="omit", equality=True, include_static=False, include_derived=False),
     dict(goal_derivations=GOALS, target_sources=("goal",)),
 ]
 

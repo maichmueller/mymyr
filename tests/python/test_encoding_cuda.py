@@ -32,7 +32,7 @@ OPTION_SETS = {
         "target_sources": ("goal",),
         "predicate_virtual_nodes": True,
     },
-    "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": False},
+    "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": "omit"},
     "no_actions": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": ()},
 }
 ALL_GOALS = ("plain", "satisfied", "unsatisfied")

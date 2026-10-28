@@ -120,7 +120,7 @@ def test_an_encoder_pickle_carries_the_fingerprint_of_its_schema():
 BATCH_OPTIONS = [
     {},
     dict(target_sources=("goal", "action"), predicate_virtual_nodes=True, max_goal_level=2),
-    dict(layout="relation", index_dtype="int64", emit_counts=False, equality=True, nullary=False),
+    dict(layout="relation", index_dtype="int64", emit_counts=False, equality=True, nullary="omit"),
     dict(history=True, target_sources=("history", "goal"), entity_arrays="auto"),
 ]
 

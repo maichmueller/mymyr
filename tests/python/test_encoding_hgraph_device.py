@@ -34,8 +34,8 @@ ALL_GOALS = ("plain", "satisfied", "unsatisfied")
 # the HGraph configs the device encodes (C9A, C9B; C9C needs action relations, which the device does not encode) and
 # the lanes that the device encodes besides them
 OPTION_SETS = {
-    "C9A": {"nullary": False, "include_actions": False},
-    "C9B": {"nullary": True, "include_actions": False},
+    "C9A": {"nullary": "omit", "include_actions": False},
+    "C9B": {"nullary": "auxiliary", "include_actions": False},
     "goal_targets": {"goal_derivations": ALL_GOALS, "target_sources": ("goal",)},
     "implicit_entities": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": (), "emit_counts": False},
     "no_static_equality": {"goal_derivations": ("plain",), "include_static": False, "equality": True},

@@ -18,7 +18,7 @@ OPTION_SETS = [
     {},
     dict(layout="relation", index_dtype="int64", goal_derivations=("plain", "satisfied", "unsatisfied"),
          target_sources=("goal", "action"), predicate_virtual_nodes=True, emit_counts=False, equality=True,
-         nullary=False, include_static=False),
+         nullary="omit", include_static=False),
     dict(entity_arrays="auto", goal_derivations=(), include_actions=False, include_derived=False),
     dict(statics="shared", predicate_virtual_nodes=True, target_sources=("goal",)),
 ]

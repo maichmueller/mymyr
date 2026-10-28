@@ -46,7 +46,7 @@ def unpack(batch, graph):
     return output
 
 
-def reference(task, state, include_static=True, include_derived=True, nullary=True):
+def reference(task, state, include_static=True, include_derived=True, nullary="auxiliary"):
     """The tuples of a state by relation name, from its atoms; a nullary atom is the tuple over the auxiliary entity."""
     atoms = list(state.atoms())
     if include_derived:
@@ -61,7 +61,7 @@ def reference(task, state, include_static=True, include_derived=True, nullary=Tr
             continue
         arguments = tuple(obj.index for obj in atom.objects)
         if not arguments:
-            if not nullary:
+            if nullary == "omit":
                 continue
             arguments = (auxiliary,)
         output.setdefault(name, set()).add(arguments)
@@ -113,7 +113,7 @@ def derived_words(task, states):
 # ------------------------------------------------------------------------------------------------ semantics
 @pytest.mark.parametrize("atoms", MODES)
 @pytest.mark.parametrize(
-    "options", [{}, {"include_static": False}, {"include_derived": False}, {"nullary": False, "include_static": False}]
+    "options", [{}, {"include_static": False}, {"include_derived": False}, {"nullary": "omit", "include_static": False}]
 )
 def test_graphs_equal_the_reconstruction_from_the_atoms(atoms, options):
     task = feature_task(atoms=atoms)
@@ -124,8 +124,8 @@ def test_graphs_equal_the_reconstruction_from_the_atoms(atoms, options):
     for graph, state in enumerate(states):
         assert unpack(batch, graph) == reference(
             task, state, options.get("include_static", True), options.get("include_derived", True),
-            options.get("nullary", True))
-    ready = encoder.relation_id("ready") if options.get("nullary", True) else None
+            options.get("nullary", "auxiliary"))
+    ready = encoder.relation_id("ready") if options.get("nullary", "auxiliary") != "omit" else None
     if ready is not None:
         assert encoder.relation_arities[ready] == 1
         assert batch.relation_counts[:, ready].tolist() == [0, 0, 1]
@@ -373,7 +373,7 @@ def test_given_derived_words_equal_the_evaluated_ones():
 # ------------------------------------------------------------------------------------------------ schema and API
 def test_the_encoder_describes_its_schema():
     task = text_task("philosophers__p03-phil4")
-    options = {"goal_derivations": (), "nullary": False, "include_static": False}
+    options = {"goal_derivations": (), "nullary": "omit", "include_static": False}
     encoder = encoding.FlatRelationEncoder(task, **options)
     schema = encoding.EncodingSchema(task, **options)
     for name in ("options", "num_relations", "relation_names", "relation_arities", "relation_logical_arities",

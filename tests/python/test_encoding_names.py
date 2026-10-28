@@ -119,7 +119,7 @@ def test_a_table_names_the_objects_of_each_rows_instance():
         pytest.skip("built without the loki front end")
     blocks = ROOT / "tests/data/pddl/blocks"
     tasks = [mymyr.Task.from_pddl(blocks / "domain.pddl", blocks / f"{p}.pddl") for p in ("smedium", "probBLOCKS-8-0")]
-    encoder = encoding.FlatRelationEncoder(rl.TaskTable(tasks), nullary=False, goal_derivations=())
+    encoder = encoding.FlatRelationEncoder(rl.TaskTable(tasks), nullary="omit", goal_derivations=())
     ids = np.array([1, 0, 1, 0], np.int32)
     batch = encoder.encode([tasks[i].initial_state for i in ids], ids)
     for graph, instance in enumerate(ids):

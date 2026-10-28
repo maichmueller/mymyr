@@ -32,9 +32,9 @@ ATOM_NAME = re.compile(r"^(\[[+-]\])?(.+?)((?:\[[^\[\]]+\])*)$")
 
 # Whether the config compares the action relations (the reference was given the actions of its record).
 HGRAPH_CONFIGS = {
-    "C9A": dict(layout="relation", nullary=False, include_actions=False),
-    "C9B": dict(layout="relation", nullary=True, include_actions=False),
-    "C9C": dict(layout="relation", nullary=False, include_actions=True, target_sources=("action",)),
+    "C9A": dict(layout="relation", nullary="omit", include_actions=False),
+    "C9B": dict(layout="relation", nullary="auxiliary", include_actions=False),
+    "C9C": dict(layout="relation", nullary="omit", include_actions=True, target_sources=("action",)),
 }
 # The lanes of the native catalog that the configs have relations of (no subgoal layers, no history)
 HGRAPH_LANES = ("fluent", "static", "derived", "goal", "goal_derivation", "action")

@@ -102,7 +102,7 @@ def test_the_edges_reconstruct_the_flat_tuples_of_a_state_batch(name, index):
         {"include_actions": False},
         {"goal_derivations": GOALS, "target_sources": ("goal",), "include_actions": False},
         {"goal_derivations": GOALS, "target_sources": ("goal", "action")},
-        {"nullary": False, "equality": True, "include_static": False, "include_derived": False},
+        {"nullary": "omit", "equality": True, "include_static": False, "include_derived": False},
     ):
         given = actions if options.get("include_actions", True) else None
         batches = []

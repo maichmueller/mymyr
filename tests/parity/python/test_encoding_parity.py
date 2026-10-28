@@ -19,7 +19,7 @@ from encoding_parity import (
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
     goal_literals, is_horizon, layer_inputs, literal_text, needed_differences,
     lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
-    sources_of, is_transition, recorded_successor,
+    sources_of, is_transition, recorded_successor, recorded_config, VARIANTS,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -27,9 +27,10 @@ CONFIGS = sorted({config for _, config in fixture_cases()})
 
 
 def case_params():
-    """pytest parameters of the (fixture, config) cases of the compared configs."""
-    return [pytest.param(path, config, id=f"{path.stem[:3]}-{config}")
-            for path, config in fixture_cases() if config in SUPPORTED]
+    """pytest parameters of the (fixture, config) cases of the compared configs, the variants included."""
+    return [pytest.param(path, native, id=f"{path.stem[:3]}-{native}")
+            for path, config in fixture_cases() if config in SUPPORTED
+            for native in [config] + [v for v, recorded in VARIANTS.items() if recorded == config]]
 
 
 def prefix_path(prefix):
@@ -39,10 +40,12 @@ def prefix_path(prefix):
 # ------------------------------------------------------------------------------------------------ the tables
 def test_every_config_is_compared_or_pending_and_the_tables_name_existing_configs():
     configs = set(CONFIGS)
-    assert set(SUPPORTED) <= configs and set(PENDING_CONFIGS) <= configs
-    assert not set(SUPPORTED) & set(PENDING_CONFIGS)
-    assert not set(SUPPORTED) & set(HGRAPH_CONFIGS) and not set(PENDING_CONFIGS) & set(HGRAPH_CONFIGS)
-    assert set(SUPPORTED) | set(PENDING_CONFIGS) | set(HGRAPH_CONFIGS) == configs
+    recorded = set(SUPPORTED) - set(VARIANTS)
+    assert recorded <= configs and set(PENDING_CONFIGS) <= configs
+    assert set(VARIANTS) <= set(SUPPORTED) and set(VARIANTS.values()) <= recorded and not set(VARIANTS) & configs
+    assert not recorded & set(PENDING_CONFIGS)
+    assert not recorded & set(HGRAPH_CONFIGS) and not set(PENDING_CONFIGS) & set(HGRAPH_CONFIGS)
+    assert recorded | set(PENDING_CONFIGS) | set(HGRAPH_CONFIGS) == configs
     assert all(PENDING_CONFIGS.values())
 
 
@@ -67,7 +70,7 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
 @pytest.mark.parametrize("path, config", case_params())
 def test_native_graphs_equal_mifrost_up_to_the_registered_differences(path, config):
     fixture = read(path)
-    expected_states = [r["state"] for r in fixture["encodings"] if r["config"] == config]
+    expected_states = [r["state"] for r in fixture["encodings"] if r["config"] == recorded_config(config)]
     result = run_case(path, config)
     assert list(result.mismatches) == expected_states
     report = [f"state {state}: {m}" for state, found in result.mismatches.items() for m in found]
@@ -602,6 +605,31 @@ def test_the_auxiliary_entity_and_its_tuples_are_not_hidden():
 
 
 @pytest.mark.parametrize("path", [prefix_path("f10"), prefix_path("f08")], ids=["f10", "f08"])
+def test_arity0_nullary_relations_equal_the_reference_without_a_nullary_difference(path):
+    # with nullary='arity0' the native nullary atoms are tuples without an argument, as the reference records them with
+    # ignore_zero_arity_relations off: no registered nullary difference is needed and no graph has an auxiliary entity
+    result = run_case(path, "C2Z")
+    assert not [m for found in result.mismatches.values() for m in found]
+    assert not {name for name in result.needed if "nullary" in name}
+    fixture, task = load(path)
+    records = [r for r in fixture["encodings"] if r["config"] == "C2"]
+    states = {s["id"]: s for s in fixture["states"]}
+    encoder = native_encoder(task, "C2Z")
+    batch = encoder.encode([replay(task, states[r["state"]]["path"]) for r in records])
+    assert 8 not in np.asarray(batch.entity_role).tolist()
+    nullary = [n for n, a in zip(encoder.relation_names, encoder.relation_logical_arities) if a == 0]
+    assert nullary
+    found = 0
+    for row, record in enumerate(records):
+        relations = record["outputs"]["relations"]
+        empty = [n for n in nullary if n in relations and fixture["tuples"][relations[n]["emit"]] == [[]]]
+        actual = native_graph(encoder, batch, row, [task], COMPARED_LANES)
+        assert all(actual.tuples[n] == [()] for n in empty)
+        found += len(empty)
+    assert found
+
+
+@pytest.mark.parametrize("path", [prefix_path("f10"), prefix_path("f08")], ids=["f10", "f08"])
 def test_a_native_catalog_without_nullary_relations_is_not_accepted(path):
     expected, actual, context = native_case(path)
     nullary = {n for n, a in actual.catalog if a == 0}
@@ -885,7 +913,7 @@ def test_horizon_nullary_tuples_are_checked_over_the_auxiliary_entity(config, pr
 def test_a_horizon_encoder_without_nullary_relations_has_none_and_no_auxiliary_entity():
     fixture, task = load(prefix_path("f10"))
     record = next(r for r in fixture["encodings"] if r["config"] == "C7AN")
-    encoder = native_encoder(task, "C7AN", nullary=False)
+    encoder = native_encoder(task, "C7AN", nullary="omit")
     batch = encoder.encode(encoding_view(task, record))
     predicates = {p.name for p in task.formalism.predicates if p.arity == 0}
     assert predicates and not predicates & {base_predicate(n) for n in encoder.relation_names}

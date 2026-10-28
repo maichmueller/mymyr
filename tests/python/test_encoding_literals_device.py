@@ -32,7 +32,7 @@ def case(request, tmp_path):
     tasks = [first, mymyr.Task.from_pddl(GOALS / "domain.pddl", path, atoms=request.param)]
     table = rl.TaskTable(tasks)
     encoder = encoding.FlatRelationEncoder(table, max_goal_level=2, include_static=False,
-                                           include_derived=False, nullary=False)
+                                           include_derived=False, nullary="omit")
     literals = ["(lit a)", "(lit b)", "(done)", "(heavy t1)", "(heavy t2)", "(lit t1)",
                 "(road a b)", "(road a a)", "(= a a)", "(= a b)"]
     atoms = [ids(tasks[0], literal) for literal in literals]
