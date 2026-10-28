@@ -5,6 +5,7 @@
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/mask_kernels.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 #include "table_launch.hpp"
 
 #include <algorithm>
@@ -26,6 +27,8 @@ std::string task_why(const Task& task)
         if (ps.arity > lifted::k_max_depth)
             return "a schema of " + std::to_string(ps.arity) + " parameters (the device masks take at most " +
                    std::to_string(lifted::k_max_depth) + ")";
+    if (!rl::exports_mask_matchers(task))
+        return "a device layout without mask matchers";
     return {};
 }
 

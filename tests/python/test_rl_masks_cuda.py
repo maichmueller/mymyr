@@ -399,3 +399,22 @@ def test_label_capture_equals_eager_and_host(name):
             assert (x is None and z is None) or (torch.equal(x, y) and torch.equal(x.cpu(), z)), (name, r, f)
     assert moved > n
     a.check_errors()
+
+
+def test_mask_ops_refuse_capturing_the_host_path():
+    """A table the kernels do not run (a schema of 31 parameters) takes the host path, which a capture refuses."""
+    dev = gpu()
+    task = text_task("organic-synthesis-opt18-strips__p20")
+    rows = torch.from_numpy(np.asarray(task.encode([task.initial_state])).view(np.int64).copy()).to(dev)
+    h = rt.register(task)
+    schema = torch.zeros(1, dtype=torch.int32, device=dev)
+    binding = torch.zeros((1, task.label_width), dtype=torch.int32, device=dev)
+    mask, status = rt.is_applicable(h, rows, schema, binding)  # eager: the host functions
+    assert int(status) == 0
+    assert torch.equal(mask.cpu(), torch.from_numpy(np.asarray(rl.is_applicable(task, rows.cpu().numpy(), 0,
+                                                                                binding.cpu().numpy()))))
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(ValueError, match="runs on the host .*parameters.*cannot be captured"):
+        with torch.cuda.graph(graph):
+            schema.add_(0)  # captured work before the refused call
+            rt.is_applicable(h, rows, schema, binding)

@@ -1233,7 +1233,7 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
 
 /// The device masks of (suite, context), cached on the table; null when the kernels do not run the suite (`why`).
 std::shared_ptr<const cuda::DeviceMasks> table_masks(const SuiteRef& ref, const PyContextPtr& c,
-                                                     std::string* why = nullptr)
+                                                     std::string* why)
 {
     std::lock_guard lock(ref.cuda_mutex());
     TaskCuda& tc = slot_cuda(ref.cuda());
@@ -1334,10 +1334,18 @@ void host_masks(const rl::TaskSuite& suite, const MaskCall& m, cudaStream_t s)
 }
 
 /// Runs a mask call on stream s: on the device masks dm, or the host functions without them (they wait for s and raise
-/// their errors). On the device, errors are status bits (*m.status) and nothing waits; with `raise` the call waits for
-/// the status and raises the host function's error for a nonzero one.
-void run_masks(const rl::TaskSuite& suite, const cuda::DeviceMasks* dm, const MaskCall& m, cudaStream_t s, bool raise)
+/// their errors; `why` the device masks do not run the suite; refused while s is capturing). On the device, errors are
+/// status bits (*m.status) and nothing waits; with `raise` the call waits for the status and raises the host
+/// function's error for a nonzero one.
+void run_masks(const rl::TaskSuite& suite, const cuda::DeviceMasks* dm, const std::string& why, const MaskCall& m,
+               cudaStream_t s, bool raise)
 {
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (!dm)
+        cuda::check(cudaStreamIsCapturing(s, &capture), "cudaStreamIsCapturing");
+    if (capture != cudaStreamCaptureStatusNone)
+        throw std::invalid_argument("mymyr: action masks: this " + std::string(suite.noun()) + " runs on the host (" +
+                                    why + "), which cannot be captured into a CUDA graph");
     check_mask_call(m, suite);
     if (!dm)
     {
@@ -1432,7 +1440,8 @@ nb::object device_action_masks(const MaskArgs& a)
     if (!a.labels.is_none())
         m.labels = device_i32(a.labels, *c, os, w.rows, true, &m.width, keep,
                               a.kind == MaskKind::Objects ? "prefix" : "binding");
-    const std::shared_ptr<const cuda::DeviceMasks> dm = table_masks(ref, c);
+    std::string why;
+    const std::shared_ptr<const cuda::DeviceMasks> dm = table_masks(ref, c, &why);
     const u64 cols = m.columns(tt);
     auto out = device_output(*c, checked_mul({w.rows, cols}, "action masks"), os);
     auto status = device_output(*c, sizeof(u32), os);
@@ -1445,7 +1454,7 @@ nb::object device_action_masks(const MaskArgs& a)
     {
         nb::gil_scoped_release release;
         cuda::DeviceGuard g(c->ctx->device());
-        run_masks(tt, dm.get(), m, os.s, true);
+        run_masks(tt, dm.get(), why, m, os.s, true);
     }
     c->release_after(os.s, std::move(keep));
     const auto [fw, enc] = output_kind(in, w, nb::none());
@@ -2201,10 +2210,11 @@ void bind_cuda(nb::module_& parent)
             m.out = reinterpret_cast<u8*>(out);
             m.views = reinterpret_cast<u64*>(views);
             m.status = reinterpret_cast<u32*>(status);
-            const auto dm = table_masks(ref, table_context(ref, nb::none(), device));
+            std::string why;
+            const auto dm = table_masks(ref, table_context(ref, nb::none(), device), &why);
             nb::gil_scoped_release release;
             cuda::DeviceGuard g(device);
-            run_masks(tt, dm.get(), m, cuda_stream(stream), false);
+            run_masks(tt, dm.get(), why, m, cuda_stream(stream), false);
         },
         "table"_a, "kind"_a, "device"_a, "stream"_a, "rows"_a, "row_words"_a, "states"_a, "task_ids"_a, "schema"_a,
         "value"_a, "labels"_a, "width"_a, "depth"_a, "out"_a, "num_objects"_a, "views"_a, "status"_a,
