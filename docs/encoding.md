@@ -301,7 +301,7 @@ A graph's entities come in blocks, each present only when the options and the in
 | the auxiliary entity, when the graph has a nullary tuple | 8 `auxiliary` | -1 |
 | the goal entities | 2 `goal` | the tuple's index among the graph's tuples in graph-major order |
 | the subgoal entities | 3 `subgoal` | the same as a goal entity |
-| the action entities | 4 `action` | the action's row among its state's rows of `actions` |
+| the action entities | 4 `action` | the action's canonical successor index: its row among its state's rows of `actions`, or the row's `index` |
 | the history step entities | 5 `history` | the step's index among the row's valid steps |
 | the history target entities | 6 `history_target` | the tuple's index among the graph's tuples in graph-major order |
 | the state entities of a horizon | 7 `state` | the graph-local node index |
@@ -437,22 +437,60 @@ its schemas both give is one tuple: the relation lists each binding once. There 
 relation.
 
 The action entities exist whenever the batch has action tuples, with or without `target_sources=("action",)`. They are
-numbered in the order of the action relations (relation id, then tuple). The entity's `entity_ref` is the row of the
-action among the rows of its own state in the expansion (the first one for a binding listed by several schemas). The
-row of the expansion is `actions.offsets[g] + entity_ref`, so `actions.action(row)` is the action and
-`actions.succ[row]` its successor: a policy that picks an action entity picks that row (`encoding.action_rows`,
-`encoding.action_indices` and `encoding.action_entities` do the mapping; [Action entities](rl.md#action-entities)).
+numbered in the order of the action relations (relation id, then tuple). The entity's `entity_ref` is the **canonical
+successor index** of the action: its row among the rows of its own state in the expansion (the first one for a binding
+listed by several schemas), which is the action an environment takes. The row of the expansion is
+`actions.offsets[g] + entity_ref`, so `actions.action(row)` is the action and `actions.succ[row]` its successor: a
+policy that picks an action entity picks that row (`encoding.action_rows`, `encoding.action_indices` and
+`encoding.action_entities` do the mapping, `encoding.action_entities_of` the inverse; [Action
+entities](rl.md#action-entities)).
+
+An expansion that dropped its no-op successors (`rl.expand(..., drop_noops=True)`: the actions whose successor equals
+the state, unless every successor of the state is one) lists a subsequence of the canonical rows and carries `index`,
+each row's position in the full order. The encoder reads it: the entity of a kept action has the `entity_ref` it has
+in the encoding of the full expansion, so `action_indices` gives the same environment actions, and the dropped
+actions have no entity. `action_rows` finds the row of graph `g` whose `index` is the entity's reference, and
+`action_entities_of(batch, indices, graphs)` maps canonical indices (an `[N]` or `[N, K]` array, row `i` of graph
+`graphs[i]`, by default graph `i`) to their entities, -1 for an action without one. Streams store `index` with the
+labels, and the rows of every state must have a strictly ascending `index` (else `ValueError`).
+
+```python
+from pathlib import Path
+
+import numpy as np
+import mymyr
+from mymyr import encoding, rl
+
+floortile = Path("tests/data/ipc/floortile-ipc/train")
+tiles = mymyr.Task.from_pddl(floortile / "domain.pddl", floortile / "p01.pddl")
+table = rl.as_table(tiles)
+states = [tiles.initial_state, *tiles.successor_states(tiles.initial_state)]
+full = rl.expand(table, states, noops=True)
+kept = rl.expand(table, states, drop_noops=True)          # without the actions that change nothing
+encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+batch = encoder.encode(states, actions=kept)
+indices = encoding.action_indices(batch)                   # canonical successor indices, as for `full`
+rows = encoding.action_rows(batch, kept)
+assert np.array_equal(kept.index[rows], indices)
+entities = encoding.action_entities(batch)
+graphs = np.searchsorted(np.asarray(batch.entity_offsets), entities, side="right") - 1
+assert np.array_equal(encoding.action_entities_of(batch, indices, graphs), entities)
+print(full.total, kept.total, len(entities))
+```
 With `target_sources=("action",)` the batch also lists the action entities as targets of group 2, after the goal and
 subgoal targets of their graph; without it they are entities and tuple arguments only. A call without `actions` has no
 action tuples and no action entities.
 
 Device rows accept a CUDA expansion as `actions=` or `(schema, binding, offsets)` device tensors, including
-`expand_flat`'s six outputs. Split-schema runs use the same k-way merge as the host, and action targets, graph-local
-references, both layouts and both index widths have identical output. The torch `encode_flat` op accepts
-`action_schema`, `action_binding`, `action_offsets` and optional `action_parent` keyword tensors. The device takes
+`expand_flat`'s six or eleven outputs (with its `index` and `status`). Split-schema runs use the same k-way merge as the
+host, and action targets, graph-local references, canonical indices, both layouts and both index widths have
+identical output. The torch `encode_flat` op accepts `action_schema`, `action_binding`, `action_offsets` and optional
+`action_parent`, `action_index` (the canonical index of each row) and `action_status` (the expansion's device status
+word, which the batch's overflow flags report) keyword tensors. The device takes
 action rows only for the relation arrays of a classical table, and the JAX FFI refuses them because its operand list
-has no expansion labels or offsets. The action mapping helpers return host NumPy indices;
-reading CUDA offsets or chosen entities through them copies those arrays to the host.
+has no expansion labels or offsets. `action_rows`, `action_indices` and `action_entities` return host NumPy indices;
+reading CUDA offsets or chosen entities through them copies those arrays to the host. `action_entities_of` of a
+device batch stays on the device: torch tensors in and out, no host read.
 
 ### Predicate virtual nodes
 
@@ -1427,13 +1465,16 @@ torch.ops.mymyr.encode_flat(
     graphs, entities, args, targets, history, numeric=0, static_instances=0, static_args=0, *,
     action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None,
-    edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False)
+    edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False,
+    action_index=None, action_status=None)
 ```
 
 Absent input tensors are `None`. The capacities are `graphs, entities, args, targets, history`, with optional
 `numeric`, `static_instances` and `static_args`; unused capacities are zero. Optional keyword tensors supply
 `action_schema`, `action_binding`, `action_offsets`, `action_parent`, horizon node/edge columns or `action_succ`
-for transitions. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
+for transitions. `action_index` gives each expansion row's canonical successor index (a no-op-dropping expansion's
+`index`) and `action_status` the expansion's device status word, whose overflow and invalid-row bits the batch then
+reports. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
 arrays. Its fake implementation derives shapes from metadata, so `torch.compile(fullgraph=True)` can trace it.
 
 The result list is ordered by `DeviceFlatBatch.array_names`: output arrays, `static_sizes`, then `sizes`.
@@ -1457,6 +1498,22 @@ assert op_batch.nbytes == fixed.nbytes
 assert not op_batch.sizes["overflow"]
 rt.unregister(handle)
 ```
+
+The expansion rows of an observation come from `torch.ops.mymyr.bounded_actions`, a label-only expansion of a
+registered encoder's task into arrays of fixed shape, without a host wait and without the `cudagraph_unsafe` tag:
+
+```text
+torch.ops.mymyr.bounded_actions(encoder, states, task_ids, entities, successors=None, drop_noops=False)
+    -> (labels, binding, offsets, succ_hash, noop, status)
+```
+
+With `M` the rows that `entities` action entities can stand for (the entity capacity times the largest number of
+schemas that share an action relation), `labels` is int32 `[2, M]` (parent and schema; `[3, M]` with the canonical
+index as its third row with `drop_noops`), `binding` int32 `[M, label_width]`, `offsets` int32 `[N + 1]`,
+`succ_hash` int64 `[M]`, `noop` bool `[M]` and `status` int32 `[1]` (bit 0: more kept rows than `M` or more
+successors before the drop than `successors`, which defaults to `M`; bit 1: an invalid row). Every output is
+contiguous and zero past `offsets[N]`. Pass the rows to `encode_flat` as `action_parent`, `action_schema`,
+`action_binding`, `action_offsets`, `action_index` and `action_status`.
 
 ### Device row streams and collation
 
@@ -1503,7 +1560,11 @@ captured after warm-up. `actions=True` uses bounded device expansion; supplied p
 calls. Automatic actions require an asynchronous expansion backend for every domain, on both exact and capacity
 calls. Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not
 allocated. The device live-row count bounds action expansion: staged padding contributes no successors or
-overflow. Raw expansion status is preserved for the live rows.
+overflow. Raw expansion status is preserved for the live rows. A domain's entity capacity bounds its kept action rows
+(`entities` times the largest number of schemas that share an action relation); the optional key `successors` bounds
+the successors before `drop_noops=True` drops the no-op rows (default: the same rows). Host capacity calls with
+`actions=True` apply the same bounds, so a batch overflows (`capacity_overflow`, all arrays zero) on the CPU exactly
+when it does on a device.
 Device suites accept Simple output as well as relations, but refuse horizon and transition schemas; encode those
 with a separate view per domain.
 

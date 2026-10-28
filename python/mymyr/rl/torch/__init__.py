@@ -61,7 +61,7 @@ the fast path only, without host synchronization: ``fast_unsupported(table, acti
 from mymyr._core._rl_torch import Env, fast_unsupported
 
 from . import rng
-from ._batched import BatchedEnv, Observation, StepResult, SuiteObservation
+from ._batched import ActionRows, BatchedEnv, Observation, StepResult, SuiteObservation
 from ._graph import CapturedRollout, Rollout
 from ._masks import applicable_objects, applicable_schemas, is_applicable
 from ._ops import (
@@ -88,6 +88,7 @@ __all__ = [
     "literal_masks",
     "literal_slots",
     "match_first",
+    "ActionRows",
     "BatchedEnv",
     "CapturedRollout",
     "Env",

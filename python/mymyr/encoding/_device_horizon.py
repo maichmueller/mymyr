@@ -11,7 +11,7 @@ from mymyr.encoding import _device as d
 from mymyr.rl import as_table
 
 
-_COLUMNS = ("schema", "binding", "offsets", "parent", "succ", "derived")
+_COLUMNS = ("schema", "binding", "offsets", "parent", "succ", "derived", "index")
 
 # The columns of device Expansions imported outside capture, for encodes captured into CUDA graphs later: an import
 # makes the current stream wait for the expansion's producer, which a capture cannot do.
@@ -61,15 +61,22 @@ def _expansion_columns(torch: Any, expansion: Any) -> SimpleNamespace:
 
 
 def columns_of(torch: Any, actions: Any) -> SimpleNamespace:
-    """The columns of a device expansion, its (schema, binding, offsets), or expand_flat's six outputs."""
+    """The columns of a device expansion, its (schema, binding, offsets), or the outputs of ``mymyr::expand_flat``
+    (the six of succ, parent, schema, binding, goal and offsets, or all eleven: then its canonical ``index`` and
+    ``status`` too, and ``succ`` only when the op stored successor rows)."""
     if isinstance(actions, (tuple, list)):
         if len(actions) == 3:
             return SimpleNamespace(schema=actions[0], binding=actions[1], offsets=actions[2], parent=None, succ=None,
-                                   derived=None, status=None)
+                                   derived=None, status=None, index=None)
         if len(actions) == 6:
             return SimpleNamespace(succ=actions[0], parent=actions[1], schema=actions[2], binding=actions[3],
-                                   offsets=actions[5], derived=None, status=None)
-        raise d._error("device actions are an expansion, (schema, binding, offsets), or expand_flat's six outputs")
+                                   offsets=actions[5], derived=None, status=None, index=None)
+        if len(actions) == 11:
+            succ, parent, schema, binding, _, offsets, _, _, _, index, status = actions
+            return SimpleNamespace(succ=succ if succ.numel() else None, parent=parent, schema=schema, binding=binding,
+                                   offsets=offsets, derived=None, status=status,
+                                   index=index if index.numel() or not schema.numel() else None)
+        raise d._error("device actions are an expansion, (schema, binding, offsets), or expand_flat's outputs")
     expansion = _expansion_type()
     if expansion is not None and isinstance(actions, expansion):
         return _expansion_columns(torch, actions)
@@ -90,11 +97,13 @@ def action_arrays(encoder: Any, actions: Any, device: Any, graphs: int, keep: li
         arrays[name] = _integer(torch, getattr(actions, name), f"actions.{name}", device, keep, ndim)
     parent = getattr(actions, "parent", None)
     arrays["parent"] = None if parent is None else _integer(torch, parent, "actions.parent", device, keep, 1)
+    index = getattr(actions, "index", None)
+    arrays["index"] = None if index is None else _integer(torch, index, "actions.index", device, keep, 1)
     capacity = arrays["schema"].shape[0]
-    if arrays["offsets"].shape != (graphs + 1,) or arrays["binding"].shape[0] != capacity or (
-        arrays["parent"] is not None and arrays["parent"].shape != (capacity,)
+    if arrays["offsets"].shape != (graphs + 1,) or arrays["binding"].shape[0] != capacity or any(
+        arrays[name] is not None and arrays[name].shape != (capacity,) for name in ("parent", "index")
     ):
-        raise d._error("the expansion needs G + 1 offsets and equally many schema, binding and parent rows")
+        raise d._error("the expansion needs G + 1 offsets and equally many schema, binding, parent and index rows")
     if arrays["binding"].shape[1] < as_table(encoder.table).label_width:
         raise d._error("the action label width is narrower than the table's")
     return SimpleNamespace(**arrays, capacity=capacity, succ=getattr(actions, "succ", None),
@@ -113,7 +122,8 @@ def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
         rows.tensors.append(status)
     rows.fields[d._ROW_ACTIONS:d._ROW_HORIZON] = [a.offsets.data_ptr(), a.schema.data_ptr(), a.binding.data_ptr(),
                           0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1],
-                          0 if status is None else status.data_ptr()]
+                          0 if status is None else status.data_ptr(),
+                          0 if a.index is None else a.index.data_ptr()]
 
 
 def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any, status: Any = None) -> Any:
@@ -212,7 +222,7 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     if children.shape[1] < width:
         children = torch.nn.functional.pad(children, (0, width - children.shape[1]))
     rows.fields[d._ROW_ACTIONS:d._ROW_HORIZON] = [a.offsets.data_ptr(), a.schema.data_ptr(), a.binding.data_ptr(),
-                          0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1], 0]
+                          0 if a.parent is None else a.parent.data_ptr(), a.capacity, a.binding.shape[1], 0, 0]
     nodes = torch.empty((rows.graphs + a.capacity, states.shape[1]), dtype=torch.int64, device=states.device)
     no = torch.empty(rows.graphs + 1, dtype=torch.int32, device=states.device)
     src = torch.empty(a.capacity, dtype=torch.int32, device=states.device)
