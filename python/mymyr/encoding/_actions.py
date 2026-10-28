@@ -123,6 +123,12 @@ def action_rows(batch: FlatBatch | DeviceFlatBatch, actions: Expansion | DeviceA
     refs = columns["entity_ref"][chosen].astype(np.int64)
     index = getattr(actions, "index", None)
     if index is None:
+        outside = refs >= offsets[graphs + 1] - offsets[graphs]
+        if outside.any():
+            bad = int(np.flatnonzero(outside)[0])
+            raise ValueError(f"mymyr: encoding: the expansion has no row for action entity {int(chosen[bad])} "
+                             f"(graph {int(graphs[bad])}, row {int(refs[bad])} of its state's rows; an entity of an "
+                             "expansion that dropped no-op rows needs that expansion's index)")
         return offsets[graphs] + refs
     total = int(offsets[-1])
     index = _ints(index)[:total]
@@ -198,7 +204,9 @@ def _device_entities_of(batch: DeviceFlatBatch, indices: Any, graphs: Any) -> An
         owner = graphs.to(torch.int64)
     if batch.implicit_entities or not batch.entity_role.numel():
         return torch.full(indices.shape, -1, dtype=torch.int64, device=device)
-    offsets = batch.entity_offsets.to(torch.int64)
+    # a capacity batch's offsets past its live graphs are zero (a device suite batch): the running maximum makes them
+    # nondecreasing for the search, with empty graphs past the live ones
+    offsets = torch.cummax(batch.entity_offsets.to(torch.int64), 0).values
     roles = batch.entity_role
     entities = torch.arange(roles.shape[0], dtype=torch.int64, device=device)
     # the entities past the batch's (the tails of capacity arrays) have role 0: never an action's

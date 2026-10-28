@@ -695,7 +695,9 @@ struct GraphTotals
 inline constexpr u32 k_graph_auxiliary = 1u;  // the graph has an auxiliary entity
 inline constexpr u32 k_graph_bad_row = 2u;    // a bit is set at or beyond the instance's fluent (or derived) slots
 inline constexpr u32 k_graph_bad_goal = 4u;   // the same in the row's own goal masks
-inline constexpr u32 k_graph_bad_action_order = 8u;   // the expansion rows are not strictly ascending in (schema, binding)
+inline constexpr u32 k_graph_bad_action_order = 8u;   // the expansion rows are not strictly ascending in
+                                                      // (schema, binding), or their `index` (if given) is not
+                                                      // strictly ascending from 0
 inline constexpr u32 k_graph_bad_action_label = 16u;  // a row has a schema or object the instance does not have, or
                                                       // belongs to another state
 inline constexpr u32 k_graph_bad_layers = 32u;   // a subgoal layer sets a bit at or beyond the instance's slots

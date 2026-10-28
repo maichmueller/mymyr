@@ -80,6 +80,7 @@ _ROW_FIELDS = 55
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
 _SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
+_INVALID = "a row is invalid"
 
 
 def _error(message: str) -> ValueError:
@@ -596,7 +597,40 @@ def encode_arrays(
     else:
         from mymyr.encoding._device_horizon import horizon_rows
         rows = horizon_rows(encoder, horizon, derived, goals, subgoals)
-    return _encode_rows(encoder, rows, capacities, keep)
+    try:
+        return _encode_rows(encoder, rows, capacities, keep)
+    except ValueError as error:
+        state = None if actions is None or _INVALID not in str(error) else _misordered(torch, actions)
+        if state is None:
+            raise
+        raise _error(f"the action rows of state {state} are not in canonical order: strictly ascending in (schema, "
+                     "binding), and in index (from 0) for an expansion with an index") from None
+
+
+def _misordered(torch: Any, actions: Any) -> Optional[int]:
+    """The first state whose expansion rows (device arrays) are not in canonical order, or None: the diagnosis of an
+    exact call that found an invalid row (it waits for the device)."""
+    offsets = actions.offsets.to(torch.int64)
+    total = int(offsets[-1])
+    counts = (offsets[1:] - offsets[:-1]).clamp(min=0)
+    if total < 1 or int(counts.sum()) != total or total > actions.schema.shape[0]:
+        return None
+    parent = torch.repeat_interleave(torch.arange(counts.shape[0], device=offsets.device), counts)
+    key = torch.cat((actions.schema[:total, None], actions.binding[:total]), dim=1).to(torch.int64)
+    step = key[1:] - key[:-1]
+    changed = step != 0
+    first = changed.to(torch.int8).argmax(dim=1, keepdim=True)
+    ascending = changed.any(dim=1) & (step.gather(1, first).squeeze(1) > 0)
+    same = parent[1:] == parent[:-1]
+    bad = torch.zeros(total, dtype=torch.bool, device=offsets.device)
+    bad[1:] = same & ~ascending
+    index = getattr(actions, "index", None)
+    if index is not None:
+        index = index[:total].to(torch.int64)
+        bad[1:] |= same & (index[1:] <= index[:-1])
+        bad |= index < 0
+    at = torch.nonzero(bad)
+    return int(parent[at[0, 0]]) if at.shape[0] else None
 
 
 def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, graph_count: Any = None) -> dict[str, Any]:
@@ -631,7 +665,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
             static_instances: int, static_tuples: int, static_args: int,
         ) -> list[int]:
             if flags & _OVERFLOW_INPUT:
-                raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
+                raise _error(_INVALID + ": a task id outside the table, a state row, goal mask, subgoal layer or "
                              "history step narrower than its instance, invalid expansion labels, horizon offsets or "
                              "endpoints, a history count outside [0, steps], or a bit that its instance has no atom "
                              "for")

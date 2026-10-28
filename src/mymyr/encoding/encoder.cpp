@@ -723,7 +723,8 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
                 " have a schema or an object its instance does not have, or belong to another state");
     if (bad_action_order != k_none)
         invalid("the action rows of state " + std::to_string(bad_action_order) +
-                " are not in canonical order: strictly ascending in (schema, binding)");
+                " are not in canonical order: strictly ascending in (schema, binding), and in index (from 0) "
+                "for an expansion with an index");
 
     // 3. scan the members, in u64: where each starts in the batch and, relation-major, in every relation
     FlatSizes sizes = detail::scan_members(s, *m_schema, graphs);
