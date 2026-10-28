@@ -165,14 +165,14 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
     const bool exclude = o.horizon.root == RootPolicy::Exclude;
     const bool full = o.horizon.mode == HorizonMode::Full;
     const bool split = full && exclude;
-    const bool lead = schema.slot_roles(id).front() == SlotRole::State;
+    const bool lead = !schema.slot_roles(id).empty() && schema.slot_roles(id).front() == SlotRole::State;
     const u32 nodes = static_cast<u32>(g.nodes.size());
     std::vector<std::string> out;
     auto tuple = [&](std::vector<std::string> head, const std::vector<i32>& objects, bool with_pred)
     {
         if (with_pred && o.predicate_virtual_nodes)
             head.push_back("v" + std::to_string(schema.virtual_key(id)));
-        if (objects.empty() && r.logical_arity == 0 && r.lane != Lane::Action)
+        if (objects.empty() && r.logical_arity == 0 && r.lane != Lane::Action && o.nullary == Nullary::Auxiliary)
             head.push_back("aux");
         for (const i32 object : objects)
             head.push_back("o" + std::to_string(object));
@@ -502,7 +502,7 @@ TEST(Horizon, RowGoalsAndNullaryRelations)
         goals.push_back(mask_goal(task, p, n));
     }
     for (const HorizonMode mode : k_modes)
-        for (const bool nullary : {true, false})
+        for (const Nullary nullary : {Nullary::Auxiliary, Nullary::Arity0, Nullary::Omit})
         {
             FlatOptions options = horizon_options(mode, RootPolicy::Include);
             options.nullary = nullary;
@@ -514,9 +514,10 @@ TEST(Horizon, RowGoalsAndNullaryRelations)
             in.goal_words = table->words();
             const auto batch = encoder->encode(in);
             expect_reference(*encoder, h, *batch, &goals);
-            // without the nullary relations the batch has no auxiliary entity, with them it has one where a nullary atom is
+            // the batch has an auxiliary entity where a nullary atom is over it, none without the nullary relations or
+            // under arity 0
             const auto role = ints(*batch, "entity_role");
-            EXPECT_EQ(std::count(role.begin(), role.end(), 8) != 0, nullary) << to_string(mode);
+            EXPECT_EQ(std::count(role.begin(), role.end(), 8) != 0, nullary == Nullary::Auxiliary) << to_string(mode);
         }
 }
 

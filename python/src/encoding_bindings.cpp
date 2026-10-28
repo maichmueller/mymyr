@@ -102,6 +102,9 @@ struct EncodingStatics
 struct EncodingRepeatedLiterals
 {
 };
+struct EncodingNullary
+{
+};
 struct EncodingLiteralSource
 {
 };
@@ -133,6 +136,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingRepeatedLiterals>
 {
     static constexpr auto Name = const_name("typing.Literal['every', 'lowest', 'highest']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingNullary>
+{
+    static constexpr auto Name = const_name("typing.Literal['auxiliary', 'arity0', 'omit']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingStatics>
@@ -382,7 +390,7 @@ encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse,
 }
 
 encoding::FlatOptions schema_options(nb::handle max_goal_level, nb::handle repeated_literals, bool include_static,
-                                     bool include_derived, bool include_numeric, bool nullary, bool equality,
+                                     bool include_derived, bool include_numeric, nb::handle nullary, bool equality,
                                      bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, nb::handle numeric_dtype, bool emit_counts,
@@ -405,7 +413,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, nb::handle repea
     options.include_static = include_static;
     options.include_derived = include_derived;
     options.include_numeric = include_numeric;
-    options.nullary = nullary;
+    options.nullary = choice(nullary, "nullary", parse_nullary, "'auxiliary', 'arity0', 'omit'");
     options.equality = equality;
     options.predicate_virtual_nodes = predicate_virtual_nodes;
     options.include_actions = include_actions;
@@ -455,7 +463,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["include_static"] = o.include_static;
     out["include_derived"] = o.include_derived;
     out["include_numeric"] = o.include_numeric;
-    out["nullary"] = o.nullary;
+    out["nullary"] = std::string(encoding::to_string(o.nullary));
     out["equality"] = o.equality;
     out["predicate_virtual_nodes"] = o.predicate_virtual_nodes;
     out["include_actions"] = o.include_actions;
@@ -490,10 +498,15 @@ constexpr const char* k_option_doc =
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates. include_numeric: one relation `[num]f` for each numeric function f of the domain that a state gives "
     "values to (a fluent function; total-cost is not one), with one tuple per ground term of f in the instance "
-    "(over the term's objects; over the auxiliary entity for a nullary function) and its value in the batch's "
+    "(over the term's objects; over the auxiliary entity for a nullary function, no argument with nullary='arity0') "
+    "and its value in the batch's "
     "numeric_values (node_value with the Simple graph); False ignores the numeric part of the states. numeric_dtype: "
-    "the dtype of numeric_values (a function term without a value is NaN). nullary: relations of the predicates "
-    "without arguments (their atoms are tuples over the graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
+    "the dtype of numeric_values (a function term without a value is NaN). nullary: how the predicates without "
+    "arguments are encoded: 'auxiliary' makes their atoms tuples over the graph's auxiliary entity (role auxiliary, "
+    "present in a graph exactly when such a tuple is), 'arity0' gives their relations no argument slot (a state tuple "
+    "is empty, a goal or history tuple holds only its leading slots; nullary numeric functions likewise, and no graph "
+    "has an auxiliary entity), 'omit' leaves them out (a nullary numeric function keeps its tuple over the auxiliary "
+    "entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
     "slot in the predicate relations' tuples: a graph gets a virtual entity (role predicate_virtual) for each predicate that "
     "has a tuple in it, numbered by ascending predicate name, and none for the others; its entity_ref is the id of the "
     "predicate's key relation (its plain state relation, else its first relation). include_actions: one relation per action schema. target_sources: "
@@ -539,8 +552,9 @@ enum class HorizonArgs
 #define MYMYR_ENCODING_ARGS_BASE                                                                                      \
     TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level,                                          \
         Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,              \
-        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,        \
-        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,    \
+        bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality, bool predicate_virtual_nodes,       \
+        bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,                        \
+        Arg<ann::EncodingIndexDtype> index_dtype,                                                                     \
         Arg<ann::EncodingNumericDtype> numeric_dtype, bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays, \
         Arg<ann::EncodingStatics> statics
 #define MYMYR_ENCODING_ARGS MYMYR_ENCODING_ARGS_BASE, TextSequenceArg outputs, bool constant_labels
@@ -552,7 +566,8 @@ enum class HorizonArgs
 #define MYMYR_ENCODING_DEFAULTS_BASE                                                                                  \
     "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,                              \
     "repeated_literals"_a = std::string(encoding::to_string(encoding::k_default_repeated_literals)),                  \
-    "include_static"_a = true, "include_derived"_a = true, "include_numeric"_a = true, "nullary"_a = true,            \
+    "include_static"_a = true, "include_derived"_a = true, "include_numeric"_a = true,                                \
+    "nullary"_a = std::string(encoding::to_string(encoding::Nullary::Auxiliary)),                                     \
     "equality"_a = false, "predicate_virtual_nodes"_a = false, "include_actions"_a = true,                            \
     "target_sources"_a = nb::tuple(), "layout"_a = "graph", "index_dtype"_a = "int32", "numeric_dtype"_a = "float32", \
     "emit_counts"_a = true, "entity_arrays"_a = "always", "statics"_a = "repeat"
@@ -634,7 +649,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level,
                         Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
-                        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
+                        bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality,
+                        bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
                         bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays,
@@ -655,7 +671,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level,
                         Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
-                        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
+                        bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality,
+                        bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
                         bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays,
@@ -823,7 +840,7 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
                 return std::vector<std::string>(names.begin(), names.end());
             },
             "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by "
-            "the nullary relations.")
+            "the nullary relations under nullary='auxiliary'.")
         .def_prop_ro(
             "simple_label_names",
             [schema_of](const Py& self) { return schema_of(self).simple_label_names(); },
@@ -1682,7 +1699,7 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"goal_complete",
      "uint8 [G]: 1 iff the goal relations of the graph hold its whole goal: its instance's goal when every conjunct could "
      "be expanded into literals (Task.encoding_goal_complete) and no literal whose truth a state can change was left "
-     "out by the options (a nullary literal with nullary=False), always for a goal given with `goals`. Absent when the "
+     "out by the options (a nullary literal with nullary='omit'), always for a goal given with `goals`. Absent when the "
      "schema has no goal relations."},
     {"target_offsets",
      "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
@@ -2430,7 +2447,8 @@ void bind_hgraph(nb::module_& module)
         "[entity_offsets[g], entity_offsets[g + 1])). The edge type (relation, k, '_symbol_') leads from each tuple "
         "of the relation to the entity at position k of the tuple; its reverse (`_symbol_`, k, relation) has the same "
         "edges the other way round. A nullary relation has one position, its auxiliary slot, so its edge goes to the "
-        "graph's auxiliary entity. Row 0 of an edge type is the tuple number (an arange, made when asked for) and "
+        "graph's auxiliary entity; under nullary='arity0' a nullary state relation has no position: its node type has "
+        "no edge type. Row 0 of an edge type is the tuple number (an arange, made when asked for) and "
         "row 1 the entity ids: a strided view of the batch's `relation_args`. The view keeps the batch alive. "
         "`mymyr.encoding.hgraph(batch)` makes one. The batch must be relation-major, encoded without "
         "predicate_virtual_nodes and with the static tuples in every graph; ValueError otherwise. "
@@ -2935,7 +2953,7 @@ void bind_encoding(nb::module_& parent)
     nb::class_<PyFlatEncoder> encoder_class(
         module, "FlatRelationEncoder", nb::is_weak_referenceable(),
         "Encodes states into relational graphs: one graph per state, with the instance's objects as entities (plus one "
-        "auxiliary entity when a nullary tuple exists) and, for every relation of the schema, the tuples of the state's "
+        "auxiliary entity when a nullary tuple over it exists) and, for every relation of the schema, the tuples of the state's "
         "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
     static const std::string encoder_doc =
         std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema, "

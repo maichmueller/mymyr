@@ -366,7 +366,7 @@ TEST(HGraphView, EdgesAreTheTuplesOfTheBatchForEveryConfiguration)
         {"no_nullary_equality",
          [](FlatOptions& o)
          {
-             o.nullary = false;
+             o.nullary = Nullary::Omit;
              o.equality = true;
          }},
         {"no_static_no_derived",
@@ -740,7 +740,7 @@ TEST(HGraphView, RefusesWhatItCannotView)
     // a batch of another schema
     {
         FlatOptions other = options;
-        other.nullary = false;
+        other.nullary = Nullary::Omit;
         const auto other_encoder = FlatEncoder::create(table, other);
         expect_refusal([&] { (void)HGraphView::of(batch, other_encoder->schema_ptr()); }, "schema");
     }

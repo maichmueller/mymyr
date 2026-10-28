@@ -192,7 +192,7 @@ TEST(EncoderReference, WithEquality)
 TEST(EncoderReference, WithoutNullaryStaticOrDerived)
 {
     FlatOptions options = test::encoder_options();
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     expect_matches_reference(options);
     options.include_static = false;
     expect_matches_reference(options);
@@ -270,7 +270,7 @@ TEST(EncoderAuxiliary, NeverExistsWithoutNullaryRelations)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "probBLOCKS-8-0"));
     FlatOptions options = test::encoder_options();
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     const auto encoder = FlatEncoder::create(table, options);
     EXPECT_FALSE(encoder->schema().find("handempty"));
     const test::Rows rows = test::random_walk(*table, 0, 64, 5);
@@ -483,7 +483,7 @@ TEST(EncoderRefusals, InvalidOptions)
     }
     // the options an encoder accepts: actions (zero tuples), both index types, nullary and equality either way
     for (const bool actions : {true, false})
-        for (const bool nullary : {true, false})
+        for (const Nullary nullary : {Nullary::Auxiliary, Nullary::Arity0, Nullary::Omit})
         {
             FlatOptions options = test::encoder_options();
             options.include_actions = actions;

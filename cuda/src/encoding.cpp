@@ -176,7 +176,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                 nullary = nullary || (ed::cell_present(cell, static_cast<u32>(n)) && cell.logical_arity == 0);
             }
             // objects, the auxiliary entity, one entity per goal or subgoal target and one per predicate virtual node
-            const u64 entities = add(add(inst.num_objects, nullary ? 1 : 0), add(targets, inst.num_virtual));
+            const u64 entities =
+                add(add(inst.num_objects, nullary && inst.nullary_auxiliary ? 1 : 0), add(targets, inst.num_virtual));
             bounds.entities = std::max(bounds.entities, entities);
             bounds.tuples = std::max(bounds.tuples, tuples);
             bounds.args = std::max(bounds.args, args);

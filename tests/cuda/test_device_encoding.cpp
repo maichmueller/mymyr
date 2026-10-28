@@ -278,7 +278,7 @@ TEST(DeviceEncodingContext, OnlyAnExtensionIsAppended)
     EXPECT_THROW(device->refresh(nullptr), std::invalid_argument);
     // another schema
     encoding::FlatOptions other = test::encoder_options();
-    other.nullary = false;
+    other.nullary = Nullary::Omit;
     const auto table = rl::TaskTable::create({tasks[0], tasks[1], tasks[0]});
     EXPECT_THROW(device->refresh(host_context(table, other)), std::invalid_argument);
     EXPECT_EQ(device->generation(), 1u);
@@ -1121,7 +1121,7 @@ TEST(DeviceEncoder, GrowsWithItsTable)
     EXPECT_TRUE(device.context().download() == host_bytes(grown->context()));
     // other options
     encoding::FlatOptions other = options;
-    other.nullary = false;
+    other.nullary = Nullary::Omit;
     EXPECT_THROW(device.refresh(encoding::FlatEncoder::create(rl::TaskTable::create(tasks), other)), std::invalid_argument);
 }
 

@@ -112,7 +112,7 @@ enum class SlotRole : u8
     SubgoalTarget,
     HistoryTarget,
     History,        // the entity of the history step
-    Auxiliary,      // the graph's auxiliary entity: the only argument of a nullary relation
+    Auxiliary,      // the graph's auxiliary entity: the only argument of a nullary relation (Nullary::Auxiliary)
 };
 
 /// The roles of the entities of a graph. Objects come first.
@@ -178,7 +178,8 @@ struct Relation
     i32 schema = -1;                            // first action schema of this name and arity, or -1
     i32 function = -1;                          // numeric function (DomainSignature::functions), or -1
     u32 arity = 0;                              // encoded arity: the slots of the other roles plus the arguments
-                                                // (one auxiliary slot for a nullary predicate)
+                                                // (one auxiliary slot for a nullary predicate, none under
+                                                // Nullary::Arity0)
     u32 logical_arity = 0;                      // arguments: the arity of the predicate or action schema
 };
 
@@ -206,7 +207,8 @@ public:
     [[nodiscard]] std::optional<u32> find(std::string_view name) const;
 
     /// The slot roles of a relation, one per encoded position: its leading slots (state, action, targets, history),
-    /// then the predicate slot, then the arguments (the auxiliary slot for a nullary predicate).
+    /// then the predicate slot, then the arguments (the auxiliary slot for a nullary predicate, nothing under
+    /// Nullary::Arity0: a nullary state relation then has no slot at all).
     [[nodiscard]] std::span<const SlotRole> slot_roles(u32 id) const;
     /// All slot roles, relation after relation, and the offset of each relation's roles (num_relations() + 1 entries).
     [[nodiscard]] std::span<const SlotRole> all_slot_roles() const noexcept { return m_roles; }

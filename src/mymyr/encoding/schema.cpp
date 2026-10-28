@@ -135,7 +135,10 @@ void Catalog::add_predicate(u32 predicate, Lane lane, const Key& key, std::initi
     if (m_options.predicate_virtual_nodes)
         pending.roles.push_back(SlotRole::Predicate);
     if (source.arity == 0)
-        pending.roles.push_back(SlotRole::Auxiliary);
+    {
+        if (m_options.nullary == Nullary::Auxiliary)
+            pending.roles.push_back(SlotRole::Auxiliary);
+    }
     else
         pending.roles.insert(pending.roles.end(), source.arity, SlotRole::Argument);
     add(std::move(pending));
@@ -164,7 +167,10 @@ void Catalog::add_numeric(u32 function)
     pending.relation.function = static_cast<i32>(function);
     pending.relation.logical_arity = source.arity;
     if (source.arity == 0)
-        pending.roles.push_back(SlotRole::Auxiliary);
+    {
+        if (m_options.nullary != Nullary::Arity0)
+            pending.roles.push_back(SlotRole::Auxiliary);
+    }
     else
         pending.roles.assign(source.arity, SlotRole::Argument);
     add(std::move(pending));
@@ -280,7 +286,7 @@ void Catalog::build()
     for (u32 predicate = 0; predicate < m_domain.predicates.size(); ++predicate)
     {
         const DomainSignature::Predicate& source = m_domain.predicates[predicate];
-        if ((source.arity == 0 && !o.nullary) || (source.name == "=" && !o.equality))
+        if ((source.arity == 0 && o.nullary == Nullary::Omit) || (source.name == "=" && !o.equality))
             continue;
         const bool state_relation = !(source.kind == PredicateKind::Static && !o.include_static) &&
                                     !(source.kind == PredicateKind::Derived && !o.include_derived);

@@ -17,8 +17,8 @@
 // Relation-major packing is what makes row 1 one strided run: all tuples of a relation are contiguous across the graphs.
 // Positions are those of the relation's slot roles (EncodingSchema::slot_roles): the leading slots (state, action,
 // targets, history), the predicate slot, then the arguments. A nullary relation has one position, its auxiliary slot, so
-// its edge type (r, 0, `_symbol_`) leads to the graph's auxiliary entity. Relations of arity 0 (none in a schema built
-// by the encoder) have a node type and no edge type.
+// its edge type (r, 0, `_symbol_`) leads to the graph's auxiliary entity. A relation of arity 0 (a nullary state
+// relation under Nullary::Arity0) has a node type and no edge type: its atoms are nodes without edges.
 //
 // The view works on the batches of the horizon, rooted-horizon and transition encoders as it does on those of the
 // single-state encoder: their relations (the action, parent, sibling and cousin relations among them) and their state

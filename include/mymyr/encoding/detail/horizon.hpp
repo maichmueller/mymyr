@@ -154,11 +154,12 @@ MYMYR_HD HorizonNodes horizon_nodes(const Cell& c, u32 count)
     }
 }
 
-/// Whether a cell's tuples of a nullary predicate are over the auxiliary entity.
-MYMYR_HD bool horizon_over_auxiliary(const Cell& c)
+/// Whether a cell's tuples of a nullary predicate are over the auxiliary entity: the cell is of a nullary predicate and
+/// the context gives nullary tuples the auxiliary slot.
+MYMYR_HD bool horizon_over_auxiliary(const InstanceView& v, const Cell& c)
 {
     const HorizonKind kind = horizon_kind(c.op);
-    return c.logical_arity == 0 && kind != HorizonKind::Action && kind != HorizonKind::Parent &&
+    return v.nullary_auxiliary && c.logical_arity == 0 && kind != HorizonKind::Action && kind != HorizonKind::Parent &&
            kind != HorizonKind::Sibling && kind != HorizonKind::Cousin;
 }
 
@@ -1023,7 +1024,7 @@ MYMYR_HD GraphTotals horizon_count_graph(const InstanceView& v, const HorizonGra
         sink(i, c, n);
         totals.tuples += n;
         totals.args += u64{n} * c.arity;
-        if (n && horizon_over_auxiliary(c))
+        if (n && horizon_over_auxiliary(v, c))
             totals.flags |= k_graph_auxiliary;
         if (n && v.num_virtual != 0 && v.relation_virtual[c.relation] != k_no_virtual)
             used[v.relation_virtual[c.relation]] = 1;
@@ -1127,8 +1128,9 @@ struct HorizonWriter
     u32 skip;         // the nodes before it
     u64 predicate;    // the predicate entity of the cell (k_no_entity: none)
     bool lead;
-    bool nullary;  // a nullary predicate: its only argument is the auxiliary entity
+    bool nullary;  // a nullary predicate over the auxiliary entity: it is its only argument
     u32 objects;
+    u32 tuples;  // the tuples written
 
     MYMYR_HD u64 state(u32 node) const { return state_first + node - skip; }
     MYMYR_HD void put(u32 node, const i32* row)
@@ -1142,16 +1144,19 @@ struct HorizonWriter
         else
             for (u32 k = 0; k < objects; ++k)
                 *dst++ = static_cast<I>(object_base + static_cast<u64>(row[k]));
+        ++tuples;
     }
     MYMYR_HD void put_pair(u32 a, u32 b)
     {
         *dst++ = static_cast<I>(state(a));
         *dst++ = static_cast<I>(state(b));
+        ++tuples;
     }
 };
 
 /// Writes the tuples of cell `c` to `dst` (the entity ids; `predicate` is the cell's virtual entity or k_no_entity) and
-/// returns how many.
+/// returns how many. A tuple of a nullary predicate holds the auxiliary entity, or no argument when the context gives
+/// nullary tuples none.
 template<class I>
 MYMYR_HD u32 fill_horizon_cell(const Cell& c, const HorizonGraph& h, const HorizonEntities& e, u64 predicate, I* dst)
 {
@@ -1163,11 +1168,12 @@ MYMYR_HD u32 fill_horizon_cell(const Cell& c, const HorizonGraph& h, const Horiz
                             e.skip,
                             predicate,
                             horizon_lead(c.op),
-                            horizon_over_auxiliary(c),
+                            horizon_over_auxiliary(*h.v, c),
                             kind == HorizonKind::Parent || kind == HorizonKind::Sibling || kind == HorizonKind::Cousin
                                 ? 0u
-                                : c.logical_arity};
+                                : c.logical_arity,
+                            0u};
     horizon_emit_cell(c, h, writer);
-    return static_cast<u32>(static_cast<u64>(writer.dst - dst) / c.arity);
+    return writer.tuples;
 }
 }  // namespace mymyr::encoding::detail
