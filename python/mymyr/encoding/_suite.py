@@ -168,15 +168,19 @@ class SuiteEncoder:
         successor equals the state are left out unless every successor of the state is one, and the action entities
         keep their canonical successor index as ``entity_ref``.
         ``framework``, ``threads`` and ``pool`` are as in ``encode``; ``capacities`` maps a domain to its capacities,
-        and every domain with rows needs an entry.
+        and every domain with rows needs an entry. With ``actions=True`` a domain's capacities bound its expansion
+        as a device's capacity call does, on the CPU too: the kept rows by the rows that its ``entities`` action
+        entities can stand for, the successors before the drop by the optional key ``successors`` (default: the same
+        rows); a batch whose expansion exceeds them overflows (``capacity_overflow``, all arrays zero).
 
         On CUDA, exact calls over several domains copy only the per-domain counts to the host to size the groups;
         one domain uses the known input row count. Each domain's exact expansion and encoding also waits for its
         output sizes. Capacity calls need an entry for every domain with
         ``graphs >= N`` and keep all counts and arrays on the device. They allocate at capacity, zero unused output
         tails and report overflow in ``device_sizes``. ``actions=True`` bounds expansions by each domain's entity
-        capacity and returns its device label arrays in ``expansions``. Automatic device action expansion requires
-        an asynchronous backend, including for exact calls, so the grouping never falls back to downloading rows.
+        capacity (and ``successors``) and returns its device label arrays in ``expansions``. Automatic device action
+        expansion requires an asynchronous backend, including for exact calls, so the grouping never falls back to
+        downloading rows.
         Given per-domain expansions are accepted only by exact device calls; capacity calls require ``actions=True``
         or no actions. Capacity expansions store labels only (``succ=None``), and preserve the backend's raw status,
         including overflow caused by staged rows past the domain's live prefix.
@@ -223,11 +227,14 @@ class SuiteEncoder:
                 exp = rl.expand(table, part, local.astype(np.int32), drop_noops=drop_noops)
             if exp is not None:
                 expansions[d] = exp
-            caps = None
+            caps, successors = None, None
             if capacities is not None:
                 if d not in capacities:
                     raise ValueError(f"mymyr: encoding: capacities has no entry for domain {d}, which has rows")
                 caps = dict(capacities[d])
+                successors = caps.pop("successors", None)
+                if successors is not None and actions is not True:
+                    raise ValueError("mymyr: encoding: capacities['successors'] bounds the expansion of actions=True")
             inputs = {
                 "derived": _take_input(derived, idx, rows),
                 "goals": _take_input(goals, idx, rows),
@@ -244,6 +251,11 @@ class SuiteEncoder:
                 pool=pool,
                 **{name: value for name, value in inputs.items() if value is not None},
             )
+            if caps is not None and actions is True:
+                from mymyr.encoding._device_actions import bound_status, overflowed
+
+                if bound_status(encoder, exp, caps.get("entities", 0), successors, drop_noops):
+                    batches[d] = overflowed(batches[d])
         return SuiteBatch(batches, domain, index, row_ids, global_ids, expansions)
 
 

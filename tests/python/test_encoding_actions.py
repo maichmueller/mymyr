@@ -366,6 +366,18 @@ def test_canonical_indices_must_ascend():
         encoder.encode(rows, actions=kept)
 
 
+def test_rows_of_a_dropped_batch_need_the_index():
+    """Without its index the rows of a no-op-dropping expansion are not found by position: an entity whose canonical
+    index lies past its state's kept rows is refused."""
+    from types import SimpleNamespace
+
+    table, rows, full, kept = noop_rows(ipc_task("floortile"))
+    batch = encoding.FlatRelationEncoder(table, **OPTIONS).encode(rows, actions=kept)
+    assert kept.total < full.total
+    with pytest.raises(ValueError, match="no row for action entity .* needs that expansion's index"):
+        encoding.action_rows(batch, SimpleNamespace(offsets=kept.offsets))
+
+
 def test_collate_drops_noop_actions():
     from mymyr import datasets
 
@@ -499,20 +511,36 @@ def test_captured_observations_drop_noop_actions(drop):
 
 
 @pytest.mark.needs_gil
-def test_traced_observations_drop_noop_actions():
+@pytest.mark.parametrize("drop", [False, True])
+def test_traced_observations_drop_noop_actions(drop):
+    """A compiled step with action rows equals the host, and its graph has no node that keeps it out of CUDA graphs
+    (inductor's check on the traced forward graph, which needs no triton)."""
     torch = torch_or_skip()
     rt = pytest.importorskip("mymyr.rl.torch")
     device = cuda_or_skip()
+    from torch._dynamo.backends.common import aot_autograd
+    from torch._inductor.utils import get_first_incompatible_cudagraph_node
+
+    assert torch.Tag.cudagraph_unsafe not in torch.ops.mymyr.bounded_actions.default.tags
     table = noop_table("floortile")
     encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
     env = rt.BatchedEnv(table, 6, device=device, seed=7, max_steps=6, observation=encoder, obs_actions=True,
-                        obs_drop_noops=True, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+                        obs_drop_noops=drop, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    graphs = []
+
+    def forward(gm, inputs):
+        graphs.append(gm)
+        return gm
+
     torch._dynamo.reset()
     try:
-        step = torch.compile(lambda: env.step(final=False), fullgraph=True, backend="aot_eager")
+        step = torch.compile(lambda: env.step(final=False), fullgraph=True,
+                             backend=aot_autograd(fw_compiler=forward))
         for _ in range(3):
             out = step()
-            check_observation(encoder, table, out.states, out.task_ids, out.obs, out.actions, True)
+            check_observation(encoder, table, out.states, out.task_ids, out.obs, out.actions, drop)
+        assert graphs
+        assert all(get_first_incompatible_cudagraph_node(g) is None for g in graphs)
     finally:
         torch.cuda.synchronize(device)
         env.close()
@@ -555,6 +583,17 @@ def test_device_encodings_of_dropped_noops_equal_the_host(domain, layout):
     graphs = torch.arange(len(rows), device=device).flip(0)
     np.testing.assert_array_equal(encoding.action_entities_of(batch, torch.as_tensor(every[::-1].copy(), device=device),
                                                               graphs).cpu().numpy(), want[::-1])
+    # rows out of canonical order are refused as on the host
+    from types import SimpleNamespace
+
+    index = exact.index.clone()
+    first = int(np.flatnonzero(np.diff(kept.offsets) > 1)[0])
+    b = int(kept.offsets[first])
+    index[b], index[b + 1] = exact.index[b + 1], exact.index[b]
+    swapped = SimpleNamespace(succ=None, schema=exact.schema, binding=exact.binding, parent=exact.parent,
+                              offsets=exact.offsets, index=index)
+    with pytest.raises(ValueError, match=f"^mymyr: encoding: the action rows of state {first} are not in canonical"):
+        encoder.encode(states, actions=swapped)
     torch.cuda.synchronize(device)
 
 
@@ -579,3 +618,140 @@ def test_device_collate_and_suites_drop_noop_actions():
         batch = suite_encoder.encode(words, ids, actions=True, drop_noops=True, capacities=capacities)
         assert_same(batch.batches[0], encoder.encode(rows, actions=kept))
     torch.cuda.synchronize(device)
+
+
+def test_device_suite_observations_find_their_action_entities():
+    """action_entities_of on the domain batches of a device suite observation (graph capacity N, zero offsets past
+    the domain's live graphs) equals the host's on the same batches."""
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = cuda_or_skip()
+    n = 64
+    suite = rl.TaskSuite([noop_table("rovers"), noop_table("floortile")])
+    encoder = encoding.SuiteEncoder(suite, **OPTIONS)
+    env = rt.BatchedEnv(suite, n, device=device, seed=4, observation=encoder, obs_actions=True, obs_drop_noops=True,
+                        obs_capacities=dict(entities=1 << 14, args=1 << 16, targets=1 << 14))
+    every = np.arange(64)[None, :].repeat(n, 0)
+    found = 0
+    for _ in range(3):
+        observation = env.observation()
+        torch.cuda.synchronize(device)
+        for batch in observation.encoding.batches:
+            graphs = batch.num_graphs
+            assert 0 < graphs < n
+            want = encoding.action_entities_of(encoding.FlatBatch.from_arrays(batch.schema, batch.as_dict("numpy")),
+                                               every[:graphs])
+            got = encoding.action_entities_of(batch, torch.as_tensor(every, device=device)).cpu().numpy()
+            np.testing.assert_array_equal(got[:graphs], want)
+            assert (got[graphs:] == -1).all()
+            found += int((want >= 0).sum())
+        env.step(torch.zeros(n, dtype=torch.int64, device=device))
+    assert found
+    env.close()
+
+
+IDLES = """(define (domain idles) (:requirements :strips :typing :negative-preconditions)
+ (:types obj)
+ (:predicates (at ?x - obj) (done ?x - obj))
+ (:action mark :parameters (?x - obj) :precondition (not (done ?x)) :effect (done ?x))
+ (:action idle :parameters (?x ?y ?z - obj) :precondition (at ?x) :effect (at ?x)))"""
+IDLES_PROBLEM = """(define (problem idles) (:domain idles) (:objects o1 o2 o3 o4 o5 o6 - obj)
+ (:init (at o1) (at o2) (at o3) (at o4) (at o5) (at o6)) (:goal (and (done o1) (done o2))))"""
+
+
+def idles_table():
+    """A table whose initial state has 216 no-op successors (idle) and 6 effective ones (mark)."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    return rl.TaskTable([mymyr.Task(mymyr.Domain.from_string(IDLES).instantiate_string(IDLES_PROBLEM))])
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_capacities_bound_the_kept_rows_alike_on_the_cpu_and_a_device(drop):
+    """The entity capacity bounds the kept action rows, ``successors`` the successors before the drop; environments
+    and suite encoders on the CPU and on a device report the same overflow and status for the same capacities."""
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = cuda_or_skip()
+    table = idles_table()
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+    task = table.tasks[0]
+    rows = np.repeat(np.asarray(task.encode([task.initial_state])), 4, axis=0)
+    full = rl.expand(table, rows, noops=True)
+    generated, kept = int(full.total), int((~full.noop).sum())
+    assert (generated, kept) == (888, 24)
+    base = dict(entities=80, args=1024, targets=256)
+    cases = [(base, True), (dict(base, successors=generated), not drop), (dict(base, successors=generated - 1), True)]
+
+    def observe(where, caps):
+        env = rt.BatchedEnv(table, 4, device=where, seed=1, observation=encoder, obs_actions=True,
+                            obs_drop_noops=drop, obs_capacities=caps)
+        observation = env.observation()
+        if where.type == "cuda":
+            torch.cuda.synchronize(where)
+        env.close()
+        return observation
+
+    suite = rl.TaskSuite([table])
+    suite_encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+    ids = np.zeros(4, np.int32)
+    for caps, overflow in cases:
+        host, dev = observe(torch.device("cpu"), caps), observe(device, caps)
+        for observation in (host, dev):
+            sizes = observation.encoding.sizes
+            assert (sizes["overflow"], sizes["capacity_overflow"]) == (overflow, overflow), (caps, sizes)
+            assert observation.actions.status.tolist() == [int(overflow)]
+            assert observation.actions.parent.shape == (80,)
+        if not overflow:
+            roles = [np.asarray(o.encoding.as_dict("numpy")["entity_role"]) for o in (host, dev)]
+            assert [int((r == ACTION_ROLE).sum()) for r in roles] == [kept, kept]
+            for name, value in host.actions._asdict().items():
+                assert torch.equal(value, getattr(dev.actions, name).cpu()), name
+        suite_caps = {0: dict(caps, graphs=4)}
+        on_host = suite_encoder.encode(rows, ids, actions=True, drop_noops=drop, capacities=suite_caps).batches[0]
+        on_device = suite_encoder.encode(torch.as_tensor(rows.view(np.int64), device=device),
+                                         torch.as_tensor(ids, device=device), actions=True, drop_noops=drop,
+                                         capacities=suite_caps).batches[0]
+        torch.cuda.synchronize(device)
+        assert on_host.sizes["capacity_overflow"] == on_device.sizes["capacity_overflow"] == overflow
+
+
+@pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.parametrize("kind", ["table", "suite"])
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_action_rows_have_the_capacity_rows_zero_past_the_kept_ones(dev, kind, drop):
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = torch.device("cpu") if dev == "cpu" else cuda_or_skip()
+    from mymyr.encoding._device_actions import action_capacity
+
+    tables = [noop_table("floortile")] + ([noop_table("rovers")] if kind == "suite" else [])
+    source = tables[0] if kind == "table" else rl.TaskSuite(tables)
+    encoders = [encoding.FlatRelationEncoder(t, **OPTIONS) for t in tables]
+    env = rt.BatchedEnv(source, 6, device=device, seed=3, observation=encoders if kind == "suite" else encoders[0],
+                        obs_actions=True, obs_drop_noops=drop,
+                        obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    observation = env.observation()
+    states, task_ids = host_rows(observation.states, observation.task_ids)
+    if kind == "table":
+        parts, domain = [observation.actions], np.zeros(6, np.int64)
+    else:
+        parts, domain = observation.actions, observation.encoding.domain.cpu().numpy()
+        task_ids = np.asarray(source.local_ids, np.int32)[task_ids]
+    for d, actions in enumerate(parts):
+        mine = domain == d
+        want = rl.expand(tables[d], states[mine][:, :tables[d].words], task_ids[mine], hashes=True, noops=True,
+                         drop_noops=drop)
+        total, rows = int(want.total), action_capacity(encoders[d], 1 << 12)
+        np.testing.assert_array_equal(actions.offsets.cpu().numpy()[:mine.sum() + 1], want.offsets)
+        assert (actions.index is not None) == drop
+        for name in ("parent", "schema", "binding", "succ_hash", "noop", "index"):
+            value = getattr(actions, name)
+            if value is None:
+                continue
+            assert value.shape[0] == rows and value.device == device, name
+            assert not value[total:].any(), name
+            got = value[:total].cpu().numpy()
+            expected = np.asarray(getattr(want, name))
+            np.testing.assert_array_equal(got.view(np.uint64) if name == "succ_hash" else got, expected, err_msg=name)
+    env.close()

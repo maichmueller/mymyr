@@ -152,14 +152,18 @@ class BatchedEnv:
     the true sizes are in the batch's ``device_sizes`` (``sizes``), and a batch that does not fit is all zero with its
     overflow flag set. Without capacities each encoding is exact, which on a device waits for the batch's sizes once
     (and cannot be captured). ``obs_actions=True`` adds the action relations of the observed states (their expansion;
-    with capacities the device expansion is bounded by the entity capacity, keeps its status on the device and
-    captures with the step; tables requiring host expansion are rejected); by default observations hold no action
-    tuples. With ``obs_actions`` the observation's expansion rows come along as ``Observation.actions`` /
-    ``StepResult.actions`` (:class:`ActionRows`: labels, successor hashes and no-op flags, without a second expansion),
-    and ``obs_drop_noops=True`` leaves out the actions whose successor equals the state (unless every successor of the
+    with capacities the device expansion is bounded, keeps its status on the device and captures with the step;
+    tables requiring host expansion are rejected); by default observations hold no action tuples. With ``obs_actions``
+    the observation's expansion rows come along as ``Observation.actions`` / ``StepResult.actions``
+    (:class:`ActionRows`: labels, successor hashes and no-op flags, without a second expansion), and
+    ``obs_drop_noops=True`` leaves out the actions whose successor equals the state (unless every successor of the
     state is one): their action entities are absent, the others keep their canonical successor index as
-    ``entity_ref``, so ``mymyr.encoding.action_indices`` still gives the actions the environment takes. Over a
-    suite an observation is a :class:`SuiteObservation`: one batch per domain and each row's index in its batch.
+    ``entity_ref``, so ``mymyr.encoding.action_indices`` still gives the actions the environment takes. With
+    capacities the entity capacity bounds the kept action rows (``entities`` times the largest number of schemas that
+    share an action relation), and ``obs_capacities['successors']`` the successors before the drop (default: the same
+    rows; with ``obs_drop_noops`` set it to the most successors the observed states have); more of either is an
+    overflow, reported alike on the CPU and on a device. Over a suite an observation is a :class:`SuiteObservation`:
+    one batch per domain and each row's index in its batch.
 
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing
     and allocate nothing (the environment's scratch is sized for N at construction), and the state tensors are marked

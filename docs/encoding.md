@@ -1541,7 +1541,11 @@ captured after warm-up. `actions=True` uses bounded device expansion; supplied p
 calls. Automatic actions require an asynchronous expansion backend for every domain, on both exact and capacity
 calls. Their expansions contain labels, parents, offsets and status with `succ=None`; successor states are not
 allocated. The device live-row count bounds action expansion: staged padding contributes no successors or
-overflow. Raw expansion status is preserved for the live rows.
+overflow. Raw expansion status is preserved for the live rows. A domain's entity capacity bounds its kept action rows
+(`entities` times the largest number of schemas that share an action relation); the optional key `successors` bounds
+the successors before `drop_noops=True` drops the no-op rows (default: the same rows). Host capacity calls with
+`actions=True` apply the same bounds, so a batch overflows (`capacity_overflow`, all arrays zero) on the CPU exactly
+when it does on a device.
 Device suites accept Simple output as well as relations, but refuse horizon and transition schemas; encode those
 with a separate view per domain.
 

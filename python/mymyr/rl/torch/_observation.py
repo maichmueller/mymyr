@@ -24,11 +24,16 @@ class ActionRows(NamedTuple):
     reaches (``State.hash()``, an int64 bit pattern as ``mymyr.hash_rows`` gives it), ``noop[row]`` whether that
     successor equals its state. With ``obs_drop_noops`` the no-op rows are dropped (unless every successor of the state is
     one) and ``index[row]`` is the row's position in the state's full canonical successor order, the action an
-    environment takes (None without the drop: the position is ``row - offsets[parent[row]]``). With ``obs_capacities``
-    the arrays have the capacity's rows (zero past ``offsets[N]``; ``index`` -1) and ``status`` holds the expansion's
-    flags on the device (bit 0: more successors than the capacity, bit 1: an invalid row), which the batch's overflow
-    flags report too; without capacities the arrays have exactly the rows and ``status`` is 0. Over a suite of several
-    domains ``actions`` is a tuple of these, one per domain batch.
+    environment takes (None without the drop: the position is ``row - offsets[parent[row]]``).
+
+    ``offsets`` has an entry per graph of the batch and one more. With ``obs_capacities`` the row arrays have, on the
+    CPU and on a device alike, the rows that the entity capacity's action entities can stand for (``entities`` times
+    the largest number of schemas that share an action relation), every array zero past ``offsets[-1]``; ``status``
+    bit 0 reports more kept rows than that or more successors before the drop than ``obs_capacities['successors']``
+    (default: the same rows), bit 1 an invalid row (a device's; the CPU raises), and the batch's overflow flags report
+    them too (an overflowed batch is all zero, and the rows are then unspecified). Without capacities the arrays have
+    exactly the rows and ``status`` is 0. Over a suite of several domains ``actions`` is a tuple of these, one per
+    domain batch.
     """
 
     parent: Tensor  # int32 [M]: the observed state (row of the observation) of each successor
@@ -51,14 +56,24 @@ def _tensor(value: Any, device: torch.device) -> Tensor:
     return torch.from_numpy(np.ascontiguousarray(array)).to(device)
 
 
-def _action_rows(x: Any, device: torch.device, drop: bool) -> ActionRows:
-    """The rows of an expansion (host or device) or of ``bounded_actions``."""
-    status = getattr(x, "status", None)
-    if status is None:
-        status = torch.zeros(1, dtype=torch.int32, device=device)
-    return ActionRows(*(_tensor(getattr(x, name), device) for name in ("parent", "schema", "binding", "offsets",
-                                                                      "succ_hash", "noop")),
-                      _tensor(x.index, device) if drop else None, status)
+def _action_rows(x: Any, device: torch.device, drop: bool, rows: Optional[int] = None, status: int = 0) -> ActionRows:
+    """The rows of an expansion (host or device) or of ``bounded_actions``; ``rows`` pads (or cuts) the row arrays of
+    an exact expansion to that many rows, zero past its own."""
+
+    def take(name: str) -> Tensor:
+        array = _tensor(getattr(x, name), device)
+        if rows is None:
+            return array
+        out = array.new_zeros((rows, *array.shape[1:]))
+        n = min(rows, array.shape[0])
+        out[:n] = array[:n]
+        return out
+
+    given = getattr(x, "status", None)
+    if given is None:
+        given = torch.tensor([status], dtype=torch.int32, device=device)
+    return ActionRows(*(take(name) for name in ("parent", "schema", "binding")), _tensor(x.offsets, device),
+                      *(take(name) for name in ("succ_hash", "noop")), take("index") if drop else None, given)
 
 
 class SuiteObservation(NamedTuple):
@@ -103,22 +118,25 @@ def _encoders(observation: Any) -> list:
     return [observation]
 
 
-def _capacities(value: Any, domains: int, rows: int) -> Optional[list[dict]]:
-    """Per encoder the capacities dict with ``graphs`` (default: the rows), or None (exact encodings)."""
+def _capacities(value: Any, domains: int, rows: int) -> tuple[Optional[list[dict]], list[Optional[int]]]:
+    """Per encoder the capacities dict with ``graphs`` (default: the rows), or None (exact encodings), and the
+    ``successors`` capacity of its action expansion (None: the default)."""
     if value is None:
-        return None
+        return None, [None] * domains
     if isinstance(value, Mapping):
         value = [value] * domains
     elif not isinstance(value, Sequence) or isinstance(value, str) or len(value) != domains:
         raise ValueError(f"mymyr: obs_capacities must be a dict or a sequence of {domains} dicts (one per domain)")
-    caps = []
+    caps, successors = [], []
     for item in value:
         if not isinstance(item, Mapping):
             raise ValueError("mymyr: obs_capacities must be a dict or a sequence of dicts, one per domain")
+        item = dict(item)
+        successors.append(item.pop("successors", None))
         caps.append({"graphs": rows, **item})
         if caps[-1]["graphs"] < rows:
             raise ValueError(f"mymyr: obs_capacities['graphs'] must be at least the number of environments ({rows})")
-    return caps
+    return caps, successors
 
 
 class Observer:
@@ -150,11 +168,18 @@ class Observer:
                                  "table the environments run on)")
         self.encoders = encoders
         self.tables = tables
-        self.capacities = _capacities(capacities, len(encoders), n)
+        self.capacities, self.successors = _capacities(capacities, len(encoders), n)
         self.actions = bool(actions)
         self.drop_noops = bool(drop_noops)
         if self.drop_noops and not self.actions:
             raise ValueError("mymyr: obs_drop_noops needs obs_actions=True")
+        if not self.actions and any(s is not None for s in self.successors):
+            raise ValueError("mymyr: obs_capacities['successors'] bounds the expansion of obs_actions=True")
+        if self.capacities is not None:
+            from mymyr.encoding._device_actions import expansion_rows
+
+            for e, c, s in zip(encoders, self.capacities, self.successors, strict=True):
+                expansion_rows(e, c.get("entities", 0), s, self.drop_noops)  # validates the successors capacity
         if self.actions and self.capacities is not None and self.device.type == "cuda":
             self._warm_rows = (env.states, env.task_ids, (env.goal_pos, env.goal_neg) if env.goals else None)
         self.goals = [_goal_lanes(e) for e in encoders]
@@ -178,16 +203,12 @@ class Observer:
                                        for c, e in zip(self.capacities, encoders, strict=True)]
                 if self.actions:
                     from mymyr._core import _cuda
-                    from mymyr.encoding._device_actions import action_capacity, table_of
+                    from mymyr.encoding._device_actions import table_of
 
-                    # the expansion of a traced observation: the encoder's own table (one device context for every
-                    # call and replay), its handle and the label capacity of the entity capacity
-                    tables = [table_of(e) for e in encoders]
-                    for t in tables:
-                        _cuda._check_async_expansion(t, n, self.device.index, _ops._stream(self.device))
-                    self._table_handles = [_ops._register_owned(t) for t in tables]
-                    self._action_capacities = [action_capacity(e, caps[1])
-                                               for e, caps in zip(encoders, self._op_capacities, strict=True)]
+                    # the expansion of a traced observation runs on the encoder's own table (one device context for
+                    # every call and replay), which needs asynchronous expansion
+                    for e in encoders:
+                        _cuda._check_async_expansion(table_of(e), n, self.device.index, _ops._stream(self.device))
             if self.suite is not None and self.capacities is not None:
                 self._suite_buffers(env)
         if self.suite is not None:
@@ -260,7 +281,8 @@ class Observer:
             return rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states), **options)
         from mymyr.encoding._device_actions import bounded_actions
 
-        return bounded_actions(self.encoders[k], states, task_ids, caps["entities"], live=live, **options)
+        return bounded_actions(self.encoders[k], states, task_ids, caps["entities"], successors=self.successors[k],
+                               live=live, **options)
 
     def _encode(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> tuple[Any, Any]:
         encoder = self.encoders[k]
@@ -269,13 +291,25 @@ class Observer:
         if self.device.type == "cuda" and torch.compiler.is_compiling():
             return self._encode_op(k, states, task_ids, goals, caps)
         actions = self._expand(k, states, task_ids, caps) if self.actions else None
-        rows = None if actions is None else _action_rows(actions, self.device, self.drop_noops)
         if self.device.type == "cuda":
+            rows = None if actions is None else _action_rows(actions, self.device, self.drop_noops)
             arrays = _device.encode_arrays(encoder, states, task_ids, None, goals,
                                            None if caps is None else _device._capacities(caps, _device.layout_of(encoder)),
                                            actions=actions)
             return _device.DeviceFlatBatch(encoder, arrays, exact=caps is None), rows
-        return encoder.encode(states, task_ids, goals=goals, actions=actions, capacities=caps), rows
+        batch = encoder.encode(states, task_ids, goals=goals, actions=actions, capacities=caps)
+        if actions is None:
+            return batch, None
+        if caps is None:
+            return batch, _action_rows(actions, self.device, self.drop_noops)
+        # the bounds of a device's bounded expansion, so that both report the same overflow
+        from mymyr.encoding._device_actions import action_capacity, bound_status, overflowed
+
+        status = bound_status(encoder, actions, caps["entities"], self.successors[k], self.drop_noops)
+        if status:
+            batch = overflowed(batch)
+        rows = _action_rows(actions, self.device, self.drop_noops, action_capacity(encoder, caps["entities"]), status)
+        return batch, rows
 
     def _encode_op(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple],
                    caps: Optional[dict]) -> tuple[Any, Any]:
@@ -284,11 +318,11 @@ class Observer:
         gp, gn = (None, None) if goals is None else goals
         rows, given = None, {}
         if self.actions:
-            # labels only (rows=False), digested while each successor is built
-            out = torch.ops.mymyr.expand_flat(self._table_handles[k], states, task_ids, self._action_capacities[k],
-                                              rows=False, hashes=True, noops=True, drop_noops=self.drop_noops)
-            _, parent, schema, binding, _, offsets, _, succ_hash, noop, index, status = out
-            index = index if self.drop_noops else None
+            out = torch.ops.mymyr.bounded_actions(self.handles[k], states, task_ids, self._op_capacities[k][1],
+                                                  self.successors[k], self.drop_noops)
+            labels, binding, offsets, succ_hash, noop, status = out
+            parent, schema = labels[0], labels[1]
+            index = labels[2] if self.drop_noops else None
             rows = ActionRows(parent, schema, binding, offsets, succ_hash, noop, index, status)
             given = dict(action_schema=schema, action_binding=binding, action_offsets=offsets, action_parent=parent,
                          action_index=index, action_status=status)
@@ -385,10 +419,9 @@ class Observer:
     def close(self) -> None:
         from mymyr.rl.torch import _ops
 
-        for h in (*getattr(self, "handles", ()), *getattr(self, "_table_handles", ())):
+        for h in getattr(self, "handles", ()):
             _ops.unregister(h)
         self.handles = []
-        self._table_handles = []
 
 
 def _table_of(table: Any) -> Any:

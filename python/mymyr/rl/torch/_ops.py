@@ -34,6 +34,11 @@ the states again; required on a device).
   derived, succ_hash, noop, index, status). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
   size under ``torch.compile``; a capacity gives static shapes (rows past it are dropped, rows past the total are
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
+- ``mymyr::bounded_actions(encoder, states, task_ids, entities, successors=None, drop_noops=False)``: the label-only
+  expansion of a ``register``-ed encoder's task whose rows the action entities of an encoding with the entity
+  capacity ``entities`` stand for, with successor digests and no-op flags: (labels, binding, offsets, succ_hash, noop,
+  status), the rows of ``labels`` parent, schema and, with ``drop_noops``, index. Static shapes, zero past the kept rows; ``successors`` bounds the successors
+  before ``drop_noops`` drops the no-op rows. It waits for nothing, so it captures (no ``cudagraph_unsafe`` tag).
 - ``mymyr::encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
   subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
   history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0,
@@ -65,6 +70,7 @@ import mymyr.rl
 from mymyr.encoding import _device
 
 __all__ = [
+    "bounded_actions",
     "encode_flat",
     "literal_masks",
     "literal_slots",
@@ -732,6 +738,44 @@ def _(table, states, task_ids, k, witness_pruning=False, derived=False, rows=Tru
 
 
 # ------------------------------------------------------------------------------------------------ encoding
+
+
+@_op("mymyr::bounded_actions", mutates_args=())
+def bounded_actions(
+    encoder: int, states: Tensor, task_ids: Optional[Tensor], entities: int, successors: Optional[int] = None,
+    drop_noops: bool = False,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """The expansion rows that the action entities of an encoding of ``states`` [N, W] (device rows) by the
+    :func:`register`-ed ``FlatRelationEncoder`` ``encoder`` stand for, labels only: ``labels`` int32 [2, M] (parent
+    and schema; [3, M] with index as the third row with ``drop_noops``), binding [M, label_width], offsets [N + 1],
+    succ_hash (int64 [M]), noop (bool [M]) and the int32 status [1].
+
+    The row arrays have the rows that ``entities`` action entities can stand for (the entity capacity times the
+    largest number of schemas that share an action relation) and are zero past the kept rows (unlike
+    ``expand_flat``'s padding, so that the rows past them index nothing out of range). ``successors`` bounds
+    the successors before ``drop_noops`` drops the no-op rows (default: the rows of the arrays). Status bit 0 reports
+    more successors than that or more kept rows than the arrays have, bit 1 an invalid row; pass the arrays and the
+    status to ``encode_flat`` (``action_*``), whose batch then reports the overflow. Nothing waits for the device and
+    the op allocates only its outputs and scratch that a captured call keeps, so it captures into CUDA graphs (warm it
+    on the capture stream first)."""
+    from mymyr.encoding._device_actions import bounded_actions as bounded
+
+    x = bounded(lookup(encoder), states, task_ids, entities, successors=successors, hashes=True, noops=True,
+                drop_noops=drop_noops)
+    return x.labels, x.binding, x.offsets, x.succ_hash, x.noop, x.status
+
+
+@bounded_actions.register_fake
+def _(encoder, states, task_ids, entities, successors=None, drop_noops=False):
+    from mymyr.encoding._device_actions import action_capacity, table_of
+
+    enc = lookup(encoder)
+    rows = action_capacity(enc, entities)
+    i32 = dict(dtype=torch.int32)
+    return (states.new_empty((3 if drop_noops else 2, rows), **i32),
+            states.new_empty((rows, table_of(enc).label_width), **i32), states.new_empty(states.shape[0] + 1, **i32),
+            states.new_empty(rows, dtype=torch.int64), states.new_empty(rows, dtype=torch.bool),
+            states.new_empty(1, **i32))
 
 
 def _encode_flat_outputs(

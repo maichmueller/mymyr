@@ -125,7 +125,11 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
             live = None
             caps = None
         else:
-            caps = d._capacities(dict(capacities[k]), d.layout_of(part_encoder))
+            given_caps = dict(capacities[k])
+            successors = given_caps.pop("successors", None)
+            if successors is not None and actions is not True:
+                raise d._error("capacities['successors'] bounds the expansion of actions=True")
+            caps = d._capacities(given_caps, d.layout_of(part_encoder))
             if caps[0] < n:
                 raise d._error("each domain's graph capacity must cover all input rows")
             live = counts[k:k + 1].clone()
@@ -146,7 +150,8 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
                 exp = rl.expand(table, action_states(part_encoder, part, part_ids), part_ids,
                                 framework="torch", stream=_stream(device), drop_noops=drop_noops)
             else:
-                exp = bounded_actions(part_encoder, part, part_ids, caps[1], live=live, drop_noops=drop_noops)
+                exp = bounded_actions(part_encoder, part, part_ids, caps[1], successors=successors, live=live,
+                                      drop_noops=drop_noops)
         if exp is not None:
             expansions[k] = exp
         inputs = [_input(v, idx, n, keep) for v in (derived, goals, subgoals, history)]
