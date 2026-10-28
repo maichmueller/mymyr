@@ -1600,6 +1600,11 @@ constexpr const char* k_template_arrays[] = {"instance_offsets", "template_size"
                                              "goal_literal"};
 }  // namespace
 
+std::shared_ptr<const rl::GoalTemplates> goal_templates_of(nb::handle object)
+{
+    return nb::cast<const PyGoalTemplates&>(object).t;
+}
+
 void bind_rl(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl", "Batched RL primitives (mymyr.rl)");
@@ -2681,6 +2686,25 @@ void bind_rl(nb::module_& parent)
                      "The most variables a template has (the width of order).")
         .def_prop_ro("max_arity", [](const PyGoalTemplates& t) { return t.t->max_arity(); },
                      "The largest literal arity (the width of terms).")
+        .def_prop_ro("capacity", [](const PyGoalTemplates& t) { return t.t->capacity(); },
+                     "The most templates of any instance (the padded match width).")
+        .def_prop_ro("needs_derived", [](const PyGoalTemplates& t) { return t.t->needs_derived(); },
+                     "Whether matching requires derived words.")
+        .def("_block", [](const PyGoalTemplates& t) {
+            ArraySpec a;
+            a.owner = t.t->shared_arrays();
+            a.data = t.t->arrays().block();
+            a.dtype = rl::DType::U8;
+            a.shape = {static_cast<i64>(t.t->arrays().bytes())};
+            a.readonly = true;
+            return ArrayOut(export_array(std::move(a), Framework::Numpy, default_words(Framework::Numpy)));
+        })
+        .def("to", [](Arg<PyGoalTemplates> self, Arg<ann::Any> device) {
+            return Arg<ann::DeviceGoalTemplates>(nb::module_::import_("mymyr.rl._match").attr("DeviceGoalTemplates")(self, device));
+        }, "device"_a, "Uploads the packed templates and literal index to a torch CUDA device. Retain through graph replay.")
+        .def("upload", [](Arg<PyGoalTemplates> self, StreamArg stream) {
+            return Arg<ann::DeviceGoalTemplates>(nb::module_::import_("mymyr.rl._match").attr("upload")(self, stream));
+        }, "stream"_a = nb::none(), "Uploads on a torch CUDA stream (None: the current stream).")
         .def_prop_ro("nbytes", [](const PyGoalTemplates& t) { return t.t->arrays().bytes(); },
                      "Bytes of the packed arrays.")
         .def_prop_ro("options", [](const PyGoalTemplates& t) { return template_options(*t.t); },
@@ -2698,7 +2722,8 @@ void bind_rl(nb::module_& parent)
             "predicate (the instance's domain table's predicate id), polarity, kind (0 static, 1 fluent, 2 derived), "
             "arity, terms [L, max_arity] (>= 0 a variable, < 0 the object -(t + 1), -2**31 padding) and goal_literal (the "
             "index in the instance's task.goal_condition.literals, -1 for templates from conditions); scalars "
-            "num_instances, num_templates, num_literals, max_vars, max_arity.")
+            "num_instances, num_templates, num_literals, max_vars, max_arity, capacity. The literal index is stored in "
+            "literal_inst, literal_ranges, literal_slots, literal_derived and literal_static; it is included in nbytes.")
         .def(
             "conditions",
             [](const PyGoalTemplates& t, InstanceArg instance) {

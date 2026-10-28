@@ -122,6 +122,8 @@ add_library(mymyr_core STATIC
     src/mymyr/rl/ops.cpp
     # lifted goal templates (lifted hindsight relabelling)
     src/mymyr/rl/goal_templates.cpp
+    src/mymyr/rl/literal_index.cpp
+    src/mymyr/rl/match.cpp
     # heuristics and best-first search
     src/mymyr/heuristics/action_costs.cpp
     src/mymyr/heuristics/relaxed_task.cpp

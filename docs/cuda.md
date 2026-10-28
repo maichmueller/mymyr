@@ -129,6 +129,16 @@ instance-local object ids into slots and goal or subgoal masks. They support bot
 capture after warming the encoder on the capture stream; invalid inputs report value 4 in a device status scalar.
 See [Encoding on the device](encoding.md#encoding-on-the-device) for shapes and the torch custom ops.
 
+`rl.match_first` matches lifted goal templates using the same canonical binding order as the host. Upload the packed
+templates and sorted literal index once with `templates.to("cuda:0")` (or `upload(stream)`). The result's flags,
+bindings, global template ids, counts and status stay on the device. `first=True` stops at the first matched template;
+a fixed capacity pads outputs and reports truncation through status. Negative and static literals are supported;
+derived literals require supplied derived words. Device templates support up to 64 variables. Each row and template
+is searched by one warp within the step budget `max_steps`; status bit 3 (value 8) reports an exhausted search, which
+leaves that template unmatched. Warm on the capture stream and keep templates and graph buffers alive through replay. The launcher `cuda::launch_match_first` uses
+caller-owned buffers without allocation or synchronization; `mymyr::match_first` has a torch fake. See
+[Lifted hindsight relabelling](rl.md#lifted-hindsight-relabelling) for shapes, status bits and examples.
+
 CUDA upload, expansion, BrFS, multi-IW, rollouts, state spaces, RL environments and A*/GBFS support numeric fluent
 values, preconditions, effects, goals and metric costs. Public state rows preserve CPU I32/F64 encoding; internal
 numeric rows hold one canonical double per fluent slot. TaskTable/TaskSuite numeric batches use per-instance kernels

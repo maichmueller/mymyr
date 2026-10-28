@@ -35,6 +35,14 @@ struct SamplerArg
 struct Sampler
 {
 };
+/// A packed host query table.
+struct GoalTemplates
+{
+};
+/// A packed query table uploaded to a torch CUDA device.
+struct DeviceGoalTemplates
+{
+};
 /// Which template variables bind distinct objects (rl::Distinct): True, False or "equality".
 struct TemplateDistinct
 {
@@ -78,6 +86,16 @@ template<>
 struct type_caster<mymyr::python::ann::HerStrategy>
 {
     static constexpr auto Name = const_name("typing.Literal['future', 'final', 'episode']");
+};
+template<>
+struct type_caster<mymyr::python::ann::GoalTemplates>
+{
+    static constexpr auto Name = const_name("mymyr._core._rl.GoalTemplates");
+};
+template<>
+struct type_caster<mymyr::python::ann::DeviceGoalTemplates>
+{
+    static constexpr auto Name = const_name("mymyr._typing.DeviceGoalTemplates");
 };
 template<>
 struct type_caster<mymyr::python::ann::TemplateDistinct>

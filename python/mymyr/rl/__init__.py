@@ -158,11 +158,15 @@ from mymyr._core._rl import (
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks, visited_mask
 from mymyr.rl._sampling import InstanceSampler
+from mymyr.rl._match import DeviceGoalTemplates, MatchResult, match_first
 
 __all__ = [
     "CpuEnvPool",
     "Expansion",
     "GoalTemplates",
+    "DeviceGoalTemplates",
+    "MatchResult",
+    "match_first",
     "HerBatch",
     "InstanceSampler",
     "PaddedExpansion",

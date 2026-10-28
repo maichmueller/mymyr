@@ -8,6 +8,7 @@
 
 #include "mymyr/rl/her.hpp"
 #include "mymyr/core/hash.hpp"
+#include "mymyr/rl/match.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
 
@@ -48,6 +49,8 @@ cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, 
 cudaError_t launch_expansion_indices(ExpansionRows out, u64 rows, cudaStream_t s, const u32* status = nullptr);
 /// counts[i] = offsets[i + 1] - offsets[i] for i < rows.
 cudaError_t launch_segment_counts(const i32* offsets, u64 rows, i32* counts, cudaStream_t s);
+/// Lifted goal matching on caller-owned arrays; no allocation or host synchronization.
+cudaError_t launch_match_first(const rl::MatchTemplates& templates, const rl::MatchBatch& batch, cudaStream_t s);
 
 /// rl::novelty_update on device arrays: seen [rows, words] (in place), states [rows, state_stride], reward [rows].
 cudaError_t launch_novelty_update(u64* seen, const u64* states, u64 rows, u32 words, u32 state_stride, i32* reward,

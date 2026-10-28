@@ -68,6 +68,7 @@ __all__ = [
     "encode_flat",
     "literal_masks",
     "literal_slots",
+    "match_first",
     "expand",
     "expand_flat",
     "lookup",
@@ -101,7 +102,8 @@ _ids = itertools.count(1)
 
 
 def register(obj: Any) -> int:
-    """The op handle of a TaskTable, Task, TaskHandle, encoder or native Env (the same handle for the same object). The
+    """The op handle of a task source, host or uploaded templates, an encoder or a native Env (the same handle for
+    the same object). The
     registry holds a reference until :func:`unregister`."""
     with _lock:
         h = _by_id.get(id(obj))
@@ -929,3 +931,27 @@ def _(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, lay
     return [*(predicates.new_empty((*shape, words), dtype=torch.int64)
               for words in (table.words, table.words, table.derived_words, table.derived_words)),
             predicates.new_empty(shape, dtype=torch.bool), predicates.new_empty((), dtype=torch.int64)]
+
+
+@torch.library.custom_op("mymyr::match_first", mutates_args=())
+def match_first(templates: int, rows: Tensor, task_ids: Optional[Tensor] = None, first: bool = False,
+                derived: Optional[Tensor] = None, capacity: Optional[int] = None,
+                max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    """Lifted matching on registered host or uploaded templates; found, binding, template, count, status.
+
+    Shapes and canonical binding order are those of mymyr.rl.match_first. Upload before capture and retain the
+    registered templates through the last replay. Output capacity is static; no host read of device counts occurs.
+    """
+    from mymyr.rl._match import _match
+    return list(_match(rows, task_ids, lookup(templates), first, derived, capacity, max_steps=max_steps))
+
+
+@match_first.register_fake
+def _(templates, rows, task_ids=None, first=False, derived=None, capacity=None, max_steps=100_000_000):
+    t = lookup(int(templates))
+    width = (1 if first else t.capacity) if capacity is None else capacity
+    shape = (rows.shape[0],) if first else (rows.shape[0], width)
+    return [rows.new_empty(shape, dtype=torch.bool),
+            rows.new_empty((*shape, t.max_vars), dtype=torch.int32),
+            rows.new_empty(shape, dtype=torch.int32), rows.new_empty((rows.shape[0],), dtype=torch.int32),
+            rows.new_empty((), dtype=torch.int64)]

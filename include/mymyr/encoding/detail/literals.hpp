@@ -63,7 +63,8 @@ struct LiteralSlot
 
 /// The first row among the rows [begin, end) of `rows` (`stride` entries each, the first `arity` compared) that is not
 /// lexicographically less than `objects`, and whether it equals `objects`.
-MYMYR_HD bool find_literal_row(const i32* rows, u32 stride, u32 begin, u32 end, const i32* objects, u32 arity, u32& at)
+template<class Objects>
+MYMYR_HD bool find_literal_row(const i32* rows, u32 stride, u32 begin, u32 end, const Objects& objects, u32 arity, u32& at)
 {
     u32 lo = begin, hi = end;
     while (lo < hi)
@@ -95,7 +96,8 @@ MYMYR_HD bool find_literal_row(const i32* rows, u32 stride, u32 begin, u32 end, 
 
 /// Resolves the atom `predicate(objects...)` of `instance`. `objects` has `width` entries: the predicate's arity in
 /// objects of the instance, then -1 up to `width` (Invalid if the arity exceeds `width`).
-MYMYR_HD LiteralSlot resolve_literal(const ContextView& c, i64 instance, i64 predicate, const i32* objects, u32 width)
+template<class Objects>
+MYMYR_HD LiteralSlot resolve_literal(const ContextView& c, i64 instance, i64 predicate, const Objects& objects, u32 width)
 {
     const LiteralSlot invalid{LiteralKind::Invalid, 0};
     if (instance < 0 || instance >= c.num_instances || predicate < 0 || predicate >= c.num_predicates ||

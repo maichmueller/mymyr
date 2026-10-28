@@ -15,8 +15,10 @@
 #include "mymyr/rl/env.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/her.hpp"
+#include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
+#include "mymyr/successor/bindings.hpp"
 
 #include <gtest/gtest.h>
 
@@ -393,4 +395,295 @@ TEST(DeviceCountCache, SokobanRecordsKeysAndStaysEqualToTheHost)
     env.refresh(db, ptr<i32>(dcount));
     env.step(db, dout);
     EXPECT_NO_THROW(env.check_errors());
+}
+
+TEST(DeviceRlOps, MatchFirstDeviceEqualsHostAndCapturedReplay)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    for (const auto& name : std::vector<std::string>{"blocks__probBLOCKS-8-0", "gripper__prob05"})
+    {
+        const auto task = load(name);
+        const auto suite = rl::TaskSuite::of(rl::TaskTable::single(task));
+        const auto templates = rl::lifted_goal_templates(suite);
+        const auto window = rollout(task, 5, 9, 13);
+        const u64 rows = 45;
+        std::vector<std::byte> packed(templates.arrays().bytes());
+        std::memcpy(packed.data(), templates.arrays().block(), packed.size());
+        auto block = upload(ctx, packed, stream);
+        auto states = upload(ctx, window.states, stream);
+        auto ids = upload(ctx, std::vector<i32>(rows, 0), stream);
+        for (bool first : {false, true})
+        {
+            const u32 capacity = first ? 1 : templates.capacity();
+            std::vector<u8> found(rows * capacity);
+            std::vector<i32> binding(rows * capacity * templates.max_vars()), which(rows * capacity), count(rows);
+            u64 status = 99;
+            rl::MatchBatch host;
+            host.states = window.states.data();
+            host.rows = rows;
+            host.row_words = window.RW;
+            host.capacity = capacity;
+            host.first = first;
+            host.found = found.data();
+            host.binding = binding.data();
+            host.template_id = which.data();
+            host.count = count.data();
+            host.status = &status;
+            rl::match_first(templates.view(), host);
+            ASSERT_EQ(status, 0);
+            auto df = upload(ctx, found, stream), db = upload(ctx, binding, stream);
+            auto dt = upload(ctx, which, stream), dc = upload(ctx, count, stream);
+            auto ds = upload(ctx, std::vector<u64>{99}, stream);
+            auto device = host;
+            device.states = ptr<const u64>(states);
+            device.task_ids = ptr<const i32>(ids);
+            device.found = ptr<u8>(df);
+            device.binding = ptr<i32>(db);
+            device.template_id = ptr<i32>(dt);
+            device.count = ptr<i32>(dc);
+            device.status = ptr<u64>(ds);
+            const auto view = templates.view(static_cast<const std::byte*>(block.data()));
+            cuda::check(cuda::launch_match_first(view, device, stream), "match_first warm-up");
+            cuda::check(cudaStreamSynchronize(stream), "sync");
+            cudaGraph_t graph{};
+            cudaGraphExec_t executable{};
+            if (cuda::GraphExec::enabled())
+            {
+                cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+                cuda::check(cuda::launch_match_first(view, device, stream), "match_first capture");
+                cuda::check(cudaStreamEndCapture(stream, &graph), "end capture");
+                cuda::check(cudaGraphInstantiate(&executable, graph, 0), "instantiate");
+                cuda::check(cudaGraphLaunch(executable, stream), "replay");
+            }
+            EXPECT_EQ(download<u8>(df, found.size(), stream), found);
+            EXPECT_EQ(download<i32>(db, binding.size(), stream), binding);
+            EXPECT_EQ(download<i32>(dt, which.size(), stream), which);
+            EXPECT_EQ(download<i32>(dc, count.size(), stream), count);
+            EXPECT_EQ(download<u64>(ds, 1, stream)[0], 0);
+            cuda::check(cudaMemsetAsync(ids.data(), 0xff, rows * sizeof(i32), stream), "invalid ids");
+            if (executable)
+                cuda::check(cudaGraphLaunch(executable, stream), "replay invalid ids");
+            else
+                cuda::check(cuda::launch_match_first(view, device, stream), "match_first invalid ids");
+            EXPECT_EQ(download<u64>(ds, 1, stream)[0], 4);
+            EXPECT_EQ(download<i32>(dc, count.size(), stream), std::vector<i32>(rows, 0));
+            if (executable)
+                cuda::check(cudaGraphExecDestroy(executable), "destroy exec");
+            if (graph)
+                cuda::check(cudaGraphDestroy(graph), "destroy graph");
+            cuda::check(cudaMemsetAsync(ids.data(), 0, rows * sizeof(i32), stream), "restore ids");
+            cuda::check(cudaStreamSynchronize(stream), "sync");
+        }
+    }
+}
+
+TEST(DeviceRlOps, MatchFirstReportsCapacityVariableLimitAndInvalidInstances)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    const auto task = load("gripper__prob05");
+    const auto templates = rl::lifted_goal_templates(rl::TaskSuite::of(rl::TaskTable::single(task)));
+    const auto window = rollout(task, 2, 2, 3);
+    std::vector<std::byte> packed(templates.arrays().bytes());
+    std::memcpy(packed.data(), templates.arrays().block(), packed.size());
+    auto block = upload(ctx, packed, stream);
+    auto states = upload(ctx, window.states, stream);
+    auto ids = upload(ctx, std::vector<i32>{0, -1, 0, 0}, stream);
+    auto count = upload(ctx, std::vector<i32>(4), stream);
+    auto status = upload(ctx, std::vector<u64>{99}, stream);
+    auto oversized = upload(ctx, std::vector<i32>(templates.num_templates(), 65), stream);
+    auto view = templates.view(static_cast<const std::byte*>(block.data()));
+    rl::MatchBatch b;
+    b.rows = 4;
+    b.states = ptr<const u64>(states);
+    b.task_ids = ptr<const i32>(ids);
+    b.row_words = window.RW;
+    b.capacity = 0;
+    b.count = ptr<i32>(count);
+    b.status = ptr<u64>(status);
+    cuda::check(cuda::launch_match_first(view, b, stream), "truncated matches");
+    EXPECT_EQ(download<u64>(status, 1, stream)[0], 5);
+    const auto counts = download<i32>(count, 4, stream);
+    EXPECT_GT(counts[0], 0);
+    EXPECT_EQ(counts[1], 0);
+    view.num_vars = ptr<const i32>(oversized);
+    cuda::check(cuda::launch_match_first(view, b, stream), "oversized templates");
+    EXPECT_EQ(download<u64>(status, 1, stream)[0], 6);
+    EXPECT_EQ(download<i32>(count, 4, stream), std::vector<i32>(4, 0));
+    b.rows = 0;
+    cuda::check(cuda::launch_match_first(view, b, stream), "empty matches");
+    EXPECT_EQ(download<u64>(status, 1, stream)[0], 0);
+}
+
+TEST(DeviceRlOps, MatchFirstGroundOnlyNeedsNoBindingStorage)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    const auto task = load("gripper__prob05");
+    const auto suite = rl::TaskSuite::of(rl::TaskTable::single(task));
+    const auto lifted = rl::lifted_goal_templates(suite);
+    auto condition = lifted.condition(0);
+    const auto state = task->initial_state();
+    std::vector<ObjectId> binding;
+    {
+        const auto workspace = task->workspace();
+        for_each_binding(*task, *workspace, condition, state.view(), {}, [&](std::span<const ObjectId> values)
+        {
+            binding.assign(values.begin(), values.end());
+            return false;
+        });
+    }
+    ASSERT_EQ(binding.size(), condition.variables.size());
+    for (auto& literal : condition.literals)
+        for (auto& term : literal.terms)
+            if (term >= 0)
+                term = formalism::object_term(binding[static_cast<u32>(term)]);
+    condition.variables.clear();
+    condition.equalities.clear();
+    const auto templates = rl::GoalTemplates::from_conditions(suite, {{condition}});
+    ASSERT_EQ(templates.max_vars(), 0);
+    std::vector<u64> words(suite->words(), 0);
+    std::copy(state.words().begin(), state.words().end(), words.begin());
+    u8 found = 0;
+    i32 which = -1, count = 0;
+    u64 status = 99;
+    rl::MatchBatch batch;
+    batch.rows = 1;
+    batch.row_words = suite->words();
+    batch.states = words.data();
+    batch.capacity = 1;
+    batch.first = true;
+    batch.found = &found;
+    batch.template_id = &which;
+    batch.count = &count;
+    batch.status = &status;
+    rl::match_first(templates.view(), batch);
+    ASSERT_EQ(found, 1);
+    ASSERT_EQ(which, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_EQ(status, 0);
+    std::vector<std::byte> packed(templates.arrays().bytes());
+    std::memcpy(packed.data(), templates.arrays().block(), packed.size());
+    auto block = upload(ctx, packed, stream), states = upload(ctx, words, stream);
+    auto df = upload(ctx, std::vector<u8>{0}, stream);
+    auto dt = upload(ctx, std::vector<i32>{-1}, stream), dc = upload(ctx, std::vector<i32>{0}, stream);
+    auto ds = upload(ctx, std::vector<u64>{99}, stream);
+    batch.states = ptr<const u64>(states);
+    batch.found = ptr<u8>(df);
+    batch.template_id = ptr<i32>(dt);
+    batch.count = ptr<i32>(dc);
+    batch.status = ptr<u64>(ds);
+    cuda::check(cuda::launch_match_first(templates.view(static_cast<const std::byte*>(block.data())), batch, stream),
+                "ground-only match");
+    EXPECT_EQ(download<u8>(df, 1, stream)[0], found);
+    EXPECT_EQ(download<i32>(dt, 1, stream)[0], which);
+    EXPECT_EQ(download<i32>(dc, 1, stream)[0], count);
+    EXPECT_EQ(download<u64>(ds, 1, stream)[0], status);
+}
+
+TEST(DeviceRlOps, MatchFirstPigeonholeAndSearchBudgetEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const auto stream = ctx->stream();
+    namespace ed = encoding::detail;
+    for (u32 mode = 0; mode < 5; ++mode)
+    {
+        SCOPED_TRACE(mode);
+        const bool typed = mode == 1;
+        const u32 vars = mode < 2 || mode == 4 ? 64 : 4;
+        std::vector<u64> inst(ed::k_instance_columns), states(1);
+        inst[ed::k_num_objects] = typed ? 70 : mode < 2 || mode == 4 ? 63 : 4;
+        std::vector<u32> ranges(ed::k_literal_columns);
+        ranges[ed::k_literal_predicate_kind] = ed::k_literal_static_predicate;
+        ranges[ed::k_literal_static_end] = typed ? 63 : 1;
+        std::vector<i32> instance_offsets{0, 1}, num_vars{static_cast<i32>(vars)};
+        std::vector<i32> literal_offsets{0, typed ? 64 : 1}, order(64), terms(64), args(63);
+        for (i32 v = 0; v < 64; ++v)
+            order[v] = terms[v] = v;
+        for (i32 v = 0; v < 63; ++v)
+            args[v] = v;
+        std::vector<i32> predicate(typed ? 64 : 1), arity(predicate.size(), typed ? 1 : 0);
+        std::vector<u8> polarity(predicate.size(), 1), distinct{static_cast<u8>(mode != 4)};
+        rl::MatchTemplates t;
+        t.num_instances = t.capacity = t.max_arity = 1;
+        t.max_vars = 64;
+        t.instance_offsets = instance_offsets.data();
+        t.num_vars = num_vars.data();
+        t.literal_offsets = literal_offsets.data();
+        t.order = order.data();
+        t.terms = terms.data();
+        t.predicate = predicate.data();
+        t.arity = arity.data();
+        t.polarity = polarity.data();
+        t.distinct = distinct.data();
+        t.literals.inst = inst.data();
+        t.literals.num_instances = t.literals.num_predicates = t.literals.max_arity = 1;
+        t.literals.literal_ranges = ranges.data();
+        t.literals.static_args = args.data();
+        std::vector<u8> found(1, 99);
+        std::vector<i32> binding(64, 99), which(1, 99), count(1, 99);
+        u64 status = 99;
+        rl::MatchBatch b;
+        b.states = states.data();
+        b.rows = b.row_words = b.capacity = 1;
+        b.max_steps = mode == 0 ? 0 : typed ? 3 : mode == 2 ? 7 : mode == 3 ? 8 : 128;
+        b.found = found.data();
+        b.binding = binding.data();
+        b.template_id = which.data();
+        b.count = count.data();
+        b.status = &status;
+        rl::match_first(t, b);
+        ASSERT_EQ(status, mode == 2 ? 8 : 0);
+        ASSERT_EQ(found[0], mode >= 3 ? 1 : 0);
+        ASSERT_EQ(count[0], mode >= 3 ? 1 : 0);
+        ASSERT_EQ(which[0], mode >= 3 ? 0 : -1);
+        for (u32 v = 0; v < 64; ++v)
+            ASSERT_EQ(binding[v], mode == 4 ? 0 : mode == 3 && v < vars ? static_cast<i32>(v) : -1);
+        auto di = upload(ctx, inst, stream), dr = upload(ctx, ranges, stream);
+        auto dio = upload(ctx, instance_offsets, stream), dnv = upload(ctx, num_vars, stream);
+        auto dlo = upload(ctx, literal_offsets, stream), dor = upload(ctx, order, stream);
+        auto dte = upload(ctx, terms, stream), da = upload(ctx, args, stream);
+        auto dp = upload(ctx, predicate, stream), dar = upload(ctx, arity, stream);
+        auto dpo = upload(ctx, polarity, stream), dd = upload(ctx, distinct, stream);
+        t.instance_offsets = ptr<const i32>(dio);
+        t.num_vars = ptr<const i32>(dnv);
+        t.literal_offsets = ptr<const i32>(dlo);
+        t.order = ptr<const i32>(dor);
+        t.terms = ptr<const i32>(dte);
+        t.predicate = ptr<const i32>(dp);
+        t.arity = ptr<const i32>(dar);
+        t.polarity = ptr<const u8>(dpo);
+        t.distinct = ptr<const u8>(dd);
+        t.literals.inst = ptr<const u64>(di);
+        t.literals.literal_ranges = ptr<const u32>(dr);
+        t.literals.static_args = ptr<const i32>(da);
+        auto ds = upload(ctx, states, stream), df = upload(ctx, found, stream), db = upload(ctx, binding, stream);
+        auto dt = upload(ctx, which, stream), dc = upload(ctx, count, stream);
+        auto dst = upload(ctx, std::vector<u64>{99}, stream);
+        b.states = ptr<const u64>(ds);
+        b.found = ptr<u8>(df);
+        b.binding = ptr<i32>(db);
+        b.template_id = ptr<i32>(dt);
+        b.count = ptr<i32>(dc);
+        b.status = ptr<u64>(dst);
+        cuda::check(cuda::launch_match_first(t, b, stream), "bounded matches");
+        EXPECT_EQ(download<u8>(df, 1, stream), found);
+        EXPECT_EQ(download<i32>(db, 64, stream), binding);
+        EXPECT_EQ(download<i32>(dt, 1, stream), which);
+        EXPECT_EQ(download<i32>(dc, 1, stream), count);
+        EXPECT_EQ(download<u64>(dst, 1, stream)[0], status);
+    }
+}
+
+TEST(DeviceRlOps, MatchFirstRequiresStatus)
+{
+    rl::MatchTemplates t;
+    rl::MatchBatch b;
+    EXPECT_THROW(rl::match_first(t, b), std::invalid_argument);
+    EXPECT_EQ(cuda::launch_match_first(t, b, nullptr), cudaErrorInvalidValue);
 }

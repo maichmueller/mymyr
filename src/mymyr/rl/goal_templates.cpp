@@ -3,6 +3,7 @@
 #include "mymyr/rl/goal_templates.hpp"
 
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/encoding/literal_index.hpp"
 #include "mymyr/successor/bindings.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -609,6 +610,64 @@ struct GoalTemplates::Packer
         b.scalar("num_literals", L);
         b.scalar("max_vars", max_vars);
         b.scalar("max_arity", max_arity);
+        namespace ed = encoding::detail;
+        u32 index_arity = 1, predicates = 0, capacity = 0;
+        for (u32 g = 0; g < owner->size(); ++g)
+        {
+            const auto& table = owner->table_of(g);
+            for (u32 ar : table.predicate_arities())
+                index_arity = std::max(index_arity, ar);
+            predicates = std::max(predicates, static_cast<u32>(table.predicate_names().size()));
+            capacity = std::max(capacity, static_cast<u32>(instance_offsets[g + 1] - instance_offsets[g]));
+        }
+        std::vector<u64> inst(static_cast<usize>(I) * ed::k_instance_columns, 0);
+        std::vector<u32> ranges(static_cast<usize>(I) * predicates * ed::k_literal_columns, 0);
+        std::vector<i32> slots, derived_slots, statics;
+        for (u32 g = 0; g < owner->size(); ++g)
+        {
+            const auto& table = owner->table_of(g);
+            const auto local = owner->local_id(g);
+            const auto meta = atom_metadata(*owner->task(g));
+            u64* row = inst.data() + u64{g} * ed::k_instance_columns;
+            row[ed::k_num_objects] = table.instance(local).num_objects;
+            row[ed::k_slot_args_offset] = slots.size() / index_arity;
+            row[ed::k_derived_args_offset] = derived_slots.size() / index_arity;
+            row[ed::k_static_args_offset] = statics.size() / index_arity;
+            auto append = [&](const char* pred_name, const char* args_name, std::vector<i32>& dst)
+            {
+                const auto pred = ed::literal_ints(meta, pred_name), args = ed::literal_ints(meta, args_name);
+                const usize width = pred.empty() ? 0 : args.size() / pred.size();
+                for (usize n = 0; n < pred.size(); ++n)
+                    for (u32 j = 0; j < index_arity; ++j)
+                        dst.push_back(j < width ? args[n * width + j] : -1);
+            };
+            append("atom_pred", "atom_args_padded", slots);
+            append("derived_pred", "derived_args_padded", derived_slots);
+            const auto sp = ed::literal_ints(meta, "static_pred"), sa = ed::literal_ints(meta, "static_args_padded");
+            const usize sw = sp.empty() ? 0 : sa.size() / sp.size();
+            auto static_rows = [&](u32 ip, u32 ar)
+            {
+                std::vector<std::vector<i32>> tuples;
+                for (usize n = 0; n < sp.size(); ++n)
+                    if (static_cast<u32>(sp[n]) == ip)
+                        tuples.emplace_back(sa.begin() + n * sw, sa.begin() + n * sw + ar);
+                std::sort(tuples.begin(), tuples.end());
+                tuples.erase(std::unique(tuples.begin(), tuples.end()), tuples.end());
+                const u32 begin = static_cast<u32>(statics.size() / index_arity - row[ed::k_static_args_offset]);
+                for (const auto& tuple : tuples)
+                    for (u32 j = 0; j < index_arity; ++j)
+                        statics.push_back(j < ar ? tuple[j] : -1);
+                return std::pair{begin, static_cast<u32>(statics.size() / index_arity - row[ed::k_static_args_offset])};
+            };
+            const auto r = ed::build_literal_ranges(table, local, meta, static_rows, true);
+            std::copy(r.begin(), r.end(), ranges.begin() + u64{g} * predicates * ed::k_literal_columns);
+        }
+        b.add("literal_inst", DType::U64, {I, ed::k_instance_columns}, inst);
+        b.add("literal_ranges", DType::U32, {I, predicates, ed::k_literal_columns}, ranges);
+        b.add("literal_slots", DType::I32, {static_cast<i64>(slots.size() / index_arity), index_arity}, slots);
+        b.add("literal_derived", DType::I32, {static_cast<i64>(derived_slots.size() / index_arity), index_arity}, derived_slots);
+        b.add("literal_static", DType::I32, {static_cast<i64>(statics.size() / index_arity), index_arity}, statics);
+        b.scalar("capacity", capacity);
         GoalTemplates t;
         t.m_suite = std::move(owner);
         t.m_arrays = std::make_shared<const ArrayBundle>(b.build());
@@ -616,6 +675,10 @@ struct GoalTemplates::Packer
         t.m_literal_offsets.assign(literal_offsets.begin(), literal_offsets.end());
         t.m_max_vars = max_vars;
         t.m_max_arity = max_arity;
+        t.m_capacity = capacity;
+        t.m_index_arity = index_arity;
+        t.m_predicates = predicates;
+        t.m_needs_derived = std::ranges::find(kind, static_cast<i32>(k_pred_derived)) != kind.end();
         return t;
     }
 };
@@ -884,3 +947,36 @@ std::vector<u32> GoalTemplates::goal_literals(u32 k) const
     return out;
 }
 }  // namespace mymyr::rl
+
+namespace mymyr::rl
+{
+MatchTemplates GoalTemplates::view(const std::byte* block) const noexcept
+{
+    if (!block)
+        block = m_arrays->block();
+    auto at = [&](const char* name) { return block + m_arrays->find(name)->offset; };
+    MatchTemplates v;
+    v.num_instances = num_instances();
+    v.capacity = m_capacity;
+    v.max_vars = m_max_vars;
+    v.max_arity = m_max_arity;
+    v.instance_offsets = reinterpret_cast<const i32*>(at("instance_offsets"));
+    v.num_vars = reinterpret_cast<const i32*>(at("num_vars"));
+    v.literal_offsets = reinterpret_cast<const i32*>(at("literal_offsets"));
+    v.order = reinterpret_cast<const i32*>(at("order"));
+    v.predicate = reinterpret_cast<const i32*>(at("predicate"));
+    v.arity = reinterpret_cast<const i32*>(at("arity"));
+    v.terms = reinterpret_cast<const i32*>(at("terms"));
+    v.polarity = reinterpret_cast<const u8*>(at("polarity"));
+    v.distinct = reinterpret_cast<const u8*>(at("distinct"));
+    v.literals.inst = reinterpret_cast<const u64*>(at("literal_inst"));
+    v.literals.num_instances = num_instances();
+    v.literals.num_predicates = m_predicates;
+    v.literals.max_arity = m_index_arity;
+    v.literals.literal_ranges = reinterpret_cast<const u32*>(at("literal_ranges"));
+    v.literals.slot_args = reinterpret_cast<const i32*>(at("literal_slots"));
+    v.literals.derived_args = reinterpret_cast<const i32*>(at("literal_derived"));
+    v.literals.static_args = reinterpret_cast<const i32*>(at("literal_static"));
+    return v;
+}
+}

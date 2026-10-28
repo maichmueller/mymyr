@@ -48,9 +48,18 @@
 //   terms [L, A]              formalism::Term (>= 0 a variable, < 0 the object -(t + 1)), k_no_term padding; A = the
 //                             largest literal arity (generated templates hold variables only)
 //   goal_literal [L]          the literal's index in the instance's goal literals (-1: from_conditions)
-// with the scalars num_instances, num_templates, num_literals, max_vars, max_arity.
+// The literal-resolution section is packed in the same block:
+//   literal_inst [I, encoding::detail::k_instance_columns] holds object counts and offsets into the tuple arrays;
+//                 the other columns are zero
+//   literal_ranges [I, P, encoding::detail::k_literal_columns] holds ranges for each table predicate, including
+//                 instance-owned derived predicates; P is the widest predicate table of the suite
+//   literal_slots, literal_derived, literal_static [rows, Aindex] hold the sorted fluent, derived and static tuples;
+//                 Aindex is the widest predicate arity of the suite, at least one
+// with scalars num_instances, num_templates, num_literals, max_vars, max_arity and capacity (the most templates of any
+// instance). The literal-resolution section contributes to nbytes and is read by view() on either memory space.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/rl/match.hpp"
 #include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/successor/conditions.hpp"
@@ -127,6 +136,10 @@ public:
     [[nodiscard]] u32 num_literals() const noexcept { return m_literal_offsets.back(); }
     [[nodiscard]] u32 max_vars() const noexcept { return m_max_vars; }
     [[nodiscard]] u32 max_arity() const noexcept { return m_max_arity; }
+    [[nodiscard]] u32 capacity() const noexcept { return m_capacity; }
+    [[nodiscard]] bool needs_derived() const noexcept { return m_needs_derived; }
+    /// POD pointers into arrays() or its byte-for-byte copy at block (for device launchers).
+    [[nodiscard]] MatchTemplates view(const std::byte* block = nullptr) const noexcept;
     /// Instance g's templates: [first(g), first(g + 1)).
     [[nodiscard]] u32 first(u32 instance) const { return m_instance_offsets.at(instance); }
     /// The options of generate() (from_conditions and from_arrays: none).
@@ -148,7 +161,8 @@ private:
     TaskSuitePtr m_suite;
     std::shared_ptr<const ArrayBundle> m_arrays;
     std::vector<u32> m_instance_offsets{0}, m_literal_offsets{0};
-    u32 m_max_vars = 0, m_max_arity = 0;
+    u32 m_max_vars = 0, m_max_arity = 0, m_capacity = 0, m_index_arity = 1, m_predicates = 0;
+    bool m_needs_derived = false;
     TemplateOptions m_options;
     bool m_generated = false;
 };

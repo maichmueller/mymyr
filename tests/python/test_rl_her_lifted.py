@@ -477,3 +477,603 @@ def test_invalid_options_and_lazy_tasks():
         t.conditions(1)
     with pytest.raises(ValueError, match="not an instance"):
         t.conditions(text_task("gripper__prob05"))
+
+
+# ------------------------------------------------------------------------------------------------ matching
+
+
+def match_rows(tasks, states):
+    """Rows and closed derived words, padded to the suite width, with a (task, state) pair per row."""
+    source = rl.TaskSuite.group(tasks)
+    rows = np.zeros((len(states), source.row_words), np.uint64)
+    derived = np.zeros((len(states), source.derived_words), np.uint64)
+    ids = np.array([g for g, _ in states], np.int32)
+    for r, (g, state) in enumerate(states):
+        task = tasks[g]
+        encoded = np.asarray(task.encode([state]))[0]
+        rows[r, :len(encoded)] = encoded
+        for atom in task.derived_atoms(state):
+            slot = atom.derived_slot
+            derived[r, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+    return source, rows, ids, derived
+
+
+def assert_match_oracle(tasks, states, templates, result, *, first=False):
+    offsets = templates.arrays()["instance_offsets"]
+    for row, (g, state) in enumerate(states):
+        matches = []
+        for local, condition in enumerate(templates.conditions(g)):
+            bindings = list(tasks[g].bindings(condition, state, limit=1))
+            at = int(offsets[g]) + local
+            if bindings:
+                matches.append((at, tuple(o.index for o in bindings[0])))
+            if not first:
+                assert bool(result.found[row, local]) == bool(bindings)
+                assert result.template[row, local] == (at if bindings else -1)
+                if bindings:
+                    want = tuple(o.index for o in bindings[0])
+                    assert tuple(result.binding[row, local, :len(want)]) == want
+                    assert (result.binding[row, local, len(want):] == -1).all()
+                else:
+                    assert (result.binding[row, local] == -1).all()
+        if first:
+            assert bool(result.found[row]) == bool(matches)
+            assert result.template[row] == (matches[0][0] if matches else -1)
+            if matches:
+                want = matches[0][1]
+                assert tuple(result.binding[row, :len(want)]) == want
+                assert (result.binding[row, len(want):] == -1).all()
+            else:
+                assert (result.binding[row] == -1).all()
+        assert result.count[row] == (int(bool(matches)) if first else len(matches))
+    assert int(result.status) == 0
+
+
+@needs_frontend
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("distinct", [True, False, "equality"])
+def test_match_first_equals_bindings_on_ipc_walks(domain, distinct):
+    tasks = [ipc(domain, "train", "p01"), ipc(domain, "train", "p02")]
+    states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=12, seed=7, walks=1)]
+    source, rows, ids, derived = match_rows(tasks, states)
+    templates = rl.lifted_goal_templates(source, distinct=distinct)
+    for first in (False, True):
+        result = rl.match_first(rows, ids, templates, first=first, derived=derived)
+        assert_match_oracle(tasks, states, templates, result, first=first)
+
+
+@pytest.mark.parametrize("name", TEXT)
+def test_match_first_equals_bindings_on_text_fixtures(name):
+    task = text_task(name)
+    states = [(0, s) for s in walk(task, steps=15, walks=1)]
+    source, rows, ids, derived = match_rows([task], states)
+    templates = rl.lifted_goal_templates(source)
+    for first in (False, True):
+        result = rl.match_first(rows, ids, templates, first=first, derived=derived)
+        assert_match_oracle([task], states, templates, result, first=first)
+
+
+def match_literal_case(atoms="dense"):
+    from test_encoding_literals import goals_task
+
+    task = goals_task("static_true", atoms=atoms)
+    conditions = [
+        task.condition(["?x", "?y"], ["(road ?x ?y)", "(not (lit ?y))"]),
+        task.condition(["?x"], ["(road ?x ?x)"]),
+        task.condition(["?x"], ["(not (lit ?x))", "(not (heavy ?x))"]),
+        task.condition(["?x"], ["(road ?x a)", "(not (lit ?x))", "(heavy t1)"]),
+        task.condition([], ["(not (heavy t2))"]),
+        task.condition([], ["(heavy t2)"]),
+        task.condition([], ["(done)"]),
+        task.condition([], ["(not (done))"]),
+        task.condition(["?unused"], ["(not (done))"]),
+        task.condition(["?x", "?y"], ["(seen ?x)", "(seen ?y)"], equalities=[("?x", "?y", False)]),
+        task.condition(["?x", "?y"], ["(seen ?x)", "(seen ?y)"]),
+        task.condition([], ["(lit t1)"]),
+        task.condition([], ["(not (lit t1))"]),
+    ]
+    states = [(0, s) for s in walk(task, steps=35, seed=12, walks=1)]
+    source, rows, ids, derived = match_rows([task], states)
+    templates = rl.GoalTemplates.from_conditions(source, [conditions])
+    return [task], states, rows, ids, derived, templates
+
+
+@needs_frontend
+@pytest.mark.parametrize("atoms", ["reachable", "dense"])
+def test_match_first_static_negative_derived_constants_repeated_and_unused_variables(atoms):
+    tasks, states, rows, ids, derived, templates = match_literal_case(atoms)
+    for first in (False, True):
+        result = rl.match_first(rows, ids, templates, first=first, derived=derived)
+        assert_match_oracle(tasks, states, templates, result, first=first)
+    with pytest.raises(ValueError, match="derived"):
+        rl.match_first(rows, ids, templates)
+    with pytest.raises(ValueError, match="derived"):
+        rl.match_first(rows, ids, templates, derived=derived[:, :0].copy())
+
+
+def test_match_first_empty_padding_truncation_and_invalid_ids():
+    tasks = [text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")]
+    source, rows, ids, derived = match_rows(tasks, [(0, tasks[0].initial_state), (1, tasks[1].initial_state)])
+    full = rl.lifted_goal_templates(source)
+    templates = rl.GoalTemplates.from_conditions(source, [full.conditions(0), []])
+    result = rl.match_first(rows, ids, templates)
+    assert not result.found[1].any() and (result.binding[1] == -1).all()
+    assert result.count[1] == 0 and (result.template[1] == -1).all()
+    invalid = rl.match_first(rows, np.array([-1, 2], np.int32), templates)
+    assert int(invalid.status) == 4 and not invalid.found.any() and not invalid.count.any()
+    empty = rl.match_first(rows[:0], ids[:0], templates)
+    assert empty.count.shape == (0,) and int(empty.status) == 0
+    # A fixed true conjunction gives a match in every row, including a capacity of zero.
+    lit = str(next(iter(tasks[0].initial_state.atoms())))
+    hit = tasks[0].condition([], [lit])
+    templates = rl.GoalTemplates.from_conditions(tasks[0], [[hit, hit]])
+    row = np.asarray(tasks[0].encode([tasks[0].initial_state]))
+    status = np.array(99, np.int64)
+    out = rl.match_first(row, None, templates, capacity=1, status=status)
+    assert out.count.tolist() == [2] and int(status) == 1 and out.found.tolist() == [[True]]
+    out = rl.match_first(row, None, templates, capacity=0)
+    assert out.found.shape == (1, 0) and out.count.tolist() == [2] and int(out.status) == 1
+    out = rl.match_first(row, None, templates, first=True, status=status)
+    assert out.count.tolist() == [1] and out.template.tolist() == [0] and int(status) == 0
+    none = rl.GoalTemplates.from_conditions(tasks[0], [[]])
+    out = rl.match_first(row, None, none, first=True)
+    assert out.binding.shape == (1, 0) and out.template.tolist() == [-1] and not out.found.any()
+    with pytest.raises(ValueError, match="narrower"):
+        rl.match_first(rows[:, :0].copy(), ids, full)
+    with pytest.raises(ValueError, match="task_ids"):
+        rl.match_first(rows, None, full)
+    with pytest.raises(ValueError, match="capacity"):
+        rl.match_first(row, None, templates, first=True, capacity=0)
+
+
+def cuda_match_runtime():
+    torch = pytest.importorskip("torch", exc_type=ImportError)
+    cuda = pytest.importorskip("mymyr.cuda", exc_type=ImportError)
+    if not torch.cuda.is_available() or not cuda.available():
+        pytest.skip("no CUDA device")
+    return torch
+
+
+@pytest.mark.parametrize("first", [False, True])
+@pytest.mark.parametrize("via_op", [False, True])
+def test_match_first_device_suite_and_capture(first, via_op):
+    torch = cuda_match_runtime()
+    tasks = [text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")]
+    states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=12, walks=1)]
+    source, rows, ids, derived = match_rows(tasks, states)
+    templates = rl.lifted_goal_templates(source)
+    expected = rl.match_first(rows, ids, templates, first=first)
+    with torch.cuda.device(0):
+        device = templates.to("cuda:0")
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        task_ids = torch.tensor(ids, device="cuda:0")
+        from mymyr.rl.torch import register, unregister
+        handle = register(device) if via_op else None
+
+        def run():
+            if via_op:
+                return rl.MatchResult(*torch.ops.mymyr.match_first(handle, x, task_ids, first))
+            return rl.match_first(x, task_ids, device, first=first)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            result = run()
+        stream.synchronize()
+        for host, gpu in zip(expected, result):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = run()
+        graph.replay()
+        for host, gpu in zip(expected, captured):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+        task_ids.fill_(-1)
+        graph.replay()
+        assert captured.status.item() == 4 and not captured.found.any().item()
+        task_ids.copy_(torch.tensor(ids, device="cuda:0"))
+        x.zero_()
+        changed = rl.match_first(np.zeros_like(rows), ids, templates, first=first)
+        graph.replay()
+        for host, gpu in zip(changed, captured):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+        assert device.nbytes == templates.nbytes
+        if handle is not None:
+            unregister(handle)
+
+
+@needs_frontend
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_device_literal_kinds(first):
+    torch = cuda_match_runtime()
+    tasks, states, rows, ids, derived, templates = match_literal_case()
+    expected = rl.match_first(rows, ids, templates, first=first, derived=derived)
+    device = templates.upload(torch.cuda.current_stream(0))
+    result = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"),
+                            torch.tensor(ids, device="cuda:0"), device, first=first,
+                            derived=torch.tensor(derived.view(np.int64), device="cuda:0"))
+    for host, gpu in zip(expected, result):
+        np.testing.assert_array_equal(host, gpu.cpu().numpy())
+    small = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None, device,
+                           derived=torch.tensor(derived.view(np.int64), device="cuda:0"), capacity=0)
+    assert small.status.item() == 1
+    np.testing.assert_array_equal(expected.count if not first else
+                                  rl.match_first(rows, ids, templates, derived=derived).count,
+                                  small.count.cpu().numpy())
+
+
+@pytest.mark.parametrize("first", [False, True])
+@pytest.mark.parametrize("max_steps", [0, 1_000_000])
+def test_match_first_torch_op_fake_and_compile(first, max_steps):
+    torch = pytest.importorskip("torch", exc_type=ImportError)
+    from mymyr.rl.torch._ops import match_first as op, register, unregister
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = torch.tensor(np.asarray(task.encode(walk(task, steps=3, walks=1))).view(np.int64))
+    handle = register(templates)
+    try:
+        expected = rl.match_first(rows.numpy(), None, templates, first=first, max_steps=max_steps)
+        eager = op(handle, rows, first=first, max_steps=max_steps)
+        with FakeTensorMode() as mode:
+            fake = op(handle, mode.from_tensor(rows), first=first, max_steps=max_steps)
+            assert [(v.shape, v.dtype) for v in fake] == [(v.shape, v.dtype) for v in eager]
+        compiled = torch.compile(lambda x: op(handle, x, first=first, max_steps=max_steps), backend="eager", fullgraph=True)(rows)
+        for host, eager_tensor, compiled_tensor in zip(expected, eager, compiled):
+            np.testing.assert_array_equal(host, eager_tensor.numpy())
+            assert torch.equal(eager_tensor, compiled_tensor)
+    finally:
+        unregister(handle)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+def test_match_first_problem_local_derived_goals(on_device):
+    from test_encoding_literals import goals_task
+
+    tasks = [goals_task("duplicate"), goals_task("static_true")]
+    source, rows, ids, derived = match_rows(tasks, [(g, s) for g, task in enumerate(tasks)
+                                                  for s in walk(task, steps=9, walks=1)])
+    templates = rl.GoalTemplates.from_conditions(source, [
+        [tasks[0].condition([], ["(axiom_0)"]), tasks[0].condition([], ["(not (axiom_0))"])],
+        [tasks[1].condition([], ["(done)"]), tasks[1].condition([], ["(not (done))"])],
+    ])
+    expected = rl.match_first(rows, ids, templates, derived=derived)
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"),
+                                 torch.tensor(ids, device="cuda:0"), templates.to("cuda:0"),
+                                 derived=torch.tensor(derived.view(np.int64), device="cuda:0"))
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+    else:
+        states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=9, walks=1)]
+        assert_match_oracle(tasks, states, templates, expected)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+def test_match_first_candidates_span_multiple_object_tiles(on_device):
+    domain = mymyr.Domain.from_string("""(define (domain tiles) (:requirements :strips)
+      (:predicates (p ?x) (edge ?x ?y))
+      (:action set :parameters (?x) :precondition (and) :effect (p ?x)))""")
+    objects = " ".join(f"o{i:02}" for i in range(70))
+    problem = f"""(define (problem tiles) (:domain tiles) (:objects {objects})
+      (:init (p o40) (p o65) (edge o40 o65)) (:goal (and (p o40) (p o65))))"""
+    task = mymyr.Task(domain.instantiate_string(problem))
+    conditions = [task.condition(["?x", "?y"], ["(p ?x)", "(p ?y)", "(edge ?x ?y)"]),
+                  task.condition(["?x", "?y"], ["(p ?x)", "(p ?y)"], equalities=[("?x", "?y", False)])]
+    templates = rl.GoalTemplates.from_conditions(task, [conditions])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates)
+    assert_match_oracle([task], [(0, task.initial_state)], templates, expected)
+    assert expected.found.all() and (expected.binding >= 32).all()
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None, templates.to("cuda:0"))
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+def test_match_first_thread_pool_matches_serial_with_status():
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.tile(np.asarray(task.encode(walk(task, steps=7, walks=1))), (32, 1))
+    ids = np.zeros(len(rows), np.int32)
+    ids[::5] = -1
+    pool = rl.ThreadPool(4)
+    for first, capacity in [(True, None), (False, 1), (False, 0)]:
+        expected = rl.match_first(rows, ids, templates, first=first, capacity=capacity)
+        actual = rl.match_first(rows, ids, templates, first=first, capacity=capacity, pool=pool)
+        for a, b in zip(expected, actual):
+            np.testing.assert_array_equal(a, b)
+        assert int(actual.status) & 4
+
+
+@needs_frontend
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("distinct", [True, False, "equality"])
+def test_match_first_device_equals_host_on_ipc_walks(domain, distinct):
+    torch = cuda_match_runtime()
+    tasks = [ipc(domain, "train", "p01"), ipc(domain, "train", "p02")]
+    states = [(g, s) for g, task in enumerate(tasks) for s in walk(task, steps=12, seed=7, walks=1)]
+    source, rows, ids, derived = match_rows(tasks, states)
+    templates = rl.lifted_goal_templates(source, distinct=distinct)
+    uploaded = templates.to("cuda:0")
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    task_ids = torch.tensor(ids, device="cuda:0")
+    d = torch.tensor(derived.view(np.int64), device="cuda:0")
+    for first in (False, True):
+        expected = rl.match_first(rows, ids, templates, first=first, derived=derived)
+        actual = rl.match_first(x, task_ids, uploaded, first=first, derived=d)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+def test_match_first_device_variable_limit():
+    torch = cuda_match_runtime()
+    task = text_task("gripper__prob05")
+    literal = str(next(iter(task.initial_state.atoms())))
+    rows = np.asarray(task.encode([task.initial_state]))
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    for variables in (64, 65):
+        condition = task.condition([f"?x{v}" for v in range(variables)], [literal])
+        templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+        expected = rl.match_first(rows, None, templates, first=True)
+        assert expected.found.all() and expected.binding.shape == (1, variables)
+        if variables == 65:
+            with pytest.raises(ValueError, match="64 variables"):
+                templates.to("cuda:0")
+        else:
+            actual = rl.match_first(x, None, templates.to("cuda:0"), first=True)
+            for host, gpu in zip(expected, actual):
+                np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@pytest.mark.parametrize("on_device", [False, True])
+def test_match_first_word_halves(on_device):
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode(walk(task, steps=5, walks=1)))
+    expected = rl.match_first(rows, None, templates)
+    halves = rows.view(np.uint32)
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(halves, device="cuda:0"), None, templates.to("cuda:0"))
+        actual = [v.cpu().numpy() for v in actual]
+    else:
+        actual = rl.match_first(halves, None, templates)
+    for a, b in zip(expected, actual):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_match_first_upload_accepts_stream_handles_and_stream_protocol():
+    torch = cuda_match_runtime()
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=True)
+    x = torch.tensor(rows.view(np.int64), device="cuda:0")
+    stream = torch.cuda.Stream(device=0)
+
+    class StreamReference:
+        cuda_stream = stream.cuda_stream
+
+    for source in (stream, stream.cuda_stream, StreamReference()):
+        uploaded = templates.upload(source)
+        actual = rl.match_first(x, None, uploaded, first=True)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("typed", ["none", "static", "fluent", "binary", "binary_pairs"])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_rejects_impossible_injective_domains(on_device, typed, first):
+    limited_type = typed != "none"
+    action = "(:action add :parameters (?x) :precondition (and) :effect (member ?x))" if typed == "fluent" else ""
+    domain = mymyr.Domain.from_string(f"""(define (domain domains)
+        (:requirements :adl :equality) (:predicates (ok) (member ?x) (pair ?x ?y))
+        (:action set :parameters () :precondition (and) :effect (ok)) {action})""")
+    objects = " ".join(f"o{i}" for i in range(70 if limited_type else 63))
+    members = " ".join(f"(member o{i}) (pair o{i} o{i})" for i in range(63))
+    if typed == "binary_pairs":
+        members = " ".join(f"(pair o{i} o{j})" for i in range(63) for j in range(63))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem domains) (:domain domains)
+        (:objects {objects}) (:init (ok) {members}) (:goal (ok)))"""))
+    variables = [f"?v{i}" for i in range(64)]
+    literals = ([f"(pair {a} {b})" for a, b in zip(variables[::2], variables[1::2])] if typed == "binary_pairs" else
+                [f"(pair {v} {v})" for v in variables] if typed == "binary" else
+                [f"(member {v})" for v in variables] if limited_type else ["(ok)"])
+    budget = 512 if typed == "binary_pairs" else 3 if limited_type else 0
+    condition = task.condition(variables, literals,
+                               equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=budget)
+    assert not expected.found.any() and expected.count.tolist() == [0]
+    assert (expected.binding == -1).all() and (expected.template == -1).all()
+    assert int(expected.status) == 0
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), first=first, max_steps=budget)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_search_budget_exhaustion_and_reset(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain budget)
+        (:requirements :adl :equality) (:predicates (ok))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem budget) (:domain budget)
+        (:objects a b c d) (:init (ok)) (:goal (ok)))"""))
+    variables = ["?a", "?b", "?c", "?d"]
+    condition = task.condition(variables, ["(ok)"],
+                               equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition, condition]])
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    status = np.array(99, np.int64)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=7, status=status, pool=rl.ThreadPool(2))
+    assert int(expected.status) == 8 and not expected.found.any() and not expected.count.any()
+    assert (expected.binding == -1).all() and (expected.template == -1).all()
+    expected = rl.MatchResult(*(value.copy() for value in expected))
+    complete = rl.match_first(rows, None, templates, first=first, max_steps=8, status=status)
+    assert int(complete.status) == 0 and complete.found.all()
+    assert complete.count.tolist() == ([1, 1] if first else [2, 2])
+    unbounded = rl.match_first(rows, None, templates, first=first, max_steps=None)
+    for want, have in zip(complete, unbounded):
+        np.testing.assert_array_equal(want, have)
+    if on_device:
+        torch = cuda_match_runtime()
+        from mymyr.rl.torch import register, unregister
+
+        device = templates.to("cuda:0")
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        device_status = torch.tensor(99, device="cuda:0")
+        handle = register(device)
+        try:
+            for budget, want in [(7, expected), (8, complete), (None, complete)]:
+                actual = rl.match_first(x, None, device, first=first, max_steps=budget, status=device_status)
+                via_op = torch.ops.mymyr.match_first(handle, x, first=first, max_steps=budget)
+                for host, gpu, op in zip(want, actual, via_op):
+                    np.testing.assert_array_equal(host, gpu.cpu().numpy())
+                    assert torch.equal(gpu, op)
+        finally:
+            unregister(handle)
+
+
+@pytest.mark.parametrize("max_steps", [-1, 2**63, 1.5])
+def test_match_first_rejects_invalid_search_budget(max_steps):
+    task = text_task("gripper__prob05")
+    templates = rl.lifted_goal_templates(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+    with pytest.raises((TypeError, ValueError)):
+        rl.match_first(rows, None, templates, max_steps=max_steps)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_exhausted_template_continues_and_combines_status(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain continued)
+        (:requirements :adl) (:predicates (ok))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem continued) (:domain continued)
+        (:objects a b) (:init (ok)) (:goal (ok)))"""))
+    expensive = task.condition(["?a", "?b"], ["(ok)"])
+    ground = task.condition([], ["(ok)"])
+    templates = rl.GoalTemplates.from_conditions(task, [[expensive, ground]])
+    rows = np.asarray(task.encode([task.initial_state] * 2))
+    ids = np.array([0, -1], np.int32)
+    expected = rl.match_first(rows, ids, templates, first=first, capacity=1, max_steps=1)
+    assert int(expected.status) == (12 if first else 13)
+    assert expected.count.tolist() == [1, 0]
+    assert expected.found.tolist() == ([True, False] if first else [[False], [False]])
+    if first:
+        assert expected.template.tolist() == [1, -1]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"),
+                                torch.tensor(ids, device="cuda:0"), templates.to("cuda:0"),
+                                first=first, capacity=1, max_steps=1)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device, first):
+    domain = mymyr.Domain.from_string("""(define (domain shared)
+        (:requirements :adl :equality) (:predicates (ok) (a ?x) (b ?x) (c ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem shared) (:domain shared)
+        (:objects o0 o1 o2 o3 o4 o5 o6 o7 o8 o9)
+        (:init (ok) (a o0) (a o1) (b o0) (b o1) (c o0) (c o1)) (:goal (ok)))"""))
+    variables = ["?x", "?y", "?z"]
+    literals = ["(a ?x)", "(b ?y)", "(c ?z)"]
+    impossible = task.condition(variables, literals, equalities=[("?x", "?y", False), ("?x", "?z", False),
+                                                                ("?y", "?z", False)])
+    reusable = task.condition(variables, literals)
+    templates = rl.GoalTemplates.from_conditions(task, [[impossible, reusable]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=6)
+    assert int(expected.status) == 0 and expected.count.tolist() == [1]
+    assert expected.found.tolist() == ([True] if first else [[False, True]])
+    assert expected.template.tolist() == ([1] if first else [[-1, 1]])
+    assert (expected.binding[0] if first else expected.binding[0, 1]).tolist() == [0, 0, 0]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), first=first, max_steps=6)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("first", [False, True])
+def test_match_first_projection_filters_by_bound_arguments(on_device, first):
+    # Nine distinct tiles of one colour, with eight tiles of each colour: the tiles of all colours together would
+    # suffice, so only the projection filtered by the bound colour rejects the search without enumerating tiles.
+    domain = mymyr.Domain.from_string("""(define (domain paint)
+        (:requirements :adl :equality) (:predicates (ok) (painted ?t ?c))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    tiles = [f"t{i}" for i in range(16)]
+    painted = " ".join(f"(painted {t} {'white' if i < 8 else 'black'})" for i, t in enumerate(tiles))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem paint) (:domain paint)
+        (:objects white black {' '.join(tiles)}) (:init (ok) {painted}) (:goal (ok)))"""))
+    nine = [f"?t{i}" for i in range(9)]
+    variables = ["?c", *nine]
+    same = task.condition(variables, [f"(painted {t} ?c)" for t in nine],
+                          equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
+    eight = task.condition(variables[:9], [f"(painted {t} ?c)" for t in nine[:8]],
+                           equalities=[(a, b, False) for i, a in enumerate(variables[:9]) for b in variables[i + 1:9]])
+    templates = rl.GoalTemplates.from_conditions(task, [[same, eight]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=1000)
+    assert int(expected.status) == 0 and expected.count.tolist() == [1]
+    assert expected.template.tolist() == ([1] if first else [[-1, 1]])
+    canonical = next(iter(task.bindings(eight, task.initial_state, limit=1)))
+    bound = expected.binding[0] if first else expected.binding[0, 1]
+    assert bound.tolist() == [o.index for o in canonical] + [-1]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), first=first, max_steps=1000)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("padding", [False, True])
+@pytest.mark.parametrize("max_steps", [2, 3])
+def test_match_first_pair_budget_with_small_and_large_template_tables(on_device, padding, max_steps):
+    domain = mymyr.Domain.from_string("""(define (domain pairs)
+        (:requirements :adl :equality) (:predicates (ok) (member ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    task = mymyr.Task(domain.instantiate_string("""(define (problem pairs) (:domain pairs)
+        (:objects a b c) (:init (ok) (member a)) (:goal (ok)))"""))
+    pair = task.condition(["?x", "?y"], ["(member ?x)", "(member ?y)"], equalities=[("?x", "?y", False)])
+    conditions = [pair]
+    if padding:
+        conditions.append(task.condition(["?x", "?y", "?z"], ["(not (ok))"]))
+    templates = rl.GoalTemplates.from_conditions(task, [conditions])
+    rows = np.asarray(task.encode([task.initial_state]))
+    expected = rl.match_first(rows, None, templates, capacity=1, max_steps=max_steps)
+    assert int(expected.status) == (8 if max_steps == 2 else 0)
+    assert not expected.found.any() and expected.count.tolist() == [0]
+    assert (expected.binding == -1).all() and expected.template.tolist() == [[-1]]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
+                                templates.to("cuda:0"), capacity=1, max_steps=max_steps)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())

@@ -13,7 +13,7 @@ import numpy as np
 
 from mymyr._core import _rl_ops
 
-__all__ = ["HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
+__all__ = ["match_first", "HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
 
 
 class HerBatch(NamedTuple):
@@ -240,3 +240,11 @@ def her_relabel(
         step_reward=float(step_reward), goal_reward=float(goal_reward), stream=_stream(fw, states),
     )
     return HerBatch(goal, source, achieved, reward, valid)
+
+
+def match_first(rows, task_ids, templates, *, first=False, derived=None, status=None, capacity=None, pool=None,
+                max_steps=100_000_000):
+    """Lifted conjunction matching; see mymyr.rl.match_first for shapes and ordering."""
+    from ._match import match_first as match
+    return match(rows, task_ids, templates, first=first, derived=derived, status=status, capacity=capacity,
+                 pool=pool, max_steps=max_steps)

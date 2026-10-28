@@ -8,7 +8,7 @@
 // width arrays in one rl::ArrayBundle with per-instance offsets, so a copy of the block (for example on a device) is
 // read through the same POD view, detail::ContextView (detail/lanes.hpp).
 
-#include "mymyr/encoding/detail/lanes.hpp"
+#include "mymyr/encoding/literal_index.hpp"
 #include "mymyr/encoding/schema.hpp"
 #include "mymyr/rl/task_table.hpp"
 
@@ -21,15 +21,6 @@ namespace mymyr::encoding
 {
 static_assert(detail::k_role_object == static_cast<u8>(EntityRole::Object));
 static_assert(detail::k_role_auxiliary == static_cast<u8>(EntityRole::Auxiliary));
-
-namespace detail
-{
-/// Throws std::logic_error naming `name` unless the slots [begin, end) of a task's atom table are the atoms of
-/// `predicate` and their first `arity` objects ascend strictly (lexicographically) from slot to slot. `pred` holds the
-/// predicate of each slot and `padded` the objects of each slot in rows of `width` entries.
-void check_slot_range(std::span<const i32> pred, std::span<const i32> padded, u32 width, u32 begin, u32 end, u32 predicate,
-                      u32 arity, const std::string& name);
-}  // namespace detail
 
 class EncodingContext
 {
