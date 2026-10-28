@@ -534,7 +534,7 @@ def test_device_encodings_of_dropped_noops_equal_the_host(domain, layout):
     exact = rl.expand(table, states, drop_noops=True, framework="torch")
     batch = encoder.encode(states, actions=exact)
     assert_same(batch, host)
-    caps = dict(entities=1 << 12, args=1 << 14, targets=1 << 12)
+    caps = dict(graphs=len(rows), entities=1 << 12, args=1 << 14, targets=1 << 12)
     bounded = bounded_actions(encoder, states, None, caps["entities"], hashes=True, drop_noops=True)
     assert_same(encoder.encode(states, actions=bounded, capacities=caps), host)
     from mymyr.rl.torch import _ops
