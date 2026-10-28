@@ -35,7 +35,8 @@ struct MatchBatch
     u64 rows = 0;
     u32 row_words = 0, derived_words = 0, capacity = 0;
     bool first = false;
-    u64 max_steps = 1000000;  ///< Per row/template: candidate tiles and binding trials, including domain pruning.
+    /// Search budget per row and template: candidate tile scans (pruning included) and binding trials.
+    u64 max_steps = 100000000;
     u8* found = nullptr;
     i32 *binding = nullptr, *template_id = nullptr, *count = nullptr;
     u64* status = nullptr;
@@ -271,9 +272,11 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
 }
 
 /// Scratch binding, base and mask each have num_vars[k] entries, private to the lane; no recursion or allocation.
-/// Worst-case work is exponential. The budget bounds candidate tiles and binding trials per row/template;
-/// each tile scan is linear in the template's literals and their indexed tuples. All lanes consume equal steps.
-/// Candidate filtering resolves a final pair directly; PruneDomains may be false for searches of at most two variables.
+/// Worst-case work is exponential. The budget counts candidate tile scans (pruning included) and binding trials;
+/// a tile scan is linear in the template's literals and their indexed tuples. All lanes consume equal steps, and
+/// exhaustion returns false with budget.exhausted set. The pigeonhole test runs while more than two variables are
+/// unbound (candidate filtering decides the last two directly), so PruneDomains = false compiles it out of searches
+/// of at most two variables.
 template<class Group, bool PruneDomains = true>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
                       i32* binding, u32* base, u32* masks, Budget& budget)

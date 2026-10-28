@@ -127,9 +127,9 @@ See [Encoding on the device](encoding.md#encoding-on-the-device) for shapes and 
 templates and sorted literal index once with `templates.to("cuda:0")` (or `upload(stream)`). The result's flags,
 bindings, global template ids, counts and status stay on the device. `first=True` stops at the first matched template;
 a fixed capacity pads outputs and reports truncation through status. Negative and static literals are supported;
-derived literals require supplied derived words. Device templates support up to 64 variables. Exponential search is bounded by `max_steps` per row/template
-(default 1,000,000); status bit 3 (value 8) reports an exhausted search with no binding. Warm on the capture
-stream and keep templates and graph buffers alive through replay. The launcher `cuda::launch_match_first` uses
+derived literals require supplied derived words. Device templates support up to 64 variables. Each row and template
+is searched by one warp within the step budget `max_steps`; status bit 3 (value 8) reports an exhausted search, which
+leaves that template unmatched. Warm on the capture stream and keep templates and graph buffers alive through replay. The launcher `cuda::launch_match_first` uses
 caller-owned buffers without allocation or synchronization; `mymyr::match_first` has a torch fake. See
 [Lifted hindsight relabelling](rl.md#lifted-hindsight-relabelling) for shapes, status bits and examples.
 

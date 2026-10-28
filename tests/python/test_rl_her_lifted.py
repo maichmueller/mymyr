@@ -926,6 +926,9 @@ def test_match_first_search_budget_exhaustion_and_reset(on_device, first):
     complete = rl.match_first(rows, None, templates, first=first, max_steps=8, status=status)
     assert int(complete.status) == 0 and complete.found.all()
     assert complete.count.tolist() == ([1, 1] if first else [2, 2])
+    unbounded = rl.match_first(rows, None, templates, first=first, max_steps=None)
+    for want, have in zip(complete, unbounded):
+        np.testing.assert_array_equal(want, have)
     if on_device:
         torch = cuda_match_runtime()
         from mymyr.rl.torch import register, unregister
@@ -935,7 +938,7 @@ def test_match_first_search_budget_exhaustion_and_reset(on_device, first):
         device_status = torch.tensor(99, device="cuda:0")
         handle = register(device)
         try:
-            for budget, want in [(7, expected), (8, complete)]:
+            for budget, want in [(7, expected), (8, complete), (None, complete)]:
                 actual = rl.match_first(x, None, device, first=first, max_steps=budget, status=device_status)
                 via_op = torch.ops.mymyr.match_first(handle, x, first=first, max_steps=budget)
                 for host, gpu, op in zip(want, actual, via_op):

@@ -425,8 +425,8 @@ disequality per pair of variables, as `GroundCondition.lift(True)` makes them. T
 with their source, options and arrays; nothing is generated again. Like tables, templates refuse tasks with lazy
 atom slots (load with `atoms="auto"`, `"reachable"` or `"dense"`).
 
-`rl.match_first(rows, task_ids, templates, first=False, derived=None, status=None, capacity=None, pool=None, max_steps=1_000_000)` matches each row
-against its instance's templates. Static literals use the instance's facts, fluent literals the row's bits, derived
+`rl.match_first(rows, task_ids, templates, first=False, derived=None, status=None, capacity=None, pool=None,
+max_steps=100_000_000)` matches each row against its instance's templates. Static literals use the instance's facts, fluent literals the row's bits, derived
 literals the supplied derived words, and negative literals absence. Supply contiguous NumPy arrays or torch tensors;
 rows are `[N, RW]` words, task ids are int32 `[N]` (or `None` for a single instance). Derived words `[N, DW]` are
 required whenever any template has a derived literal. The first binding is exactly
@@ -458,22 +458,26 @@ assert not bounded.found.any() and int(bounded.status) & 8
 ```
 
 Counts include successful matches beyond capacity. Status is cleared each call: bit 0 (value 1) reports truncated
-matches, bit 1 (value 2) a template exceeding the device limit of 64 variables, bit 2 (value 4) an invalid instance id, and bit 3 (value 8) search budget exhaustion.
-Invalid rows have no matches. A supplied `status` scalar is reused and returned. Host calls can reuse an `rl.ThreadPool` with `pool=` to partition
-rows across workers. The destination-passing C++ form
+matches, bit 1 (value 2) a template exceeding the device limit of 64 variables, bit 2 (value 4) an invalid instance
+id and bit 3 (value 8) an exhausted search budget. Invalid rows have no matches. A supplied `status` scalar is reused
+and returned. Host calls can reuse an `rl.ThreadPool` with `pool=` to partition rows across workers. The
+destination-passing C++ form
 `rl::match_first(MatchTemplates, MatchBatch, ThreadPool*)` also accepts caller-owned output buffers and a thread pool;
 `GoalTemplates::view(block)` resolves the packed pointers on either host or device memory.
 
-Search has exponential worst-case work. Total object counts and shared positive-literal argument projections, including type domains prune
-impossible injective bindings. Variables with candidate domains contained in the same projection count together,
-including constraints from different predicates or argument positions. `max_steps` (default 1,000,000; integer in `[0, 2**63)`) limits work independently for
-each row/template on host and device. One step is a candidate tile scan (including domain pruning) or a binding
-trial; a tile scans the template's literals and their indexed tuples. Ground checks and cardinality rejection need
-no steps. Exhaustion leaves that template's outputs at failure/padding and sets status value 8; other templates
-continue with their own budget. Counts include only completed successes. With `first=True`, an earlier exhausted
-template can precede the returned success, so inspect status before treating the result as the first matching
-template. Increase the budget and retry when value 8 is set. In C++, supply the required `MatchBatch::status` scalar and set `MatchBatch::max_steps`; the torch custom
-op accepts the same `max_steps=` keyword.
+Matching is a backtracking search whose work is exponential in the number of variables in the worst case. With
+distinct variables, a pigeonhole test prunes it before and during the search: there must be at least as many objects
+as variables, and the variables whose candidates lie inside the projection of a positive literal on one argument
+(filtered by its constant and bound arguments; a unary predicate projects a type) must fit into that projection.
+Satisfiable templates can still need exponential work. `max_steps` bounds it for each row and template, on the host
+and the device alike: a step is a binding trial or a scan of a 32-object candidate tile over the template's literals
+and their tuples, pruning included (`None`: no bound; otherwise an integer in `[0, 2**63)`). The default leaves room
+for the templates that `lifted_goal_templates` makes for the IPC benchmarks in `tests/data/ipc`, matched in the states
+of random walks. An exhausted search leaves its template unmatched and sets status value 8; the other templates are still
+searched with their own budgets, so counts include only completed matches, and with `first=True` an exhausted earlier
+template can precede the returned match. Retry with a larger budget when value 8 is set. The torch custom op takes
+the same `max_steps=`; in C++, set `MatchBatch::max_steps` and supply the `MatchBatch::status` scalar, which is
+required.
 
 For CUDA, upload once with `templates.to("cuda:0")` or `templates.upload(torch.cuda.current_stream())`. Uploads include
 the sorted literal index and reject templates above the variable limit. Warm matching on the capture stream before
