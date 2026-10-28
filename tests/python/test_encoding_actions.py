@@ -511,8 +511,9 @@ def test_captured_observations_drop_noop_actions(drop):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.parametrize("successors", [None, 1 << 16])
 @pytest.mark.parametrize("drop", [False, True])
-def test_traced_observations_drop_noop_actions(drop):
+def test_traced_observations_drop_noop_actions(drop, successors):
     """A compiled step with action rows equals the host, and its graph has no node that keeps it out of CUDA graphs
     (inductor's check on the traced forward graph, which needs no triton)."""
     torch = torch_or_skip()
@@ -524,8 +525,9 @@ def test_traced_observations_drop_noop_actions(drop):
     assert torch.Tag.cudagraph_unsafe not in torch.ops.mymyr.bounded_actions.default.tags
     table = noop_table("floortile")
     encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    caps = dict(entities=1 << 12, args=1 << 14, targets=1 << 12, successors=successors)
     env = rt.BatchedEnv(table, 6, device=device, seed=7, max_steps=6, observation=encoder, obs_actions=True,
-                        obs_drop_noops=drop, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+                        obs_drop_noops=drop, obs_capacities={k: v for k, v in caps.items() if v is not None})
     graphs = []
 
     def forward(gm, inputs):
@@ -593,6 +595,12 @@ def test_device_encodings_of_dropped_noops_equal_the_host(domain, layout):
     swapped = SimpleNamespace(succ=None, schema=exact.schema, binding=exact.binding, parent=exact.parent,
                               offsets=exact.offsets, index=index)
     with pytest.raises(ValueError, match=f"^mymyr: encoding: the action rows of state {first} are not in canonical"):
+        encoder.encode(states, actions=swapped)
+    # a row that is no label of its instance is the cause first, as on the host
+    schema = exact.schema.clone()
+    schema[b] = 1000
+    swapped.schema = schema
+    with pytest.raises(ValueError, match="^mymyr: encoding: a row is invalid"):
         encoder.encode(states, actions=swapped)
     torch.cuda.synchronize(device)
 
@@ -666,54 +674,71 @@ def idles_table():
     return rl.TaskTable([mymyr.Task(mymyr.Domain.from_string(IDLES).instantiate_string(IDLES_PROBLEM))])
 
 
-@pytest.mark.parametrize("drop", [False, True])
-def test_capacities_bound_the_kept_rows_alike_on_the_cpu_and_a_device(drop):
-    """The entity capacity bounds the kept action rows, ``successors`` the successors before the drop; environments
-    and suite encoders on the CPU and on a device report the same overflow and status for the same capacities."""
+def observe_idles(where, caps, drop):
     torch = torch_or_skip()
     rt = pytest.importorskip("mymyr.rl.torch")
-    device = cuda_or_skip()
     table = idles_table()
     encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+    env = rt.BatchedEnv(table, 4, device=where, seed=1, observation=encoder, obs_actions=True, obs_drop_noops=drop,
+                        obs_capacities=caps)
+    observation = env.observation()
+    if where.type == "cuda":
+        torch.cuda.synchronize(where)
+    env.close()
+    return observation
+
+
+IDLES_CAPS = dict(entities=80, args=1024, targets=256)  # 80 action rows: the 24 kept ones fit, the 888 others not
+
+
+@pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_capacities_bound_the_kept_rows(dev, drop):
+    """The entity capacity bounds the kept action rows, ``successors`` the successors before the drop: environments
+    and suite encoders report the overflow (flags, status, zero sizes) on the CPU as on a device."""
+    torch = torch_or_skip()
+    device = torch.device("cpu") if dev == "cpu" else cuda_or_skip()
+    table = idles_table()
     task = table.tasks[0]
     rows = np.repeat(np.asarray(task.encode([task.initial_state])), 4, axis=0)
     full = rl.expand(table, rows, noops=True)
     generated, kept = int(full.total), int((~full.noop).sum())
     assert (generated, kept) == (888, 24)
-    base = dict(entities=80, args=1024, targets=256)
-    cases = [(base, True), (dict(base, successors=generated), not drop), (dict(base, successors=generated - 1), True)]
-
-    def observe(where, caps):
-        env = rt.BatchedEnv(table, 4, device=where, seed=1, observation=encoder, obs_actions=True,
-                            obs_drop_noops=drop, obs_capacities=caps)
-        observation = env.observation()
-        if where.type == "cuda":
-            torch.cuda.synchronize(where)
-        env.close()
-        return observation
-
-    suite = rl.TaskSuite([table])
-    suite_encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+    cases = [(IDLES_CAPS, True), (dict(IDLES_CAPS, successors=generated), not drop),
+             (dict(IDLES_CAPS, successors=generated - 1), True)]
+    suite_encoder = encoding.SuiteEncoder(rl.TaskSuite([table]), target_sources=("action",))
     ids = np.zeros(4, np.int32)
     for caps, overflow in cases:
-        host, dev = observe(torch.device("cpu"), caps), observe(device, caps)
-        for observation in (host, dev):
-            sizes = observation.encoding.sizes
-            assert (sizes["overflow"], sizes["capacity_overflow"]) == (overflow, overflow), (caps, sizes)
-            assert observation.actions.status.tolist() == [int(overflow)]
-            assert observation.actions.parent.shape == (80,)
-        if not overflow:
-            roles = [np.asarray(o.encoding.as_dict("numpy")["entity_role"]) for o in (host, dev)]
-            assert [int((r == ACTION_ROLE).sum()) for r in roles] == [kept, kept]
+        observation = observe_idles(device, caps, drop)
+        sizes = observation.encoding.sizes
+        assert (sizes["overflow"], sizes["capacity_overflow"]) == (overflow, overflow), (caps, sizes)
+        assert observation.actions.status.tolist() == [int(overflow)]
+        assert observation.actions.parent.shape == (80,) and observation.actions.offsets.shape == (5,)
+        roles = np.asarray(observation.encoding.as_dict("numpy")["entity_role"])
+        if overflow:
+            assert sizes["entities"] == sizes["args"] == 0 and not roles.any()
+        else:
+            assert int((roles == ACTION_ROLE).sum()) == kept and sizes["entities"] > kept
+        suite_caps = {0: dict(caps, graphs=4)}
+        states, task_ids = (rows, ids) if dev == "cpu" else (torch.as_tensor(rows.view(np.int64), device=device),
+                                                              torch.as_tensor(ids, device=device))
+        batch = suite_encoder.encode(states, task_ids, actions=True, drop_noops=drop, capacities=suite_caps).batches[0]
+        assert batch.sizes["capacity_overflow"] == overflow
+    with pytest.raises(ValueError, match="successors capacity must be an int in"):
+        observe_idles(device, dict(IDLES_CAPS, successors=1 << 31), drop)
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_cpu_and_device_observations_of_bounded_rows_agree(drop):
+    torch = torch_or_skip()
+    device = cuda_or_skip()
+    for caps in (IDLES_CAPS, dict(IDLES_CAPS, successors=888), dict(IDLES_CAPS, successors=887)):
+        host, dev = observe_idles(torch.device("cpu"), caps, drop), observe_idles(device, caps, drop)
+        assert host.encoding.sizes == dev.encoding.sizes
+        assert torch.equal(host.actions.status, dev.actions.status.cpu())
+        if not host.encoding.sizes["overflow"]:
             for name, value in host.actions._asdict().items():
                 assert torch.equal(value, getattr(dev.actions, name).cpu()), name
-        suite_caps = {0: dict(caps, graphs=4)}
-        on_host = suite_encoder.encode(rows, ids, actions=True, drop_noops=drop, capacities=suite_caps).batches[0]
-        on_device = suite_encoder.encode(torch.as_tensor(rows.view(np.int64), device=device),
-                                         torch.as_tensor(ids, device=device), actions=True, drop_noops=drop,
-                                         capacities=suite_caps).batches[0]
-        torch.cuda.synchronize(device)
-        assert on_host.sizes["capacity_overflow"] == on_device.sizes["capacity_overflow"] == overflow
 
 
 @pytest.mark.parametrize("drop", [False, True])
@@ -743,7 +768,9 @@ def test_action_rows_have_the_capacity_rows_zero_past_the_kept_ones(dev, kind, d
         want = rl.expand(tables[d], states[mine][:, :tables[d].words], task_ids[mine], hashes=True, noops=True,
                          drop_noops=drop)
         total, rows = int(want.total), action_capacity(encoders[d], 1 << 12)
-        np.testing.assert_array_equal(actions.offsets.cpu().numpy()[:mine.sum() + 1], want.offsets)
+        assert actions.offsets.shape == (7,)
+        np.testing.assert_array_equal(actions.offsets.cpu().numpy(),
+                                      np.pad(want.offsets, (0, 6 - int(mine.sum())), mode="edge"))
         assert (actions.index is not None) == drop
         for name in ("parent", "schema", "binding", "succ_hash", "noop", "index"):
             value = getattr(actions, name)
@@ -755,3 +782,35 @@ def test_action_rows_have_the_capacity_rows_zero_past_the_kept_ones(dev, kind, d
             expected = np.asarray(getattr(want, name))
             np.testing.assert_array_equal(got.view(np.uint64) if name == "succ_hash" else got, expected, err_msg=name)
     env.close()
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_bounded_actions_outputs_match_their_fakes(drop):
+    """torch.library.opcheck of the expansion and encoding ops an observation traces, below, at and above the rows
+    of the arrays: the fake outputs have the real ones' shapes, strides and dtypes, and nothing aliases."""
+    torch = torch_or_skip()
+    device = cuda_or_skip()
+    from mymyr.rl.torch import _ops
+
+    table = noop_table("floortile")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    task = table.tasks[0]
+    states = torch.as_tensor(np.repeat(np.asarray(task.encode([task.initial_state])), 4, axis=0).view(np.int64),
+                             device=device)
+    handle, table_handle = _ops.register(encoder), _ops.register(table)
+    try:
+        for successors in (None, 8, 16, 64):  # 16 rows: the action rows of 16 entities
+            args = (handle, states, None, 16, successors, drop)
+            torch.library.opcheck(torch.ops.mymyr.bounded_actions.default, args)
+            labels, binding, offsets, succ_hash, noop, status = torch.ops.mymyr.bounded_actions(*args)
+            assert labels.shape == (3 if drop else 2, 16) and labels.is_contiguous()
+            given = dict(action_schema=labels[1], action_binding=binding, action_offsets=offsets,
+                         action_parent=labels[0], action_index=labels[2] if drop else None, action_status=status)
+            torch.library.opcheck(torch.ops.mymyr.encode_flat.default,
+                                  (handle, states, *[None] * 16, 4, 256, 2048, 256, 0), given)
+        torch.library.opcheck(torch.ops.mymyr.expand_flat.default, (table_handle, states, None, 64),
+                              dict(rows=False, hashes=True, noops=True, drop_noops=drop))
+        torch.cuda.synchronize(device)
+    finally:
+        _ops.unregister(handle)
+        _ops.unregister(table_handle)
