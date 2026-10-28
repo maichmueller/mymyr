@@ -47,6 +47,12 @@ OPTION_SETS = {
     },
     "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": "omit"},
     "no_actions": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": ()},
+    "nullary_arity0_targets_virtual": {
+        "nullary": "arity0",
+        "goal_derivations": ("plain", "satisfied", "unsatisfied"),
+        "target_sources": ("goal",),
+        "predicate_virtual_nodes": True,
+    },
 }
 ALL_GOALS = ("plain", "satisfied", "unsatisfied")
 LAYERED_OPTION_SETS = {
@@ -59,6 +65,13 @@ LAYERED_OPTION_SETS = {
         "target_sources": ("goal", "subgoal", "history"),
         "predicate_virtual_nodes": True,
         "goal_derivations": ("plain", "satisfied"),
+    },
+    "nullary_arity0_levels_history": {
+        "nullary": "arity0",
+        "max_goal_level": 2,
+        "history": True,
+        "target_sources": ("goal", "subgoal", "history"),
+        "goal_derivations": ALL_GOALS,
     },
 }
 
