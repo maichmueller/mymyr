@@ -787,6 +787,8 @@ def encode_flat(
     edge_binding: Optional[Tensor] = None,
     action_succ: Optional[Tensor] = None,
     expand_actions: bool = False,
+    action_index: Optional[Tensor] = None,
+    action_status: Optional[Tensor] = None,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -804,7 +806,12 @@ def encode_flat(
     ``action_succ`` and expansion labels to build depth-one transitions; ``derived`` is per node for a horizon schema.
     ``expand_actions=True`` expands observation actions into buffers bounded by the entity capacity and the schema
     multiplicity, with device overflow status; it requires asynchronous expansion. It takes no explicit action or
-    horizon arrays. The arguments after ``numeric`` are passed by keyword."""
+    horizon arrays. Explicit expansion rows (``action_schema``, ``action_binding``, ``action_offsets``, optionally
+    ``action_parent``) may carry ``action_index``, each row's position in its state's full canonical successor order
+    (``mymyr::expand_flat``'s ``index`` with ``drop_noops``: the ``entity_ref`` of its action entity), and
+    ``action_status``, the expansion's int32 or int64 device status word [1] (bit 0 overflow, bit 1 invalid input),
+    which the batch's overflow flags then report (capacity, invalid row): such a batch is all zero. The arguments after ``numeric`` are passed by
+    keyword."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
@@ -824,16 +831,18 @@ def encode_flat(
     actions = None
     if expand_actions:
         if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent, action_succ,
-                                      node_offsets, edge_offsets, edge_src, edge_dst, edge_schema, edge_binding)):
+                                      action_index, action_status, node_offsets, edge_offsets, edge_src, edge_dst,
+                                      edge_schema, edge_binding)):
             raise ValueError("mymyr: encoding: expand_actions takes no explicit action or horizon arrays")
         from mymyr.encoding._device_actions import bounded_actions
         actions = bounded_actions(enc, states, task_ids, entities)
-    if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent, action_succ)):
+    if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent, action_succ,
+                                   action_index, action_status)):
         if any(a is None for a in (action_schema, action_binding, action_offsets)):
             raise ValueError("mymyr: encoding: actions need schema, binding and offsets")
         from types import SimpleNamespace
         actions = SimpleNamespace(schema=action_schema, binding=action_binding, offsets=action_offsets,
-                                  parent=action_parent, succ=action_succ)
+                                  parent=action_parent, succ=action_succ, index=action_index, status=action_status)
     horizon = None
     if node_offsets is not None:
         if steps is not None or actions is not None:
@@ -879,6 +888,8 @@ def _(
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None, edge_schema=None, edge_binding=None,
     action_succ=None,
     expand_actions=False,
+    action_index=None,
+    action_status=None,
 ):  # fmt: skip
     if node_offsets is not None:
         states = states[:node_offsets.shape[0] - 1]

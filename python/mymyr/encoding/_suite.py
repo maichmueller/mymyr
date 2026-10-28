@@ -154,6 +154,7 @@ class SuiteEncoder:
         threads: int = 1,
         pool: ThreadPool | None = None,
         capacities: Mapping[int, Mapping[str, int]] | None = None,
+        drop_noops: bool = False,
     ) -> SuiteBatch:
         """Encodes the rows ``states`` (an array ``[N, W]`` of state words, or a list of States) of the instances
         ``task_ids`` (global numbers of the suite) into one batch per domain.
@@ -163,6 +164,9 @@ class SuiteEncoder:
         their share. ``actions=True`` expands every domain's rows (``rl.expand`` over the domain's table) and encodes
         their actions; a mapping from a domain to an ``rl.Expansion`` of that domain's rows (in the order of the call,
         over the domain's table with the domain's instance numbers) is used instead where it names a domain.
+        ``drop_noops=True`` (with ``actions=True``) expands with ``rl.expand(..., drop_noops=True)``: the actions whose
+        successor equals the state are left out unless every successor of the state is one, and the action entities
+        keep their canonical successor index as ``entity_ref``.
         ``framework``, ``threads`` and ``pool`` are as in ``encode``; ``capacities`` maps a domain to its capacities,
         and every domain with rows needs an entry.
 
@@ -185,7 +189,10 @@ class SuiteEncoder:
             from mymyr.encoding._suite_device import encode
 
             return encode(self, states, task_ids, derived=derived, goals=goals, actions=actions, subgoals=subgoals,
-                          history=history, framework=framework, threads=threads, pool=pool, capacities=capacities)
+                          history=history, framework=framework, threads=threads, pool=pool, capacities=capacities,
+                          drop_noops=drop_noops)
+        if drop_noops and actions is not True:
+            raise ValueError("mymyr: encoding: drop_noops needs actions=True")
         suite = self.suite
         if isinstance(states, (list, tuple)):
             rows = len(states)
@@ -213,7 +220,7 @@ class SuiteEncoder:
             if exp is None and actions is True:
                 from mymyr import rl
 
-                exp = rl.expand(table, part, local.astype(np.int32))
+                exp = rl.expand(table, part, local.astype(np.int32), drop_noops=drop_noops)
             if exp is not None:
                 expansions[d] = exp
             caps = None

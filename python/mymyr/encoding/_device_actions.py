@@ -63,7 +63,6 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
     ``hashes``, ``noops`` and ``drop_noops`` add ``succ_hash``, ``noop`` and ``index`` (None when absent), digested
     while each successor is built, without storing successor rows.
     """
-    from collections import Counter
     from types import SimpleNamespace
     from mymyr import rl
     from mymyr.rl.torch._ops import _stream
@@ -71,9 +70,7 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
     torch = d._torch()
     table, device = table_of(encoder), states.device
     states = action_states(encoder, states, ids)
-    # Split schemas can yield several expansion rows for one encoded action entity.
-    multiplicity = max(Counter(encoder.schema_relations).values(), default=1)
-    capacity = min(0x7fffffff, capacity * multiplicity)
+    capacity = action_capacity(encoder, capacity)
     opts = dict(dtype=torch.int32, device=device)
     x = SimpleNamespace(succ=None,
                         schema=torch.zeros(capacity, **opts), binding=torch.zeros((capacity, table.label_width), **opts),
@@ -95,8 +92,19 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, live:
             total = x.offsets.gather(0, live)
             x.offsets = torch.where(torch.arange(states.shape[0] + 1, device=device) <= live, x.offsets, total)
             used = torch.arange(capacity, device=device) < total
-            for name in ("schema", "binding", "parent"):
+            for name, fill in (("schema", 0), ("binding", 0), ("parent", 0), ("succ_hash", 0), ("noop", False),
+                               ("index", -1)):
                 array = getattr(x, name)
-                mask = used if array.ndim == 1 else used[:, None]
-                setattr(x, name, torch.where(mask, array, 0))
+                if array is not None:
+                    mask = used if array.ndim == 1 else used[:, None]
+                    setattr(x, name, torch.where(mask, array, fill))
     return x
+
+
+def action_capacity(encoder: Any, entities: int) -> int:
+    """The expansion rows that ``entities`` action entities of ``encoder`` can stand for: split schemas can yield
+    several expansion rows for one encoded action entity."""
+    from collections import Counter
+
+    multiplicity = max(Counter(encoder.schema_relations).values(), default=1)
+    return min(0x7fffffff, entities * multiplicity)

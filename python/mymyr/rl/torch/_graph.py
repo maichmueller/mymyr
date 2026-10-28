@@ -19,7 +19,8 @@ class Rollout(NamedTuple):
     or a ``SuiteObservation`` over a suite of several domains) and ``final_obs`` those of the reached states before the
     autoreset (with ``final=True``), each the same arrays after every replay. ``mymyr.encoding.collate(rollout.obs)``
     concatenates them into one batch of the K * N rows in step order (over a suite: per domain,
-    ``collate([o.batches[d] for o in rollout.obs])``)."""
+    ``collate([o.batches[d] for o in rollout.obs])``). With ``obs_actions``, ``obs_actions`` holds step k's
+    ``StepResult.actions``: the expansion rows of the action entities of ``obs[k]``."""
 
     action: Optional[Tensor]  # int64 [K, N]: the policy's actions (None: the random policy)
     reward: Tensor  # float32 [K, N]
@@ -39,6 +40,7 @@ class Rollout(NamedTuple):
     obs: Optional[tuple] = None  # the K steps' encoded observations
     final_obs: Optional[tuple] = None  # the K steps' encoded final observations (final=True)
     revisited: Optional[Tensor] = None  # bool [K, N]: false when visit tracking is disabled
+    obs_actions: Optional[tuple] = None  # the K steps' observation action rows (obs_actions=True)
 
 
 class CapturedRollout:
@@ -105,7 +107,7 @@ class CapturedRollout:
 
         self.graph = torch.cuda.CUDAGraph()
         K, n = self.steps, env.num_envs
-        obs, final_obs = [], []
+        obs, final_obs, obs_actions = [], [], []
         with torch.cuda.graph(self.graph, pool=pool, stream=side):
             # the steps write into slices of the stacked outputs (no stacking copies)
             b = torch.empty((K, n), dtype=torch.bool, device=dev)
@@ -128,13 +130,15 @@ class CapturedRollout:
                 if actions is not None:
                     a = actions[k]
                     a.copy_(policy(env).reshape(n))
-                step_obs, step_final = env._step_into(
+                step_obs, step_final, step_actions = env._step_into(
                     StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
                 )
                 obs.append(step_obs)
                 final_obs.append(step_final)
+                obs_actions.append(step_actions)
             self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,
-                                   tuple(final_obs) if observer is not None and final else None, out.revisited)
+                                   tuple(final_obs) if observer is not None and final else None, out.revisited,
+                                   tuple(obs_actions) if observer is not None and observer.actions else None)
 
     @property
     def result(self) -> Rollout:

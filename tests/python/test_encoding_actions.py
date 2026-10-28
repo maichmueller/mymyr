@@ -9,7 +9,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import BLOCKS, text_task, walk
+from conftest import BLOCKS, ROOT, text_task, walk
 
 GOAL_ROLE = 2
 ACTION_ROLE = 4
@@ -232,3 +232,166 @@ def test_virtual_nodes_are_options_of_the_schema():
     on = encoding.EncodingSchema(task, **OPTIONS)
     assert "predicate_virtual" in on.entity_role_names
     assert off.schema_fingerprint != on.schema_fingerprint
+
+
+# ------------------------------------------------------------------------------------------------ dropped no-ops
+NOOP_DOMAINS = ["floortile", "rovers", "satellite"]  # domains whose walks reach actions that change nothing
+SWITCHES = """(define (domain switches)
+ (:requirements :strips :negative-preconditions)
+ (:predicates (live) (p))
+ (:action idle-a :parameters (?x) :precondition (live) :effect (and))
+ (:action idle-b :parameters (?x) :precondition (live) :effect (and))
+ (:action stop :parameters (?x) :precondition (and (live) (not (p))) :effect (not (live)))
+ (:action set :parameters (?x) :precondition (and (live) (not (p))) :effect (p)))"""
+SWITCHES_PROBLEM = "(define (problem switches) (:domain switches) (:objects a) (:init (live)) (:goal (p)))"
+
+
+def ipc_task(domain):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    base = ROOT / "tests/data/ipc" / f"{domain}-ipc" / "train"
+    return mymyr.Task.from_pddl(base / "domain.pddl", base / "p01.pddl")
+
+
+def switches_task():
+    """A task whose state after `set` has only no-op successors (the fallback keeps them all)."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    return mymyr.Task(mymyr.Domain.from_string(SWITCHES).instantiate_string(SWITCHES_PROBLEM))
+
+
+def noop_rows(task):
+    """A walk's rows and the full and the no-op-dropping expansion of them."""
+    table = rl.as_table(task)
+    rows = np.asarray(task.encode(walk(task, steps=12, walks=2, seed=9)))
+    return (table, rows, rl.expand(table, rows, noops=True, hashes=True),
+            rl.expand(table, rows, noops=True, hashes=True, drop_noops=True))
+
+
+def entity_graphs(batch, entities):
+    return np.searchsorted(np.asarray(batch.entity_offsets), entities, side="right") - 1
+
+
+def check_dropped(batch, full_batch, full, kept):
+    """The action entities of `batch` (encoded from `kept`) are those of `full_batch` (encoded from `full`) without the
+    no-op actions of states that have another successor, with the same canonical indices and labels."""
+    entities = encoding.action_entities(batch)
+    graphs = entity_graphs(batch, entities)
+    indices = encoding.action_indices(batch)
+    rows = encoding.action_rows(batch, kept)
+    np.testing.assert_array_equal(kept.index[rows], indices)
+    np.testing.assert_array_equal(kept.parent[rows], graphs)
+    fallback = np.array([e > b and full.noop[b:e].all() for b, e in zip(full.offsets[:-1], full.offsets[1:])])
+    assert not kept.noop[rows][~fallback[graphs]].any()
+    full_rows = full.offsets[graphs] + indices
+    np.testing.assert_array_equal(full.schema[full_rows], kept.schema[rows])
+    np.testing.assert_array_equal(full.binding[full_rows], kept.binding[rows])
+    if kept.succ_hash is not None:
+        np.testing.assert_array_equal(full.succ_hash[full_rows], kept.succ_hash[rows])
+    # the full batch's entities of the same (graph, index) are the kept actions plus the dropped no-ops
+    full_entities = encoding.action_entities(full_batch)
+    full_keys = set(zip(entity_graphs(full_batch, full_entities).tolist(), encoding.action_indices(full_batch).tolist()))
+    kept_keys = set(zip(graphs.tolist(), indices.tolist()))
+    dropped = {(int(full.parent[r]), int(r - full.offsets[full.parent[r]])) for r in np.flatnonzero(full.noop)
+               if not fallback[full.parent[r]]}
+    assert kept_keys == full_keys - dropped
+    return entities, graphs, indices
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("domain", NOOP_DOMAINS)
+def test_dropped_noops_keep_the_canonical_index_of_every_action_entity(domain, layout):
+    task = ipc_task(domain)
+    table, rows, full, kept = noop_rows(task)
+    assert full.noop.any() and kept.total < full.total
+    encoder = encoding.FlatRelationEncoder(table, layout=layout, **OPTIONS)
+    full_batch = encoder.encode(rows, actions=full)
+    batch = encoder.encode(rows, actions=kept)
+    entities, graphs, indices = check_dropped(batch, full_batch, full, kept)
+    # action_entities_of inverts action_indices, and has no entity for a dropped or absent index
+    np.testing.assert_array_equal(encoding.action_entities_of(batch, indices[:, None], graphs)[:, 0], entities)
+    np.testing.assert_array_equal(encoding.action_entities_of(batch, indices, graphs), entities)
+    counts = np.diff(full.offsets)
+    every = np.arange(counts.max() + 1)[None, :].repeat(len(rows), 0)
+    table_of = encoding.action_entities_of(batch, every)
+    table_full = encoding.action_entities_of(full_batch, every)
+    for g in range(len(rows)):
+        b = int(full.offsets[g])
+        for j in range(counts.max() + 1):
+            present = j < counts[g] and (not full.noop[b + j] or full.noop[b:b + counts[g]].all())
+            assert (table_of[g, j] >= 0) == present
+            assert (table_full[g, j] >= 0) == (j < counts[g])
+            if present:
+                assert encoding.action_indices(batch, [table_of[g, j]])[0] == j
+    assert (encoding.action_entities_of(batch, [-1, 1 << 40]) == -1).all()
+    # pools, slices of the batch and streams give the same entities
+    pooled = encoder.encode(rows, actions=kept, threads=3)
+    np.testing.assert_array_equal(pooled.entity_ref, batch.entity_ref)
+    stream = encoder.stream()
+    for part in (slice(0, 5), slice(5, len(rows))):
+        stream.append(rows[part], actions=rl.expand(table, rows[part], drop_noops=True))
+    np.testing.assert_array_equal(stream.flush().entity_ref, batch.entity_ref)
+
+
+def test_states_whose_successors_are_all_noops_keep_them():
+    task = switches_task()
+    table = rl.as_table(task)
+    initial = np.asarray(task.encode([task.initial_state]))
+    rows = np.concatenate([initial, rl.expand(table, initial).succ])  # the initial state and its four successors
+    full, kept = rl.expand(table, rows, noops=True, hashes=True), rl.expand(table, rows, hashes=True, drop_noops=True)
+    counts = np.diff(full.offsets)
+    every_noop = [g for g in range(len(rows)) if counts[g] and full.noop[full.offsets[g]:full.offsets[g + 1]].all()]
+    assert counts[0] == 4 and full.noop[:4].sum() == 2 and every_noop
+    np.testing.assert_array_equal(np.diff(kept.offsets)[every_noop], counts[every_noop])
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    batch = encoder.encode(rows, actions=kept)
+    check_dropped(batch, encoder.encode(rows, actions=full), full, kept)
+    found = encoding.action_entities_of(batch, np.arange(4)[None, :].repeat(len(rows), 0)) >= 0
+    np.testing.assert_array_equal(found[0], ~full.noop[:4])
+    for g in every_noop:
+        np.testing.assert_array_equal(found[g], np.arange(4) < counts[g])
+
+
+def test_canonical_indices_must_ascend():
+    task = ipc_task("floortile")
+    table, rows, _, kept = noop_rows(task)
+    index = np.asarray(kept.index)
+    if not index.flags.writeable:
+        pytest.skip("the expansion's arrays are read-only")
+    first = int(np.flatnonzero(np.diff(kept.offsets) > 1)[0])
+    b = int(kept.offsets[first])
+    index[b], index[b + 1] = index[b + 1], index[b]
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    with pytest.raises(ValueError, match="^mymyr: encoding: .*canonical"):
+        encoder.encode(rows, actions=kept)
+
+
+def test_collate_drops_noop_actions():
+    from mymyr import datasets
+
+    task = ipc_task("rovers")
+    table, rows, full, kept = noop_rows(task)
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    items = datasets.StateRows(rows, np.zeros(len(rows), np.int32))
+    out = datasets.EncodingCollate(encoder, actions=True, drop_noops=True)(items)
+    np.testing.assert_array_equal(out.actions.index, kept.index)
+    check_dropped(out.graphs, encoder.encode(rows, actions=full), full, out.actions)
+    with pytest.raises(ValueError, match="drop_noops needs actions=True"):
+        datasets.EncodingCollate(encoder, drop_noops=True)
+
+
+def test_suite_encoder_drops_noop_actions():
+    rovers, satellite = ipc_task("rovers"), ipc_task("satellite")
+    suite = rl.TaskSuite([rl.as_table(rovers), rl.as_table(satellite)])
+    states = [*walk(rovers, steps=6, walks=1, seed=3), *walk(satellite, steps=6, walks=1, seed=3)]
+    ids = np.array([0] * 7 + [1] * 7, np.int32)
+    encoder = encoding.SuiteEncoder(suite, **OPTIONS)
+    out = encoder.encode(states, ids, actions=True, drop_noops=True)
+    full = encoder.encode(states, ids, actions=True)
+    for d in range(2):
+        kept = out.expansions[d]
+        assert kept.index is not None
+        check_dropped(out.batches[d], full.batches[d], rl.expand(suite.tables[d], states[7 * d:7 * d + 7], noops=True, hashes=True),
+                      kept)
+    with pytest.raises(ValueError, match="drop_noops needs actions=True"):
+        encoder.encode(states, ids, drop_noops=True)

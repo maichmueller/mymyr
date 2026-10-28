@@ -353,7 +353,10 @@ class EncodingCollate:
 
     ``encoder`` is a ``FlatRelationEncoder`` over the table whose instances the rows' ``task_id`` number, or a
     ``SuiteEncoder`` when the rows are of the instances of a suite (global ids; the graphs are then one batch per domain).
-    ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
+    ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result);
+    ``drop_noops=True`` (with ``actions``) leaves out the actions whose successor equals the state, unless every
+    successor of the state is one (``rl.expand(..., drop_noops=True)``: the action entities keep their canonical
+    successor index as ``entity_ref``). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
     encoded with it. CUDA rows stay on the device with either encoder. ``capacities`` optionally supplies output capacities, avoiding
     the wait for exact allocation; for a suite it maps every domain to capacities with ``graphs >= N``.
@@ -370,9 +373,13 @@ class EncodingCollate:
         threads: int = 1,
         pool: ThreadPool | None = None,
         capacities: Mapping[str, int] | Mapping[int, Mapping[str, int]] | None = None,
+        drop_noops: bool = False,
     ) -> None:
+        if drop_noops and not actions:
+            raise ValueError("mymyr: datasets: drop_noops needs actions=True")
         self.encoder = encoder
         self.actions = actions
+        self.drop_noops = drop_noops
         self.framework = framework
         self.threads = threads
         self.pool = pool
@@ -393,8 +400,10 @@ class EncodingCollate:
         if self.actions:
             if isinstance(self.encoder, SuiteEncoder):
                 extra["actions"] = True
+                if self.drop_noops:
+                    extra["drop_noops"] = True
             else:
-                expansion = rl.expand(self.encoder.table, rows, task_ids)
+                expansion = rl.expand(self.encoder.table, rows, task_ids, drop_noops=self.drop_noops)
                 extra["actions"] = expansion
         graphs = self.encoder.encode(
             rows, task_ids, goals=goals, framework=self.framework, threads=self.threads, pool=self.pool, **extra

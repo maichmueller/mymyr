@@ -59,7 +59,8 @@ def _states(states: Any, idx: Any, table: Any, suite: Any) -> Any:
 
 
 def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any, actions: Any,
-           subgoals: Any, history: Any, framework: Any, threads: Any, pool: Any, capacities: Any) -> Any:
+           subgoals: Any, history: Any, framework: Any, threads: Any, pool: Any, capacities: Any,
+           drop_noops: bool = False) -> Any:
     from mymyr import rl
     from mymyr.encoding._suite import SuiteBatch
     from mymyr.rl.torch._ops import _stream
@@ -71,6 +72,8 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
         if part_encoder.options["horizon_mode"] is not None:
             raise d._error(f"device suites encode relational schemas; {type(part_encoder).__name__} takes host rows "
                            "or a HorizonView per domain")
+    if drop_noops and actions is not True:
+        raise d._error("drop_noops needs actions=True")
     if capacities is not None and isinstance(actions, Mapping) and actions:
         raise d._error("device suite capacity calls do not accept given per-domain expansions; use actions=True")
     if task_ids is None:
@@ -141,9 +144,9 @@ def encode(encoder: Any, states: Any, task_ids: Any, *, derived: Any, goals: Any
 
                 _cuda._check_async_expansion(table, part.shape[0], device.index, _stream(device))
                 exp = rl.expand(table, action_states(part_encoder, part, part_ids), part_ids,
-                                framework="torch", stream=_stream(device))
+                                framework="torch", stream=_stream(device), drop_noops=drop_noops)
             else:
-                exp = bounded_actions(part_encoder, part, part_ids, caps[1], live=live)
+                exp = bounded_actions(part_encoder, part, part_ids, caps[1], live=live, drop_noops=drop_noops)
         if exp is not None:
             expansions[k] = exp
         inputs = [_input(v, idx, n, keep) for v in (derived, goals, subgoals, history)]
