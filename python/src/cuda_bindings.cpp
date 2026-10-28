@@ -736,7 +736,7 @@ nb::capsule workspace_reference(const std::shared_ptr<ExpansionWorkspace>& works
 
 /// The device task ids of a batch: an int32 CUDA array [rows] on the context's device, or None (null: a table of one).
 const i32* device_task_ids(nb::handle obj, const PyContext& c, const OpStream& os, u64 rows,
-                           std::vector<std::shared_ptr<void>>& keep)
+                           std::vector<std::shared_ptr<void>>& keep, ImportSync* sync = nullptr)
 {
     if (obj.is_none())
         return nullptr;
@@ -744,7 +744,7 @@ const i32* device_task_ids(nb::handle obj, const PyContext& c, const OpStream& o
     if (d.device_type != dl::k_cuda && d.device_type != dl::k_cuda_managed)
         throw nb::type_error("mymyr: 'task_ids' must be an int32 CUDA array like the states (device states take device "
                              "task ids)");
-    DeviceInput in = import_device(obj, c, os, "task_ids");
+    DeviceInput in = import_device(obj, c, os, "task_ids", sync);
     const dl::Imported& im = in.im;
     if (im.dtype.code != dl::k_int || im.dtype.bits != 32 || im.dtype.lanes != 1)
         throw nb::type_error("mymyr: device 'task_ids' must be int32");
@@ -1473,9 +1473,9 @@ void run_masks(const rl::TaskSuite& suite, const cuda::DeviceMasks* dm, const st
 
 /// An int32 CUDA array [rows] (matrix: [rows, cols], *cols set) read in place on the operation's stream.
 const i32* device_i32(nb::handle obj, const PyContext& c, const OpStream& os, u64 rows, bool matrix, u32* cols,
-                      std::vector<std::shared_ptr<void>>& keep, const char* name)
+                      std::vector<std::shared_ptr<void>>& keep, const char* name, ImportSync* sync)
 {
-    DeviceInput in = import_device(obj, c, os, name);
+    DeviceInput in = import_device(obj, c, os, name, sync);
     const dl::Imported& im = in.im;
     const std::string q = std::string("mymyr: '") + name + "'";
     if (im.dtype.code != dl::k_int || im.dtype.bits != 32 || im.dtype.lanes != 1)
@@ -1506,7 +1506,8 @@ nb::object device_action_masks(const MaskArgs& a)
     PyContextPtr c = table_context(ref, nb::none(), dl::dlpack_device(a.states).device_id);
     c->drain();
     const OpStream os = c->stream_of(nb::none());
-    DeviceInput in = import_device(a.states, *c, os, "states");
+    ImportSync sync;
+    DeviceInput in = import_device(a.states, *c, os, "states", &sync);
     const WordsLayout w = device_words(in);
     const u32 NN = tt.numeric_words();
     if (w.words < NN)
@@ -1516,7 +1517,7 @@ nb::object device_action_masks(const MaskArgs& a)
     m.kind = a.kind;
     m.b = {static_cast<const u64*>(w.data), w.rows, w.words - NN, w.stride, nullptr};
     m.numeric_words = NN;
-    m.b.task_ids = device_task_ids(a.task_ids, *c, os, w.rows, keep);
+    m.b.task_ids = device_task_ids(a.task_ids, *c, os, w.rows, keep, &sync);
     if (a.kind != MaskKind::Schemas)
     {
         if (a.schema.is_none())
@@ -1524,7 +1525,7 @@ nb::object device_action_masks(const MaskArgs& a)
         if (PyIndex_Check(a.schema.ptr()) && dl::dlpack_device(a.schema).device_type < 0)
             m.schema.value = int_arg<i32>(a.schema, "schema");
         else
-            m.schema.schema = device_i32(a.schema, *c, os, w.rows, false, nullptr, keep, "schema");
+            m.schema.schema = device_i32(a.schema, *c, os, w.rows, false, nullptr, keep, "schema", &sync);
     }
     if (a.kind == MaskKind::Objects)
     {
@@ -1535,7 +1536,7 @@ nb::object device_action_masks(const MaskArgs& a)
         throw nb::type_error("mymyr: binding must be an int32 array [N, L]");
     if (!a.labels.is_none())
         m.labels = device_i32(a.labels, *c, os, w.rows, true, &m.width, keep,
-                              a.kind == MaskKind::Objects ? "prefix" : "binding");
+                              a.kind == MaskKind::Objects ? "prefix" : "binding", &sync);
     std::string why;
     const std::shared_ptr<const cuda::DeviceMasks> dm = table_masks(ref, c, &why);
     const u64 cols = m.columns(tt);
