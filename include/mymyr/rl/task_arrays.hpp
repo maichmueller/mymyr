@@ -248,13 +248,18 @@ inline constexpr u32 k_device_arrays_version = 2;
 /// Section versions of the latest layout.
 inline constexpr u32 k_section_core_version = 1;  // version 1's arrays
 inline constexpr u32 k_section_plan_version = 3;  // compiled plans (task_arrays_view.hpp); 2: the compact view, plan_view_map;
-                                                  // 3: the mask matchers (plan_schema k_sc_masks)
+                                                  // 3: the mask matchers (plan_schema k_sc_masks; k_none where
+                                                  // exports_mask_matchers is false)
 
 /// The versioned POD export of the task. Throws std::invalid_argument for an unknown version, and
 /// std::length_error when a version-2 table outgrows its u32 offsets.
 [[nodiscard]] ArrayBundle device_arrays(const Task& task, u32 version = k_device_arrays_version);
 /// The rows of the per-state view of device_arrays' plan section (plan_view_rows), without the export.
 [[nodiscard]] u32 device_view_rows(const Task& task);
+/// Whether device_arrays' plan section holds the mask matchers of the task's schemas (plan_schema k_sc_masks; else
+/// k_sc_masks is k_none): tasks without numeric fluents and axioms whose schemas have at most dev::k_max_matcher_depth
+/// parameters, the tasks the device masks (cuda/masks.hpp) run.
+[[nodiscard]] bool exports_mask_matchers(const Task& task);
 
 /// The work of the device's two matchers of one plan matcher: its fixed-order search and its fail-first forward
 /// checking (cuda/src/lifted_device.cuh run_fixed / run_fc), in units of a word read or written, summed over the

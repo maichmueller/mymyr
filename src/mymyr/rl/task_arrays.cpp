@@ -410,6 +410,7 @@ public:
         m_vars.assign(C.pattern_vars.size() * 2, 0);
 
         std::vector<u32> schema(C.schemas.size() * dev::k_sc_count, 0);
+        const bool masks = exports_mask_matchers(m_task);
         for (usize s = 0; s < C.schemas.size(); ++s)
         {
             const plan::Schema& ps = C.schemas[s];
@@ -431,9 +432,10 @@ public:
                 const bool fc = deep ? m.use_fc : prefers_fc(m_costs.schemas[s][wi]) && (keys_fit || !fixed_in_order(m));
                 row[wi == 0 ? dev::k_sc_pre0 : dev::k_sc_pre1] = matcher(m, fc);
             }
-            // the mask matchers (rl/masks.hpp), consecutive rows: existence, then one per parameter
-            row[dev::k_sc_masks] = count(m_matcher_rows.size() / dev::k_mc_count);
-            for (u32 entry = 0; entry <= ps.arity; ++entry)
+            // the mask matchers (rl/masks.hpp), consecutive rows: existence, then one per parameter; compiled only for
+            // the tasks the device masks run
+            row[dev::k_sc_masks] = masks ? count(m_matcher_rows.size() / dev::k_mc_count) : dev::k_none;
+            for (u32 entry = 0; masks && entry <= ps.arity; ++entry)
             {
                 const plan::Matcher& m = mymyr::detail::mask_matcher(C, static_cast<u32>(s), entry);
                 (void)matcher(m, m.use_fc);
@@ -622,6 +624,16 @@ private:
         return {first, count(v.size())};
     }
 
+    /// The offset of `v` appended to `out`, or of the block `last` (the previous one) when it holds the same words.
+    u32 shared(std::vector<u64>& out, std::pair<u64, u64>& last, const std::vector<u64>& v)
+    {
+        if (last.second == v.size() && std::equal(v.begin(), v.end(), out.begin() + static_cast<i64>(last.first)))
+            return count(last.first);
+        last = {out.size(), v.size()};
+        out.insert(out.end(), v.begin(), v.end());
+        return count(last.first);
+    }
+
     /// A matcher row; `fc`: the device prefers forward checking (rl::device_search_costs).
     u32 matcher(const plan::Matcher& m, bool fc)
     {
@@ -634,14 +646,16 @@ private:
                                (fixed_in_order(m) ? dev::k_mc_fixed_in_order : 0u) |
                                (m.steps.size() >= m.first_exist + 2 ? dev::k_mc_witnesses : 0u);
         row[dev::k_mc_first_exist] = m.first_exist;
-        row[dev::k_mc_dom0] = count(m_dom0.size());
-        row[dev::k_mc_dom0_n] = count(m.dom0.size());
-        m_dom0.insert(m_dom0.end(), m.dom0.begin(), m.dom0.end());
-        put(row.data(), dev::k_mc_unary_begin, list(m.unary_begin));
-        row[dev::k_mc_unary] = count(m_unary.size() / 2);
-        row[dev::k_mc_unary_n] = count(m.unary.size());
+        // static domains and unary filters equal to the previous matcher's share its rows (a schema's mask matchers
+        // repeat those of its matcher without witness pruning)
+        std::vector<u64> unary;
         for (const plan::Unary& u : m.unary)
-            m_unary.insert(m_unary.end(), {u.ptr.v, u.neg ? u64{1} : u64{0}});
+            unary.insert(unary.end(), {u.ptr.v, u.neg ? u64{1} : u64{0}});
+        row[dev::k_mc_dom0] = shared(m_dom0, m_last_dom0, m.dom0);
+        row[dev::k_mc_dom0_n] = count(m.dom0.size());
+        put(row.data(), dev::k_mc_unary_begin, list(m.unary_begin));
+        row[dev::k_mc_unary] = shared(m_unary, m_last_unary, unary) / 2;
+        row[dev::k_mc_unary_n] = count(m.unary.size());
         put(row.data(), dev::k_mc_pre_checks, checks(m.pre_checks));
         put(row.data(), dev::k_mc_checks, checks(m.checks));
         row[dev::k_mc_steps] = count(m_steps.size() / 5);
@@ -678,6 +692,7 @@ private:
     std::vector<u8> m_view_live;  // ViewLayout row -> kept (not the zero row, not dropped)
     u32 m_view_rows = 0;
     std::vector<u64> m_rs, m_pattern_base, m_dom0, m_unary, m_rows, m_edges;
+    std::pair<u64, u64> m_last_dom0{0, ~u64{0}}, m_last_unary{0, ~u64{0}};  // the latest blocks (offset, words)
     std::vector<const plan::Matcher*> m_numeric_matchers;
     std::vector<u32> m_vars, m_pattern_rows, m_check_rows, m_matcher_rows, m_index, m_steps, m_cond_effect;
 };
@@ -802,6 +817,16 @@ void add_plan_section(ArrayBundle::Builder& b, const Task& task, u32 fluent_slot
 }  // namespace
 
 u32 device_view_rows(const Task& task) { return compact_view_of(task.compiled()).rows; }
+
+bool exports_mask_matchers(const Task& task)
+{
+    if (task.numeric_slots() || task.has_axioms())
+        return false;
+    for (const plan::Schema& ps : task.compiled().schemas)
+        if (ps.arity > dev::k_max_matcher_depth)
+            return false;
+    return true;
+}
 
 ArrayBundle atom_metadata(const Task& task)
 {
