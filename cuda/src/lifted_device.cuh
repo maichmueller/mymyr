@@ -819,7 +819,10 @@ struct RowWriter
             *out.missing_flag = 1;
         if (inside && (out.hash || out.noop) && max_add > WB)
         {
-            successor_chunks(pos, b, inside);
+            if constexpr (CEOW > 0)
+                successor_past_whole(*this, pos, b, inside);
+            else
+                successor_chunks(pos, b, inside);
             return;
         }
         const u32 ow = out.out_words;
@@ -864,6 +867,16 @@ struct RowWriter
                 for (u32 i = 0; i < ow; ++i)
                     r[i] = 0;
         }
+    }
+
+    /// successor_chunks for a digested row whose adds reach past WB words, with conditional effects. Not inlined: the
+    /// chunked path with its two further copies of the effects and their condition matchers would otherwise be inlined
+    /// into every conditional-effect writer of WB words for a rare row, tripling those kernels' code (nvcc 13.4
+    /// crashes intermittently on them so inflated). The writer is passed by value so that the caller's copy stays in
+    /// registers.
+    static __device__ __noinline__ void successor_past_whole(RowWriter w, u64 pos, const u32* b, bool inside)
+    {
+        w.successor_chunks(pos, b, inside);
     }
 
     /// The successor of a row of any width, k_max_words words at a time (WB = k_wide): each chunk takes the parent's
