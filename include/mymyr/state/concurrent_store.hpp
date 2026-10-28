@@ -13,8 +13,8 @@
 //     resulting ids do not depend on thread scheduling.
 // Numeric tasks: a record is [len, bits..., numeric words...]; the numeric words (a fixed count per task) follow
 // the trimmed bits, the hash is hash::state and equality compares them bitwise.
-// Every thread t in [0, threads) may call insert(t, ...) or insert_bounded(t, ...) concurrently with the others;
-// nothing else is concurrent.
+// Every thread t in [0, threads) may call insert(t, ...) or insert_bounded(t, ...) concurrently with the others, and
+// wants_rehash(), record() and key() of published handles; nothing else is concurrent.
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/hash.hpp"
@@ -210,8 +210,8 @@ public:
     [[nodiscard]] u64 approx_size() const noexcept { return m_approx.load(std::memory_order_relaxed); }
     /// True once the load factor exceeds 60%: every thread must stop inserting (finishing at most the insert it is in)
     /// until rehash() ran. The table cannot fill before that: the capacity is at least 2^15 entries per thread, so the
-    /// 40% left exceed the up to 64 unreported inserts and the one insert in flight of every thread. A plain load, so
-    /// that a search can check it before every insert.
+    /// 40% left exceed the fewer than 64 unreported inserts and the one insert in flight of every thread. A plain
+    /// load, so that a search can check it before every insert.
     [[nodiscard]] bool wants_rehash() const noexcept { return m_grow.load(std::memory_order_relaxed); }
     [[nodiscard]] u64 capacity() const noexcept { return m_cap; }
 
