@@ -136,6 +136,31 @@ def test_brfs_takes_the_common_start_blocked_and_budget_options(store):
         assert r.status == Status.OUT_OF_STATES and r.stats.states == limit, (limit, r.stats)
 
 
+def test_threaded_brfs_through_an_expansion_wider_than_the_store():
+    # the initial state's one successor has 65^3 successors: more states than the concurrent store's initial table
+    # holds, inserted by one expansion. Every thread count gives the same space, limit and plan
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string(
+        "(define (domain d) (:requirements :strips :typing) (:types obj) "
+        "(:predicates (start) (on) (a ?x - obj) (b ?x - obj) (c ?x - obj)) "
+        "(:action choose :parameters () :precondition (start) :effect (and (not (start)) (on))) "
+        "(:action pick :parameters (?x ?y ?z - obj) :precondition (on) "
+        ":effect (and (not (on)) (a ?x) (b ?y) (c ?z))))")
+    objects = " ".join(f"o{i}" for i in range(65))
+    task = mymyr.Task(domain.instantiate_string(
+        f"(define (problem p) (:domain d) (:objects {objects} - obj) (:init (start)) "
+        "(:goal (and (a o0) (b o0) (c o0))))"))
+    states = 2 + 65**3
+    for threads in (1, 8):
+        r = search.brfs(task, stop_at_goal=False, threads=threads)
+        assert r.exhausted and r.stats.states == states, (threads, r.stats)
+        r = search.brfs(task, max_states=200_000, threads=threads)
+        assert r.status == Status.OUT_OF_STATES and r.stats.states == 200_000, (threads, r.stats)
+        r = search.brfs(task, threads=threads)
+        assert r.solved and len(r.plan) == 2 and task.is_goal(replay(task, r.plan))
+
+
 def test_every_search_result_has_the_common_fields(blocks):
     results = [search.brfs(blocks), search.astar(blocks, heuristic="max"), search.gbfs(blocks),
                search.beam(blocks, beam_width=50), search.ehc(blocks), search.anytime_astar(blocks, heuristic="ff"),

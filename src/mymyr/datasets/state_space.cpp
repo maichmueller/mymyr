@@ -619,6 +619,10 @@ struct alignas(64) Worker
     std::vector<u32> tsch, targs;      // labels: schema, width binding objects
     std::vector<f64> tcost;            // costs (tasks with non-unit costs)
     u64 generated = 0;
+    // an expansion stopped for a rehash: it resumes at successor `resume_at` (counted from the state's first
+    // successor), of schema `resume_schema`, whose first successor has index `resume_first`
+    bool paused = false;
+    u32 resume_schema = 0, resume_first = 0, resume_at = 0;
 };
 
 enum class Stop : u8
@@ -687,10 +691,9 @@ public:
             for (;;)
             {
                 m_team.run([&](u32 t) { work(t); });
-                if (m_stop.load(std::memory_order_relaxed) != 0 || !m_resize.load(std::memory_order_relaxed))
+                if (m_stop.load(std::memory_order_relaxed) != 0 || !m_store->wants_rehash())
                     break;
                 m_store->rehash(m_team);
-                m_resize.store(false, std::memory_order_relaxed);
             }
             if (const u8 s = m_stop.load(std::memory_order_relaxed))
             {
@@ -738,7 +741,7 @@ private:
         {
             if (lo >= hi)
             {
-                if (m_resize.load(std::memory_order_relaxed) || m_stop.load(std::memory_order_relaxed))
+                if (m_store->wants_rehash() || m_stop.load(std::memory_order_relaxed))
                     break;
                 if (m_store->approx_size() >= m_limit)  // approx_size() <= size(): never a false stop
                 {
@@ -756,32 +759,62 @@ private:
                     break;
                 hi = std::min(m_layer_hi, lo + m_chunk);
             }
-            expand(t, lo++);
+            if (!expand(t, lo))
+                break;  // paused for a rehash: state lo resumes after it, then the rest of [lo, hi)
+            ++lo;
             if (m_store->wants_rehash())
-                m_resize.store(true, std::memory_order_relaxed);
-            if (m_resize.load(std::memory_order_relaxed))
-                break;  // stop after the current state; the rest of [lo, hi) resumes after the rehash
+                break;
         }
         m_pend_lo[t] = lo;
         m_pend_hi[t] = hi;
     }
 
-    void expand(u32 t, u64 id)
+    /// Expands state `id`, or resumes its paused expansion; false if it paused (again) because the store wants a
+    /// rehash. The transitions of a state are contiguous in its thread's buffers, whatever the pauses.
+    bool expand(u32 t, u64 id)
     {
         Worker& w = m_ws[t];
         Successors& succ = *w.succ;
         const StateView rec = m_store->record(m_loc[id]);  // records never move
         succ.prepare(rec);
-        m_goal[id] = succ.goal_holds();
-        w.src_id.push_back(static_cast<u32>(id));
+        u32 first_schema = 0, k = 0, next = 0;
+        if (w.paused)
+        {
+            first_schema = w.resume_schema;
+            k = w.resume_first;
+            next = w.resume_at;
+            w.paused = false;
+        }
+        else
+        {
+            m_goal[id] = succ.goal_holds();
+            w.src_id.push_back(static_cast<u32>(id));
+        }
         // the parent's metric value in the cost formula (datasets/state_space.hpp)
         const f64 g = m_metric ? m_costs.initial(rec) : static_cast<f64>(m_depth);
         const bool labels = m_o.labels;
         const u32 K = m_width;
-        u32 k = 0;
-        succ.generate<false>(
+        u32 cur = ~u32{0};
+        succ.generate<true>(
             [&](u32 schema, const ObjectId* b, const Delta& d)
             {
+                if (schema != cur)
+                {
+                    cur = schema;
+                    w.resume_first = k;
+                }
+                if (k < next)  // inserted before the pause
+                {
+                    ++k;
+                    return true;
+                }
+                if (m_store->wants_rehash())
+                {
+                    w.paused = true;
+                    w.resume_schema = schema;
+                    w.resume_at = k;
+                    return false;
+                }
                 const u32 kk = k++;
                 ++w.generated;
                 const u32 nn = apply_delta(rec.w, rec.nw, d, w.next);
@@ -797,10 +830,13 @@ private:
                     w.tcost.push_back(m_costs.transition(g, d));
                 return true;
             },
-            false, true);
-        w.src_cnt.push_back(k);
+            false, true, first_schema);
         if (k >= (u32{1} << 24))
             throw std::length_error("mymyr: more than 2^24 successors of one state");
+        if (w.paused)
+            return false;
+        w.src_cnt.push_back(k);
+        return true;
     }
 
     void finalize_layer()
@@ -1015,7 +1051,6 @@ private:
     u64 m_layer_lo = 0, m_layer_hi = 0;
     std::atomic<u64> m_chunk_ctr{0};
     u64 m_chunk = 1;
-    std::atomic<bool> m_resize{false};
     std::atomic<u8> m_stop{0};
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
