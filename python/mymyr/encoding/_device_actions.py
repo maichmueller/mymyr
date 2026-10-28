@@ -116,10 +116,16 @@ def bounded_actions(encoder: Any, states: Any, ids: Any, capacity: int, *, succe
             # (labels -1, digests and flags 0)
             labels.clamp_(min=0)
             x.binding = torch.where((torch.arange(rows, device=device) < total)[:, None], x.binding[:rows], 0)
+    if width > rows:
+        # a contiguous block of the rows, as wide as the arrays (the working rows past them are scratch)
+        labels = labels[:, :rows].contiguous()
+        if live is None:
+            x.parent, x.schema = labels[0], labels[1]
+            x.index = labels[2] if drop_noops else None
     for name in names:
         if getattr(x, name) is not None and getattr(x, name).shape[0] != rows:
             setattr(x, name, getattr(x, name)[:rows])
-    x.labels = labels[:, :rows]
+    x.labels = labels
     return x
 
 
@@ -134,14 +140,16 @@ def action_capacity(encoder: Any, entities: int) -> int:
 
 def expansion_rows(encoder: Any, entities: int, successors: int | None, drop_noops: bool) -> int:
     """The successors a bounded expansion has room for before it drops no-op rows: ``successors`` (default: the
-    ``action_capacity`` of the entity capacity); without the drop the kept rows are all successors, so the action
-    capacity bounds them as well."""
+    ``action_capacity`` of the entity capacity; at most 2**31 - 1, the rows an expansion indexes); without the drop
+    the kept rows are all successors, so the action capacity bounds them as well. With the drop a device holds that
+    many working rows twice (the labels, digests and flags, and the compaction's copy of them): about
+    ``38 + 8 * label_width`` bytes a successor."""
     rows = action_capacity(encoder, entities)
     if successors is None:
         return rows
-    if isinstance(successors, bool) or not isinstance(successors, int) or successors < 0:
-        raise d._error(f"the successors capacity must be an int >= 0, not {successors!r}")
-    return min(0x7fffffff, successors) if drop_noops else min(rows, successors)
+    if isinstance(successors, bool) or not isinstance(successors, int) or not 0 <= successors <= 0x7fffffff:
+        raise d._error(f"the successors capacity must be an int in [0, 2**31 - 1], not {successors!r}")
+    return successors if drop_noops else min(rows, successors)
 
 
 def bound_status(encoder: Any, expansion: Any, entities: int, successors: int | None, drop_noops: bool) -> int:
@@ -152,15 +160,16 @@ def bound_status(encoder: Any, expansion: Any, entities: int, successors: int | 
 
 
 def overflowed(batch: Any) -> Any:
-    """``batch`` (a host FlatBatch encoded with capacities) as a batch that overflowed its capacities: all arrays zero,
-    its true sizes, ``capacity_overflow`` set. The form of a host encoding whose bounded expansion overflowed."""
+    """``batch`` (a host FlatBatch encoded with capacities) as a batch whose bounded expansion overflowed: all arrays
+    and sizes zero, ``capacity_overflow`` set, as a device reports it (its encoding does not run on such rows)."""
     import numpy as np
 
     from mymyr._core._encoding import FlatBatch
 
     arrays = {name: np.zeros_like(value) if isinstance(value, np.ndarray) else value
               for name, value in batch.as_dict("numpy").items()}
-    sizes = dict(batch.sizes, overflow=True, capacity_overflow=True)
+    sizes = {name: value if isinstance(value, bool) else 0 for name, value in batch.sizes.items()}
+    sizes.update(overflow=True, capacity_overflow=True)
     module = type(batch.task_ids).__module__.split(".")[0]
     framework = {"torch": "torch", "jax": "jax", "jaxlib": "jax"}.get(module, "numpy")
     return FlatBatch.from_arrays(batch.schema, arrays, sizes=sizes, framework=framework)

@@ -26,12 +26,14 @@ class ActionRows(NamedTuple):
     one) and ``index[row]`` is the row's position in the state's full canonical successor order, the action an
     environment takes (None without the drop: the position is ``row - offsets[parent[row]]``).
 
-    ``offsets`` has an entry per graph of the batch and one more. With ``obs_capacities`` the row arrays have, on the
-    CPU and on a device alike, the rows that the entity capacity's action entities can stand for (``entities`` times
-    the largest number of schemas that share an action relation), every array zero past ``offsets[-1]``; ``status``
-    bit 0 reports more kept rows than that or more successors before the drop than ``obs_capacities['successors']``
-    (default: the same rows), bit 1 an invalid row (a device's; the CPU raises), and the batch's overflow flags report
-    them too (an overflowed batch is all zero, and the rows are then unspecified). Without capacities the arrays have
+    ``offsets`` has N + 1 entries (N the environments; over a suite the entries past a domain batch's graphs repeat
+    its total), on the CPU and on a device alike. With ``obs_capacities`` the row arrays have, on the CPU and on a
+    device alike, the rows that the entity capacity's action entities can stand for (``entities`` times the largest
+    number of schemas that share an action relation), every array zero past ``offsets[-1]``; ``status`` bit 0 reports
+    more kept rows than that or more successors before the drop than ``obs_capacities['successors']`` (default: the
+    same rows), bit 1 an invalid row (a device's; the CPU raises), and the batch's overflow flags report them too. A
+    batch whose expansion overflowed is all zero and so are its sizes (the encoding did not run); the rows and
+    ``offsets`` are then unspecified (``offsets[-1]`` is at least the kept rows). Without capacities the arrays have
     exactly the rows and ``status`` is 0. Over a suite of several domains ``actions`` is a tuple of these, one per
     domain batch.
     """
@@ -412,6 +414,10 @@ class Observer:
             g = None if goals is None else (goals[0][taken], goals[1][taken])
             batch, actions = self._encode(k, states[taken], local[taken].contiguous(), g)
             batches.append(batch)
+            if actions is not None:
+                # N + 1 offsets, as a device's domain batches have them: the total past the domain's graphs
+                tail = actions.offsets[-1:].expand(states.shape[0] - taken.shape[0])
+                actions = actions._replace(offsets=torch.cat((actions.offsets, tail)))
             rows.append(actions)
         observation = SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
         return observation, tuple(rows) if self.actions else None

@@ -600,22 +600,27 @@ def encode_arrays(
     try:
         return _encode_rows(encoder, rows, capacities, keep)
     except ValueError as error:
-        state = None if actions is None or _INVALID not in str(error) else _misordered(torch, actions)
+        state = None if actions is None or _INVALID not in str(error) else _misordered(torch, encoder, actions,
+                                                                                         task_ids)
         if state is None:
             raise
         raise _error(f"the action rows of state {state} are not in canonical order: strictly ascending in (schema, "
                      "binding), and in index (from 0) for an expansion with an index") from None
 
 
-def _misordered(torch: Any, actions: Any) -> Optional[int]:
+def _misordered(torch: Any, encoder: Any, actions: Any, task_ids: Any) -> Optional[int]:
     """The first state whose expansion rows (device arrays) are not in canonical order, or None: the diagnosis of an
-    exact call that found an invalid row (it waits for the device)."""
+    exact call that found an invalid row (it waits for the device). Rows that are not valid labels (a schema or an
+    object the instance does not have, a parent that is not their state) are the cause first, as on the host: then
+    None."""
     offsets = actions.offsets.to(torch.int64)
     total = int(offsets[-1])
     counts = (offsets[1:] - offsets[:-1]).clamp(min=0)
     if total < 1 or int(counts.sum()) != total or total > actions.schema.shape[0]:
         return None
     parent = torch.repeat_interleave(torch.arange(counts.shape[0], device=offsets.device), counts)
+    if not _valid_labels(torch, encoder, actions, task_ids, parent, total):
+        return None
     key = torch.cat((actions.schema[:total, None], actions.binding[:total]), dim=1).to(torch.int64)
     step = key[1:] - key[:-1]
     changed = step != 0
@@ -631,6 +636,33 @@ def _misordered(torch: Any, actions: Any) -> Optional[int]:
         bad |= index < 0
     at = torch.nonzero(bad)
     return int(parent[at[0, 0]]) if at.shape[0] else None
+
+
+def _valid_labels(torch: Any, encoder: Any, actions: Any, task_ids: Any, parent: Any, total: int) -> bool:
+    """Whether the first ``total`` rows are labels of their states' instances: schemas of the table, parents that are
+    their states, and objects of the instance in the schema's arguments."""
+    from mymyr.encoding._device_actions import table_of
+
+    table = table_of(encoder)
+    device = parent.device
+    schema = actions.schema[:total].to(torch.int64)
+    if bool(((schema < 0) | (schema >= table.num_schemas)).any()):
+        return False
+    given = getattr(actions, "parent", None)
+    if given is not None and not bool((given[:total].to(torch.int64) == parent).all()):
+        return False
+    if task_ids is None:
+        instance = torch.zeros_like(parent)
+    else:
+        ids = torch.as_tensor(task_ids, device=device).to(torch.int64)
+        instance = ids[parent]
+        if bool(((instance < 0) | (instance >= len(table))).any()):
+            return False
+    objects = torch.as_tensor(list(table.num_objects), dtype=torch.int64, device=device)[instance]
+    arity = torch.as_tensor(list(table.schema_arities), dtype=torch.int64, device=device)[schema]
+    binding = actions.binding[:total].to(torch.int64)
+    used = torch.arange(binding.shape[1], device=device) < arity[:, None]
+    return not bool((used & ((binding < 0) | (binding >= objects[:, None]))).any())
 
 
 def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, graph_count: Any = None) -> dict[str, Any]:
