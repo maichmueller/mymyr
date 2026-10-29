@@ -1233,8 +1233,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             invalid("the schema does not store relation arrays");
         if (arrays.simple)
         {
-            if (!a.node_offsets || !a.edge_offsets ||
-                ((out.capacities.entities || out.capacities.args) && !a.node_label) ||
+            const u64 nodes = encoding::simple_node_capacity(out.capacities.graphs, out.capacities,
+                                                             arrays.argumentless_relations);
+            if (!a.node_offsets || !a.edge_offsets || (nodes && !a.node_label) ||
                 (out.capacities.args && (!a.edge_index || !a.edge_label)) ||
                 a.edge_stride < mul(2, out.capacities.args))
                 invalid("the Simple arrays must hold the node and edge capacities");

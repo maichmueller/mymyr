@@ -1,0 +1,5 @@
+(define (problem no-blocks)
+ (:domain blocks-flags)
+ (:objects)
+ (:init (handempty) (moved))
+ (:goal (and (handempty) (moved))))
