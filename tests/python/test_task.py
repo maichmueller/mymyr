@@ -265,6 +265,45 @@ def test_frozen_wrapper_can_be_collected_and_recreated():
     assert source_reference() is None
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_frozen_cache_lock_allows_collection(cached):
+    from python_children import run_code
+
+    run_code(f'''
+import gc
+import threading
+from concurrent.futures import Future
+
+import mymyr
+from conftest import text_task
+
+lazy = text_task("gripper__prob05", atoms="lazy")
+retained = lazy.frozen() if {cached!r} else None
+probe = mymyr._core._FrozenCacheProbe()
+result = Future()
+
+def contend():
+    try:
+        result.set_result(probe.frozen(lazy.local()))
+    except BaseException as error:
+        result.set_exception(error)
+
+worker = threading.Thread(target=contend)
+
+def collect_while_locked():
+    worker.start()
+    probe.wait()
+    # The contender is in native code, about to wait on the held cache lock. Collection must be able to stop it.
+    gc.collect()
+
+twin = probe.frozen(lazy, collect_while_locked)
+worker.join()
+assert result.result() is twin
+assert lazy.frozen() is twin
+assert retained is None or retained is twin
+''', timeout=5)
+
+
 def test_frozen_cache_with_concurrent_collection():
     import gc
     import threading
