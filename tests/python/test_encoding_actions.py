@@ -838,6 +838,7 @@ def test_action_rows_have_the_capacity_rows_zero_past_the_kept_ones(dev, kind, d
     env.close()
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("drop", [False, True])
 def test_bounded_actions_outputs_match_their_fakes(drop):
     """torch.library.opcheck of the expansion and encoding ops an observation traces, below, at and above the rows

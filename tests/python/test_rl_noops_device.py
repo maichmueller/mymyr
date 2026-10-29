@@ -206,6 +206,7 @@ def test_device_hash_rows_matches_host_and_captures(words, numeric_words):
     torch.cuda.synchronize()
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("rows", [False, True])
 def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):

@@ -123,6 +123,7 @@ def test_invalid_placements_and_unreferenced_task_ids_set_status(case):
     assert empty.pos.shape == (0, 0, encoder.table.words) and empty.status.item() == 0
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("layered", [False, True])
 def test_custom_ops_fake_compile_and_cuda_graph_replay(case, layered):
     _, encoder, p, o, signs, rows, task_ids, layers = case
