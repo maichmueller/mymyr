@@ -38,9 +38,15 @@ void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
             for (i32 k = t.instance_offsets[g]; k < t.instance_offsets[g + 1]; ++k)
             {
                 match_detail::Budget budget{b.max_steps};
-                const bool found = match_detail::search(encoding::detail::SoloGroup{}, t, static_cast<u32>(g),
-                    static_cast<u32>(k), b.states + row * b.row_words,
-                    b.derived ? b.derived + row * b.derived_words : nullptr, binding.data(), base.data(), masks.data(), need.data(), budget);
+                const u64* state = b.states + row * b.row_words;
+                const u64* derived = b.derived ? b.derived + row * b.derived_words : nullptr;
+                // The search the device runs for these templates, so that both count the same steps.
+                const bool found = t.max_vars <= 2
+                    ? match_detail::search<encoding::detail::SoloGroup, false, false>({}, t, static_cast<u32>(g),
+                          static_cast<u32>(k), state, derived, binding.data(), base.data(), masks.data(), need.data(),
+                          budget)
+                    : match_detail::search(encoding::detail::SoloGroup{}, t, static_cast<u32>(g), static_cast<u32>(k),
+                          state, derived, binding.data(), base.data(), masks.data(), need.data(), budget);
                 if (budget.exhausted)
                     flags |= 8;
                 if (!found)

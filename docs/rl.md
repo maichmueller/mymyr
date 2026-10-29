@@ -529,25 +529,26 @@ destination-passing C++ form
 `rl::match_first(MatchTemplates, MatchBatch, ThreadPool*)` also accepts caller-owned output buffers and a thread pool;
 `GoalTemplates::view(block)` resolves the packed pointers on either host or device memory.
 
-Matching is a backtracking search whose work is exponential in the number of variables in the worst case. With
-distinct variables, two counting tests prune it. A pigeonhole test: there must be at least as many objects as
-variables, and the variables whose candidates lie inside the projection of a positive literal on one argument
-(filtered by its constant and bound arguments; a unary predicate projects a type) must fit into that projection. A
-supporter test: a variable that s literals of one predicate share with s distinct unbound variables, such as a
-location in `(at ?p1 ?l) (at ?p2 ?l)`, needs a value with s distinct supporting objects, and the variables that need
-at least s must fit into the values that have that many. The tests run at the start and, once the search has met a
-failure, at every partial binding with more than two unbound variables. They only reject partial bindings that have
-no completion, so the first binding stays that of the binding order. Satisfiable templates can still need
-exponential work. `max_steps` bounds it for each row and template, on the host and the device alike: a step is a
-binding trial or a scan of a 32-object candidate tile over the template's literals and their tuples, the tests'
-scans included (`None`: no bound; otherwise an integer in `[0, 2**63)`). A scan reads only the tuples that agree with
-a literal's leading constant and bound arguments. The default leaves room
-for the templates that `lifted_goal_templates` makes for the IPC benchmarks in `tests/data/ipc`, matched in the states
-of random walks. An exhausted search leaves its template unmatched and sets status value 8; the other templates are still
-searched with their own budgets, so counts include only completed matches, and with `first=True` an exhausted earlier
-template can precede the returned match. Retry with a larger budget when value 8 is set. The torch custom op takes
-the same `max_steps=`; in C++, set `MatchBatch::max_steps` and supply the `MatchBatch::status` scalar, which is
-required.
+Matching is a backtracking search whose work is exponential in the number of variables in the worst case. With distinct
+variables, two counting tests prune it. A pigeonhole test: there must be at least as many objects as variables, and the
+variables whose candidates lie inside the projection of a positive literal on one argument (filtered by its constant and
+bound arguments; a unary predicate projects a type) must fit into that projection. A supporter test: a variable that s
+literals of one predicate share with s distinct unbound variables, such as a location in `(at ?p1 ?l) (at ?p2 ?l)`,
+needs a value with s distinct supporting objects, and the variables that need at least s must fit into the values that
+have that many. The tests run at the start and, once the search has met a failure, at every partial binding with more
+than two unbound variables. They only reject partial bindings that have no completion, so the first binding stays that
+of the binding order. Satisfiable templates can still need exponential work. `max_steps` bounds it for each row and
+template, on the host and the device alike: a step is a binding trial or a scan of a 32-object candidate tile over the
+template's literals and their tuples, the tests' scans included (`None`: no bound; otherwise an integer in
+`[0, 2**63)`). A scan reads only the tuples that agree with a literal's leading constant and bound arguments. When a
+template of the table has more than two variables, a tile without candidates also looks up, within its step, the next
+tile that every positive literal of the variable reaches, and the search moves there. The host and the device count the
+same steps. The default leaves room for the templates that `lifted_goal_templates` makes for the IPC benchmarks in
+`tests/data/ipc`, matched in the states of random walks. An exhausted search leaves its template unmatched and sets
+status value 8; the other templates are still searched with their own budgets, so counts include only completed matches,
+and with `first=True` an exhausted earlier template can precede the returned match. Retry with a larger budget when
+value 8 is set. The torch custom op takes the same `max_steps=`; in C++, set `MatchBatch::max_steps` and supply the
+`MatchBatch::status` scalar, which is required.
 
 For CUDA, upload once with `templates.to("cuda:0")` or `templates.upload(torch.cuda.current_stream())`. Uploads include
 the sorted literal index and reject templates above the variable limit. Warm matching on the capture stream before
