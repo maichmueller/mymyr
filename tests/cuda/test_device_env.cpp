@@ -581,7 +581,7 @@ TEST(DeviceEnvVisited, FinishInsertsEqualHost)
     SKIP_WITHOUT_GPU();
     for (const char* name : {"gripper__prob05", "pegsol-08-strips__p22", "philosophers__p03-phil4", "cs-counters"})
         for (bool autoreset : {true, false})
-            for (u32 H : {8u, 64u, 1024u, cuda::envk::k_wide_visited})
+            for (u32 H : {8u, 64u, cuda::envk::k_wide_visited / 2, cuda::envk::k_wide_visited})
                 for (auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
                 {
                     SCOPED_TRACE(std::string(name) + (autoreset ? " autoreset" : " masked resets") + " H " +

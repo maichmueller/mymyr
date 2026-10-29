@@ -210,8 +210,10 @@ struct Finish
     u64* restarts = nullptr;
 };
 /// Visited tables of at least this many words restart in a kernel of their own after an autoreset (see
-/// Finish::restarts): the stores of the few blocks that hold the restarting rows cannot use the memory bandwidth.
-inline constexpr u32 k_wide_visited = 2048;
+/// Finish::restarts): the stores of the few blocks that hold the restarting rows cannot use the memory bandwidth. The
+/// kernel runs on every step with autoreset, also when no row restarts; below this capacity the blocks' own stores
+/// cost less than that launch.
+inline constexpr u32 k_wide_visited = 8192;
 cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStream_t s);
 cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, cudaStream_t s);
 

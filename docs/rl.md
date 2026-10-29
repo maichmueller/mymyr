@@ -309,8 +309,9 @@ hashes=True)`, equal to `mymyr.hash_rows(rows, numeric_words=k)` with the rows' 
 `0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and sets bit 0 of the
 sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot invent one, apart from
 hash collisions. A full table also costs more per step: the probe sequence of every new state runs through a table
-at ¾ occupancy, so a capacity of at least twice the episode length (`track_visited=True`) is also the fast choice. The
-torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
+at ¾ occupancy, so a capacity of at least twice the episode length (`track_visited=True`) is also the fast choice. On a
+CUDA device with autoreset, tables of 8192 words or more restart in a kernel of their own, which adds about 1 µs to
+every step, also to steps in which no episode ends. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
 `env.visited_status` (int32 `[1]`) expose the live storage on the environments' device; treat the table and counts as
 read-only. A CUDA environment keeps them with one thread per environment, so they hold the same words as the CPU's
 after the same calls, on every device path (the fast path, the general path and label steps). Reset, step,
