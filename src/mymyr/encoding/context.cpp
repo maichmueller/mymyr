@@ -168,7 +168,9 @@ struct InstanceRows
     std::vector<Cell> numeric_cells;                        // one per numeric function that has slots
     u64 numeric_tuples = 0;
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
-    std::vector<i32> goal_constants;  // the constant goal literals, rows of detail::k_constant_objects + max_arity
+    std::vector<i32> goal_constants;  // the constant goal literals, rows of detail::k_constant_objects + max_arity,
+                                      // then the rows of the goal cells (InstanceView::goal_constants)
+    u64 goal_constant_count = 0;      // the constant goal literals
     std::vector<u32> literal_ranges;                        // [domain predicates, detail::k_literal_columns]
     u64 num_objects = 0, words = 0, fluent_slots = 0, derived_words = 0, derived_slots = 0;
     u64 fingerprint = 0;
@@ -495,16 +497,29 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         std::sort(literals.begin(), literals.end());
         for (const std::vector<i32>& literal : literals)
             out.goal_constants.insert(out.goal_constants.end(), literal.begin(), literal.end());
+        out.goal_constant_count = literals.size();
     }
-    // whether the instance's goal has a constant literal of (ip, sign) that the goal variant (0 plain, 1 satisfied,
-    // 2 unsatisfied) lists
-    auto lists_constant = [&](u32 ip, u32 sign, u32 variant)
+    // Gives the goal cell `cell` of level 0 of the instance's lists the rows [c, d) of the constant literals of
+    // (ip, sign) of the instance's goal that its variant (0 plain, 1 satisfied, 2 unsatisfied) lists, appended to the
+    // instance's goal_constants; returns whether it lists one.
+    const u32 constant_width = detail::k_constant_objects + max_arity;
+    auto list_constants = [&](Cell& cell, u32 ip, u32 sign, u32 variant)
     {
+        cell.c = cell.d = static_cast<u32>(out.goal_constants.size() / constant_width);
         const auto found = constants.find({ip, sign});
         if (found == constants.end())
             return false;
-        return std::ranges::any_of(found->second, [&](const ConstantLiteral& row)
-                                   { return variant == 0 || (variant == 1) == row.holds; });
+        for (const ConstantLiteral& row : found->second)
+        {
+            if (variant != 0 && (variant == 1) != row.holds)
+                continue;
+            out.goal_constants.insert(out.goal_constants.end(),
+                                      {0, static_cast<i32>(instance.pred_map[ip]), static_cast<i32>(sign)});
+            for (u32 k = 0; k < max_arity; ++k)
+                out.goal_constants.push_back(k < row.objects.size() ? row.objects[k] : -1);
+            ++cell.d;
+        }
+        return cell.c != cell.d;
     };
     if (horizon)
     {
@@ -597,7 +612,14 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 }
                 else if (constant_part)
                     (d.level == 0 ? fixed_goal : fixed_levels).push_back(cell);
-                if (cell.a == cell.b && !(d.level == 0 && constant_part && lists_constant(ip, sign, variant)))
+                bool listed = false;
+                if (d.level == 0)
+                {
+                    listed = constant_part && list_constants(cell, ip, sign, variant);
+                    if (!constant_part)
+                        cell.c = cell.d = 0;
+                }
+                if (cell.a == cell.b && !listed)
                     continue;  // the instance's goal has no tuple here
                 out.cells.push_back(cell);
             }
@@ -670,7 +692,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 }
                 else
                     fixed_goal.push_back(cell);
-                if (cell.a == cell.b && !lists_constant(ip, sign, variant))
+                if (!list_constants(cell, ip, sign, variant) && cell.a == cell.b)
                     continue;  // the instance's goal has no tuple here
                 out.cells.push_back(cell);
             }
@@ -1017,7 +1039,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_encoding_fingerprint] = rows.fingerprint;
         columns[detail::k_goal_offset] = goal_words.size();
         columns[detail::k_goal_constants_offset] = goal_constants.size() / (detail::k_constant_objects + max_arity);
-        columns[detail::k_goal_constant_count] = rows.goal_constants.size() / (detail::k_constant_objects + max_arity);
+        columns[detail::k_goal_constant_count] = rows.goal_constant_count;
         columns[detail::k_goal_complete] = rows.goal_complete;
         columns[detail::k_needs_derived] = rows.needs;
         inst.insert(inst.end(), std::begin(columns), std::end(columns));

@@ -162,7 +162,8 @@ struct Pass
     [[nodiscard]] detail::CellList cells_of(const detail::InstanceView& v, u64 g) const noexcept
     {
         if (!Layered)
-            return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g), false, false, has_constants<false>(g));
+            return has_constants<false>(g) ? detail::cell_list(v, true, has_actions(g), false, false, true)
+                                           : detail::cell_list(v, in.goal_pos != nullptr, has_actions(g));
         return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g), in.subgoals.layers != 0,
                                  history_used(g) != 0, has_constants<true>(g));
     }
@@ -256,6 +257,28 @@ struct Pass
     return true;
 }
 
+/// The view of one instance, kept across the graphs of a range: consecutive graphs mostly share their instance.
+class InstanceViews
+{
+public:
+    explicit InstanceViews(const detail::ContextView& view) noexcept : m_view(view) {}
+
+    [[nodiscard]] const detail::InstanceView& of(u32 instance) noexcept
+    {
+        if (instance != m_instance)
+        {
+            m_v = detail::instance_view(m_view, instance);
+            m_instance = instance;
+        }
+        return m_v;
+    }
+
+private:
+    const detail::ContextView& m_view;
+    u32 m_instance = ~u32{0};
+    detail::InstanceView m_v{};
+};
+
 /// Pass one of a member: validates its graphs, evaluates their derived words, counts them, and (relation-major) tallies
 /// the tuples per relation. An invalid graph is recorded by kind and counts as empty.
 template<bool Layered, bool Lanes>
@@ -279,6 +302,7 @@ void count_range(const Pass& p, u32 t)
     if (p.relation_major)
         m.tally.assign(p.R, 0);
     m.cell_counts.clear();
+    InstanceViews views(p.view);
     for (u64 g = lo; g < hi; ++g)
     {
         const i32 id = p.in.task_ids ? p.in.task_ids[g] : 0;
@@ -288,7 +312,7 @@ void count_range(const Pass& p, u32 t)
             continue;
         }
         const u32 instance = static_cast<u32>(id);
-        const detail::InstanceView v = detail::instance_view(p.view, instance);
+        const detail::InstanceView& v = views.of(instance);
         if (const auto validity = detail::row_validity(v, p.map_of(g).data ? v.words : p.in.states.words,
                                                        p.in.goal_pos != nullptr, p.in.goal_words,
                                                        p.in.goal_derived_pos != nullptr, p.in.goal_derived_words);
@@ -404,11 +428,12 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start,
         history = m.history_start, numeric = m.numeric_start;
     u32* virtual_scratch = m.virtual_scratch.empty() ? nullptr : m.virtual_scratch.data();
+    InstanceViews views(p.view);
     // fills graph g; `graph_counts` are its cell counts (null unless the pass kept them)
     auto fill_one = [&](u64 g, const u32* graph_counts)
     {
         const u32 instance = p.instance_of(g);
-        const detail::InstanceView v = detail::instance_view(p.view, instance);
+        const detail::InstanceView& v = views.of(instance);
         const detail::GraphTotals& totals = m.totals[g - lo];
         detail::RowLayers layers;
         const detail::RowInput row = p.row_input<Layered, Lanes>(

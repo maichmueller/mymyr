@@ -144,18 +144,6 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             if (goal_reads || layer_reads)
                 modes[i] |= 1u << (m + 3);
         }
-        // the constant literals of the instance's goal with the table predicate `tp` and the sign of goal op `op`
-        const auto instance_constants = [&inst](u32 tp, u32 op)
-        {
-            u64 n = 0;
-            for (u32 k = 0; k < inst.goal_constants.count; ++k)
-            {
-                const i32* row = inst.goal_constants.row(k);
-                n += static_cast<u32>(row[ed::k_constant_predicate]) == tp &&
-                     (row[ed::k_constant_negative] != 0) == ed::goal_op_negative(op);
-            }
-            return n;
-        };
         // Cell scratch covers every optional lane combination. Fixed-row output bounds omit expansion tuples,
         // whose count belongs to the input, and the constant literals of the rows (bounded per literal below).
         const bool actions = schema.options().include_actions;
@@ -185,7 +173,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                 if (ed::is_action_op(cell.op) || ed::is_horizon_op(cell.op))
                     continue;
                 const bool instance_goal = ed::is_goal_op(cell.op) && !row_goals && ed::goal_op_level(cell.op) == 0;
-                const u64 n = u64{cell.b - cell.a} + (instance_goal ? instance_constants(cell.c, cell.op) : 0u);
+                // a goal cell of the instance's goal holds the rows of the constant literals it lists (Cell)
+                const u64 n = u64{cell.b - cell.a} + (instance_goal ? cell.d - cell.c : 0u);
                 tuples = add(tuples, n);
                 args = add(args, mul(n, cell.arity));
                 if (ed::is_goal_op(cell.op) && ed::goal_op_mode(cell.op) == ed::GoalMode::PlainTarget)
@@ -210,8 +199,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             {
                 const ed::Cell& key = list.cells[c];
                 if (!ed::is_goal_op(key.op) || ed::is_history_op(key.op) || ed::is_action_op(key.op) ||
-                    ed::is_horizon_op(key.op))
-                    continue;
+                    ed::is_horizon_op(key.op) || (!row_goals && ed::goal_op_level(key.op) == 0))
+                    continue;  // a cell of the instance's goal takes no constant literal of a row
                 u64 literal_tuples = 0, literal_args = 0, literal_targets = 0;
                 for (u32 other = 0; other < list.count; ++other)
                 {

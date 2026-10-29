@@ -400,22 +400,44 @@ TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
     for (u32 k = 0; k < v.goal_constants.count; ++k)
     {
         EXPECT_EQ(v.goal_constants.row(k)[lanes::k_constant_layer], 0);
-        const u32 w = v.goal_constants.width;
+        const u32 width = v.goal_constants.width;
         if (k != 0)
         {
-            EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + w,
-                                                     v.goal_constants.row(k), v.goal_constants.row(k) + w));
+            EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + width,
+                                                     v.goal_constants.row(k), v.goal_constants.row(k) + width));
         }
     }
+    // each goal cell of the instance's goal lists the rows [c, d) past the constant part: literals of its predicate
+    // and sign, ascending, each one of the constant part
     u32 constant_cells = 0;
+    const u32 w = v.goal_constants.width;
     for (u32 i = 0; i < v.num_cells; ++i)
     {
-        if (lanes::is_goal_op(v.cells[i].op) && v.cells[i].a == v.cells[i].b)
+        const Cell& cell = v.cells[i];
+        if (!lanes::is_goal_op(cell.op))
+            continue;
+        const Relation& relation = context->schema().relation(cell.relation);
+        EXPECT_LE(cell.c, cell.d) << relation.name;
+        if (cell.c == cell.d)
+            continue;
+        EXPECT_GE(cell.c, v.goal_constants.count) << relation.name;
+        for (u32 k = cell.c; k < cell.d; ++k)
         {
-            const Relation& relation = context->schema().relation(v.cells[i].relation);
-            EXPECT_EQ(v.cells[i].c, static_cast<u32>(relation.predicate)) << relation.name;
-            ++constant_cells;
+            const i32* row = v.goal_constants.row(k);
+            EXPECT_EQ(row[lanes::k_constant_predicate], static_cast<i32>(relation.predicate)) << relation.name;
+            EXPECT_EQ(row[lanes::k_constant_negative], lanes::goal_op_negative(cell.op) ? 1 : 0) << relation.name;
+            if (k != cell.c)
+            {
+                EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + w,
+                                                         row, row + w));
+            }
+            bool found = false;
+            for (u32 j = 0; j < v.goal_constants.count; ++j)
+                found = found || std::equal(row, row + w, v.goal_constants.row(j));
+            EXPECT_TRUE(found) << relation.name;
         }
+        if (cell.a == cell.b)
+            ++constant_cells;
     }
     EXPECT_GT(constant_cells, 0u);
     for (u32 i = 0; i < v.num_row_cells; ++i)

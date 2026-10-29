@@ -198,8 +198,10 @@ struct Cell
                         // a numeric cell: the instance's numeric slots [a, b)
     u32 arity;          // encoded arity: the logical arity, or 1 for a nullary predicate, plus the slots of the other roles
     u32 logical_arity;  // the predicate's arity
-    u32 c = 0, d = 0;   // a goal cell: c is the table domain predicate of its literals (the key of its constant
-                        // literals), d is 0; a shared static cell: the rows [c, d) of the instance's static tuples
+    u32 c = 0, d = 0;   // a goal cell of level 0 in a list of the instance's goal: the rows [c, d) of the
+                        // instance's goal_constants that it lists (InstanceView::goal_constants); any other goal cell:
+                        // c is the table domain predicate of its literals (the key of the row's constant literals),
+                        // d is 0; a shared static cell: the rows [c, d) of the instance's static tuples
 };
 static_assert(sizeof(Cell) == 32);
 
@@ -356,8 +358,8 @@ enum InstanceColumn : u32
     k_static_args_offset,   // the same for static tuples in `static_args`
     k_encoding_fingerprint, // Task::encoding_fingerprint(): states of equal tasks and equal fingerprints decode alike
     k_goal_offset,          // first word of the instance's goal masks in `goal_words`
-    k_goal_constants_offset,  // first row of the instance's constant goal literals in `goal_constants`
-    k_goal_constant_count,    // the instance's constant goal literals
+    k_goal_constants_offset,  // first row of the instance's rows in `goal_constants`
+    k_goal_constant_count,    // the instance's constant goal literals (its first rows there)
     k_goal_complete,        // 1 iff the instance's goal masks and constant part hold its whole goal
     k_needs_derived,        // which derived words its graphs read (k_needs_* bits)
     k_ext_lists,            // 12 pairs (cells, first row in `cells`): the lists of a graph with subgoal layers, history
@@ -390,7 +392,8 @@ struct ContextView
     const u64* goal_words = nullptr;  // per instance: positive and negative goal masks over the fluent slots (`words` words
                                       // each), then over the derived slots (`derived_words` words each)
     const i32* goal_constants = nullptr;  // [constant goal literals of all instances, k_constant_objects + max_arity]:
-                                          // each instance's constant part, a ConstantRows of layer 0
+                                          // each instance's constant part, a ConstantRows of layer 0, followed by
+                                          // the rows its goal cells list (InstanceView::goal_constants)
     const u32* action_schemas = nullptr;  // the schemas of every action relation, ascending: the entries of an action cell
     const u32* schema_arity = nullptr;    // [num_schemas] the objects of each action schema's ground actions
     u32 num_schemas = 0;
@@ -435,7 +438,9 @@ struct InstanceView
     const u64* goal_neg;
     const u64* goal_derived_pos;  // and over the derived slots
     const u64* goal_derived_neg;
-    ConstantRows goal_constants;  // the constant part of the instance's goal
+    ConstantRows goal_constants;  // the constant part of the instance's goal; past its `count` rows follow, for each
+                                  // goal cell of level 0 of the instance's lists, the literals its variant lists
+                                  // (in the order of their objects; the cell's rows [c, d))
     u32 goal_complete;
     u32 needs_derived;
     const u32* action_schemas;
@@ -846,13 +851,14 @@ struct GoalWords
     const u64* derived_pos;
     const u64* derived_neg;
     ConstantRows constants;  // the goal's constant literals (level 0)
+    bool instance;           // the instance's goal: its goal cells of level 0 hold their rows of `constants` (Cell)
 };
 
 MYMYR_HD GoalWords goal_words(const InstanceView& v, const RowInput& in)
 {
     if (in.goal_pos)
-        return {in.goal_pos, in.goal_neg, in.goal_derived_pos, in.goal_derived_neg, in.goal_constants};
-    return {v.goal_pos, v.goal_neg, v.goal_derived_pos, v.goal_derived_neg, v.goal_constants};
+        return {in.goal_pos, in.goal_neg, in.goal_derived_pos, in.goal_derived_neg, in.goal_constants, false};
+    return {v.goal_pos, v.goal_neg, v.goal_derived_pos, v.goal_derived_neg, v.goal_constants, true};
 }
 
 /// Whether the graph's goal is its whole goal: always for a row's own masks, else the instance's flag.
@@ -1612,18 +1618,22 @@ MYMYR_HD void constant_run(const Cell& c, const ConstantRows& rows, i32 layer, u
         ++last;
 }
 
-/// Whether goal cell `c` lists its constant literal `row`: the variant takes it (plain: all, satisfied: those that
-/// hold, unsatisfied: the others), and the placement of repeated literals puts it at the cell's level, comparing it
-/// with the constant literals of the goal (`g`: the instance's or the row's) and of the row's subgoal layers.
+/// Whether the placement of repeated literals can drop a constant literal of this graph: the row has subgoal layers
+/// and the policy is not Every.
 template<bool Layered>
-MYMYR_HD bool constant_listed(const InstanceView& v, const Cell& c, const GoalWords& g, const RowInput& in,
+MYMYR_HD bool placement_applies(const InstanceView& v, const RowInput& in)
+{
+    return Layered && in.layers && in.layers->subgoals.layers != 0 && v.repeated_literals != RepeatedLiterals::Every;
+}
+
+/// Whether the placement of repeated literals puts the constant literal `row` of goal cell `c` at the cell's level,
+/// comparing it with the constant literals of the goal (`g`: the instance's or the row's) and of the row's subgoal
+/// layers.
+template<bool Layered>
+MYMYR_HD bool constant_placed(const InstanceView& v, const Cell& c, const GoalWords& g, const RowInput& in,
                               const i32* row)
 {
-    const GoalMode mode = goal_op_mode(c.op);
-    if (mode == GoalMode::Satisfied || mode == GoalMode::Unsatisfied)
-        if (constant_holds(v, row, c.logical_arity) != (mode == GoalMode::Satisfied))
-            return false;
-    if (!Layered || !in.layers || in.layers->subgoals.layers == 0 || v.repeated_literals == RepeatedLiterals::Every)
+    if (!placement_applies<Layered>(v, in))
         return true;
     const ConstantRows& sub = in.layers->constants;
     const u32 level = goal_op_level(c.op), levels = level_count(in.layers->subgoals);
@@ -1642,17 +1652,61 @@ MYMYR_HD bool constant_listed(const InstanceView& v, const Cell& c, const GoalWo
     return true;
 }
 
+/// Whether goal cell `c` lists its constant literal `row`: the variant takes it (plain: all, satisfied: those that
+/// hold, unsatisfied: the others), and the placement of repeated literals puts it at the cell's level
+/// (constant_placed).
+template<bool Layered>
+MYMYR_HD bool constant_listed(const InstanceView& v, const Cell& c, const GoalWords& g, const RowInput& in,
+                              const i32* row)
+{
+    const GoalMode mode = goal_op_mode(c.op);
+    if (mode == GoalMode::Satisfied || mode == GoalMode::Unsatisfied)
+        if (constant_holds(v, row, c.logical_arity) != (mode == GoalMode::Satisfied))
+            return false;
+    return constant_placed<Layered>(v, c, g, in, row);
+}
+
+/// The constant literals goal cell `c` takes in this graph: the rows [first, last) of `rows`, of which those that
+/// constant_listed accepts. A cell of level 0 of the instance's goal takes its rows [c.c, c.d) of the instance's
+/// goal_constants, which its variant lists (`listed`), so that only the placement can drop one; any other goal cell
+/// takes the run of its layer, predicate and sign among the row's constant literals.
+struct ConstantRange
+{
+    ConstantRows rows;
+    u32 first, last;
+    bool listed;  // the variant lists every row of the range
+};
+
+template<bool Layered>
+MYMYR_HD ConstantRange constant_range(const Cell& c, const GoalWords& g, const RowInput& in)
+{
+    if (g.instance && (!Layered || goal_op_level(c.op) == 0))
+        return {g.constants, c.c, c.d, true};
+    i32 layer = 0;
+    ConstantRange r{cell_constant_rows<Layered>(c, g, in, layer), 0, 0, false};
+    constant_run(c, r.rows, layer, r.first, r.last);
+    return r;
+}
+
+/// Whether goal cell `c` lists row k of its range `r` (constant_range) in this graph.
+template<bool Layered>
+MYMYR_HD bool range_listed(const InstanceView& v, const Cell& c, const GoalWords& g, const RowInput& in,
+                           const ConstantRange& r, u32 k)
+{
+    return r.listed ? constant_placed<Layered>(v, c, g, in, r.rows.row(k))
+                    : constant_listed<Layered>(v, c, g, in, r.rows.row(k));
+}
+
 /// The constant literals goal cell `c` lists in this graph.
 template<bool Layered>
 MYMYR_HD u32 constant_count(const InstanceView& v, const Cell& c, const GoalWords& g, const RowInput& in)
 {
-    i32 layer = 0;
-    const ConstantRows rows = cell_constant_rows<Layered>(c, g, in, layer);
-    u32 first = 0, last = 0;
-    constant_run(c, rows, layer, first, last);
+    const ConstantRange r = constant_range<Layered>(c, g, in);
+    if (r.listed && !placement_applies<Layered>(v, in))
+        return r.last - r.first;
     u32 n = 0;
-    for (u32 k = first; k < last; ++k)
-        n += constant_listed<Layered>(v, c, g, in, rows.row(k)) ? 1u : 0u;
+    for (u32 k = r.first; k < r.last; ++k)
+        n += range_listed<Layered>(v, c, g, in, r, k) ? 1u : 0u;
     return n;
 }
 
@@ -2536,15 +2590,17 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
     const u64 A = v.max_arity;
     const u32 arity = K == k_any_arity ? c.logical_arity : K;
     const i32* table = goal_op_derived(c.op) ? v.derived_args : v.slot_args;
-    i32 layer = 0;
-    const ConstantRows constants = cell_constant_rows<Layered>(c, g, in, layer);
-    u32 k = 0, last = 0;
-    constant_run(c, constants, layer, k, last);
+    const ConstantRange r = constant_range<Layered>(c, g, in);
+    const ConstantRows& constants = r.rows;
+    u32 k = r.first;
+    const u32 last = r.last;
+    const bool check = !r.listed || placement_applies<Layered>(v, in);
     // the next constant literal the cell lists (k == last: none is left)
     auto next_constant = [&]
     {
-        while (k < last && !constant_listed<Layered>(v, c, g, in, constants.row(k)))
-            ++k;
+        if (check)
+            while (k < last && !range_listed<Layered>(v, c, g, in, r, k))
+                ++k;
     };
     next_constant();
     u32 n = 0;

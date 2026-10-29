@@ -952,19 +952,19 @@ MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, 
     const u32 stride = v.max_arity;
     Cell flat = c;
     flat.op = low;
-    i32 layer = 0;
-    ConstantRows constants{};
-    u32 k = 0, end = 0;
+    ConstantRange r{};
     if (kind == HorizonKind::Goal || kind == HorizonKind::Sat)
-    {
-        constants = cell_constant_rows<true>(flat, h.goal, h.row, layer);
-        constant_run(flat, constants, layer, k, end);
-    }
+        r = constant_range<true>(flat, h.goal, h.row);
+    const ConstantRows& constants = r.rows;
+    u32 k = r.first;
+    const u32 end = r.last;
+    const bool check = !r.listed || placement_applies<true>(v, h.row);
     // the next constant literal the cell lists (k == end: none is left)
     auto next_constant = [&]
     {
-        while (k < end && !constant_listed<true>(v, flat, h.goal, h.row, constants.row(k)))
-            ++k;
+        if (check)
+            while (k < end && !range_listed<true>(v, flat, h.goal, h.row, r, k))
+                ++k;
     };
     next_constant();
     if (c.a < c.b)
