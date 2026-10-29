@@ -1489,3 +1489,34 @@ def test_relabel_lifted_numeric_words_participate_in_loop_equality(on_device):
         x, p, d = [torch.tensor(a, device="cuda:0") for a in (reached.view(np.int64), prev.view(np.int64), done)]
         actual = rl.her_relabel_lifted(x, d, None, t.to("cuda:0"), prev_states=p, max_segments=1)
         assert_lifted_parity(want, actual)
+
+
+@needs_frontend
+@pytest.mark.parametrize("framework", ["numpy", "torch", "cuda"])
+def test_relabel_lifted_preserves_the_high_goal_bit(framework):
+    names = [f"p{i:02d}" for i in range(64)]
+    predicates = " ".join(f"({name})" for name in names)
+    domain = mymyr.Domain.from_string(
+        f"(define (domain flags) (:requirements :strips) (:predicates {predicates})"
+        f" (:action mark :parameters () :precondition (and) :effect (and {predicates})))"
+    )
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem p) (:domain flags) (:init) (:goal (p63)))"))
+    assert task.literal("(p63)").atom.slot == 63
+    t = rl.lifted_goal_templates(task)
+    initial = task.initial_state
+    final = task.successor_states(initial)[0]
+    prev = np.asarray(task.encode([initial]))[None, :, :]
+    reached = np.asarray(task.encode([final]))[None, :, :]
+    done = np.zeros((1, 1), bool)
+    expected = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=1)
+    assert expected.goal_pos.tolist() == [[[1 << 63]]]
+    if framework == "numpy":
+        return
+    torch = cuda_match_runtime() if framework == "cuda" else pytest.importorskip("torch")
+    device = "cuda:0" if framework == "cuda" else "cpu"
+    x, p, d = [torch.tensor(a, device=device) for a in (reached.view(np.int64), prev.view(np.int64), done)]
+    actual = rl.her_relabel_lifted(x, d, None, t.to(device) if framework == "cuda" else t,
+                                  prev_states=p, max_segments=1)
+    assert actual.goal_pos.item() == -(1 << 63)
+    assert_lifted_parity(expected, actual)
