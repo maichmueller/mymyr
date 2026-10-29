@@ -226,10 +226,12 @@ def test_stubs_parse_and_are_typed():
     assert ") -> tuple[int, ...]:" in formalism
     assert ": object" not in rl and "-> object" not in rl and "-> list:" not in rl and "-> dict:" not in rl
     ops =(d / "_rl_ops.pyi").read_text()
-    assert "def match_first(rows: mymyr._typing.SupportsDLPack" in ops
+    array = "mymyr._typing.SupportsDLPack | mymyr._typing.TensorView"
+    assert f"def match_first(rows: {array}" in ops
     assert "templates: mymyr._core._rl.GoalTemplates" in ops
     assert "strategy: Literal['future', 'final', 'episode'] = 'future'" in ops
-    assert "prefix: mymyr._typing.SupportsDLPack | None, depth: int, mask: mymyr._typing.SupportsDLPack" in ops
+    assert f"prefix: {array} | None, depth: int, mask: {array}" in ops
+    assert f"def target_visited(target: {array}" in ops
     for text in (jx, ops):
         assert ": object" not in text and "-> object" not in text
         assert "-> list:" not in text and "-> dict:" not in text and "-> tuple:" not in text

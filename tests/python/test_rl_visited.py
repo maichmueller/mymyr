@@ -665,6 +665,17 @@ def test_compiled_observations_carry_action_visited():
         assert torch.equal(a.revisited, b.revisited)
         assert torch.equal(a.action_visited, b.action_visited)
         assert torch.equal(eager.visited, compiled.visited)
+    # the op's fake implementation, with and without a row map
+    from mymyr.rl.torch._observation import _target_arrays
+
+    rows = a.actions
+    arrays = _target_arrays(a.obs, device)
+    env_rows = torch.arange(6, dtype=torch.int32, device=device).flip(0)
+    for mapping in (None, env_rows):
+        args = (*arrays, rows.offsets, rows.index, rows.succ_hash, rows.status, eager.visited, eager.visited_count,
+                mapping)
+        result = torch.library.opcheck(torch.ops.mymyr.target_visited.default, args)
+        assert set(result.values()) == {"SUCCESS"}, result
     eager.close()
     compiled.close()
 

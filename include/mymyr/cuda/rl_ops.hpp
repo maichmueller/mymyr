@@ -56,6 +56,11 @@ cudaError_t launch_segment_counts(const i32* offsets, u64 rows, i32* counts, cud
 /// parents) or [-1, table_rows) reads as not visited.
 cudaError_t launch_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
                                 const i32* parent, const i32* rows, u64 parents, u64 size, u8* out, cudaStream_t s);
+/// rl::target_visited on device arrays, one thread per target: out [x.targets].
+cudaError_t launch_target_visited(const rl::TargetRows<i32>& x, const u64* table, const i32* count, u64 table_rows,
+                                  u32 capacity, u8* out, cudaStream_t s);
+cudaError_t launch_target_visited(const rl::TargetRows<i64>& x, const u64* table, const i32* count, u64 table_rows,
+                                  u32 capacity, u8* out, cudaStream_t s);
 /// Lifted goal matching on caller-owned arrays; no allocation or host synchronization.
 cudaError_t launch_match_first(const rl::MatchTemplates& templates, const rl::MatchBatch& batch, cudaStream_t s);
 

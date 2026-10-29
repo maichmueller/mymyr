@@ -212,7 +212,7 @@ bit 0 once the row's table overflowed; every state array leads with the rows, so
 reached state before insertion and autoreset. Reset clears selected histories and inserts initial states;
 `env.clear_visited(state, mask=None)` returns a state with selected histories cleared and current states inserted,
 retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses `[N, 0]` table/status arrays and
-reports false revisit flags. On CUDA a JAX `Env` refuses `track_visited` at construction.
+reports false revisit flags. A JAX `Env` on a CUDA device keeps the same tables on the device.
 `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
 hashes with JAX x64 enabled (64-bit inputs raise `TypeError` without it; `x.view(np.uint32)` gives the halves), and
 equals the NumPy membership operation under jit without host reads. The successor hashes in that layout are
@@ -308,7 +308,9 @@ hashes=True)`, equal to `mymyr.hash_rows(rows, numeric_words=k)` with the rows' 
 `numeric_words` keys classical rows only). Equal 64-bit hashes count as one entry; zero shares the reserved key
 `0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and sets bit 0 of the
 sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot invent one, apart from
-hash collisions. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
+hash collisions. A full table also costs more per step: the probe sequence of every new state runs through a table
+at ¾ occupancy, so a capacity of at least twice the episode length (`track_visited=True`) is also the fast choice. The
+torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
 `env.visited_status` (int32 `[1]`) expose the live storage on the environments' device; treat the table and counts as
 read-only. A CUDA environment keeps them with one thread per environment, so they hold the same words as the CPU's
 after the same calls, on every device path (the fast path, the general path and label steps). Reset, step,
@@ -365,8 +367,9 @@ aligned with the batch's `target_entity`; over a suite of several domains a tupl
 each target whether it is an action entity whose successor (its `actions.succ_hash`) is in the environment's table.
 Targets that are not action entities, the unused tail of a capacity batch and the targets of an overflowed
 observation are false. The tables are those after the step and its autoreset: the next observation's, in which a
-no-op successor is visited. The mask is computed by torch operations on the environments' device, so it is part of
-captured and compiled steps; `CapturedRollout` results hold one mask per step in `action_visited`.
+no-op successor is visited. One kernel per domain batch computes the mask on the environments' device (a thread per
+target, `mymyr::target_visited` under `torch.compile`), so it is part of captured and compiled steps; `CapturedRollout`
+results hold one mask per step in `action_visited`.
 
 ```python needs-torch
 from mymyr import encoding

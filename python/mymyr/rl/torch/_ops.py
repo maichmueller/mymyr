@@ -53,6 +53,11 @@ the states again; required on a device).
   views follow as keyword tensors: ``action_schema``, ``action_binding``, ``action_offsets``, ``action_parent``,
   ``node_offsets``, ``edge_offsets``, ``edge_src``, ``edge_dst``, ``edge_schema``, ``edge_binding`` and
   ``action_succ``.
+- ``mymyr::visited_mask(table, count, succ_hash, parent, rows)``: membership of successor hashes in visited tables
+  (bool [M]); ``mymyr::clear_visited(env, ...)``: restarts the visited tables of rows.
+- ``mymyr::target_visited(target, role, ref, entity_offsets, live, row_offsets, row_index, succ_hash, status, table,
+  count, env_rows)``: whether each action target of an encoded batch reaches a visited successor (bool [T]; one
+  thread per target, the observations' ``action_visited``).
 - ``mymyr::literal_slots`` / ``mymyr::literal_masks``: CUDA lookup of table predicate ids and instance-local objects
   on a registered encoder; kinds and slots, or goal/subgoal masks, with a device status scalar for invalid input.
 The expansion ops take ``derived``, ``rows``, ``hashes``, ``noops`` and ``drop_noops`` flags and return the same
@@ -69,6 +74,7 @@ from torch import Tensor
 
 import mymyr.rl
 from mymyr.encoding import _device
+from mymyr.rl._ops import tensor_view
 
 __all__ = [
     "bounded_actions",
@@ -374,7 +380,8 @@ def visited_mask_impl(table: Tensor, count: Tensor, succ_hash: Tensor, parent: T
     from mymyr._core import _rl_ops
 
     out = torch.empty(succ_hash.shape, dtype=torch.bool, device=table.device)
-    _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out, stream=_stream(table))
+    v = tensor_view
+    _rl_ops.visited_mask(v(table), v(count), v(succ_hash), v(parent), rows=v(rows), out=v(out), stream=_stream(table))
     return out
 
 
@@ -389,6 +396,39 @@ def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor
 @visited_mask.register_fake
 def _(table, count, succ_hash, parent, rows=None):
     return succ_hash.new_empty(succ_hash.shape, dtype=torch.bool)
+
+
+def target_visited_impl(target: Tensor, role: Tensor, ref: Tensor, entity_offsets: Tensor, live: Optional[Tensor],
+                        row_offsets: Tensor, row_index: Optional[Tensor], succ_hash: Tensor, status: Optional[Tensor],
+                        table: Tensor, count: Tensor, env_rows: Optional[Tensor]) -> Tensor:
+    """The eager body of ``mymyr::target_visited``."""
+    from mymyr._core import _rl_ops
+
+    out = torch.empty(target.shape, dtype=torch.bool, device=table.device)
+    v = tensor_view
+    _rl_ops.target_visited(v(target), v(role), v(ref), v(entity_offsets), v(row_offsets), v(succ_hash), v(table),
+                           v(count), live=v(live), row_index=v(row_index), status=v(status), env_rows=v(env_rows),
+                           out=v(out), stream=_stream(table))
+    return out
+
+
+@_op("mymyr::target_visited", mutates_args=())
+def target_visited(target: Tensor, role: Tensor, ref: Tensor, entity_offsets: Tensor, live: Optional[Tensor],
+                   row_offsets: Tensor, row_index: Optional[Tensor], succ_hash: Tensor, status: Optional[Tensor],
+                   table: Tensor, count: Tensor, env_rows: Optional[Tensor]) -> Tensor:
+    """Whether each target of an encoded batch (``target`` [T]: target_entity; ``live`` int64 [1]: the live targets,
+    None: all) is an action entity (``role``: entity_role) whose successor row is in its environment's visited table:
+    bool [T]. The graph of an entity comes from ``entity_offsets``, its row from ``entity_ref`` (``ref``), the graph's
+    rows ``[row_offsets[g], row_offsets[g + 1])`` and, with the drop of no-op rows, ``row_index``; ``env_rows`` [G]
+    maps graphs to table rows (None: graph g is row g). A nonzero ``status`` [1] makes every target false. CPU or CUDA
+    tensors (one thread per target on torch's current stream, without a host synchronization)."""
+    return target_visited_impl(target, role, ref, entity_offsets, live, row_offsets, row_index, succ_hash, status,
+                               table, count, env_rows)
+
+
+@target_visited.register_fake
+def _(target, role, ref, entity_offsets, live, row_offsets, row_index, succ_hash, status, table, count, env_rows):
+    return target.new_empty(target.shape, dtype=torch.bool)
 
 
 def clear_visited_impl(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,

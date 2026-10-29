@@ -134,8 +134,10 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None, poo
     count = empty((rows.shape[0],), "int32")
     if status is None:
         status = empty((), "int64")
-    _rl_ops.match_first(rows, task_ids, host, block, found, binding, template, count, status,
-                        first=first, derived=derived, stream=stream, pool=pool, max_steps=max_steps)
+    from ._ops import tensor_view as v
+
+    _rl_ops.match_first(v(rows), v(task_ids), host, v(block), v(found), v(binding), v(template), v(count), v(status),
+                        first=first, derived=v(derived), stream=stream, pool=pool, max_steps=max_steps)
     if first:
         found, binding, template = found[:, 0], binding[:, 0], template[:, 0]
     return MatchResult(found, binding, template, count, status)

@@ -1,12 +1,14 @@
 #pragma once
 // Array imports of the RL bindings (rl_torch_bindings.cpp, rl_ops_bindings.cpp): arrays read and written in place
 // through DLPack (destination passing), host memory or CUDA memory on one device, imported with the array API's
-// stream handoff on the call's stream.
+// stream handoff on the call's stream; or tensor views (mymyr._typing.TensorView, see tensor_view below), which the
+// torch wrappers pass without the cost of a DLPack export.
 
 #include "arrays.hpp"
 #include "dlpack.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/vector.h>
 
 #include <algorithm>
 #include <initializer_list>
@@ -26,6 +28,38 @@ constexpr DType i32t{dl::k_int, 32}, u32t{dl::k_uint, 32}, i64t{dl::k_int, 64}, 
 
 inline std::string quoted(const char* name) { return std::string("mymyr: '") + name + "'"; }
 
+/// Whether obj is a tensor view: a tuple (data pointer, DLPack dtype code, bits, CUDA device or -1 for host memory,
+/// shape, strides in elements). The caller keeps the memory alive for the call and has ordered its pending writes
+/// before the call's stream (mymyr.rl's torch wrappers pass torch's current stream).
+[[nodiscard]] inline bool is_tensor_view(nb::handle obj) { return nb::isinstance<nb::tuple>(obj); }
+
+/// The memory of a tensor view (is_tensor_view), as an import with nothing to keep.
+inline dl::Imported tensor_view(nb::handle obj, const char* name)
+{
+    const auto t = nb::borrow<nb::tuple>(obj);
+    if (t.size() != 6)
+        throw nb::type_error((quoted(name) + " is a tuple but not a tensor view").c_str());
+    dl::Imported im;
+    im.data = reinterpret_cast<void*>(nb::cast<std::uintptr_t>(t[0]));
+    im.dtype = dl::DataType{nb::cast<u8>(t[1]), nb::cast<u8>(t[2]), 1};
+    const int device = nb::cast<int>(t[3]);
+    im.device = device < 0 ? dl::Device{dl::k_cpu, 0} : dl::Device{dl::k_cuda, device};
+    im.shape = nb::cast<std::vector<i64>>(t[4]);
+    im.strides = nb::cast<std::vector<i64>>(t[5]);
+    if (im.strides.size() != im.shape.size())
+        throw nb::type_error((quoted(name) + " is a tensor view with mismatched shape and strides").c_str());
+    return im;
+}
+
+/// The (device type, device id) of an array or tensor view; {-1, -1} for neither.
+[[nodiscard]] inline dl::Device device_of(nb::handle obj)
+{
+    if (!is_tensor_view(obj))
+        return dl::dlpack_device(obj);
+    const int device = nb::cast<int>(nb::borrow<nb::tuple>(obj)[3]);
+    return device < 0 ? dl::Device{dl::k_cpu, 0} : dl::Device{dl::k_cuda, device};
+}
+
 /// The arrays of one call, read and written in place: host memory for a host Env, CUDA memory on the Env's device for
 /// a device Env (imported on the call's stream). `keep` holds the imports.
 class Imports
@@ -35,11 +69,11 @@ public:
     /// call's other arrays).
     Imports(int device, std::intptr_t stream, bool env = true) : m_device(device), m_stream(stream), m_env(env) {}
 
-    /// obj as a C-contiguous array of one of `dtypes` with `shape` (-1: any extent; the extents are stored in `ext`),
-    /// or null for None. Writable unless `write` is false.
+    /// obj as a C-contiguous array of one of `dtypes` with `shape` (-1: any extent; the extents are stored in `ext`,
+    /// its dtype in `dtype`), or null for None. Writable unless `write` is false.
     template<class T>
     T* get(nb::handle obj, const char* name, std::initializer_list<DType> dtypes, std::initializer_list<i64> shape,
-           bool write, std::vector<i64>* ext = nullptr)
+           bool write, std::vector<i64>* ext = nullptr, DType* dtype = nullptr)
     {
         if (obj.is_none())
             return nullptr;
@@ -52,6 +86,8 @@ public:
         check_shape(im, name, shape);
         if (ext)
             *ext = im.shape;
+        if (dtype)
+            *dtype = DType{im.dtype.code, im.dtype.bits};
         auto* p = static_cast<T*>(im.data);
         keep.push_back(std::move(im.keep));
         return p;
@@ -166,9 +202,10 @@ public:
 private:
     dl::Imported take(nb::handle obj, const char* name, bool write)
     {
-        if (write && framework_of(obj) == Framework::Jax)
+        const bool view = is_tensor_view(obj);
+        if (write && !view && framework_of(obj) == Framework::Jax)
             throw nb::type_error((quoted(name) + " is a JAX array; JAX arrays are immutable").c_str());
-        const dl::Device d = dl::dlpack_device(obj);
+        const dl::Device d = device_of(obj);
         if (d.device_type < 0)
             throw nb::type_error((quoted(name) + " must be an array that speaks DLPack").c_str());
         if (m_device < 0 && !dl::host_accessible(d.device_type))
@@ -179,6 +216,8 @@ private:
             throw nb::type_error((quoted(name) + " must be a CUDA array on cuda:" + std::to_string(m_device) +
                                   (m_env ? " (the Env's device)" : " (the device of the call's other arrays)"))
                                      .c_str());
+        if (view)
+            return tensor_view(obj, name);
         dl::Imported im = dl::import_dlpack(obj, m_device < 0 ? dl::k_stream_default : m_stream);
         if (write && im.readonly)
             throw nb::type_error((quoted(name) + " is read-only").c_str());

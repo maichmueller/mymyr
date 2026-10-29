@@ -432,7 +432,8 @@ class Observer:
         """Whether the successor of each action target of ``encoding`` is in its environment's visited table: bool
         [targets] aligned with the batch's ``target_entity`` (False for a target that is not an action entity, for
         the tail of a capacity batch and for an observation whose expansion overflowed); a tuple of these, one per
-        domain batch, over a suite of several domains. Torch operations without a host synchronization."""
+        domain batch, over a suite of several domains. One ``mymyr::target_visited`` per domain batch, without a host
+        synchronization."""
         if self.suite is None:
             return _targets_visited(encoding, actions, visited, count, None, self._implicit[0])
         n = visited.shape[0]
@@ -453,21 +454,18 @@ class Observer:
         self.handles = []
 
 
-def _target_arrays(batch: Any, device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tensor, Any]:
+def _target_arrays(batch: Any, device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
     """target_entity, entity_role, entity_ref and entity_offsets of a batch as torch tensors on ``device``, and its live
-    targets (a device count of a capacity batch, else the array's length)."""
+    targets (int64 [1]: a capacity batch's count, on the device for a device batch; None: all of them)."""
     if isinstance(batch, _device.DeviceFlatBatch):
         arrays = [getattr(batch, name) for name in ("target_entity", "entity_role", "entity_ref", "entity_offsets")]
         sizes = batch.device_sizes
-        live = arrays[0].shape[0] if sizes is None else sizes[3]
-        return (*arrays, live)
+        return (*arrays, None if sizes is None else sizes[3:4])
     columns = batch.as_dict("torch")
     arrays = [columns[name].to(device) for name in ("target_entity", "entity_role", "entity_ref", "entity_offsets")]
     sizes = batch.sizes
-    return (*arrays, arrays[0].shape[0] if sizes is None else int(sizes["targets"]))
-
-
-_ACTION_ROLE = 4
+    live = None if sizes is None else torch.tensor([int(sizes["targets"])], dtype=torch.int64, device=device)
+    return (*arrays, live)
 
 
 def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tensor, env_rows: Optional[Tensor],
@@ -475,36 +473,18 @@ def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tenso
     """Observer.action_visited of one batch and its expansion rows; ``env_rows`` maps the batch's graphs to the
     environment rows (None: graph g is row g); ``implicit``: the batch has implicit entity arrays (no action
     entities)."""
-    device = visited.device
+    from mymyr.rl.torch import _ops
+
     if implicit:
-        return torch.zeros(0, dtype=torch.bool, device=device)
-    target, role, ref, entity_offsets, live = _target_arrays(batch, device)
-    T, M = target.shape[0], rows.parent.shape[0]
-    if T == 0 or M == 0 or role.shape[0] == 0:
-        return torch.zeros(T, dtype=torch.bool, device=device)
-    # the rows' membership: rows past offsets[-1] are padding, and a status flags undefined rows
-    usable = (torch.arange(M, device=device) < rows.offsets[-1]) & (rows.status[0] == 0)
-    parent = torch.where(usable, rows.parent, -1)
-    seen = rl.visited_mask(visited, count, rows.succ_hash, parent, rows=env_rows)
-    # each target's entity, graph and canonical successor index; a capacity batch's entity offsets past its live
-    # graphs are zero, so their running maximum is searched
-    entity = target.to(torch.int64).clamp(0, role.shape[0] - 1)
-    action = (torch.arange(T, device=device) < live) & (role[entity] == _ACTION_ROLE)
-    offsets = torch.cummax(entity_offsets.to(torch.int64), 0).values
-    row_offsets = rows.offsets.to(torch.int64)
-    graph = (torch.searchsorted(offsets, entity, right=True) - 1).clamp(0, row_offsets.shape[0] - 2)
-    index = ref[entity].to(torch.int64)
-    if rows.index is None:
-        at = row_offsets[graph] + index
-        found = (index >= 0) & (at < row_offsets[graph + 1])
-    else:
-        # the live rows are sorted by (parent, index)
-        key = torch.where(usable, (rows.parent.to(torch.int64) << 32) | rows.index.to(torch.int64),
-                          torch.iinfo(torch.int64).max)
-        want = (graph << 32) | index.clamp(0, 0x7FFFFFFF)
-        at = torch.searchsorted(key, want).clamp(max=M - 1)
-        found = (index >= 0) & (key[at] == want)
-    return action & found & seen[at.clamp(0, M - 1)]
+        return torch.zeros(0, dtype=torch.bool, device=visited.device)
+    target, role, ref, entity_offsets, live = _target_arrays(batch, visited.device)
+    if env_rows is not None:
+        env_rows = env_rows[:entity_offsets.shape[0] - 1]  # the batch's graphs
+    args =(target, role, ref, entity_offsets, live, rows.offsets, rows.index, rows.succ_hash, rows.status, visited,
+            count, env_rows)
+    if torch.compiler.is_compiling():
+        return torch.ops.mymyr.target_visited(*args)
+    return _ops.target_visited_impl(*args)
 
 
 def _table_of(table: Any) -> Any:
