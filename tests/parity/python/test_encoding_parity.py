@@ -604,6 +604,11 @@ def test_the_auxiliary_entity_and_its_tuples_are_not_hidden():
     assert exercised >= 10
 
 
+@pytest.mark.parametrize("path, config", [c for c in case_params() if c.values[1] in VARIANTS])
+def test_the_arity0_variants_need_no_nullary_difference(path, config):
+    assert not {name for name in run_case(path, config).needed if "nullary" in name}
+
+
 @pytest.mark.parametrize("path", [prefix_path("f10"), prefix_path("f08")], ids=["f10", "f08"])
 def test_arity0_nullary_relations_equal_the_reference_without_a_nullary_difference(path):
     # with nullary='arity0' the native nullary atoms are tuples without an argument, as the reference records them with

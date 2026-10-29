@@ -1176,10 +1176,12 @@ SUPPORTED = {
     "C5B": dict(history=True, include_actions=False, nullary="omit"),
     "C5BN": dict(history=True, include_actions=False, nullary="auxiliary"),
 }
-# Native configs compared against the records of another config: C2 with the nullary atoms as tuples without an
-# argument, as the reference encodes them with ``ignore_zero_arity_relations`` off (no auxiliary entity).
-VARIANTS = {"C2Z": "C2"}
-SUPPORTED["C2Z"] = dict(SUPPORTED["C2"], nullary="arity0")
+# Native configs compared against the records of another config: every config that keeps the nullary relations, with
+# the nullary atoms as tuples of their leading slots alone, as the reference encodes them with
+# ``ignore_zero_arity_relations`` off (no auxiliary entity).
+VARIANTS = {f"{config}Z": config for config in ("C2", "C3N", "C3D", "C3S", "C3H", "C4_L1N", "C4_L2N", "C5AN", "C5BN")}
+for _variant, _config in VARIANTS.items():
+    SUPPORTED[_variant] = dict(SUPPORTED[_config], nullary="arity0")
 # The horizon configs (mifrost's FlatHorizonEncoder). Every one is compared with the nullary relations kept: mifrost's
 # catalog lists them whatever its ignore_zero_arity_relations says, and leaves them empty.
 ADDED = ("added_satisfied", "added_unsatisfied")
