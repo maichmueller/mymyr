@@ -709,8 +709,8 @@ VISITED_FIELDS = ("states", "task_id", "steps", "count", "at_goal", "visited", "
 @pytest.mark.parametrize("autoreset", [False, True])
 @pytest.mark.parametrize("name", ["gripper__prob05", "numeric", "suite"])
 def test_cuda_visited_tables_equal_cpu(name, autoreset, capacity):
-    """A CUDA Env keeps the CPU Env's tables word for word: steps (fast and general paths, overflow at H = 2),
-    reset_where, clear_visited and jitted scans."""
+    """A CUDA Env keeps the CPU Env's tables word for word: steps (fast and general paths, overflow at H = 2, also
+    after the overflow status is zeroed), reset_where, clear_visited and jitted scans."""
     need_gpu()
     tasks = [text_task("gripper__prob05")]
     if name in ("numeric", "suite"):
@@ -748,6 +748,9 @@ def test_cuda_visited_tables_equal_cpu(name, autoreset, capacity):
             mask = np.arange(n) % 3 == t % 2
             states = [jax.jit(env.clear_visited)(state, mask) for env, state in zip(envs, states)]
             expect_equal(*states, f"{t} clear_visited")
+        if t in (8, 14):
+            # an acknowledged overflow: saturated rows set their bit again on the next step
+            states = [state._replace(visited_status=jnp.zeros_like(state.visited_status)) for state in states]
     if capacity == 2:
         assert np.asarray(states[1].visited_status).any()
 

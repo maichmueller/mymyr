@@ -371,7 +371,8 @@ def torch_equal(a, b):
 @pytest.mark.parametrize("kind", ["single", "multi", "suite", "general"])
 def test_device_rollouts_equal_host(kind, autoreset, capacity):
     """CPU and device BatchedEnvs keep the same tables word for word: steps of the random policy and invalid actions,
-    autoresets or masked resets, overflow (H = 4), clear_visited; device visited_mask equals the host's."""
+    autoresets or masked resets, overflow (H = 4, also after the status is zeroed), clear_visited; device
+    visited_mask equals the host's."""
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import BatchedEnv
 
@@ -405,6 +406,10 @@ def test_device_rollouts_equal_host(kind, autoreset, capacity):
             cpu.clear_visited(mask)
             gpu.clear_visited(mask.to(device))
             assert_same(cpu, gpu, *tables)
+        if step in (7, 20):
+            # an acknowledged overflow: saturated rows set the bit again on their next step
+            cpu.visited_status.zero_()
+            gpu.visited_status.zero_()
         if step % 5 == 0:
             exp = rl.expand(table, cpu.states, cpu._ids(), framework="torch", hashes=True)
             want = rl.visited_mask(cpu.visited, cpu.visited_count, exp.succ_hash, exp.parent)

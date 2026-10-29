@@ -174,15 +174,18 @@ __device__ __forceinline__ u64 row_key(const u64* row, u32 words, const u32* num
     return hash::state(row, words, row + words, nn);
 }
 
-/// Inserts `key` into row i's visited table; returns whether it was there. The insert that saturates the count
-/// (overflow) sets bit 0 of the row's status word; a saturated row writes no status again, so that the rows of an
-/// overflowed batch do not contend for one word on every step.
+/// Inserts `key` into row i's visited table; returns whether it was there. Every step of a saturated row (overflow)
+/// sets bit 0 of the row's status word, as on the host, so that the bit returns after a caller zeroes the status. The
+/// word is read first and written only while the bit is clear: the rows of an overflowed batch do not contend for it.
 __device__ __forceinline__ bool visited_step(const VisitedRows& v, u64 i, u64 key)
 {
-    const i32 before = v.count[i];
     const bool seen = rl::visited_insert(v.table + i * v.capacity, v.capacity, v.count[i], key);
-    if (before != static_cast<i32>(v.capacity) && v.count[i] == static_cast<i32>(v.capacity))
-        atomicOr(v.status + (v.status_per_row ? i : 0), 1);
+    if (v.count[i] == static_cast<i32>(v.capacity))
+    {
+        i32* status = v.status + (v.status_per_row ? i : 0);
+        if (!(*status & 1))
+            atomicOr(status, 1);
+    }
     return seen;
 }
 

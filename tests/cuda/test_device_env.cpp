@@ -652,6 +652,12 @@ TEST(DeviceEnvVisited, FinishInsertsEqualHost)
                             env.clear_visited(d.b, static_cast<const u8*>(d.mask.data()));
                             dv.expect_equal(hv, d.s, "clear_visited", t);
                         }
+                        if (t == 9 || t == 24)
+                        {
+                            // the caller acknowledges an overflow: saturated rows set the bit again on their next step
+                            hv.status[0] = 0;
+                            cuda::check(cudaMemsetAsync(dv.status.data(), 0, 4, d.s), "memset");
+                        }
                         if (HasFatalFailure())
                             return;
                     }
