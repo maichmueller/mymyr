@@ -72,7 +72,7 @@ def test_declared_optional_and_keyword_mutations_increment_versions(optional):
                 ctypes.c_bool.from_address(tensor.data_ptr()).value = False
 
     for call in (mutate, mutate._opoverload):
-        x, y, z = [torch.ones(1, dtype=torch.bool) for _ in range(3)]
+        x, y, z = [torch.ones(1, dtype=torch.bool, device="cpu") for _ in range(3)]
         loss = torch.ones(1, requires_grad=True).masked_fill(x, 0).sum()
         call(x, y=y if optional else None, z=z if optional else None)
         assert [t._version for t in (x, y, z)] == [1, int(optional), int(optional)]
@@ -94,7 +94,7 @@ def test_dispatch_key_exclusions_preserve_mutation_versions():
         ctypes.c_bool.from_address(x.data_ptr()).value = False
 
     for call in (mutate, mutate._opoverload):
-        tensor = torch.ones(1, dtype=torch.bool)
+        tensor = torch.ones(1, dtype=torch.bool, device="cpu")
         with torch._C._AutoDispatchBelowADInplaceOrView():
             call(tensor)
         assert not tensor.item()
