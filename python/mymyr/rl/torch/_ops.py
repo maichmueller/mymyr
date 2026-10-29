@@ -369,10 +369,10 @@ def step_impl(
     return out
 
 
-@_op("mymyr::visited_mask", mutates_args=())
-def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
-                 rows: Optional[Tensor] = None) -> Tensor:
-    """Membership of successor hashes in host visited tables; -1 parent or mapped row denotes padding."""
+def visited_mask_impl(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
+                      rows: Optional[Tensor] = None) -> Tensor:
+    """The eager body of ``mymyr::visited_mask`` (no dispatcher: an eager call of a custom op imports
+    torch._dynamo)."""
     if table.device.type != "cpu":
         raise ValueError("mymyr: visited_mask requires CPU tensors")
     from mymyr._core import _rl
@@ -382,17 +382,30 @@ def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor
     return out
 
 
+@_op("mymyr::visited_mask", mutates_args=())
+def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
+                 rows: Optional[Tensor] = None) -> Tensor:
+    """Membership of successor hashes in host visited tables; -1 parent or mapped row denotes padding."""
+    return visited_mask_impl(table, count, succ_hash, parent, rows)
+
+
 @visited_mask.register_fake
 def _(table, count, succ_hash, parent, rows=None):
     return succ_hash.new_empty(succ_hash.shape, dtype=torch.bool)
+
+
+def clear_visited_impl(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,
+                       visited_count: Tensor, visited_status: Tensor, mask: Optional[Tensor]) -> None:
+    """The eager body of ``mymyr::clear_visited``."""
+    lookup(env).clear_visited(states, task_ids, visited=visited, visited_count=visited_count,
+                              visited_status=visited_status, mask=mask)
 
 
 @_op("mymyr::clear_visited", mutates_args=("visited", "visited_count"))
 def clear_visited(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,
                   visited_count: Tensor, visited_status: Tensor, mask: Optional[Tensor]) -> None:
     """Clear masked host visited tables and insert the current states."""
-    lookup(env).clear_visited(states, task_ids, visited=visited, visited_count=visited_count,
-                              visited_status=visited_status, mask=mask)
+    clear_visited_impl(env, states, task_ids, visited, visited_count, visited_status, mask)
 
 
 @clear_visited.register_fake

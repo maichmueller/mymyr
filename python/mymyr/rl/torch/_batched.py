@@ -430,8 +430,11 @@ class BatchedEnv:
             return
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
-        _ops.clear_visited(self.handle, self.states, self._ids(), self.visited, self.visited_count,
-                           self.visited_status, mask)
+        args = (self.handle, self.states, self._ids(), self.visited, self.visited_count, self.visited_status, mask)
+        if torch.compiler.is_compiling():
+            torch.ops.mymyr.clear_visited(*args)
+        else:
+            _ops.clear_visited_impl(*args)
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
