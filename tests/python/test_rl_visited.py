@@ -348,7 +348,7 @@ def device_table(kind):
     if kind == "single":
         return rl.TaskTable([task_of("gripper__prob05")])
     if kind == "multi":
-        return ipc_table("blocksworld", ("p01", "p02", "p03"))
+        return ipc_table("blocksworld", ("p01", "p02", "p13"))
     if kind == "suite":
         return rl.TaskSuite([ipc_table("rovers"), ipc_table("floortile", ("p01", "p02"))])
     return rl.TaskSuite.group([task_of("gripper__prob05"), task_of("numeric")])
@@ -454,11 +454,11 @@ def target_reference(table, batch, states, task_ids, history, env_rows=None):
     offsets = np.maximum.accumulate(np.asarray(columns["entity_offsets"]))
     host_states = states.cpu().numpy().view(np.uint64)
     ids = task_ids.cpu().numpy()
-    multi = isinstance(table, rl.TaskSuite) or table.num_instances > 1
+    multi = isinstance(table, rl.TaskSuite) or len(table.tasks) > 1
     full = rl.expand(table, host_states, ids if multi else None)
     successors = rl.decode(table, np.asarray(full.succ), ids[np.asarray(full.parent)]) if multi else \
         rl.decode(table, np.asarray(full.succ))
-    want = np.zeros(len(targets), bool)
+    want = np.zeros(len(batch.target_entity), bool)  # a device batch's targets at their capacity
     for t in range(live):
         e = int(targets[t])
         if role[e] != 4:
