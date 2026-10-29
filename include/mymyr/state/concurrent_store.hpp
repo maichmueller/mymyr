@@ -5,15 +5,16 @@
 //   - one lock-free open-addressing table of 64-bit entries (tag32 << 32 | handle). A thread probes read-only, writes
 //     its candidate record at its own arena's end only when it meets an empty entry, publishes it with a CAS, and
 //     simply reuses the record space when it loses the race to an equal state;
-//   - growth by a stop-the-world parallel rehash (rehash(team)) that the search runs between frontier chunks once
-//     wants_rehash() reports a load factor above 60%;
+//   - growth by a stop-the-world parallel rehash (rehash(team)): once wants_rehash() reports a load factor above
+//     60%, every inserting thread stops before its next insert (inside an expansion, too: one expansion may generate
+//     more states than the table holds) and the caller rehashes;
 //   - a per-record discoverer key for deterministic ids: new records carry the inserting thread's key and a
 //     duplicate found in the current layer lowers it by an atomic min. The search sorts each layer by key, so the
 //     resulting ids do not depend on thread scheduling.
 // Numeric tasks: a record is [len, bits..., numeric words...]; the numeric words (a fixed count per task) follow
 // the trimmed bits, the hash is hash::state and equality compares them bitwise.
-// Every thread t in [0, threads) may call insert(t, ...) or insert_bounded(t, ...) concurrently with the others;
-// nothing else is concurrent.
+// Every thread t in [0, threads) may call insert(t, ...) or insert_bounded(t, ...) concurrently with the others, and
+// wants_rehash(), record() and key() of published handles; nothing else is concurrent.
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/hash.hpp"
@@ -150,8 +151,9 @@ private:
                         count->stored.fetch_add(1, std::memory_order_release);
                     if (++A.local_new == 64)
                     {
-                        m_approx.fetch_add(64, std::memory_order_relaxed);
                         A.local_new = 0;
+                        if ((m_approx.fetch_add(64, std::memory_order_relaxed) + 64) * 10 > m_cap * 6)
+                            m_grow.store(true, std::memory_order_relaxed);
                     }
                     return std::pair<Handle, bool>{nh, true};
                 }
@@ -206,10 +208,15 @@ public:
 
     /// Approximate number of states (lags by up to 64 per thread).
     [[nodiscard]] u64 approx_size() const noexcept { return m_approx.load(std::memory_order_relaxed); }
-    [[nodiscard]] bool wants_rehash() const noexcept { return approx_size() * 10 > m_cap * 6; }
+    /// True once the load factor exceeds 60%: every thread must stop inserting (finishing at most the insert it is in)
+    /// until rehash() ran. The table cannot fill before that: the capacity is at least 2^15 entries per thread, so the
+    /// 40% left exceed the fewer than 64 unreported inserts and the one insert in flight of every thread. A plain
+    /// load, so that a search can check it before every insert.
+    [[nodiscard]] bool wants_rehash() const noexcept { return m_grow.load(std::memory_order_relaxed); }
     [[nodiscard]] u64 capacity() const noexcept { return m_cap; }
 
-    /// Doubles the table (stop the world: no insert may run). Every team member rehashes a slice.
+    /// Doubles the table (stop the world: no insert may run). Every team member rehashes a slice. wants_rehash() is
+    /// recomputed for the new capacity.
     void rehash(Team& team)
     {
         const u64 nc = m_cap * 2;
@@ -235,6 +242,7 @@ public:
         std::free(old);
         m_tab = nt;
         m_cap = nc;
+        m_grow.store(approx_size() * 10 > m_cap * 6, std::memory_order_relaxed);
     }
 
     [[nodiscard]] u64 bytes() const noexcept
@@ -354,8 +362,11 @@ private:
     u32 m_lb = 32;
     u64 m_limask = 0;
     std::vector<std::unique_ptr<Arena>> m_arenas;
+    // read by every insert; written only by rehash() and once per growth (m_grow)
     std::atomic<u64>* m_tab = nullptr;
     u64 m_cap = 0;
-    std::atomic<u64> m_approx{0};
+    std::atomic<bool> m_grow{false};
+    // written every 64 inserts of a thread: a cache line of its own
+    alignas(64) std::atomic<u64> m_approx{0};
 };
 }  // namespace mymyr

@@ -113,6 +113,7 @@ def test_simple_capacities_goals_layers_history_and_overflow(form, index):
     same_batch(h, d)
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("form", ["graph", "relation", "simple"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
 def test_simple_op_compiles_and_captured_graph_replays(form, index):

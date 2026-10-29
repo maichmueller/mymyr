@@ -1687,8 +1687,9 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "(FlatBatch.implicit_entities)."},
     {"entity_ref",
      "index [E]: an object's instance-local id; a goal, subgoal or history target entity's tuple (its index among the "
-     "graph's tuples in graph-major order); an action entity's first row among its graph's rows of the expansion given "
-     "as `actions` (the expansion row is actions.offsets[g] + entity_ref); a history step's index among the valid "
+     "graph's tuples in graph-major order); an action entity's canonical successor index: its first row among its "
+     "graph's rows of the expansion given as `actions` (the expansion row is actions.offsets[g] + entity_ref), or that "
+     "row's actions.index for an expansion with drop_noops; a history step's index among the valid "
      "steps of its row (step entity_ref of the row's `history`); a predicate virtual node's key (the id of its "
      "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
@@ -2989,7 +2990,9 @@ void bind_encoding(nb::module_& parent)
              "task_ids)): the action relations then hold one tuple (action entity, objects...) per distinct ground "
              "action among the expansion rows of each state, in lexicographic order of the objects, and "
              "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
-             "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
+             "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]); for an expansion "
+             "with an `index` (rl.expand(..., drop_noops=True)) it is the row's `index`, its position in the "
+             "state's full canonical order (encoding.action_rows finds the row). Without it the "
              "action relations are empty. The expansion must be over the encoder's own table or over tasks that "
              "have, per instance, the same fingerprint and atom encoding. The rows must be in canonical order "
              "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
@@ -3245,8 +3248,9 @@ void bind_encoding(nb::module_& parent)
             "Encodes the rows held, in the order they were appended, and empties the stream: the result equals "
             "`encoder.encode(rows, ...)` over the same rows bit for bit. framework, threads, pool and capacities are "
             "as in `encode`; `framework` defaults to the stream's. The graph g of the batch is the g-th appended row. "
-            "With `actions`, the action rows are those appended for each state: the expansion row of an action "
-            "entity of the state that was row k of an append with expansion x is `x.offsets[k] + entity_ref`. If the "
+            "With `actions`, the action rows are those appended for each state with their canonical index: the "
+            "expansion row of an action entity of the state that was row k of an append with expansion x is "
+            "`x.offsets[k] + entity_ref` (for x with an `index`: the row of state k whose index is entity_ref). If the "
             "encoding raises (or, with `capacities`, overflows: `sizes['overflow']`), the rows are kept, so that the "
             "flush can be repeated with larger capacities. A stream without rows flushes to a batch of no graphs.")
         .def(

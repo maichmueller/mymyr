@@ -1122,6 +1122,10 @@ struct alignas(64) ThreadState
     u64 next_progress = 0;
     u32 tick = 0;
     u32 transitions = 0;  // since the last check of the time and the token inside an expansion
+    // an expansion stopped for a rehash: it resumes at successor `resume_at` (counted from the state's first
+    // successor), of schema `resume_schema`, whose first successor has index `resume_first`
+    bool paused = false;
+    u32 resume_schema = 0, resume_first = 0, resume_at = 0;
 };
 
 class ParallelBrfs
@@ -1186,10 +1190,11 @@ public:
             for (;;)
             {
                 m_team.run([&](u32 t) { work(t); });
-                if (!m_resize.load(std::memory_order_relaxed))
+                // a stopped search does not grow: the insert that reaches max_states may also ask for a rehash
+                if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed) ||
+                    !m_store.wants_rehash())
                     break;
                 m_store.rehash(m_team);
-                m_resize.store(false, std::memory_order_relaxed);
             }
             if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed))
             {
@@ -1261,7 +1266,7 @@ private:
         {
             if (lo >= hi)
             {
-                if (m_resize.load(std::memory_order_relaxed) || m_stop.load(std::memory_order_relaxed) ||
+                if (m_store.wants_rehash() || m_stop.load(std::memory_order_relaxed) ||
                     m_halt.load(std::memory_order_relaxed))
                     break;
                 const u64 c = m_chunk_ctr.fetch_add(1, std::memory_order_relaxed);
@@ -1270,13 +1275,13 @@ private:
                     break;
                 hi = std::min(m_layer_hi, lo + m_chunk);
             }
-            if (!keep_going(t))
+            if (m_ws[t].paused ? m_halt.load(std::memory_order_relaxed) != 0 : !keep_going(t))
                 break;
-            expand(t, lo++);
+            if (!expand(t, lo))
+                break;  // paused for a rehash: state lo resumes after it, then the rest of [lo, hi)
+            ++lo;
             if (m_store.wants_rehash())
-                m_resize.store(true, std::memory_order_relaxed);
-            if (m_resize.load(std::memory_order_relaxed))
-                break;  // stop after the current state; the rest of [lo, hi) resumes after the rehash
+                break;
         }
         m_pend_lo[t] = lo;
         m_pend_hi[t] = hi;
@@ -1342,12 +1347,16 @@ private:
         return false;
     }
 
-    void expand(u32 t, u64 id)
+    /// Expands state `id`, or resumes its paused expansion; false if it paused (again) because the store wants a
+    /// rehash.
+    bool expand(u32 t, u64 id)
     {
         ThreadState& w = m_ws[t];
         Successors& succ = *w.succ;
         const StateView rec = m_store.record(m_loc[id]);  // records never move
         succ.prepare(rec);
+        if (w.paused)
+            return generate(t, id, rec, w.resume_schema, w.resume_first, w.resume_at);
         const bool goal = is_goal(m_o.goal, succ, rec);
         w.goals += goal;
         if (goal)
@@ -1359,19 +1368,47 @@ private:
             if (m_o.stop_at_goal)
             {
                 m_stop.store(true, std::memory_order_relaxed);
-                return;
+                return true;
             }
         }
         ++w.expanded;
         if (w.obs)
             w.obs->on_expand(id, rec);
-        u32 k = 0;
+        return generate(t, id, rec, 0, 0, 0);
+    }
+
+    /// The successors of the prepared state `id` from successor `next` on (of schema `first_schema`, whose first
+    /// successor has index `k`): every successor gets the discoverer key (id, its index), whatever the pauses. False
+    /// if the store wants a rehash before all of them are inserted: the expansion pauses at the next one.
+    bool generate(u32 t, u64 id, const StateView& rec, u32 first_schema, u32 k, u32 next)
+    {
+        ThreadState& w = m_ws[t];
+        Successors& succ = *w.succ;
+        w.paused = false;
+        u32 schema = ~u32{0};
         const bool bounded = m_o.max_states != ~u64{0};
         succ.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
+                if (s != schema)
+                {
+                    schema = s;
+                    w.resume_first = k;
+                }
+                if (k < next)  // inserted before the pause
+                {
+                    ++k;
+                    return true;
+                }
                 if (m_halt.load(std::memory_order_relaxed))
                     return false;
+                if (m_store.wants_rehash())
+                {
+                    w.paused = true;
+                    w.resume_schema = s;
+                    w.resume_at = k;
+                    return false;
+                }
                 if (++w.transitions == search::k_check_transitions)
                 {
                     w.transitions = 0;
@@ -1408,9 +1445,10 @@ private:
                     return halt(search::SearchStatus::OutOfStates);
                 return true;
             },
-            m_o.witness_pruning, m_o.canonical_order);
+            m_o.witness_pruning, m_o.canonical_order, first_schema);
         if (k >= (u32{1} << 24))
             throw std::length_error("mymyr brfs: more than 2^24 successors of one state");
+        return !w.paused;
     }
 
     void finalize_layer()
@@ -1543,7 +1581,6 @@ private:
     u64 m_layer_lo = 0, m_layer_hi = 0;
     std::atomic<u64> m_chunk_ctr{0};
     u64 m_chunk = 1;
-    std::atomic<bool> m_resize{false};
     std::atomic<bool> m_stop{false};
     std::atomic<u64> m_goal{~u64{0}};  // the smallest id of a goal state expanded
     std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress, states)

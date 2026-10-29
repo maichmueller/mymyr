@@ -702,6 +702,7 @@ def test_match_first_device_literal_kinds(first):
                                   small.count.cpu().numpy())
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("first", [False, True])
 @pytest.mark.parametrize("max_steps", [0, 1_000_000])
 def test_match_first_torch_op_fake_and_compile(first, max_steps):

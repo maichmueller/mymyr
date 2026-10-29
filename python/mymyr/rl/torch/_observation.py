@@ -12,7 +12,70 @@ from mymyr._core import _rl
 from mymyr._core._encoding import FlatRelationEncoder
 from mymyr.encoding import _device
 
-__all__ = ["SuiteObservation"]
+__all__ = ["ActionRows", "SuiteObservation"]
+
+
+class ActionRows(NamedTuple):
+    """The expansion rows that the action entities of an encoded observation stand for (``Observation.actions``,
+    ``StepResult.actions``): the successors of the N observed states, as ``mymyr.rl.expand`` lists them, labels only.
+
+    The successors of state ``i`` are the rows ``[offsets[i], offsets[i + 1])``; ``mymyr.encoding.action_rows(obs,
+    actions, entities)`` gives the row of an action entity. ``succ_hash[row]`` is the hash of the successor the action
+    reaches (``State.hash()``, an int64 bit pattern as ``mymyr.hash_rows`` gives it), ``noop[row]`` whether that
+    successor equals its state. With ``obs_drop_noops`` the no-op rows are dropped (unless every successor of the state is
+    one) and ``index[row]`` is the row's position in the state's full canonical successor order, the action an
+    environment takes (None without the drop: the position is ``row - offsets[parent[row]]``).
+
+    ``offsets`` has N + 1 entries (N the environments; over a suite the entries past a domain batch's graphs repeat
+    its total), on the CPU and on a device alike. With ``obs_capacities`` the row arrays have, on the CPU and on a
+    device alike, the rows that the entity capacity's action entities can stand for (``entities`` times the largest
+    number of schemas that share an action relation), every array zero past ``offsets[-1]``; ``status`` bit 0 reports
+    more kept rows than that or more successors before the drop than ``obs_capacities['successors']`` (default: the
+    same rows), bit 1 an invalid row (a device's; the CPU raises), and the batch's overflow flags report them too. A
+    batch whose expansion overflowed is all zero and so are its sizes (the encoding did not run); the rows and
+    ``offsets`` are then unspecified (``offsets[-1]`` is at least the kept rows). Without capacities the arrays have
+    exactly the rows and ``status`` is 0. Over a suite of several domains ``actions`` is a tuple of these, one per
+    domain batch.
+    """
+
+    parent: Tensor  # int32 [M]: the observed state (row of the observation) of each successor
+    schema: Tensor  # int32 [M]
+    binding: Tensor  # int32 [M, label_width]: the action's objects (-1 padding)
+    offsets: Tensor  # int32 [N + 1]
+    succ_hash: Tensor  # int64 [M]
+    noop: Tensor  # bool [M]
+    index: Optional[Tensor]  # int32 [M] with obs_drop_noops, else None
+    status: Tensor  # int32 [1]
+
+
+def _tensor(value: Any, device: torch.device) -> Tensor:
+    """An expansion array as a torch tensor on ``device`` (a uint64 host array as its int64 bit pattern)."""
+    if isinstance(value, Tensor):
+        return value.to(device)
+    array = np.asarray(value)
+    if array.dtype == np.uint64:
+        array = array.view(np.int64)
+    return torch.from_numpy(np.ascontiguousarray(array)).to(device)
+
+
+def _action_rows(x: Any, device: torch.device, drop: bool, rows: Optional[int] = None, status: int = 0) -> ActionRows:
+    """The rows of an expansion (host or device) or of ``bounded_actions``; ``rows`` pads (or cuts) the row arrays of
+    an exact expansion to that many rows, zero past its own."""
+
+    def take(name: str) -> Tensor:
+        array = _tensor(getattr(x, name), device)
+        if rows is None:
+            return array
+        out = array.new_zeros((rows, *array.shape[1:]))
+        n = min(rows, array.shape[0])
+        out[:n] = array[:n]
+        return out
+
+    given = getattr(x, "status", None)
+    if given is None:
+        given = torch.tensor([status], dtype=torch.int32, device=device)
+    return ActionRows(*(take(name) for name in ("parent", "schema", "binding")), _tensor(x.offsets, device),
+                      *(take(name) for name in ("succ_hash", "noop")), take("index") if drop else None, given)
 
 
 class SuiteObservation(NamedTuple):
@@ -57,22 +120,25 @@ def _encoders(observation: Any) -> list:
     return [observation]
 
 
-def _capacities(value: Any, domains: int, rows: int) -> Optional[list[dict]]:
-    """Per encoder the capacities dict with ``graphs`` (default: the rows), or None (exact encodings)."""
+def _capacities(value: Any, domains: int, rows: int) -> tuple[Optional[list[dict]], list[Optional[int]]]:
+    """Per encoder the capacities dict with ``graphs`` (default: the rows), or None (exact encodings), and the
+    ``successors`` capacity of its action expansion (None: the default)."""
     if value is None:
-        return None
+        return None, [None] * domains
     if isinstance(value, Mapping):
         value = [value] * domains
     elif not isinstance(value, Sequence) or isinstance(value, str) or len(value) != domains:
         raise ValueError(f"mymyr: obs_capacities must be a dict or a sequence of {domains} dicts (one per domain)")
-    caps = []
+    caps, successors = [], []
     for item in value:
         if not isinstance(item, Mapping):
             raise ValueError("mymyr: obs_capacities must be a dict or a sequence of dicts, one per domain")
+        item = dict(item)
+        successors.append(item.pop("successors", None))
         caps.append({"graphs": rows, **item})
         if caps[-1]["graphs"] < rows:
             raise ValueError(f"mymyr: obs_capacities['graphs'] must be at least the number of environments ({rows})")
-    return caps
+    return caps, successors
 
 
 class Observer:
@@ -84,7 +150,7 @@ class Observer:
     device count of graphs, and nothing waits for the device. On the CPU the rows are grouped on the host.
     """
 
-    def __init__(self, env: Any, observation: Any, capacities: Any, actions: bool) -> None:
+    def __init__(self, env: Any, observation: Any, capacities: Any, actions: bool, drop_noops: bool = False) -> None:
         table = env.core.table
         n = env.num_envs
         self.device = env.device
@@ -104,8 +170,18 @@ class Observer:
                                  "table the environments run on)")
         self.encoders = encoders
         self.tables = tables
-        self.capacities = _capacities(capacities, len(encoders), n)
+        self.capacities, self.successors = _capacities(capacities, len(encoders), n)
         self.actions = bool(actions)
+        self.drop_noops = bool(drop_noops)
+        if self.drop_noops and not self.actions:
+            raise ValueError("mymyr: obs_drop_noops needs obs_actions=True")
+        if not self.actions and any(s is not None for s in self.successors):
+            raise ValueError("mymyr: obs_capacities['successors'] bounds the expansion of obs_actions=True")
+        if self.capacities is not None:
+            from mymyr.encoding._device_actions import expansion_rows
+
+            for e, c, s in zip(encoders, self.capacities, self.successors, strict=True):
+                expansion_rows(e, c.get("entities", 0), s, self.drop_noops)  # validates the successors capacity
         if self.actions and self.capacities is not None and self.device.type == "cuda":
             self._warm_rows = (env.states, env.task_ids, (env.goal_pos, env.goal_neg) if env.goals else None)
         self.goals = [_goal_lanes(e) for e in encoders]
@@ -127,6 +203,14 @@ class Observer:
                 # graphs, entities, args, targets, history and numeric: the op's capacity arguments, in its order
                 self._op_capacities = [_device._capacities(c, _device.layout_of(e))
                                        for c, e in zip(self.capacities, encoders, strict=True)]
+                if self.actions:
+                    from mymyr._core import _cuda
+                    from mymyr.encoding._device_actions import table_of
+
+                    # the expansion of a traced observation runs on the encoder's own table (one device context for
+                    # every call and replay), which needs asynchronous expansion
+                    for e in encoders:
+                        _cuda._check_async_expansion(table_of(e), n, self.device.index, _ops._stream(self.device))
             if self.suite is not None and self.capacities is not None:
                 self._suite_buffers(env)
         if self.suite is not None:
@@ -177,51 +261,78 @@ class Observer:
 
     # ------------------------------------------------------------------------------------------ encoding
 
-    def encode(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> Any:
-        """The encoding of the rows: a batch over a table, a :class:`SuiteObservation` over a suite of several
-        domains."""
+    def encode(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> tuple[Any, Any]:
+        """The encoding of the rows and the expansion rows of its action entities (:class:`ActionRows`; None without
+        ``obs_actions``): a batch over a table, a :class:`SuiteObservation` (and a tuple of rows, one per domain) over
+        a suite of several domains."""
         if self.suite is None:
             return self._encode(0, states, task_ids, goals)
         if self.device.type == "cuda" and self.capacities is not None:
             return self._encode_suite_device(states, task_ids, goals)
         return self._encode_suite_split(states, task_ids, goals)
 
-    def _encode(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> Any:
+    def _expand(self, k: int, states: Tensor, task_ids: Tensor, caps: Optional[dict], live: Any = None) -> Any:
+        """The expansion of the rows that the observation's action entities stand for: digests and the canonical index
+        of every row, the no-op rows dropped with ``obs_drop_noops``."""
+        options = dict(hashes=True, noops=True, drop_noops=self.drop_noops)
+        if self.device.type != "cuda":
+            return rl.expand(self.tables[k], states, task_ids, **options)
+        if caps is None:
+            from mymyr.rl.torch._ops import _stream
+
+            return rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states), **options)
+        from mymyr.encoding._device_actions import bounded_actions
+
+        return bounded_actions(self.encoders[k], states, task_ids, caps["entities"], successors=self.successors[k],
+                               live=live, **options)
+
+    def _encode(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> tuple[Any, Any]:
         encoder = self.encoders[k]
         goals = goals if self.goals[k] else None
         caps = None if self.capacities is None else self.capacities[k]
+        if self.device.type == "cuda" and torch.compiler.is_compiling():
+            return self._encode_op(k, states, task_ids, goals, caps)
+        actions = self._expand(k, states, task_ids, caps) if self.actions else None
         if self.device.type == "cuda":
-            if torch.compiler.is_compiling():
-                return self._encode_op(k, states, task_ids, goals, caps)
-            actions = None
-            if self.actions:
-                from mymyr.rl.torch._ops import _stream
-
-                if caps is None:
-                    actions = rl.expand(self.tables[k], states, task_ids, framework="torch", stream=_stream(states))
-                else:
-                    from mymyr.encoding._device_actions import bounded_actions
-
-                    actions = bounded_actions(encoder, states, task_ids, caps["entities"])
+            rows = None if actions is None else _action_rows(actions, self.device, self.drop_noops)
             arrays = _device.encode_arrays(encoder, states, task_ids, None, goals,
                                            None if caps is None else _device._capacities(caps, _device.layout_of(encoder)),
                                            actions=actions)
-            return _device.DeviceFlatBatch(encoder, arrays, exact=caps is None)
-        actions = None
-        if self.actions:
-            actions = rl.expand(self.tables[k], states, task_ids)
-        return encoder.encode(states, task_ids, goals=goals, actions=actions, capacities=caps)
+            return _device.DeviceFlatBatch(encoder, arrays, exact=caps is None), rows
+        batch = encoder.encode(states, task_ids, goals=goals, actions=actions, capacities=caps)
+        if actions is None:
+            return batch, None
+        if caps is None:
+            return batch, _action_rows(actions, self.device, self.drop_noops)
+        # the bounds of a device's bounded expansion, so that both report the same overflow
+        from mymyr.encoding._device_actions import action_capacity, bound_status, overflowed
 
-    def _encode_op(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple], caps: Optional[dict]) -> Any:
+        status = bound_status(encoder, actions, caps["entities"], self.successors[k], self.drop_noops)
+        if status:
+            batch = overflowed(batch)
+        rows = _action_rows(actions, self.device, self.drop_noops, action_capacity(encoder, caps["entities"]), status)
+        return batch, rows
+
+    def _encode_op(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple],
+                   caps: Optional[dict]) -> tuple[Any, Any]:
         if caps is None:
             raise ValueError("mymyr: observations under torch.compile need obs_capacities (static shapes)")
         gp, gn = (None, None) if goals is None else goals
+        rows, given = None, {}
+        if self.actions:
+            out = torch.ops.mymyr.bounded_actions(self.handles[k], states, task_ids, self._op_capacities[k][1],
+                                                  self.successors[k], self.drop_noops)
+            labels, binding, offsets, succ_hash, noop, status = out
+            parent, schema = labels[0], labels[1]
+            index = labels[2] if self.drop_noops else None
+            rows = ActionRows(parent, schema, binding, offsets, succ_hash, noop, index, status)
+            given = dict(action_schema=schema, action_binding=binding, action_offsets=offsets, action_parent=parent,
+                         action_index=index, action_status=status)
         outs = torch.ops.mymyr.encode_flat(
             self.handles[k], states, task_ids, None, gp, gn, None, None, None, None, None, None, None, None, None,
-            None, None, None, *self._op_capacities[k],
-            expand_actions=self.actions,
+            None, None, None, *self._op_capacities[k], **given,
         )  # fmt: skip
-        return _device.DeviceFlatBatch._of(self._templates[k], outs, self._op_capacities[k][1])
+        return _device.DeviceFlatBatch._of(self._templates[k], outs, self._op_capacities[k][1]), rows
 
     def _suite_ids(self, task_ids: Tensor) -> tuple[Tensor, Tensor]:
         ids = task_ids.to(torch.int64)
@@ -242,7 +353,8 @@ class Observer:
         starts = counts.cumsum(0) - counts
         return index, starts[domain] + index, counts
 
-    def _encode_suite_device(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> SuiteObservation:
+    def _encode_suite_device(self, states: Tensor, task_ids: Tensor,
+                             goals: Optional[tuple]) -> tuple[SuiteObservation, Any]:
         if torch.compiler.is_compiling():
             raise ValueError("mymyr: the observations of a suite of several domains are not traced by torch.compile: "
                              "capture the steps with BatchedEnv.capture or torch.cuda.graph")
@@ -259,11 +371,10 @@ class Observer:
         from mymyr.rl.torch._ops import _stream
 
         stream = _stream(self.device)
-        batches = []
+        batches, rows = [], []
         for k, encoder in enumerate(self.encoders):
             caps = _device._capacities(self.capacities[k], _device.layout_of(encoder))
             if self.actions:
-                from mymyr.encoding._device_actions import bounded_actions
                 from mymyr.encoding._device_horizon import bind_actions
 
                 live = counts[k:k + 1].clone()
@@ -274,7 +385,8 @@ class Observer:
                 states_k = torch.where(mask[:, None], self._rows_states[idx, :table.words], 0)
                 ids_k = torch.where(mask, self._rows_ids[idx], 0)
                 goals_k = None if goals is None or not self.goals[k] else tuple(g[idx] for g in self._rows_goals)
-                actions = bounded_actions(encoder, states_k, ids_k, caps[1], live=live)
+                actions = self._expand(k, states_k, ids_k, self.capacities[k], live=live)
+                rows.append(_action_rows(actions, self.device, self.drop_noops))
                 checked = _device._Rows(torch, states_k, ids_k, None, goals_k)
                 bind_actions(encoder, checked, actions)
                 arrays = _device._encode_rows(encoder, checked, caps, [actions], graph_count=live)
@@ -286,20 +398,29 @@ class Observer:
                                                  n, caps, self.device, False, zero_unused=True)
             batch._keepalive = (scratch,)
             batches.append(batch)
-        return SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
+        observation = SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
+        return observation, tuple(rows) if self.actions else None
 
-    def _encode_suite_split(self, states: Tensor, task_ids: Tensor, goals: Optional[tuple]) -> SuiteObservation:
+    def _encode_suite_split(self, states: Tensor, task_ids: Tensor,
+                            goals: Optional[tuple]) -> tuple[SuiteObservation, Any]:
         """Groups the rows on the host (a CPU environment, or exact encodings on a device, which wait anyway)."""
         domain, local = self._suite_ids(task_ids)
         one_hot = (domain.unsqueeze(1) == self._domains).to(torch.int64)  # no host check of the values
         index = (one_hot.cumsum(0) - 1).gather(1, domain.unsqueeze(1)).squeeze(1)
         host_domain = domain.cpu()
-        batches = []
+        batches, rows = [], []
         for k in range(len(self.encoders)):
-            rows = torch.nonzero(host_domain == k).reshape(-1).to(states.device)
-            g = None if goals is None else (goals[0][rows], goals[1][rows])
-            batches.append(self._encode(k, states[rows], local[rows].contiguous(), g))
-        return SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
+            taken = torch.nonzero(host_domain == k).reshape(-1).to(states.device)
+            g = None if goals is None else (goals[0][taken], goals[1][taken])
+            batch, actions = self._encode(k, states[taken], local[taken].contiguous(), g)
+            batches.append(batch)
+            if actions is not None:
+                # N + 1 offsets, as a device's domain batches have them: the total past the domain's graphs
+                tail = actions.offsets[-1:].expand(states.shape[0] - taken.shape[0])
+                actions = actions._replace(offsets=torch.cat((actions.offsets, tail)))
+            rows.append(actions)
+        observation = SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
+        return observation, tuple(rows) if self.actions else None
 
     def close(self) -> None:
         from mymyr.rl.torch import _ops

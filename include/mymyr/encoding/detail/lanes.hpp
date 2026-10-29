@@ -63,8 +63,9 @@
 //     before it);
 //   - one subgoal entity per tuple of a plain subgoal cell with subgoal targets, numbered and referring like the goal
 //     entities;
-//   - one action entity per tuple of an action cell, in fill order (relation, then tuple); its `entity_ref` is the row
-//     of the graph's first expansion row that has the ground action, counted from the graph's first row;
+//   - one action entity per tuple of an action cell, in fill order (relation, then tuple); its `entity_ref` is the
+//     canonical successor index of the graph's first expansion row that has the ground action: the row's
+//     ActionRows::index entry when the rows carry one, else the row counted from the graph's first row;
 //   - one history entity per used step, in step order; its `entity_ref` is the step's index among the row's valid
 //     steps (so the input step of the entity is history[g][entity_ref]);
 //   - one history-target entity per tuple of a history cell with history targets, numbered like the goal entities
@@ -436,10 +437,12 @@ MYMYR_HD GraphWidth graph_width(const InstanceView& v)
 /// The expansion rows of one graph's state: the labels of its successors, in canonical order (by schema, then
 /// lexicographically by binding). `schema`, `binding` (rows of `label_width` objects, -1 past the schema's arity) and
 /// `parent` (the batch index of the expanded state; null: not checked) point at the state's first row, and `state` is
-/// the graph's index in the batch. A graph with rows (count > 0) also has two scratch arrays of the caller's: `starts`
-/// (v.num_schemas + 1 words), which count_graph fills with the first row of each schema and fill_graph reads, so it
-/// must survive between the two for the graph; and `cursors` (v.num_schemas words), the cursors of the merge of the
-/// runs of an action relation, which only the call that uses them needs.
+/// the graph's index in the batch. `index` (null: none) is the position of each row in the state's full canonical
+/// successor order, for rows that are a subsequence of it (a no-op-dropping expansion's): strictly ascending from 0 or
+/// more. A graph with rows (count > 0) also has two scratch arrays of the caller's: `starts` (v.num_schemas + 1 words),
+/// which count_graph fills with the first row of each schema and fill_graph reads, so it must survive between the two
+/// for the graph; and `cursors` (v.num_schemas words), the cursors of the merge of the runs of an action relation, which
+/// only the call that uses them needs.
 struct ActionRows
 {
     const i32* schema = nullptr;
@@ -450,6 +453,7 @@ struct ActionRows
     u64 state = 0;
     u32* starts = nullptr;
     u32* cursors = nullptr;
+    const i32* index = nullptr;
 };
 
 /// Masks in layers, for one row: `layers` masks of `words` words each, one after the other (layer l starts at
@@ -698,7 +702,9 @@ struct GraphTotals
 inline constexpr u32 k_graph_auxiliary = 1u;  // the graph has an auxiliary entity
 inline constexpr u32 k_graph_bad_row = 2u;    // a bit is set at or beyond the instance's fluent (or derived) slots
 inline constexpr u32 k_graph_bad_goal = 4u;   // the same in the row's own goal masks
-inline constexpr u32 k_graph_bad_action_order = 8u;   // the expansion rows are not strictly ascending in (schema, binding)
+inline constexpr u32 k_graph_bad_action_order = 8u;   // the expansion rows are not strictly ascending in
+                                                      // (schema, binding), or their `index` (if given) is not
+                                                      // strictly ascending from 0
 inline constexpr u32 k_graph_bad_action_label = 16u;  // a row has a schema or object the instance does not have, or
                                                       // belongs to another state
 inline constexpr u32 k_graph_bad_layers = 32u;   // a subgoal layer sets a bit at or beyond the instance's slots
@@ -970,8 +976,9 @@ MYMYR_HD u32 action_row_fault(const InstanceView& v, const ActionRows& a)
     return k_graph_bad_action_order;
 }
 
-/// Whether the expansion rows of a graph are valid labels of the instance and strictly ascending in (schema, binding):
-/// the flags k_graph_bad_action_label and k_graph_bad_action_order, else 0. A row is a valid label if its schema is one
+/// Whether the expansion rows of a graph are valid labels of the instance and strictly ascending in (schema, binding),
+/// and their `index` (if given) strictly ascending from 0 or more: the flags k_graph_bad_action_label and
+/// k_graph_bad_action_order, else 0. A row is a valid label if its schema is one
 /// of the context's, its parent (if given) is the graph's state, and the first `arity` entries of its binding are
 /// objects of the instance. It writes a.starts (the first row of each schema, in v.num_schemas + 1 words): one pass
 /// over the rows finds the run of each schema in turn, which consumes every row exactly if the schemas ascend and are
@@ -1041,6 +1048,15 @@ MYMYR_HD u32 check_actions(const InstanceView& v, const ActionRows& a)
     }
     for (; next <= S; ++next)
         starts[next] = count;
+    if (const i32* index = a.index)
+    {
+        i32 previous = -1;
+        for (u32 i = 0; i < count; ++i)
+        {
+            unordered |= index[i] <= previous ? 1u : 0u;
+            previous = index[i];
+        }
+    }
     return outside ? k_graph_bad_action_label : unordered ? k_graph_bad_action_order : 0u;
 }
 
@@ -2268,10 +2284,11 @@ MYMYR_HD u64 predicate_entity(const InstanceView& v, const FillCursor& cursor, u
 
 /// Writes the rows [begin, begin + n) of one action schema as the tuples of an action cell: for each row, its action
 /// entity (`first` + the row's position) and the first K objects of its binding (rows of `label_width` entries) as
-/// entity ids, the entity's role and reference (its row), and with Targets its target entry.
+/// entity ids, the entity's role and reference (its canonical index: index[k], or the row without `index`), and with
+/// Targets its target entry.
 template<class I, u32 K, bool Targets>
-MYMYR_HD void emit_action_rows(I* dst, const i32* binding, u32 label_width, u32 n, u32 begin, u64 first,
-                               u64 entity_base, u8* role, I* ref, I* target_entity, u8* target_group)
+MYMYR_HD void emit_action_rows(I* dst, const i32* binding, u32 label_width, u32 n, u32 begin, const i32* index,
+                               u64 first, u64 entity_base, u8* role, I* ref, I* target_entity, u8* target_group)
 {
     for (u32 k = 0; k < n; ++k, binding += label_width, dst += 1 + K)
     {
@@ -2279,7 +2296,7 @@ MYMYR_HD void emit_action_rows(I* dst, const i32* binding, u32 label_width, u32 
         for (u32 j = 0; j < K; ++j)
             dst[1 + j] = static_cast<I>(entity_base + static_cast<u64>(binding[j]));
         role[k] = k_role_action;
-        ref[k] = static_cast<I>(begin + k);
+        ref[k] = index ? static_cast<I>(index[k]) : static_cast<I>(begin + k);
         if constexpr (Targets)
         {
             target_entity[k] = static_cast<I>(first + k);
@@ -2289,30 +2306,31 @@ MYMYR_HD void emit_action_rows(I* dst, const i32* binding, u32 label_width, u32 
 }
 
 template<class I, bool Targets>
-MYMYR_HD void emit_action_rows_of(u32 arity, I* dst, const i32* binding, u32 label_width, u32 n, u32 begin, u64 first,
-                                  u64 entity_base, u8* role, I* ref, I* target_entity, u8* target_group)
+MYMYR_HD void emit_action_rows_of(u32 arity, I* dst, const i32* binding, u32 label_width, u32 n, u32 begin,
+                                  const i32* index, u64 first, u64 entity_base, u8* role, I* ref, I* target_entity,
+                                  u8* target_group)
 {
     switch (arity)
     {
     case 0:
-        emit_action_rows<I, 0, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
-                                      target_entity, target_group);
+        emit_action_rows<I, 0, Targets>(dst, binding, label_width, n, begin, index, first, entity_base, role,
+                                      ref, target_entity, target_group);
         break;
     case 1:
-        emit_action_rows<I, 1, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
-                                      target_entity, target_group);
+        emit_action_rows<I, 1, Targets>(dst, binding, label_width, n, begin, index, first, entity_base, role,
+                                      ref, target_entity, target_group);
         break;
     case 2:
-        emit_action_rows<I, 2, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
-                                      target_entity, target_group);
+        emit_action_rows<I, 2, Targets>(dst, binding, label_width, n, begin, index, first, entity_base, role,
+                                      ref, target_entity, target_group);
         break;
     case 3:
-        emit_action_rows<I, 3, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
-                                      target_entity, target_group);
+        emit_action_rows<I, 3, Targets>(dst, binding, label_width, n, begin, index, first, entity_base, role,
+                                      ref, target_entity, target_group);
         break;
     case 4:
-        emit_action_rows<I, 4, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
-                                      target_entity, target_group);
+        emit_action_rows<I, 4, Targets>(dst, binding, label_width, n, begin, index, first, entity_base, role,
+                                      ref, target_entity, target_group);
         break;
     default:
         for (u32 k = 0; k < n; ++k, binding += label_width)
@@ -2320,7 +2338,7 @@ MYMYR_HD void emit_action_rows_of(u32 arity, I* dst, const i32* binding, u32 lab
             *dst++ = static_cast<I>(first + k);
             dst = emit_tuple<I>(dst, binding, arity, entity_base);
             role[k] = k_role_action;
-            ref[k] = static_cast<I>(begin + k);
+            ref[k] = index ? static_cast<I>(index[k]) : static_cast<I>(begin + k);
             if constexpr (Targets)
             {
                 target_entity[k] = static_cast<I>(first + k);
@@ -2353,15 +2371,16 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
         const i32* binding = a.binding + static_cast<u64>(begin) * a.label_width;
         u8* role = out.entity_role + first;
         I* ref = out.entity_ref + first;
+        const i32* index = a.index ? a.index + begin : nullptr;
         if (target)
         {
             const u64 at = cursor.target_base + cursor.goal_entities + cursor.subgoal_entities + cursor.actions_written;
-            emit_action_rows_of<I, true>(arity, dst, binding, a.label_width, n, begin, first, entity_base, role, ref,
-                                         out.target_entity + at, out.target_group + at);
+            emit_action_rows_of<I, true>(arity, dst, binding, a.label_width, n, begin, index, first, entity_base,
+                                         role, ref, out.target_entity + at, out.target_group + at);
         }
         else
-            emit_action_rows_of<I, false>(arity, dst, binding, a.label_width, n, begin, first, entity_base, role, ref,
-                                          nullptr, nullptr);
+            emit_action_rows_of<I, false>(arity, dst, binding, a.label_width, n, begin, index, first, entity_base,
+                                          role, ref, nullptr, nullptr);
     }
     else
     {
@@ -2377,7 +2396,7 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
             if (out.entity_role)
             {
                 out.entity_role[entity] = k_role_action;
-                out.entity_ref[entity] = static_cast<I>(row);
+                out.entity_ref[entity] = a.index ? static_cast<I>(a.index[row]) : static_cast<I>(row);
             }
             if (target && out.target_entity)
             {

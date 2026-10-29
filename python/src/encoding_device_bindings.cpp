@@ -67,8 +67,8 @@ struct Rows
     // derived stride, derived words; then the history's dt and count
     std::array<std::uintptr_t, 9> subgoals{}, history{};
     std::uintptr_t history_dt = 0, history_count = 0;
-    // the expansion rows: offsets, schema, binding, parent, capacity, label width, status
-    std::array<std::uintptr_t, 7> actions{};
+    // the expansion rows: offsets, schema, binding, parent, capacity, label width, status, canonical index
+    std::array<std::uintptr_t, 8> actions{};
     // the horizon view: node offsets, edge offsets, src, dst, schema, binding, nodes, edges, label width, scratch,
     // scratch words, status (mymyr.encoding._device._ROW_HORIZON and after)
     std::array<std::uintptr_t, 12> horizon{};
@@ -79,7 +79,7 @@ struct Rows
         return horizon[0] ? std::max<u64>(graphs, horizon[k_horizon_nodes]) : graphs;
     }
 };
-constexpr usize k_row_fields = 54;
+constexpr usize k_row_fields = 55;
 
 Rows rows_of(const std::vector<std::uintptr_t>& v)
 {
@@ -161,7 +161,7 @@ cuda::DeviceEncodeInput input_of(const Rows& r, u32 numeric_words = 0)
     in.history.count = ptr<const i32>(r.history_count);
     const auto& a = r.actions;
     in.actions = {ptr<const i32>(a[0]), ptr<const i32>(a[1]), ptr<const i32>(a[2]), ptr<const i32>(a[3]),
-                  a[4], static_cast<u32>(a[5]), ptr<const u64>(a[6])};
+                  a[4], static_cast<u32>(a[5]), ptr<const u64>(a[6]), ptr<const i32>(a[7])};
     const auto& h = r.horizon;
     in.horizon = {ptr<const i32>(h[0]), ptr<const i32>(h[1]), ptr<const i32>(h[2]), ptr<const i32>(h[3]),
                   ptr<const i32>(h[4]), ptr<const i32>(h[5]), h[6], h[7], static_cast<u32>(h[8]),

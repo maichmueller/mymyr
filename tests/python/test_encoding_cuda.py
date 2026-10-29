@@ -1245,6 +1245,7 @@ def test_device_threads_are_validated_as_on_the_host(cases, threads):
         device_encode(encoder, case, dev, threads=threads)
 
 
+@pytest.mark.needs_gil
 def test_a_compiled_function_specializes_each_encoder_handle(cases):
     dev = gpu()
     case = cases["gripper"]

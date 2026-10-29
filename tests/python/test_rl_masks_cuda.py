@@ -200,6 +200,7 @@ def test_device_masks_errors_and_status():
     assert tuple(empty.shape) == (0, task.num_schemas) and empty.device == dev
 
 
+@pytest.mark.needs_gil
 def test_mask_ops_compile_and_capture():
     dev = gpu()
     task = text_task("gripper__prob05")

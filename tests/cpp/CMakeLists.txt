@@ -90,7 +90,7 @@ gtest_discover_tests(mymyr_thread_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 
 if(TARGET mymyr_frontend)
     # The benchmark PDDL of the tests is vendored under tests/data (benchmarks/, ipc/, pddl/).
     add_executable(mymyr_frontend_tests frontend/test_frontend.cpp frontend/test_encoding_goal.cpp search/test_astar_iw_pddl.cpp
-        search/test_wastar_ehc_anytime_pddl.cpp)
+        search/test_wastar_ehc_anytime_pddl.cpp search/test_brfs_pddl.cpp)
     target_link_libraries(mymyr_frontend_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_frontend_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"

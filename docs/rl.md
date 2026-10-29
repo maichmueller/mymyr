@@ -585,7 +585,15 @@ action targets chooses entities, and `mymyr.encoding` maps a chosen entity back 
 - `encoding.action_indices(batch, entities)` is each entity's position among its own state's successors, which is what
   `CpuEnvPool.step` (and every environment of `mymyr.rl`) takes as the action;
 - without `entities` both cover every action entity of the batch, in entity order
-  (`encoding.action_entities(batch)` lists their ids).
+  (`encoding.action_entities(batch)` lists their ids);
+- `encoding.action_entities_of(batch, indices, graphs=None)` is the inverse: the entity of each canonical successor
+  index (`[N]` or `[N, K]`, row `i` of graph `graphs[i]`, by default graph `i`), -1 where the graph has none. On a
+  device batch it is a torch computation on the device that waits for nothing.
+
+Encoded from an expansion that dropped its no-op actions (`rl.expand(..., drop_noops=True)`), the batch has no entity
+for them, and every other entity keeps its position in the full canonical order as `entity_ref` (the expansion's
+`index`): `action_indices` gives the same environment actions as with the full expansion, and `action_rows` finds the
+entity's row by its `index`.
 
 The targets of behaviour cloning are positions of this kind: `datasets.plan_rows` replays a plan into its states and,
 per step, the canonical successor index of the plan's action, the entity whose `action_indices` equals it
@@ -959,11 +967,18 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
   with or without `obs_capacities`. Exact device expansion waits for its total, and the encoding waits for its
-  sizes. Capacity observations allocate bounded action buffers using the entity capacity and keep the total and
-  status on the device; they wait for nothing and capture with the step. This requires a table whose expansion runs
-  asynchronously on the device; tables needing host expansion are rejected before expansion. Insufficient action or
-  encoding capacity sets the batch's capacity overflow flag and zeroes every output array. Successful capacity calls
-  zero unused output tails. These buffers store labels only; successor state rows are not allocated.
+  sizes. Capacity observations allocate bounded action buffers and keep the total and status on the device; they
+  wait for nothing and capture with the step. The buffers have the rows that the entity capacity's action entities
+  can stand for (`entities` times the largest number of schemas that share an action relation): they bound the kept
+  rows. `obs_capacities["successors"]` bounds the successors before `obs_drop_noops` drops the no-op rows (default:
+  the same rows), so with the drop set it to the most successors an observed state batch has; it is at most
+  2**31 - 1, and with the drop a device holds that many working rows of about `38 + 8 * label_width` bytes each.
+  More kept rows or more successors is an overflow, and the CPU environment reports it as a device does, for the same
+  capacities: the capacity overflow flag, every output array and the batch's sizes zero (the encoding does not run).
+  This requires a table whose expansion runs asynchronously on the device; tables needing host expansion are rejected
+  before expansion. Insufficient encoding capacity sets the batch's capacity overflow flag and zeroes every output
+  array, with the true sizes. Successful capacity calls zero unused output tails. These buffers store labels only;
+  successor state rows are not allocated.
   A captured graph owns an exclusive expansion workspace per table; eager calls and other captures use their own.
   The workspace stays alive until the graph is destroyed and its last replay has completed, also for a manual
   `torch.cuda.CUDAGraph`. Callers may drop every result without releasing the workspace. Two instantiations of one
@@ -975,6 +990,21 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   synchronize the replay stream before freeing or reusing them.
   External CUDA streams must remain valid while arrays produced on them are retained. The JAX environments do not
   encode actions.
+- **Action rows and no-op actions.** With `obs_actions=True` the observation's expansion rows come along as
+  `Observation.actions` and `StepResult.actions` (`mymyr.rl.torch.ActionRows`; over a suite of several domains a tuple,
+  one per domain batch; `Rollout.obs_actions` for a captured rollout): `parent`, `schema`, `binding`, `offsets`, the
+  successor hash `succ_hash` (int64 bit patterns of `State.hash()`) and `noop` of every row, `index` and the device
+  `status`. `encoding.action_rows(obs, actions, entities)` gives the row of a chosen entity, so a policy reads the
+  label (Label mode) or the hash of the state an action reaches without a second expansion. `obs_drop_noops=True`
+  leaves out the actions whose successor equals the state, unless every successor of the state is one: their entities
+  are absent, `actions.index` is each kept row's canonical successor index, and `encoding.action_indices` of an entity
+  is still the action that `step` takes. It costs one compaction pass of the label-only expansion and captures like
+  it; under `torch.compile` the observation is traced as `mymyr::bounded_actions` followed by `mymyr::encode_flat`
+  with those rows, neither tagged `cudagraph_unsafe`, so `mode="reduce-overhead"` keeps the step in CUDA graphs.
+  With `obs_capacities` the row arrays have the capacity's rows on the CPU and on a device alike, every array zero
+  past `offsets[-1]` (so that `parent` there still names a state); `offsets` has N + 1 entries, over a suite the
+  total repeated past a domain batch's graphs. Without capacities the row arrays have exactly the rows. After an
+  overflow the rows and `offsets` are unspecified.
 - **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
   `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
   domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
@@ -1015,6 +1045,27 @@ result = rollout.replay()
 batch = encoding.collate(result.obs)
 print(len(result.obs), batch.num_graphs, result.obs[0].device)
 assert result.obs[0].nbytes == sum(result.obs[0].nbytes_by_array.values())
+```
+
+Without no-op actions, a policy that picks an action entity steps to the successor whose hash the observation names:
+
+```python needs-torch
+import numpy as np
+import torch
+
+floortile = Path("tests/data/ipc/floortile-ipc/train")
+tiles = mymyr.Task.from_pddl(floortile / "domain.pddl", floortile / "p01.pddl", atoms="dense")
+tile_encoder = encoding.FlatRelationEncoder(tiles, target_sources=("action",))
+tile_env = BatchedEnv(tiles, 4, seed=1, observation=tile_encoder, obs_actions=True, obs_drop_noops=True)
+observation = tile_env.observation()
+batch, rows = observation.encoding, observation.actions
+entities = encoding.action_entities(batch)
+graphs = np.searchsorted(np.asarray(batch.entity_offsets), entities, side="right") - 1
+chosen = entities[np.searchsorted(graphs, np.arange(4))]       # the first action entity of each graph
+assert not rows.noop[encoding.action_rows(batch, rows, chosen)].any()
+reached = rows.succ_hash[encoding.action_rows(batch, rows, chosen)]
+step = tile_env.step(torch.as_tensor(encoding.action_indices(batch, chosen)))
+assert torch.equal(mymyr.hash_rows(step.final_states), reached)
 ```
 
 Action observations use the same capacity form, including the reached states before an autoreset:

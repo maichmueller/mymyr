@@ -755,6 +755,7 @@ def test_captured_action_observations_follow_changing_suite_domains(suite):
                     assert_same(batch, expected)
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("single", [False, True])
 @pytest.mark.parametrize("compiled", [False, True])
 def test_captured_actions_survive_other_stream_steps_expansions_and_captures(gripper, single, compiled):

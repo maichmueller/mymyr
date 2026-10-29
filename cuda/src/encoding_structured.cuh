@@ -20,7 +20,8 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
                         a.binding ? a.binding + u64(first) * a.label_width : a.schema,
                         a.parent ? a.parent + first : nullptr, a.label_width, u32(last - first), g,
                         p.action_storage + g * p.action_stride,
-                        p.action_storage + g * p.action_stride + r.v.num_schemas + 1};
+                        p.action_storage + g * p.action_stride + r.v.num_schemas + 1,
+                        a.index ? a.index + first : nullptr};
         return true;
     }
     const auto& hz = p.horizon;
