@@ -734,3 +734,139 @@ TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
     expect_captured_tables_equal_eager(32);
     expect_captured_tables_equal_eager(cuda::envk::k_wide_visited);  // the restarts' own kernel
 }
+
+TEST(DeviceEnvGoals, DirectInstanceWritesValidateMasks)
+{
+    SKIP_WITHOUT_GPU();
+    const auto suite = rl::TaskSuite::group({load("blocks__probBLOCKS-8-0", true), load("gripper__prob05", true)});
+    const u32 W = suite->words(), slots = suite->task(1)->atoms().fluent_slots();
+    ASSERT_LT(suite->task(1)->words(), W);
+    for (auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
+        for (u32 H : {0u, 8u})
+        {
+            SCOPED_TRACE(std::string(path == cuda::DeviceEnv::Path::Auto ? "auto" : "general") + " H=" + std::to_string(H));
+            auto ctx = context();
+            rl::EnvConfig cfg;
+            cfg.autoreset = false;
+            cfg.max_steps = 3;
+            cuda::DeviceEnv env(ctx, suite, cfg, path);
+            rl::HostEnv host(suite, cfg);
+            HostBatch h(W, env.label_width(), 2, 0);
+            DeviceBatch d(ctx, env, 2, 0);
+            std::vector<i32> ids{1, 0};
+            std::vector<u64> pos(2 * W), neg(2 * W);
+            cuda::DeviceBuffer di(ctx, 2 * sizeof(i32), d.s), dp(ctx, 2 * W * sizeof(u64), d.s),
+                dn(ctx, 2 * W * sizeof(u64), d.s);
+            h.b.task_ids = ids.data();
+            h.b.goal_pos = pos.data();
+            h.b.goal_neg = neg.data();
+            d.b.task_ids = static_cast<i32*>(di.data());
+            d.b.goal_pos = static_cast<u64*>(dp.data());
+            d.b.goal_neg = static_cast<u64*>(dn.data());
+            std::unique_ptr<HostVisited> hv;
+            std::unique_ptr<DeviceVisited> dv;
+            if (H)
+            {
+                hv = std::make_unique<HostVisited>(h.b, h.out, 2, H);
+                dv = std::make_unique<DeviceVisited>(ctx, d, H);
+            }
+            host.reset(h.b, nullptr, h.out.count);
+            const auto source = h.v.states;
+            // Change both instances and their states while retaining their goal masks.
+            ids[0] = 0;
+            ids[1] = 1;
+            std::copy_n(source.data() + W, W, h.v.states.data());
+            std::copy_n(source.data(), W, h.v.states.data() + W);
+            to_device(d.states, h.v.states, d.s);
+            to_device(di, ids, d.s);
+            // A source goal with a high slot cannot be used in the narrower destination instance.
+            const u32 high = suite->task(0)->atoms().fluent_slots() - 1;
+            pos[W + high / 64] |= u64{1} << (high & 63);
+            to_device(dp, pos, d.s);
+            to_device(dn, neg, d.s);
+            EXPECT_THROW(host.refresh(h.b, h.out.count), std::invalid_argument);
+            env.refresh(d.b, d.out.count);
+            EXPECT_THROW(env.check_errors(), std::invalid_argument);
+            EXPECT_NO_THROW(env.check_errors());
+            for (bool negative : {false, true})
+                for (u32 bad : {slots, suite->task(1)->words() * 64})
+                {
+                    std::fill(pos.begin(), pos.end(), 0);
+                    std::fill(neg.begin(), neg.end(), 0);
+                    (negative ? neg : pos)[W + bad / 64] = u64{1} << (bad & 63);
+                    to_device(dp, pos, d.s);
+                    to_device(dn, neg, d.s);
+                    EXPECT_THROW(host.goal(h.b, h.v.goal.data()), std::invalid_argument);
+                    auto no_outputs = h.b;
+                    no_outputs.at_goal = nullptr;
+                    EXPECT_THROW(host.refresh(no_outputs, nullptr), std::invalid_argument);
+                    env.goal(d.b, d.out.goal);
+                    EXPECT_THROW(env.check_errors(), std::invalid_argument);
+                    EXPECT_THROW(host.reset(h.b, nullptr, h.out.count, true), std::invalid_argument);
+                    env.reset(d.b, nullptr, d.out.count, true);
+                    EXPECT_THROW(env.check_errors(), std::invalid_argument);
+                }
+            // Empty relabelled goals fit both instances and remain empty through refresh and absorbing steps.
+            std::fill(pos.begin(), pos.end(), 0);
+            std::fill(neg.begin(), neg.end(), 0);
+            to_device(dp, pos, d.s);
+            to_device(dn, neg, d.s);
+            host.reset(h.b, nullptr, h.out.count, true);
+            env.reset(d.b, nullptr, d.out.count, true);
+            host.refresh(h.b, h.out.count);
+            env.refresh(d.b, d.out.count);
+            host.step(h.b, h.out);
+            env.step(d.b, d.out);
+            expect_equal(d.snapshot(), h.v, "kept goals", 0);
+            // Reset restores each written instance's default goals.
+            host.reset(h.b, nullptr, h.out.count);
+            env.reset(d.b, nullptr, d.out.count);
+            for (int t = 0; t < 5; ++t)
+            {
+                host.step(h.b, h.out);
+                env.step(d.b, d.out);
+                expect_equal(d.snapshot(), h.v, "instance goals", t);
+                if (H)
+                    dv->expect_equal(*hv, d.s, "instance goals", t);
+            }
+            EXPECT_NO_THROW(env.check_errors());
+        }
+}
+
+TEST(DeviceEnvGoals, CapturedRefreshChecksWrittenGoals)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    cuda::Stream capture;
+    const auto task = load("gripper__prob05", true);
+    cuda::DeviceEnv env(ctx, rl::TaskTable::single(task), {});
+    DeviceBatch d(ctx, env, 1, 0);
+    cuda::DeviceBuffer dp(ctx, d.W * sizeof(u64), d.s), dn(ctx, d.W * sizeof(u64), d.s);
+    d.b.goal_pos = static_cast<u64*>(dp.data());
+    d.b.goal_neg = static_cast<u64*>(dn.data());
+    env.reset(d.b, nullptr, d.out.count);
+    env.reserve(1);
+    cuda::check(cudaStreamSynchronize(d.s), "sync");
+    env.set_stream(capture);
+    cudaGraph_t graph = nullptr;
+    cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeThreadLocal), "begin capture");
+    env.refresh(d.b, d.out.count);
+    cuda::check(cudaStreamEndCapture(capture, &graph), "end capture");
+    cudaGraphExec_t exec = nullptr;
+    cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+    std::vector<u64> pos(d.W, 0), neg(d.W, 0);
+    const u32 slot = task->atoms().fluent_slots();
+    ASSERT_LT(slot, d.W * 64);
+    pos[slot / 64] = u64{1} << (slot & 63);
+    to_device(dp, pos, capture);
+    to_device(dn, neg, capture);
+    cuda::check(cudaGraphLaunch(exec, capture), "launch");
+    EXPECT_THROW(env.check_errors(), std::invalid_argument);
+    std::fill(pos.begin(), pos.end(), 0);
+    to_device(dp, pos, capture);
+    cuda::check(cudaGraphLaunch(exec, capture), "launch");
+    EXPECT_NO_THROW(env.check_errors());
+    EXPECT_EQ(to_host<u8>(d.at_goal, 1, capture), std::vector<u8>{1});
+    cuda::check(cudaGraphExecDestroy(exec), "destroy graph exec");
+    cuda::check(cudaGraphDestroy(graph), "destroy graph");
+}

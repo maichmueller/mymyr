@@ -468,7 +468,6 @@ class Env:
                 raise ValueError("mymyr: per-env goals need goals=True and both goal_pos and goal_neg")
             gpos = jnp.asarray(goal_pos, jnp.uint32).reshape(gpos.shape)
             gneg = jnp.asarray(goal_neg, jnp.uint32).reshape(gneg.shape)
-            at_goal = _masks_hold(states, gpos, gneg)
         state = EnvState(
             states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed, at_goal,
             visited, visited_count, visited_status,
@@ -476,6 +475,8 @@ class Env:
         if not isinstance(states, jax.core.Tracer):
             # committed to the environment's device: jitted steps of this state run there, whatever the default device
             state = jax.device_put(state, self.device)
+        if goal_pos is not None:
+            state = self.refresh(state)
         return state, self.observation(state)
 
     def reset_where(
@@ -537,7 +538,8 @@ class Env:
 
     def refresh(self, state: EnvState) -> EnvState:
         """Recomputes the successor counts, the device cache and ``at_goal`` of states, task ids or goal masks the
-        caller wrote into ``state``."""
+        caller wrote into ``state``. Goal masks stay in the current instance's slot layout; bits outside its fluent
+        slots raise an FFI error on the CPU or set a device error reported by :meth:`check_errors`."""
         with self._dev():
             count, counts, views, at_goal = _ffi.env_refresh(
                 self.handle, state.states, state.task_id, state.counts, state.views, state.goal_pos, state.goal_neg
@@ -671,7 +673,7 @@ class Env:
 
     def check_errors(self) -> None:
         """Waits for this environment's device work and raises if a fast-path step met a stale cache (states written
-        without :meth:`refresh`) or task ids outside the table."""
+        without :meth:`refresh`), task ids outside the table or goal masks outside their instance's fluent slots."""
         self.native.check_errors()
 
 
@@ -718,13 +720,6 @@ def _observation(table: Any, observation: Any, capacities: Any, actions: bool) -
                              "domain)")
     goals = [any(lane in _device._GOAL_LANES for lane in e.relation_lanes) for e in encoders]
     return encoders, caps, goals
-
-
-def _masks_hold(states: Any, goal_pos: Any, goal_neg: Any) -> Any:
-    """Whether each state row (uint32 halves) holds its goal masks ([N, 2 words]: the rows' first 2 words columns)."""
-    w = goal_pos.shape[-1]
-    head = states[..., :w]
-    return jnp.all((head & goal_pos) == goal_pos, axis=-1) & jnp.all((head & goal_neg) == 0, axis=-1)
 
 
 def as_words(x: Union[np.ndarray, Any]) -> np.ndarray:

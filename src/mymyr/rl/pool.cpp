@@ -2,6 +2,8 @@
 
 #include "mymyr/rl/pool.hpp"
 
+#include "mymyr/rl/goal_masks.hpp"
+
 #include "mymyr/core/threads.hpp"
 
 #include <algorithm>
@@ -564,6 +566,10 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
                 throw std::invalid_argument("mymyr: CpuEnvPool.reset: goal masks of " + std::to_string(goal_words) +
                                             " words; env " + std::to_string(ids[p]) + "'s instance has " +
                                             std::to_string(w));
+            const u32 inst = static_cast<u32>(task_ids ? task_ids[p] : I.task_ids[ids[p]]);
+            if (!goal_masks_fit(goal_pos + p * goal_words, goal_neg + p * goal_words, goal_words,
+                                I.env.suite()->task(inst)->atoms().fluent_slots()))
+                throw std::invalid_argument("mymyr: CpuEnvPool.reset: goal masks set fluent slots their instance does not have");
         }
     PoolBatch out = I.take_spare();
     size_batch(out, ids.size(), W, I.NN, I.L, I.goals, false);

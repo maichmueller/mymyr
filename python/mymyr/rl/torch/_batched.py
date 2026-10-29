@@ -450,7 +450,8 @@ class BatchedEnv:
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
-        masks."""
+        masks. Goals stay in the written instance's slot layout; bits outside its fluent slots raise ValueError on
+        the host or set a device error reported by :meth:`check_errors`."""
         args = (
             self.handle, self.states, self._ids(), self.counts, self.views, self.goal_pos, self.goal_neg, self.count,
             self.at_goal,
@@ -582,7 +583,8 @@ class BatchedEnv:
     def check_errors(self) -> None:
         """Waits for the device work and raises if a fast-path step met states written without :meth:`refresh`, or
         met task ids outside the table (device ``task_ids`` / ``next_task_ids``; host values are checked when given;
-        the general path's step and refresh raise such ids themselves). A no-op on the CPU."""
+        the general path's step and refresh raise such ids themselves), or goal masks outside the instance's fluent
+        slots. A no-op on the CPU."""
         self.core.check_errors()
 
     def close(self) -> None:

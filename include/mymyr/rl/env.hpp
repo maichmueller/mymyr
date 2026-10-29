@@ -40,7 +40,8 @@
 // Rows are `words` atom words wide (at least the suite's words(), so a reset into any instance fits), plus the suite's
 // numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). A step reads and writes
 // the row's own instance's words only (TaskSuite::instance(t).words): the words past them are padding, never read,
-// and zero once a reset has written the row; goal masks are read over the same words. Every step of a row is a
+// and zero once a reset has written the row. Per-env goal masks must be zero past the instance's fluent slots,
+// including unused bits of its last word and padding words; host calls reject invalid masks. Every step of a row is a
 // function of that row's state, action and RNG stream alone, so results do not depend on the batch composition, the
 // batch split or the thread count.
 
@@ -208,6 +209,8 @@ public:
     /// The goal tests of the rows' states (goal[i] for i < b.rows); at_goal is not read.
     void goal(const EnvBatch& b, u8* goal) const;
     /// After the caller wrote states, task ids or goal masks: count (if set) and at_goal (if the batch has it).
+    /// Keeps valid goals in the current instance's slot layout; throws std::invalid_argument for masks that set
+    /// slots outside it. Changing an instance may therefore require writing new goals before refreshing.
     void refresh(EnvBatch& b, i32* count, ThreadPool* pool = nullptr);
 
     /// Scratch of one thread's row steps (grown as needed).

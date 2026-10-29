@@ -137,6 +137,7 @@ struct Instances
     u64 view_words = 0;
     const u64* goal_pos = nullptr;
     const u64* goal_neg = nullptr;
+    const u32* fluent_slots = nullptr;  // [I], bounds of per-env goal masks
     const u8* init_goal = nullptr;  // [I] whether the initial state passes the instance's goal test
     // the fast path: per instance its view words (an autoreset copies the instance's own view) and, without derived
     // goal literals, its goal as the words of its masks that are not zero (CSR: instance k's are [goal_off[k],
@@ -184,7 +185,8 @@ struct Finish
     u32 dead_end_terminal = 1;  // a dead end terminates
     Instances in;
     const i32* next_task_ids = nullptr;  // [rows]: the instance an autoresetting row restarts in (null: its own)
-    u32* error = nullptr;                // value 4: a task id outside the table (a next id of any row, used or not;
+    u32* error = nullptr;                // bit 4 (16): per-env goals outside the instance's fluent slots;
+                                         // value 4: a task id outside the table (a next id of any row, used or not;
                                          // an autoresetting row keeps its instance; the row's own: instance 0)
     u32* order_bad = nullptr;            // reset to 0 for the next step (Select sets it)
     // outputs (null: not written)
