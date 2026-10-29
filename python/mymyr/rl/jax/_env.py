@@ -476,7 +476,16 @@ class Env:
             # committed to the environment's device: jitted steps of this state run there, whatever the default device
             state = jax.device_put(state, self.device)
         if goal_pos is not None:
-            state = self.refresh(state)
+            with self._dev():
+                states, steps, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status = _ffi.env_reset(
+                    self.handle, state.states, state.task_id, state.steps, state.count, state.counts, state.views,
+                    state.goal_pos, state.goal_neg, state.at_goal, state.visited, state.visited_count,
+                    state.visited_status, jnp.ones(n, jnp.bool_), True,
+                )
+            state = state._replace(
+                states=states, steps=steps, count=count, counts=counts, views=views, goal_pos=gpos, goal_neg=gneg,
+                at_goal=at_goal, visited=visited, visited_count=visited_count, visited_status=visited_status,
+            )
         return state, self.observation(state)
 
     def reset_where(

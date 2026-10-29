@@ -211,6 +211,10 @@ def test_jax_reset_validates_custom_goals(suite, device, path):
         with pytest.raises(ValueError, match="goal masks.*fluent slots"):
             env.check_errors()
     state, _ = env.reset(0, ids)
+    valid_pos, valid_neg = (halves(a) for a in masks(suite, ids, "new"))
+    custom, _ = env.reset(0, ids, goal_pos=valid_pos, goal_neg=valid_neg)
+    for field in ("states", "count", "at_goal", "reset_counts", "draws"):
+        np.testing.assert_array_equal(getattr(custom, field), getattr(state, field))
     # Invalid assignments to rows outside the reset mask are ignored.
     state, _ = env.reset_where(state, np.array([True, False]), goal_pos=pos, goal_neg=neg)
     jax.block_until_ready(state)
