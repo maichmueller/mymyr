@@ -268,25 +268,41 @@ def test_frozen_wrapper_can_be_collected_and_recreated():
 def test_frozen_cache_with_concurrent_collection():
     import gc
     import threading
+    import time
     from concurrent.futures import ThreadPoolExecutor
 
     lazy = text_task("gripper__prob05", atoms="lazy")
     barrier = threading.Barrier(9)
+    collected = threading.Event()
     stop = threading.Event()
 
+    # The freezing threads run until ten collections have overlapped them (and at least 100 rounds each).
     def freeze(worker):
         local = lazy.local()
         mode = ("auto", "reachable", "dense")[worker % 3]
         barrier.wait()
-        for _ in range(100):
+        rounds = 0
+        while rounds < 100 or not collected.is_set():
             twin = local.frozen(mode)
             assert twin is lazy.frozen(mode)
             del twin
+            rounds += 1
 
+    # A free-threaded collection stops the world, and a thread that collects back to back can keep the other threads
+    # from ever resuming. Pausing as long as the last collection took leaves them at least half of the time.
     def collect():
         barrier.wait()
-        while not stop.is_set():
-            gc.collect()
+        collections = 0
+        try:
+            while not stop.is_set():
+                start = time.perf_counter()
+                gc.collect()
+                collections += 1
+                if collections == 10:
+                    collected.set()
+                stop.wait(time.perf_counter() - start)
+        finally:
+            collected.set()
 
     with ThreadPoolExecutor(9) as pool:
         collecting = pool.submit(collect)
