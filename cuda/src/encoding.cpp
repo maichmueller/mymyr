@@ -176,7 +176,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                 nullary = nullary || (ed::cell_present(cell, static_cast<u32>(n)) && cell.logical_arity == 0);
             }
             // objects, the auxiliary entity, one entity per goal or subgoal target and one per predicate virtual node
-            const u64 entities = add(add(inst.num_objects, nullary ? 1 : 0), add(targets, inst.num_virtual));
+            const u64 entities =
+                add(add(inst.num_objects, nullary && inst.nullary_auxiliary ? 1 : 0), add(targets, inst.num_virtual));
             bounds.entities = std::max(bounds.entities, entities);
             bounds.tuples = std::max(bounds.tuples, tuples);
             bounds.args = std::max(bounds.args, args);
@@ -545,6 +546,7 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
     arrays.simple = schema.emits_simple();
     arrays.shared_statics = schema.shared_statics();
     arrays.static_relations = schema.shared_statics() ? schema.static_relations().size() : 0;
+    arrays.argumentless_relations = schema.argumentless_relations();
     return arrays;
 }
 
@@ -580,7 +582,7 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.history_entity, arrays.history ? mul(I, S) : 0);
     place(out.history_dt, arrays.history ? mul(4, S) : 0);
     place(out.node_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
-    place(out.node_label, arrays.simple ? mul(4, add(E, A)) : 0);
+    place(out.node_label, arrays.simple ? mul(4, add(add(E, A), mul(G, arrays.argumentless_relations))) : 0);
     place(out.edge_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
     place(out.edge_index, arrays.simple ? mul(I, mul(4, A)) : 0);
     place(out.edge_label, arrays.simple ? mul(4, mul(2, A)) : 0);
@@ -1231,8 +1233,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             invalid("the schema does not store relation arrays");
         if (arrays.simple)
         {
-            if (!a.node_offsets || !a.edge_offsets ||
-                ((out.capacities.entities || out.capacities.args) && !a.node_label) ||
+            const u64 nodes = encoding::simple_node_capacity(out.capacities.graphs, out.capacities,
+                                                             arrays.argumentless_relations);
+            if (!a.node_offsets || !a.edge_offsets || (nodes && !a.node_label) ||
                 (out.capacities.args && (!a.edge_index || !a.edge_label)) ||
                 a.edge_stride < mul(2, out.capacities.args))
                 invalid("the Simple arrays must hold the node and edge capacities");
@@ -1336,6 +1339,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         p.out = out.arrays;
         p.capacities = out.capacities;
+        p.node_capacity =
+            encoding::simple_node_capacity(out.capacities.graphs, out.capacities, schema.argumentless_relations());
     }
     p.index64 = index == encoding::IndexType::I64;
     p.zero_unused = out.zero_unused;

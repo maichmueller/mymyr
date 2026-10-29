@@ -120,7 +120,7 @@ TEST(EncodingContext, NullaryOffRemovesTheNullaryCells)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
     FlatOptions options = test::encoder_options();
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     const auto context = context_of(table, options);
     EXPECT_EQ(cell_names(*context, 0), (std::set<std::string>{"clear", "holding", "object", "on", "ontable"}));
     for (const Cell& cell : cells_of(*context, 0))
@@ -455,7 +455,7 @@ TEST(EncodingContext, TheLiteralSectionResolvesEveryAtomUnderEveryFixedLayoutAnd
     std::vector<FlatOptions> variants(6, test::encoder_options());
     variants[1].include_static = false;
     variants[2].include_derived = false;
-    variants[3].nullary = false;
+    variants[3].nullary = Nullary::Omit;
     variants[4].statics = Statics::Shared;
     variants[5].horizon.mode = HorizonMode::Delta;
     for (const auto atoms : {TaskOptions::Atoms::Reachable, TaskOptions::Atoms::Dense})

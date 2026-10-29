@@ -73,8 +73,8 @@ def goal_reference(task, state, literals, schema_names):
 
 def goal_is_complete(task, options):
     """goal_complete of an instance: its goal could be expanded into literals and the options left out no literal whose
-    truth a state can change (a nullary literal with nullary=False; a static literal is fixed)."""
-    dropped = not options.get("nullary", True) and any(
+    truth a state can change (a nullary literal with nullary="omit"; a static literal is fixed)."""
+    dropped = options.get("nullary", "auxiliary") == "omit" and any(
         not x.objects and x.predicate.kind != "static" for x in task.encoding_goal
     )
     return int(task.encoding_goal_complete and not dropped)
@@ -128,7 +128,7 @@ OPTIONS = [
     {"target_sources": ("goal",), "layout": "relation"},
     {"goal_derivations": ("plain",), "target_sources": ("goal",), "index_dtype": "int64"},
     {"goal_derivations": ("satisfied", "unsatisfied")},
-    {"nullary": False, "target_sources": ("goal",)},
+    {"nullary": "omit", "target_sources": ("goal",)},
     {"include_static": False, "include_derived": False, "emit_counts": True},
 ]
 

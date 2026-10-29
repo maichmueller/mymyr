@@ -108,6 +108,19 @@ enum class Statics : u8
     Shared,
 };
 
+/// How the atoms of a nullary predicate (a predicate without arguments) are encoded. Auxiliary makes each a tuple over
+/// the graph's auxiliary entity, an entity a graph has exactly when it has such a tuple, so that the fact has a node to
+/// attach to. Arity0 gives the nullary relations no argument slot: a tuple holds only the slots of its other roles (a
+/// state tuple is empty), and no graph has an auxiliary entity. Omit leaves the nullary predicates out of the catalog.
+/// A nullary numeric function is a tuple over the auxiliary entity under Auxiliary and Omit, and a tuple without
+/// arguments under Arity0.
+enum class Nullary : u8
+{
+    Auxiliary,
+    Arity0,
+    Omit,
+};
+
 /// The integer type of every index, count and offset array.
 enum class IndexType : u8
 {
@@ -179,9 +192,8 @@ struct FlatOptions
     /// not total-cost), with one tuple per ground function term of the instance and its value in `numeric_values`.
     /// Without it the numeric part of the states is ignored.
     bool include_numeric = true;
-    /// Relations of the nullary predicates. A nullary atom is a tuple over the graph's auxiliary entity, so that the
-    /// fact has a node to attach to.
-    bool nullary = true;
+    /// How the nullary predicates are encoded: over the auxiliary entity, without an argument slot, or not at all.
+    Nullary nullary = Nullary::Auxiliary;
     /// Relations of the equality predicate `=`.
     bool equality = false;
     /// A predicate slot in the tuples of the predicate relations: a graph gets an entity for each predicate that has a
@@ -244,7 +256,8 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
 /// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "repeat", "shared"; "int32", "int64";
-/// "every", "lowest", "highest"; "float32", "float64"; "none", "full", "delta", "action"; "include", "exclude", "encode_only"; "relations", "simple"),
+/// "every", "lowest", "highest"; "float32", "float64"; "none", "full", "delta", "action"; "include", "exclude",
+/// "encode_only"; "relations", "simple"; "auxiliary", "arity0", "omit"),
 /// and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
@@ -257,6 +270,7 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
 [[nodiscard]] std::string_view to_string(Output value) noexcept;
+[[nodiscard]] std::string_view to_string(Nullary value) noexcept;
 [[nodiscard]] std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept;
 [[nodiscard]] std::optional<TargetSource> parse_target_source(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
@@ -268,4 +282,5 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Output> parse_output(std::string_view text) noexcept;
+[[nodiscard]] std::optional<Nullary> parse_nullary(std::string_view text) noexcept;
 }

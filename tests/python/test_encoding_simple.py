@@ -150,7 +150,7 @@ def test_the_graph_is_the_incidence_graph_of_the_tuples_in_both_layouts(name, in
         {"include_actions": False},
         {"goal_derivations": GOALS, "target_sources": ("goal",), "include_actions": False},
         {"goal_derivations": GOALS, "target_sources": ("goal", "action")},
-        {"nullary": False, "equality": True, "include_static": False, "include_derived": False},
+        {"nullary": "omit", "equality": True, "include_static": False, "include_derived": False},
     ):
         given = actions if options.get("include_actions", True) else None
         batches = []

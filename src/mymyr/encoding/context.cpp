@@ -30,6 +30,13 @@ bool is_state_relation(const Relation& relation)
            relation.predicate >= 0;
 }
 
+/// Whether the first slot of relation `id` has role `role` (a relation of arity 0 has no slot).
+bool leads_with(const EncodingSchema& schema, u32 id, SlotRole role)
+{
+    const auto roles = schema.slot_roles(id);
+    return !roles.empty() && roles.front() == role;
+}
+
 std::span<const i32> ints(const rl::ArrayBundle& bundle, const char* name)
 {
     const rl::ArrayInfo* info = bundle.find(name);
@@ -348,8 +355,9 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         const Relation& relation = schema.relation(relation_id);
         const u32 logical = static_cast<u32>(arity[ip]);
         const Lane lane = kind[ip] == rl::k_pred_static ? Lane::Static : kind[ip] == rl::k_pred_fluent ? Lane::Fluent : Lane::Derived;
+        const u32 arguments = logical != 0 || schema.options().nullary == Nullary::Auxiliary ? std::max(logical, 1u) : 0u;
         if (relation.lane != lane || relation.logical_arity != logical ||
-            relation.arity != std::max(logical, 1u) + (schema.options().predicate_virtual_nodes ? 1u : 0u))
+            relation.arity != arguments + (schema.options().predicate_virtual_nodes ? 1u : 0u))
             throw std::logic_error("mymyr: encoding: the relation " + relation.name + " does not match its predicate");
         Cell cell{relation_id, 0, 0, 0, relation.arity, logical};
         if (lane == Lane::Fluent)
@@ -774,7 +782,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
                 continue;
             max_arity = std::max(max_arity, relation.logical_arity);
             layer_relations.history[u64{static_cast<u32>(relation.predicate)} * 2 + sign] = static_cast<i32>(id);
-            if (own->slot_roles(id).front() == SlotRole::HistoryTarget)
+            if (leads_with(*own, id, SlotRole::HistoryTarget))
                 layer_relations.target[id] = 1;
             continue;
         }
@@ -790,7 +798,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         const u64 per_level = u64{table->num_domain_predicates()} * 6;
         const u64 predicate = static_cast<u32>(relation.predicate);
         layer_relations.subgoal[(level - 1) * per_level + (predicate * 2 + sign) * 3 + variant] = static_cast<i32>(id);
-        if (plain && own->slot_roles(id).front() == SlotRole::SubgoalTarget)
+        if (plain && leads_with(*own, id, SlotRole::SubgoalTarget))
             layer_relations.target[id] = 1;
     }
     GoalRelations goal_relations;
@@ -809,7 +817,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         const u32 variant = plain ? 0 : relation.derivation == GoalDerivation::Satisfied ? 1 : 2;
         goal_relations.id[(u64{static_cast<u32>(relation.predicate)} * 2 + (relation.sign > 0 ? 0 : 1)) * 3 + variant] =
             static_cast<i32>(id);
-        if (plain && own->slot_roles(id).front() == SlotRole::GoalTarget)
+        if (plain && leads_with(*own, id, SlotRole::GoalTarget))
             goal_relations.target[id] = 1;
     }
     // The relations of a horizon: what each lists, and the cells of the edge relations (every instance has them).
@@ -1035,6 +1043,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     v.repeated_literals = m_schema->options().repeated_literals;
+    v.nullary_auxiliary = m_schema->options().nullary != Nullary::Arity0;
     return v;
 }
 }

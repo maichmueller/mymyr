@@ -110,7 +110,7 @@ TEST(EncodingSchema, SlotRolesFollowTheTargetsAndVirtualNodes)
 TEST(EncodingSchema, NullaryStaticAndDerivedOptionsSelectRelations)
 {
     FlatOptions options;
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     {
         const auto schema = EncodingSchema::create(blocks(), options);
         for (const char* name : {"handempty", "[+]handempty[g]", "[+]handempty[hist]"})
@@ -282,7 +282,7 @@ TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
     vary([](FlatOptions& o) { o.max_goal_level = 1; });
     vary([](FlatOptions& o) { o.include_static = false; });
     vary([](FlatOptions& o) { o.include_derived = false; });
-    vary([](FlatOptions& o) { o.nullary = false; });
+    vary([](FlatOptions& o) { o.nullary = Nullary::Omit; });
     vary([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     vary([](FlatOptions& o) { o.include_actions = false; });
     vary([](FlatOptions& o) { o.targets = {TargetSource::Action}; });

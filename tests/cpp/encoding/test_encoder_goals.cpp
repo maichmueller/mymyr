@@ -335,14 +335,14 @@ struct Tally
 };
 
 /// Whether the goal of `task` stays complete under `options`: it was complete, and no literal was dropped whose truth a
-/// state can change (a nullary literal over a fluent or derived predicate under nullary = false; a dropped static or
+/// state can change (a nullary literal over a fluent or derived predicate under Nullary::Omit; a dropped static or
 /// equality literal has a fixed truth).
 bool stays_complete(const Task& task, const FlatOptions& options)
 {
     if (!task.encoding_goal_complete())
         return false;
     for (const formalism::Literal& literal : task.encoding_goal())
-        if (!options.nullary && task.compiled().arity[literal.pred.v] == 0 &&
+        if (options.nullary == Nullary::Omit && task.compiled().arity[literal.pred.v] == 0 &&
             task.data().predicates[literal.pred.v].kind != formalism::PredKind::Static)
             return false;
     return true;
@@ -419,7 +419,7 @@ TEST(EncoderGoals, PlainOnlyAndDerivationsOnly)
 TEST(EncoderGoals, WithoutNullaryEqualityStaticOrDerivedRelations)
 {
     FlatOptions options = goal_options();
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     expect_instance_goals(options);
     options.equality = false;
     expect_instance_goals(options);
@@ -752,7 +752,7 @@ TEST(EncoderGoals, TheAuxiliaryEntityCountsNullaryGoalTuples)
         EXPECT_EQ(graph.tuples[done][0][1], graph.num_objects);  // [goal entity, auxiliary]
         EXPECT_EQ(graph.role[static_cast<usize>(graph.num_objects)], 8);
     }
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     const auto without = FlatEncoder::create(table, options);
     EXPECT_FALSE(without->schema().find("[+]done[g]"));
     const auto plain = decode(*without->encode(input_of(rows)), without->schema());
@@ -953,10 +953,12 @@ TEST(EncoderGoals, TheGoalIsIncompleteWhenALiteralWithoutAFixedTruthIsDropped)
         FlatOptions options = goal_options();
         ASSERT_TRUE(table->task(0)->encoding_goal_complete());
         EXPECT_EQ(complete(options), (std::vector<i64>{1, 1, 1}));
-        options.nullary = false;
+        options.nullary = Nullary::Omit;
         EXPECT_EQ(complete(options), (std::vector<i64>{0, 0, 0}));
+        options.nullary = Nullary::Arity0;
+        EXPECT_EQ(complete(options), (std::vector<i64>{1, 1, 1}));
         // the equality predicate is static: dropping it leaves the goal as complete as it was
-        options.nullary = true;
+        options.nullary = Nullary::Auxiliary;
         options.equality = false;
         EXPECT_EQ(complete(options), (std::vector<i64>{1, 1, 1}));
     }

@@ -101,7 +101,11 @@ def schema_from_dict(record: Mapping[str, Any], table: TaskTable | Any) -> Encod
     """
     _check_record(record)
     record = dict(record)
-    schema = _core.EncodingSchema(table, **record["options"])
+    try:
+        schema = _core.EncodingSchema(table, **record["options"])
+    except TypeError as error:
+        _core.EncodingSchema(table)  # a table that is no table keeps its TypeError
+        raise _bad(f"the schema record's options are not options of this build: {error}") from error
     if record["version"] != schema.version:
         raise _bad(
             f"the schema record is of version {record['version']} of the catalog rules, this build has version "

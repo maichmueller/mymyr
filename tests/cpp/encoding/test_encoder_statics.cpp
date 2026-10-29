@@ -122,12 +122,12 @@ Arrays repeated_form(const EncodingSchema& schema, Arrays a)
                 const u64 s = segment(g, r);
                 const i64 begin = a.at("relation_arg_offsets")[s], end = a.at("relation_arg_offsets")[s + 1];
                 cells[g][r].assign(a.at("relation_args").begin() + begin, a.at("relation_args").begin() + end);
-                shared_tuples[g][r] = static_cast<u64>(end - begin) / arity;
+                shared_tuples[g][r] = static_cast<u64>(a.at("relation_offsets")[s + 1] - a.at("relation_offsets")[s]);
                 continue;
             }
             const u64 s = block * Rs + it->second;
             const i64 begin = a.at("static_arg_offsets")[s], end = a.at("static_arg_offsets")[s + 1];
-            static_tuples[g][r] = static_cast<u64>(end - begin) / arity;
+            static_tuples[g][r] = static_cast<u64>(a.at("static_offsets")[s + 1] - a.at("static_offsets")[s]);
             for (i64 at = begin; at < end; ++at)
             {
                 const i64 id = a.at("static_args")[static_cast<u64>(at)];
@@ -168,7 +168,7 @@ Arrays repeated_form(const EncodingSchema& schema, Arrays a)
     for (u64 s = 0; s < G * R; ++s)
     {
         const u64 g = relation_major ? s % G : s / R, r = relation_major ? s / G : s % R;
-        counts[g * R + r] = static_cast<i64>(cells[g][r].size() / schema.relation(static_cast<u32>(r)).arity);
+        counts[g * R + r] = static_cast<i64>(shared_tuples[g][r] + static_tuples[g][r]);
         arg_offsets.push_back(static_cast<i64>(args.size()));
         args.insert(args.end(), cells[g][r].begin(), cells[g][r].end());
     }

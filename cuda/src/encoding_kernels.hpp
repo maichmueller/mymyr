@@ -82,6 +82,7 @@ struct EncodeParams
     bool simple = false;
     encoding::FlatSizes* sizes = nullptr;
     encoding::BatchShape capacities;
+    u64 node_capacity = 0;  // the Simple nodes within the capacities (encoding::simple_node_capacity)
     encoding::StaticShape static_capacities{};
     encoding::StaticSizes* static_sizes = nullptr;
     encoding::StaticSizes* static_totals = nullptr;

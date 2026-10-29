@@ -445,6 +445,11 @@ def kind_of(relation):
     return ""
 
 
+def over_auxiliary(config):
+    """Whether the native encoder of ``config`` encodes the nullary atoms over the auxiliary entity."""
+    return SUPPORTED[config].get("nullary", "auxiliary") == "auxiliary"
+
+
 def _nullary_over_auxiliary(expected, actual, context):
     """The reference's catalog omits nullary relations or lists them without tuples. The native catalog has every
     nullary relation of the domain (the reference lists them in its config with ``ignore_zero_arity_relations`` off),
@@ -452,7 +457,7 @@ def _nullary_over_auxiliary(expected, actual, context):
     (after the goal entity, when the goal relations have targets), which the graph has exactly when there is one.
     The expectation is rebuilt that way from the atoms of the recorded state and the goal's nullary tuples of the
     config that keeps them; a nullary relation that the native catalog lacks, or has in addition, stays a mismatch."""
-    if not SUPPORTED[context.config].get("nullary", True) or context.dag is not None:
+    if not over_auxiliary(context.config) or context.dag is not None:
         return expected, actual
     fixture = context.fixture
     catalog = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
@@ -559,7 +564,7 @@ def _nullary_horizon(expected, actual, context):
     graph has the auxiliary entity exactly when such a tuple exists. The expectation fills them from the atoms of the
     record's nodes by the semantics of each relation (facts, delta, goal, satisfaction at the nodes or relative to the
     root); a nullary relation that the native catalog lacks, or has in addition, stays a mismatch."""
-    if context.dag is None or not SUPPORTED[context.config].get("nullary", True):
+    if context.dag is None or not over_auxiliary(context.config):
         return expected, actual
     nodes = _node_atoms(context)
     nullary = {p.name for p in context.task.formalism.predicates if p.arity == 0}
@@ -754,7 +759,7 @@ def _nullary_layers_over_auxiliary(expected, actual, context):
     nullary literal of a layer or step is a tuple over the auxiliary entity, which the graph has exactly when there is
     one. The expectation lists the history relations that its catalog omits, from the config that keeps nullary
     relations, and ends each tuple of a nullary subgoal or history relation with the auxiliary entity."""
-    if not SUPPORTED[context.config].get("nullary", True) or context.dag is not None:
+    if not over_auxiliary(context.config) or context.dag is not None:
         return expected, actual
     fixture = context.fixture
     kept = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
@@ -1152,25 +1157,31 @@ LAYERS = dict(goal_derivations=("plain", "satisfied", "unsatisfied"), target_sou
               include_actions=False)
 SUPPORTED = {
     "C1": dict(include_actions=False),
-    "C2": dict(goal_derivations=("plain", "satisfied", "unsatisfied"), nullary=True, layout="relation",
+    "C2": dict(goal_derivations=("plain", "satisfied", "unsatisfied"), nullary="auxiliary", layout="relation",
                include_actions=False),
     "C3": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True),
-    "C3N": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary=True),
-    "C3D": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary=True,
+    "C3N": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary="auxiliary"),
+    "C3D": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary="auxiliary",
                 goal_derivations=("plain", "satisfied", "unsatisfied")),
     "C3S": dict(target_sources=("action", "goal", "subgoal"), max_goal_level=2, predicate_virtual_nodes=True,
-                nullary=True),
+                nullary="auxiliary"),
     "C3H": dict(target_sources=("action", "goal", "history"), history=True, predicate_virtual_nodes=True,
-                nullary=True),
-    "C4_L1": dict(LAYERS, max_goal_level=1, nullary=False),
-    "C4_L1N": dict(LAYERS, max_goal_level=1, nullary=True),
-    "C4_L2": dict(LAYERS, max_goal_level=2, nullary=False),
-    "C4_L2N": dict(LAYERS, max_goal_level=2, nullary=True),
-    "C5A": dict(target_sources=("history",), history=True, include_actions=False, nullary=False),
-    "C5AN": dict(target_sources=("history",), history=True, include_actions=False, nullary=True),
-    "C5B": dict(history=True, include_actions=False, nullary=False),
-    "C5BN": dict(history=True, include_actions=False, nullary=True),
+                nullary="auxiliary"),
+    "C4_L1": dict(LAYERS, max_goal_level=1, nullary="omit"),
+    "C4_L1N": dict(LAYERS, max_goal_level=1, nullary="auxiliary"),
+    "C4_L2": dict(LAYERS, max_goal_level=2, nullary="omit"),
+    "C4_L2N": dict(LAYERS, max_goal_level=2, nullary="auxiliary"),
+    "C5A": dict(target_sources=("history",), history=True, include_actions=False, nullary="omit"),
+    "C5AN": dict(target_sources=("history",), history=True, include_actions=False, nullary="auxiliary"),
+    "C5B": dict(history=True, include_actions=False, nullary="omit"),
+    "C5BN": dict(history=True, include_actions=False, nullary="auxiliary"),
 }
+# Native configs compared against the records of another config: every config that keeps the nullary relations, with
+# the nullary atoms as tuples of their leading slots alone, as the reference encodes them with
+# ``ignore_zero_arity_relations`` off (no auxiliary entity).
+VARIANTS = {f"{config}Z": config for config in ("C2", "C3N", "C3D", "C3S", "C3H", "C4_L1N", "C4_L2N", "C5AN", "C5BN")}
+for _variant, _config in VARIANTS.items():
+    SUPPORTED[_variant] = dict(SUPPORTED[_config], nullary="arity0")
 # The horizon configs (mifrost's FlatHorizonEncoder). Every one is compared with the nullary relations kept: mifrost's
 # catalog lists them whatever its ignore_zero_arity_relations says, and leaves them empty.
 ADDED = ("added_satisfied", "added_unsatisfied")
@@ -1244,6 +1255,11 @@ def is_transition(config):
 PENDING_CONFIGS = {
     "C8S": "goals, actions, subgoals, transition",
 }
+
+
+def recorded_config(config):
+    """The config of the fixture records that the native config ``config`` is compared against."""
+    return VARIANTS.get(config, config)
 
 
 def native_encoder(task, config, **options):
@@ -1460,7 +1476,7 @@ def encode_records(task, config, rows, records):
 def run_case(path, config):
     """Encode the recorded states of ``config`` natively and compare each graph against mifrost's record."""
     fixture, task = load(path)
-    records = [r for r in fixture["encodings"] if r["config"] == config]
+    records = [r for r in fixture["encodings"] if r["config"] == recorded_config(config)]
     states = {s["id"]: s for s in fixture["states"]}
     rows = [replay(task, states[r["state"]]["path"]) for r in records]
     result = CaseResult({}, set())

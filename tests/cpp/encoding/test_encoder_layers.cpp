@@ -655,7 +655,7 @@ TEST(EncoderLayers, NullaryLiteralsInALayerAreTuplesOverTheAuxiliaryEntity)
     const Masks masks = make_masks(*table, {0}, {{{on("handempty", true, {})}}});
     // the state has no nullary tuple of its own: without nullary relations the state has no auxiliary entity
     FlatOptions options = layer_options(1, false);
-    options.nullary = true;
+    options.nullary = Nullary::Auxiliary;
     const auto encoder = FlatEncoder::create(table, options);
     EncodeInput in = input_of(rows);
     in.subgoals = layer_input(masks);
@@ -670,7 +670,7 @@ TEST(EncoderLayers, NullaryLiteralsInALayerAreTuplesOverTheAuxiliaryEntity)
     // the subgoal entity comes after 3 objects, the auxiliary entity and 2 goal entities
     EXPECT_EQ(g.tuples[sg][0], (Tuple{3 + 1 + 2, 3}));
     EXPECT_EQ(g.tuples[*schema.find("[+]handempty[sg][sat]")], (std::vector<Tuple>{{3}}));
-    options.nullary = false;
+    options.nullary = Nullary::Omit;
     const auto without = FlatEncoder::create(table, options);
     EXPECT_EQ(without->schema().find("[+]handempty[sg]"), std::nullopt);
 }

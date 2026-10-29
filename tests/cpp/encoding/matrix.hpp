@@ -418,7 +418,7 @@ inline std::vector<Config> configs()
     add("no_nullary_equality",
         [](auto& o)
         {
-            o.nullary = false;
+            o.nullary = encoding::Nullary::Omit;
             o.equality = true;
         });
     add("no_static_no_derived",
@@ -434,6 +434,22 @@ inline std::vector<Config> configs()
             o.entity_arrays = encoding::EntityArrays::Auto;
         });
     add("row_goals", [&](auto& o) { o.goal_derivations = all; }, Inputs{true, true, false});
+    add("arity0_goal_targets_virtual",
+        [&](auto& o)
+        {
+            o.nullary = encoding::Nullary::Arity0;
+            o.goal_derivations = all;
+            o.targets = {TargetSource::Goal};
+            o.predicate_virtual_nodes = true;
+        });
+    add("arity0_implicit_entities_row_goals",
+        [&](auto& o)
+        {
+            o.nullary = encoding::Nullary::Arity0;
+            o.goal_derivations = all;
+            o.entity_arrays = encoding::EntityArrays::Auto;
+        },
+        Inputs{true, true, false});
     add("row_goals_derived_targets_virtual",
         [&](auto& o)
         {
@@ -512,7 +528,7 @@ inline std::vector<Config> layered_configs()
         {
             o.history = true;
             o.include_static = false;
-            o.nullary = false;
+            o.nullary = encoding::Nullary::Omit;
             o.emit_counts = false;
             o.entity_arrays = encoding::EntityArrays::Auto;
         },
@@ -535,6 +551,16 @@ inline std::vector<Config> layered_configs()
             o.targets = {TargetSource::Subgoal, TargetSource::History, TargetSource::Goal};
         },
         Inputs{true, false, false, 2, true, true});
+    add("arity0_levels_and_history_targets",
+        [](auto& o)
+        {
+            o.nullary = encoding::Nullary::Arity0;
+            o.max_goal_level = 2;
+            o.history = true;
+            o.history_max_steps = 2;
+            o.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History};
+        },
+        Inputs{true, true, true, 2, true, true});
     return out;
 }
 

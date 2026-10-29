@@ -34,6 +34,7 @@ constexpr std::array<std::string_view, 2> k_numeric_dtypes = {"float32", "float6
 constexpr std::array<std::string_view, 4> k_modes = {"none", "full", "delta", "action"};
 constexpr std::array<std::string_view, 3> k_roots = {"include", "exclude", "encode_only"};
 constexpr std::array<std::string_view, 2> k_outputs = {"relations", "simple"};
+constexpr std::array<std::string_view, 3> k_nullary = {"auxiliary", "arity0", "omit"};
 }
 
 std::string_view to_string(GoalDerivation value) noexcept { return k_derivations[static_cast<usize>(value)]; }
@@ -47,6 +48,7 @@ std::string_view to_string(NumericDtype value) noexcept { return k_numeric_dtype
 std::string_view to_string(HorizonMode value) noexcept { return k_modes[static_cast<usize>(value)]; }
 std::string_view to_string(RootPolicy value) noexcept { return k_roots[static_cast<usize>(value)]; }
 std::string_view to_string(Output value) noexcept { return k_outputs[static_cast<usize>(value)]; }
+std::string_view to_string(Nullary value) noexcept { return k_nullary[static_cast<usize>(value)]; }
 
 std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept
 {
@@ -84,6 +86,7 @@ std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept
 }
 
 std::optional<Output> parse_output(std::string_view text) noexcept { return parse<Output>(k_outputs, text); }
+std::optional<Nullary> parse_nullary(std::string_view text) noexcept { return parse<Nullary>(k_nullary, text); }
 
 void require_repeated_statics(const FlatOptions& options, std::string_view family)
 {

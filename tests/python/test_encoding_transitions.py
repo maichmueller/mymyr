@@ -459,7 +459,7 @@ def same_batch(a, b):
     {},
     {"layout": "relation", "index_dtype": "int64", "goal_derivations": ADDED, "include_actions": False},
     {"root_policy": "include", "parent_relation": True, "max_goal_level": 0},
-    {"root_policy": "encode_only", "parent_relation": True, "nullary": False, "include_static": False},
+    {"root_policy": "encode_only", "parent_relation": True, "nullary": "omit", "include_static": False},
 ])
 def test_the_transition_encoders_equal_the_horizon_encoder_on_the_depth_one_view(name, cls, mode, options):
     task = text_task(name)

@@ -1100,7 +1100,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
 }
 
 void FlatEncoder::clear_capacity_tails(const FlatBuffers& out, const FlatSizes& sizes, const ExtraSizes& extra,
-                                       const BatchShape& capacities, const StaticShape& static_capacities) const
+                                       u64 graphs, const BatchShape& capacities,
+                                       const StaticShape& static_capacities) const
 {
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
     const StaticSizes& statics = extra.statics;
@@ -1111,11 +1112,12 @@ void FlatEncoder::clear_capacity_tails(const FlatBuffers& out, const FlatSizes& 
     if (out.numeric_values)
         zero(out.numeric_values, extra.numeric, capacities.numeric,
              m_schema->options().numeric_dtype == NumericDtype::F64 ? 8 : 4);
+    const u64 nodes = simple_node_capacity(graphs, capacities, m_schema->argumentless_relations());
     if (out.node_value)
-        zero(out.node_value, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
+        zero(out.node_value, sizes.entities + sizes.tuples, nodes, 4);
     if (out.node_label)
     {
-        zero(out.node_label, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
+        zero(out.node_label, sizes.entities + sizes.tuples, nodes, 4);
         zero(out.edge_label, 2 * sizes.args, 2 * capacities.args, 4);
         zero(out.edge_index, 2 * sizes.args, 2 * capacities.args, index_bytes);
         zero(static_cast<std::byte*>(out.edge_index) + out.edge_stride * index_bytes, 2 * sizes.args,
@@ -1175,14 +1177,15 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
     const bool fits = !sizes.overflowed();
     const StaticShape static_shape = static_capacities ? *static_capacities : StaticShape{};
     Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets,
-                                     capacities.history, capacities.numeric, capacities.entities + capacities.args,
+                                     capacities.history, capacities.numeric,
+                                     simple_node_capacity(graphs, capacities, m_schema->argumentless_relations()),
                                      2 * capacities.args, static_shape);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     if (fits)
     {
         fill(in, sizes, out, pool, scratch);
-        clear_capacity_tails(out, sizes, true_extra, capacities, static_shape);
+        clear_capacity_tails(out, sizes, true_extra, graphs, capacities, static_shape);
     }
     else
         for (const rl::ArrayInfo& info : bundle->arrays())

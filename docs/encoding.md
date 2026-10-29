@@ -62,7 +62,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
 | `include_derived` | bool | `True` | the state relations of the derived predicates |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
-| `nullary` | bool | `True` | the relations of nullary predicates, as tuples over the [auxiliary entity](#lanes) |
+| `nullary` | `'auxiliary'`, `'arity0'`, `'omit'` | `'auxiliary'` | the relations of nullary predicates: tuples over the [auxiliary entity](#lanes), tuples without an argument, or none |
 | `equality` | bool | `False` | the relations of the equality predicate `=` |
 | `predicate_virtual_nodes` | bool | `False` | a [virtual node](#predicate-virtual-nodes) per predicate in its tuples |
 | `include_actions` | bool | `True` | one relation per action schema, filled from `actions` ([Actions](#actions)) |
@@ -120,14 +120,15 @@ instances of a table, so tables over one domain give the same relation ids to th
   each relation, `relation_arities` the encoded arity of its tuples and `relation_slot_roles` each position of them.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
   (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
-  predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`;
-  the state relations of the static predicates (the types included) and of the derived predicates can be dropped
+  predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`; the
+  state relations of the static predicates (the types included) and of the derived predicates can be dropped
   (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates have relations of
-  arity 1 (slot role `auxiliary_slot`); with `nullary=False` they have none. `slot_role_names` and `entity_role_names`
-  always list all nine roles. An action relation holds the schema's full parameter list (the written parameters and
-  the ones normalization adds for existential variables). Schemas of one name and arity (a disjunctive precondition
-  splits an action) share one relation; a name with several arities has one relation `name#arity` per arity. The
-  catalog lists only relations a graph can have tuples in.
+  arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
+  their relation (a state relation without predicate virtual nodes has arity 0); with `nullary='omit'` they have none.
+  `slot_role_names` and `entity_role_names` always list all nine roles. An action relation holds the schema's full
+  parameter list (the written parameters and the ones normalization adds for existential variables). Schemas of one name
+  and arity (a disjunctive precondition splits an action) share one relation; a name with several arities has one
+  relation `name#arity` per arity. The catalog lists only relations a graph can have tuples in.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, `numeric_dtype` where values are stored,
   history and `history_max_steps`, horizon mode and root policy), `repeated_literals` (always with subgoal relations,
@@ -298,7 +299,7 @@ A graph's entities come in blocks, each present only when the options and the in
 | Block | Role (`entity_role`) | `entity_ref` |
 |---|---|---|
 | the objects of the instance, in the task's object order | 0 `object` | the instance-local object id: `task.objects[entity_ref]` is its name |
-| the auxiliary entity, when the graph has a nullary tuple | 8 `auxiliary` | -1 |
+| the auxiliary entity, when the graph has a tuple over it (a nullary atom with `nullary='auxiliary'`, or a nullary numeric function with `'auxiliary'` or `'omit'`) | 8 `auxiliary` | -1 |
 | the goal entities | 2 `goal` | the tuple's index among the graph's tuples in graph-major order |
 | the subgoal entities | 3 `subgoal` | the same as a goal entity |
 | the action entities | 4 `action` | the action's canonical successor index: its row among its state's rows of `actions`, or the row's `index` |
@@ -339,10 +340,14 @@ A relation's lane (`schema.relation_lanes`) says what fills its tuples:
   evaluated) and the atoms of the instance, each atom in the relation of its predicate, with its arguments as the
   tuple. The types are static unary predicates, so `object` has one tuple per object. The `=` predicate has relations
   only with `equality=True`.
-- the **nullary** atoms (`nullary=True`, the default): all nullary atoms of a graph share one auxiliary entity, and each
-  one is the unary tuple over it. The graph has the auxiliary entity exactly when it has such a tuple. With
-  `nullary=False` there are no nullary relations and no auxiliary entity. The nullary literals of goals, subgoal layers
-  and history steps are tuples over the auxiliary entity as well.
+- the **nullary** atoms, as `nullary` chooses. With `'auxiliary'` (the default) all nullary atoms of a graph share one
+  auxiliary entity, and each one is the unary tuple over it; the graph has the auxiliary entity exactly when it has such
+  a tuple. With `'arity0'` a nullary atom is a tuple without an argument: its cell counts it in `relation_counts` and
+  has no entry in `relation_args`, and no graph has an auxiliary entity. With `'omit'` there are no nullary predicate
+  relations; a graph has the auxiliary entity only for the tuple of a nullary [numeric function](#numeric-functions).
+  The nullary literals of goals, subgoal layers and history steps follow the same choice: tuples over the auxiliary
+  entity, or tuples of their leading slots alone (the goal entity of a goal tuple that has one, the step entity of a
+  history tuple, the predicate's virtual node).
 - **goal**, **goal_derivation** and **goal_satisfaction**: the [goal](#goals) and [subgoal](#subgoals) literals;
 - **action**: one tuple per action of the state ([Actions](#actions));
 - **history**: the literals of the row's [history](#history) steps;
@@ -352,12 +357,26 @@ A relation's lane (`schema.relation_lanes`) says what fills its tuples:
 
 A call without `subgoals`, `history` or `actions` has no tuples in their relations.
 
+```python
+blocks = mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt")  # handempty is nullary
+choices = {v: encoding.FlatRelationEncoder(blocks, nullary=v) for v in ("auxiliary", "arity0", "omit")}
+encoded = {v: e.encode(blocks.initial_state) for v, e in choices.items()}
+assert choices["auxiliary"].describe(encoded["auxiliary"], 0).relations["handempty"] == (("auxiliary",),)
+assert choices["arity0"].describe(encoded["arity0"], 0).relations["handempty"] == ((),)
+assert "handempty" not in choices["omit"].relation_names
+
+# an arity-0 cell counts its tuples and has no arguments; no graph has the auxiliary entity
+handempty = choices["arity0"].relation_id("handempty")
+assert choices["arity0"].relation_arities[handempty] == 0 and encoded["arity0"].relation_counts[0, handempty] == 1
+assert int(encoded["arity0"].entity_offsets[-1]) == int(encoded["auxiliary"].entity_offsets[-1]) - 1 == 8
+```
+
 ### Goals
 
 The goal of an instance is `Task.encoding_goal` read as a set of ground literals (a conjunction, with `forall`
 expanded where the front end can). `goal_complete` is 0 for an instance whose goal had a conjunct it could not expand
 and for one with a literal that the options leave out although a state can change its truth (a nullary literal under
-`nullary=False`); a left-out literal of a static predicate has a fixed truth and leaves the goal complete.
+`nullary='omit'`); a left-out literal of a static predicate has a fixed truth and leaves the goal complete.
 A literal is placed in the relations of its predicate, `[+]` for a positive and `[-]` for a negative one. With the
 default `goal_derivations=("plain", "satisfied")` the relations are, per predicate and sign:
 
@@ -369,14 +388,14 @@ The literals of fluent and derived predicates are evaluated against the state wo
 static predicates and of atoms without a slot (not reachable by any state) have a fixed truth and form the constant part
 of the goal. A statically false literal is still emitted: in its plain relation, and in `[unsat]` for a positive
 literal over a false atom or `[sat]` for a negative one. Goal literals whose predicate has no goal relation (equality
-without `equality=True`, nullary atoms with `nullary=False`, the types) are not encoded. A cell lists its tuples in the
+without `equality=True`, nullary atoms with `nullary='omit'`, the types) are not encoded. A cell lists its tuples in the
 lexicographic order of their arguments, constant part and masked literals merged.
 
 With `target_sources=("goal",)` every plain goal tuple gets a **goal entity** (after the objects and the auxiliary
 entity), numbered in the order of the plain goal relations (relation id, then tuple), so that the id is
-`entity_offsets[g] + num_objects[g] + has_auxiliary + k` for the `k`-th plain goal tuple of graph `g`. The entity is
-the first argument of its tuple, its `entity_ref` the tuple's [graph-major index](#entities), and the batch lists the
-goal entities as targets of group 0.
+`entity_offsets[g] + num_objects[g] + has_auxiliary + k` for the `k`-th plain goal tuple of graph `g` (`has_auxiliary`
+is 0 under `nullary='arity0'`). The entity is the first argument of its tuple, its `entity_ref` the tuple's [graph-major
+index](#entities), and the batch lists the goal entities as targets of group 0.
 
 **`goals=`** gives every row a goal of its own instead of its instance's: `(goal_pos, goal_neg)` or `(goal_pos,
 goal_neg, goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns
@@ -494,15 +513,16 @@ device batch stays on the device: torch tensors in and out, no host read.
 
 ### Predicate virtual nodes
 
-With `predicate_virtual_nodes=True` a graph has one **predicate virtual node** (the last entities of the graph) for
-each predicate that one of its tuples has a relation of: the relations of a predicate are its state relation, its goal
+With `predicate_virtual_nodes=True` a graph has one **predicate virtual node** (the last entities of the graph) for each
+predicate that one of its tuples has a relation of: the relations of a predicate are its state relation, its goal
 relations (`[+]on[g]`, `[+]on[g][sat]`, ...) and its history relations. A tuple of such a relation has the node as an
 extra argument right before the predicate's own arguments (after the goal entity of a goal tuple that has one); action
 tuples have no predicate slot. A node exists only if some tuple uses it, so a predicate without tuples in the graph has
 no node, and the nodes are numbered by the name of their predicate (ascending, bytewise), whatever relations the schema
 keeps. The node's `entity_ref` is the id of the predicate's key relation: its plain state relation, or for a predicate
 without one (a static or derived predicate whose state relation is dropped) its first relation in the catalog (C++:
-`EncodingSchema::virtual_key`). The nullary atoms of a predicate are the tuple over its node and the auxiliary entity.
+`EncodingSchema::virtual_key`). The nullary atoms of a predicate are the tuple over its node and the auxiliary entity,
+or over its node alone with `nullary='arity0'`.
 
 ### Derived atoms
 
@@ -675,7 +695,9 @@ tuple, which names the node it leads to. The root has no entity at all; its rela
 The catalog lists only relations a graph can have tuples in: a static predicate has no delta relation and no relation
 of the nodes (its atoms are the root's), and the added-satisfaction relations exist per goal level. The atoms and goal
 literals of nullary predicates are tuples over the graph's auxiliary entity, in front of which stands the state entity
-(`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when a nullary tuple exists.
+(`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when a nullary tuple exists. With
+`nullary='arity0'` the state entity is their only argument (`handempty(node)`), and the root's nullary atoms under
+`exclude` are tuples without an argument.
 
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon and transition
 encoders have no `stream`, and C++ `FlatStream(encoder)` refuses them with `std::invalid_argument`. Shared statics are
@@ -876,7 +898,8 @@ array it hands out keep the batch alive and copy no tuple; creating a device vie
   `i` leads from tuple `i` of the relation to the entity at that position of the tuple. `view.reverse_edge_types` are
   the same edges the other way round, `('_symbol_', position, relation)`. A nullary relation has one position, its
   auxiliary slot, so its edge leads to the graph's auxiliary entity, which a graph has exactly when it has a nullary
-  tuple.
+  tuple. A relation of arity 0 (a nullary state relation with `nullary='arity0'`) is a node type without an edge type:
+  its atoms are nodes that no edge touches.
 - **Edge index**: `view.edge_index(edge_type)` is the pair `(edge_index_0, edge_index_1)` of the edge type (also
   `view.edge_index_0(...)` and `view.edge_index_1(...)`; `view.num_edges(edge_type)` is the length). For a forward
   type, row 0 is the tuple numbers `0 .. n - 1`, made when asked for, and row 1 is the entity at the position of each
@@ -957,14 +980,14 @@ label means the same object in every problem of the domain. `schema.simple_label
 relation names, then the constant names; its length is the vocabulary size of `node_label`.
 
 **Edges.** For every tuple `t` (its node `a`) and every position `k` of its relation (the encoded arity, so a nullary
-atom has one position, its auxiliary entity), the entity `e` at that position gives two edges: `e -> a` with the label
-`k` and `a -> e` with the label `K + k`, `K` the largest encoded arity of a relation. A graph's edges are all its
-forward edges in (tuple, position) order, then all its reverse edges in the same order, so `edge_label % K` is the
-position (`relation_slot_roles` interprets it) and `edge_offsets[g + 1] - edge_offsets[g]` is twice the graph's tuple
-arguments. `schema.simple_edge_label_names` lists `'0' .. 'K-1'` and `'0^-1' .. '(K-1)^-1'`. Static, type, goal
-(with their derivation), subgoal and history atoms are tuple nodes like any other, and target, action, history and
-state entities are entity nodes joined through their slots, so a goal literal's status is in its label, for example
-`[+]on[g][unsat]`.
+atom has one position, its auxiliary entity, and none with `nullary='arity0'`, where its node has no edges), the entity
+`e` at that position gives two edges: `e -> a` with the label `k` and `a -> e` with the label `K + k`, `K` the largest
+encoded arity of a relation. A graph's edges are all its forward edges in (tuple, position) order, then all its reverse
+edges in the same order, so `edge_label % K` is the position (`relation_slot_roles` interprets it) and
+`edge_offsets[g + 1] - edge_offsets[g]` is twice the graph's tuple arguments. `schema.simple_edge_label_names` lists
+`'0' .. 'K-1'` and `'0^-1' .. '(K-1)^-1'`. Static, type, goal (with their derivation), subgoal and history atoms are
+tuple nodes like any other, and target, action, history and state entities are entity nodes joined through their
+slots, so a goal literal's status is in its label, for example `[+]on[g][unsat]`.
 
 | Array | dtype, shape | Meaning |
 |---|---|---|
@@ -981,9 +1004,10 @@ batch, and `simple_node_labels` and `simple_edge_labels` (the vocabulary sizes),
 with `outputs=('relations', 'simple')` it has them as well. The Simple arrays are the same in both layouts, and
 encoding rows alone, in a batch, in a stream or with capacities gives the same graphs: a graph encoded alone is the
 slice of the batch's arrays with the node ids shifted by `node_offsets[g]`. With
-capacities the Simple arrays have `entities + args` nodes and `2 * args` edges; the first `sizes['entities'] +
-sizes['tuples']` nodes and `2 * sizes['args']` edges hold the graphs and the rest is zero. `edge_index` is then
-`[2, 2 * args]`.
+capacities the Simple arrays have `entities + args + G * Z` nodes, `G` the rows of the call and `Z` the relations
+without argument slots (`relation_arities` 0, which only `nullary='arity0'` gives; a cell of one holds at most one
+tuple), and `2 * args` edges; the first `sizes['entities'] + sizes['tuples']` nodes and `2 * sizes['args']` edges hold the graphs and the
+rest is zero. `edge_index` is then `[2, 2 * args]`.
 
 **Refusals.** `predicate_virtual_nodes` (a tuple's node already names its predicate), `entity_arrays='auto'` (the
 graph keeps the entity arrays) and `statics='shared'` (the graph holds the static tuples among its own) raise
@@ -1026,8 +1050,9 @@ and a static function never changes) the schema has a relation `[num]f` (lane `n
 all other relations of the catalog, sorted by name among themselves, so a schema without numeric functions has the
 relation ids it would have without the lane. It has one tuple for each numeric slot of `f` in the instance, over the
 objects of the ground term `(f o1 ... ok)`, or over the auxiliary entity for a nullary function, in the lexicographic
-order of the objects. The tuples are the same in every graph of an instance: a state changes their values, not their
-number.
+order of the objects. With `nullary='arity0'` the tuple of a nullary function has no argument; `nullary='omit'` leaves
+out the nullary predicates, not the nullary functions. The tuples are the same in every graph of an instance: a state
+changes their values, not their number.
 
 `numeric_values` holds the value of every numeric tuple of the batch, in the order in which the numeric tuples appear
 in `relation_args` (graph after graph in the graph layout, relation after relation in the relation layout), as
@@ -1053,11 +1078,17 @@ assert numeric_batch.numeric_values.dtype == np.float32
 args = np.asarray(numeric_batch.relation_args)[numeric_batch.relation_arg_offsets[value]:][:4]
 assert [counters.objects[a - numeric_batch.entity_offsets[0]] for a in args] == ["o0", "o1", "o2", "o3"]
 
-# float64 values, and nullary functions: tuples over the auxiliary entity
+# float64 values, and nullary functions: tuples over the auxiliary entity, or without one under nullary='arity0'
 drone = mymyr.Task.from_text("tests/data/numeric_tasks/cs-drone.txt")
 wide = encoding.FlatRelationEncoder(drone, numeric_dtype="float64")
 assert wide.encode([drone.initial_state]).numeric_values.dtype == np.float64
 assert wide.relation_names.count("[num]battery-level") == 1
+battery = wide.relation_id("[num]battery-level")
+flat = encoding.FlatRelationEncoder(drone, numeric_dtype="float64", nullary="arity0")
+assert wide.relation_arities[battery] == 1 and flat.relation_arities[flat.relation_id("[num]battery-level")] == 0
+flat_batch, wide_batch = flat.encode([drone.initial_state]), wide.encode([drone.initial_state])
+assert np.array_equal(flat_batch.numeric_values, wide_batch.numeric_values)
+assert int(flat_batch.entity_offsets[-1]) == int(wide_batch.entity_offsets[-1]) - 1
 ```
 
 `include_numeric=False` leaves the numeric relations and `numeric_values` out (the rows of a numeric table still carry
@@ -1095,14 +1126,15 @@ the same blocks). The blocks of a batch are those of its distinct instances: a s
 the instances it holds, so `block(task_ids[g])` is `searchsorted(static_task_ids, task_ids[g])`.
 
 The entities in `static_args` are **graph-local**, because the block belongs to the instance and not to a graph: an
-object is its instance-local id (`task.objects[id]`), the auxiliary entity of a nullary tuple is `num_objects`, and the
-predicate slot of a predicate relation (with `predicate_virtual_nodes`) holds the predicate's key, the `entity_ref` of
-its virtual node. A model that wants the repeated form adds `entity_offsets[g]` to the object and auxiliary ids of every
-graph `g` that uses the block of `task_ids[g]`, and looks the key up among the virtual nodes of `g`. A graph's
-entities are the same as in the repeated form: an object, auxiliary or virtual node that only a static tuple uses
-still exists in the graph. The `entity_ref` of a goal, subgoal or history target entity is its tuple index among the
-graph's own tuples, which in the shared form does not count the static tuples. Subgoal layers and history steps need
-nothing of the static blocks: their relations are not static.
+object is its instance-local id (`task.objects[id]`), the auxiliary entity of a nullary tuple is `num_objects` (a
+nullary tuple has no argument with `nullary='arity0'`), and the predicate slot of a predicate relation (with
+`predicate_virtual_nodes`) holds the predicate's key, the `entity_ref` of its virtual node. A model that wants the
+repeated form adds `entity_offsets[g]` to the object and auxiliary ids of every graph `g` that uses the block of
+`task_ids[g]`, and looks the key up among the virtual nodes of `g`. A graph's entities are the same as in the repeated
+form: an object, auxiliary or virtual node that only a static tuple uses still exists in the graph. The `entity_ref` of
+a goal, subgoal or history target entity is its tuple index among the graph's own tuples, which in the shared form does
+not count the static tuples. Subgoal layers and history steps need nothing of the static blocks: their relations are not
+static.
 
 ```python
 shared = encoding.FlatRelationEncoder(task, statics="shared")
@@ -1150,20 +1182,21 @@ model):
 | Key | Required | Bounds |
 |---|---|---|
 | `graphs` | always | the number of input rows |
-| `entities` | always | `entity_role`, `entity_ref` (the Simple graph: `entities + args` nodes) |
+| `entities` | always | `entity_role`, `entity_ref` (the Simple graph: `entities + args + G * Z` nodes, [Z](#the-simple-graph) the relations without argument slots) |
 | `args` | always | `relation_args` (the Simple graph: `2 * args` edges) |
 | `targets` | iff the schema has targets | `target_entity`, `target_group` |
 | `history` | iff the schema has history | `history_entity`, `history_dt` |
 | `numeric` | iff the batch stores `numeric_values` | `numeric_values` |
 | `static_instances`, `static_args` | iff `statics='shared'` (refused otherwise) | the static blocks (`I_b`) and `static_args` (`A_s`) |
 
-The offset arrays keep their sizes (`G + 1`, `G * R + 1`, `G` the rows of the call). Exceeding the graph capacity
-raises before encoding; tuple counts have no separate capacity because every tuple has at least one argument. The batch
-fills the first entries of each array and the rest is zero (`static_offsets` and `static_arg_offsets` repeat their last
-value). `batch.sizes` holds the true sizes: `entities`, `tuples`, `args`, `targets`, with history `history`, with
-numeric values `numeric`, with shared statics `static_instances`, `static_tuples` and `static_args`. A batch that does
-not fit (a capacity too small, or an index type too narrow) leaves every array zero and sets `sizes['overflow']`;
-`sizes['capacity_overflow']` and `sizes['index_overflow']` tell which. Nothing raises.
+The offset arrays keep their sizes (`G + 1`, `G * R + 1`, `G` the rows of the call). Exceeding the graph capacity raises
+before encoding; tuple counts have no separate capacity: a tuple has an argument, or is the one tuple of a cell of a
+relation without argument slots. The batch fills the first entries of each array and the rest is zero (`static_offsets`
+and `static_arg_offsets` repeat their last value). `batch.sizes` holds the true sizes: `entities`, `tuples`, `args`,
+`targets`, with history `history`, with numeric values `numeric`, with shared statics `static_instances`,
+`static_tuples` and `static_args`. A batch that does not fit (a capacity too small, or an index type too narrow) leaves
+every array zero and sets `sizes['overflow']`; `sizes['capacity_overflow']` and `sizes['index_overflow']` tell which.
+Nothing raises.
 
 ```python
 fixed_encoder = encoding.FlatRelationEncoder(task)

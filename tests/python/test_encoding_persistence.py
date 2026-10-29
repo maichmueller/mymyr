@@ -79,6 +79,8 @@ def test_a_changed_record_is_refused():
         (altered(["catalog", "arities", 3], 7), "relation 3 .* differs in its arities"),
         (altered(["catalog", "names"], record["catalog"]["names"][:-1]), "columns of the schema record's catalog differ"),
         (altered(["options", "layout"], "relation"), "fingerprint is"),
+        (altered(["options", "nullary"], True), "options are not options of this build: .*nullary must be a string"),
+        (altered(["options", "nullary"], "none"), "nullary must be one of 'auxiliary', 'arity0', 'omit'"),
     ]
     for bad, message in cases:
         with pytest.raises(ValueError, match="mymyr: encoding: .*" + message):
@@ -86,6 +88,9 @@ def test_a_changed_record_is_refused():
     # a catalog that disagrees is refused even if the fingerprint is right
     with pytest.raises(ValueError, match="differs in its names"):
         encoding.schema_from_dict(altered(["catalog", "names", 0], "zzz"), task)
+    # a table that is no table is a TypeError whatever the record holds
+    with pytest.raises(TypeError):
+        encoding.schema_from_dict(altered(["options", "nullary"], True), object())
 
 
 @pytest.mark.parametrize(
@@ -120,7 +125,7 @@ def test_an_encoder_pickle_carries_the_fingerprint_of_its_schema():
 BATCH_OPTIONS = [
     {},
     dict(target_sources=("goal", "action"), predicate_virtual_nodes=True, max_goal_level=2),
-    dict(layout="relation", index_dtype="int64", emit_counts=False, equality=True, nullary=False),
+    dict(layout="relation", index_dtype="int64", emit_counts=False, equality=True, nullary="omit"),
     dict(history=True, target_sources=("history", "goal"), entity_arrays="auto"),
 ]
 

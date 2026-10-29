@@ -161,7 +161,9 @@ TEST_P(EncodingLaneCorpus, EverySupportedOptionEqualsThePlainForms)
                 auto& o = config.options;
                 o.include_static = (flags & 1) != 0;
                 o.include_derived = (flags & 2) != 0;
-                o.nullary = (flags & 4) != 0;
+                o.nullary = (flags & 4) != 0  ? encoding::Nullary::Auxiliary
+                            : (targets & 1) ? encoding::Nullary::Arity0
+                                            : encoding::Nullary::Omit;
                 o.equality = (flags & 8) != 0;
                 o.predicate_virtual_nodes = (flags & 16) != 0;
                 o.include_actions = (flags & 32) != 0;

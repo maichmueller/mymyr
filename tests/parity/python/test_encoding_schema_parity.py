@@ -39,7 +39,7 @@ def native_options(entry):
         for key in ("goal_derivations", "max_goal_level", "target_sources", "include_static"):
             if key in kw:
                 out[key] = kw[key]
-        out["nullary"] = not kw.get("ignore_zero_arity_relations", True)
+        out["nullary"] = "omit" if kw.get("ignore_zero_arity_relations", True) else "auxiliary"
         out["history"] = "history" in kw.get("target_sources", ())
         out["predicate_virtual_nodes"] = bool(kw.get("use_predicate_virtual_nodes", False))
     else:
@@ -47,7 +47,7 @@ def native_options(entry):
         out["root_policy"] = kw["root_policy"]
         out["include_actions"] = not kw["ignore_actions"]
         # mifrost lists the nullary relations in every horizon catalog, whatever ignore_zero_arity_relations says.
-        out["nullary"] = True
+        out["nullary"] = "auxiliary"
         out["parent_relation"] = bool(kw.get("enable_parent_relation", False))
         if "goal_derivations" in kw:
             out["goal_derivations"] = [name.split(".")[-1] for name in kw["goal_derivations"]]
@@ -123,7 +123,7 @@ def test_catalog_equals_mifrost(tasks, name):
     skipped = never_filled(entry, schema)
     assert native_catalog(schema) == [row for i, row in enumerate(mifrost_catalog(entry)) if i not in skipped]
     nullary = [i for i, n in enumerate(schema.relation_logical_arities) if n == 0 and schema.relation_predicates[i] >= 0]
-    assert bool(nullary) == native_options(entry)["nullary"]
+    assert bool(nullary) == (native_options(entry)["nullary"] != "omit")
     assert all(schema.relation_slot_roles[i][-1] == AUXILIARY_SLOT for i in nullary)
     assert [SOURCE_OF_LANE[lane] for lane in schema.relation_lanes] == [
         source for i, source in enumerate(entry["sources"]) if i not in skipped
@@ -133,6 +133,20 @@ def test_catalog_equals_mifrost(tasks, name):
         "goal_target_slot", "subgoal_target_slot", "history_target_slot", "history_slot",
     ]  # fmt: skip
     assert len(schema.slot_role_names) == len(schema.entity_role_names) == 9
+
+
+@needs_pddl
+@pytest.mark.parametrize("name", [n for n in CATALOGS if n not in (SUPPORT_LITERALS, NO_STATIC)
+                                  and native_options(CATALOGS[n])["nullary"] != "omit"])
+def test_the_arity0_catalog_equals_mifrost_without_removing_a_slot(tasks, name):
+    # nullary='arity0' lists the nullary relations as mifrost does with them kept: without an auxiliary slot
+    entry = CATALOGS[name]
+    options = native_options(entry)
+    schema = EncodingSchema(tasks[entry["domain"]], **dict(options, nullary="arity0"))
+    skipped = never_filled(entry, schema)
+    rows = list(zip(schema.relation_names, schema.relation_arities, schema.relation_slot_roles))
+    assert rows == [row for i, row in enumerate(mifrost_catalog(entry)) if i not in skipped]
+    assert AUXILIARY_SLOT not in {role for roles in schema.relation_slot_roles for role in roles}
 
 
 @needs_pddl

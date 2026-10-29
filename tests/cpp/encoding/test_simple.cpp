@@ -338,7 +338,7 @@ std::vector<Config> configs()
          {
              o.include_static = false;
              o.include_derived = false;
-             o.nullary = false;
+             o.nullary = Nullary::Omit;
          }},
         {"equality_actions_targets",
          [all](FlatOptions& o)

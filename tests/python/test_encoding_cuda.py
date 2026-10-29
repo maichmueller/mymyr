@@ -32,8 +32,14 @@ OPTION_SETS = {
         "target_sources": ("goal",),
         "predicate_virtual_nodes": True,
     },
-    "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": False},
+    "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": "omit"},
     "no_actions": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": ()},
+    "nullary_arity0_targets_virtual": {
+        "nullary": "arity0",
+        "goal_derivations": ("plain", "satisfied", "unsatisfied"),
+        "target_sources": ("goal",),
+        "predicate_virtual_nodes": True,
+    },
 }
 ALL_GOALS = ("plain", "satisfied", "unsatisfied")
 LAYERED_OPTION_SETS = {
@@ -46,6 +52,13 @@ LAYERED_OPTION_SETS = {
         "target_sources": ("goal", "subgoal", "history"),
         "predicate_virtual_nodes": True,
         "goal_derivations": ("plain", "satisfied"),
+    },
+    "nullary_arity0_levels_history": {
+        "nullary": "arity0",
+        "max_goal_level": 2,
+        "history": True,
+        "target_sources": ("goal", "subgoal", "history"),
+        "goal_derivations": ALL_GOALS,
     },
 }
 
@@ -884,6 +897,21 @@ def test_names_and_descriptions_of_a_device_batch_equal_the_host_ones(cases, lay
         encoder.describe(over, 0)
     with pytest.raises(IndexError):
         encoder.entity_names(batch, case.n)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_descriptions_of_a_nullary_arity0_device_batch_equal_the_host_ones(cases, layout):
+    dev = gpu()
+    case = cases["blocks_table"] if "blocks_table" in cases else cases["philosophers"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, nullary="arity0", target_sources=("goal",),
+                                           goal_derivations=("plain", "satisfied", "unsatisfied"))
+    assert 0 in list(encoder.relation_arities)
+    host = host_encode(encoder, case)
+    batch = device_encode(encoder, case, dev)
+    capacity = device_encode(encoder, case, dev, capacities=exact_capacities(host))
+    for g in (0, case.n // 2, case.n - 1):
+        assert encoder.describe(batch, g) == encoder.describe(host, g)
+        assert encoder.describe(capacity, g) == encoder.describe(host, g)
 
 
 def test_action_target_schemas_without_expansion_rows_are_encoded():

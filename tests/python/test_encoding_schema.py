@@ -169,7 +169,7 @@ def test_nullary_and_derived_predicates_follow_the_options():
     assert default.relation_slot_roles[row] == [8]  # the auxiliary slot: nullary atoms are tuples over the graph's one auxiliary entity
     assert default.slot_role_names[8] == "auxiliary_slot" and default.entity_role_names[8] == "auxiliary"
     assert default.relation_slot_roles[default.relation_id("[+]axiom_0[hist]")] == [7, 8]
-    without_nullary = EncodingSchema(task, nullary=False)
+    without_nullary = EncodingSchema(task, nullary="omit")
     assert "axiom_0" not in without_nullary.relation_names and "[+]axiom_0[g]" not in without_nullary.relation_names
     assert without_nullary.entity_role_names == default.entity_role_names
     assert without_nullary.slot_role_names == default.slot_role_names
@@ -212,7 +212,7 @@ FINGERPRINT_VARIANTS = {
     "max_goal_level": {"max_goal_level": 1},
     "include_static": {"include_static": False},
     "include_derived": {"include_derived": False},
-    "nullary": {"nullary": False},
+    "nullary": {"nullary": "omit"},
     "equality": {"equality": True},
     "predicate_virtual_nodes": {"predicate_virtual_nodes": True},
     "include_actions": {"include_actions": False},
@@ -245,8 +245,8 @@ def test_every_output_changing_option_changes_the_fingerprint():
 def test_fingerprint_ignores_the_order_of_options_and_their_spelling():
     task = text_task("philosophers__p03-phil4")
     first = EncodingSchema(task, goal_derivations=["plain", "unsatisfied", "satisfied"], target_sources=["goal", "action"],
-                           max_goal_level=2, nullary=False)  # fmt: skip
-    second = EncodingSchema(task, nullary=False, max_goal_level=2, target_sources=("action", "goal", "action"),
+                           max_goal_level=2, nullary="omit")  # fmt: skip
+    second = EncodingSchema(task, nullary="omit", max_goal_level=2, target_sources=("action", "goal", "action"),
                             goal_derivations={"satisfied", "unsatisfied", "plain"})  # fmt: skip
     assert first.schema_fingerprint == second.schema_fingerprint
     # options that do not change the output keep the fingerprint

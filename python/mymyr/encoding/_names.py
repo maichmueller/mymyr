@@ -114,6 +114,7 @@ class _Graph:
         self.entity_role_names = schema.entity_role_names
         self.graph = graph
         self.task_id = int(np.asarray(batch.task_ids)[graph])
+        self.offsets = np.asarray(batch.relation_offsets)
         self.arg_offsets = np.asarray(batch.relation_arg_offsets)
         self.args = np.asarray(batch.relation_args)
         self.by_relation = encoder.options["layout"] == "relation"
@@ -146,6 +147,7 @@ class _Graph:
             self.static = (
                 int(np.searchsorted(np.asarray(static_ids)[:blocks], self.task_id)),
                 {int(relation): k for k, relation in enumerate(relations)},
+                np.asarray(batch.static_offsets),
                 np.asarray(batch.static_arg_offsets),
                 np.asarray(batch.static_args),
             )
@@ -159,17 +161,17 @@ class _Graph:
             return self._static_tuples(relation)
         segment = self.segment(relation)
         first, last = int(self.arg_offsets[segment]), int(self.arg_offsets[segment + 1])
-        arity = self.arities[relation]
-        return (self.args[first:last] - self.begin).reshape(-1, arity)
+        count = int(self.offsets[segment + 1]) - int(self.offsets[segment])
+        return (self.args[first:last] - self.begin).reshape(count, self.arities[relation])
 
     def _static_tuples(self, relation):
         """The tuples of a static relation from the static block of the graph's instance: graph-local ids, with the key of
         a predicate slot replaced by the graph's virtual node of that key."""
-        block, index, arg_offsets, args = self.static
+        block, index, offsets, arg_offsets, args = self.static
         segment = block * len(index) + index[relation]
         first, last = int(arg_offsets[segment]), int(arg_offsets[segment + 1])
-        arity = self.arities[relation]
-        rows = args[first:last].astype(np.int64).reshape(-1, arity)
+        count = int(offsets[segment + 1]) - int(offsets[segment])
+        rows = args[first:last].astype(np.int64).reshape(count, self.arities[relation])
         for position, role in enumerate(self.slot_roles[relation]):
             if role == _PREDICATE_SLOT:
                 nodes = {

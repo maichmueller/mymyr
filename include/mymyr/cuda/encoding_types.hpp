@@ -53,6 +53,7 @@ struct OutputArrays
     bool simple = false;
     bool shared_statics = false;
     u32 static_relations = 0;
+    u32 argumentless_relations = 0;  // EncodingSchema::argumentless_relations: they bound the Simple nodes
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities

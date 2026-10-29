@@ -219,7 +219,7 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
         const u64 numeric = p.cell_counts[p.cells].numeric;
         if (p.numeric_f64) zero(as<f64>(out.numeric_values), bad ? 0 : numeric, capacities.numeric);
         else zero(as<f32>(out.numeric_values), bad ? 0 : numeric, capacities.numeric);
-        zero(out.node_label, bad ? 0 : sizes.entities + sizes.tuples, capacities.entities + capacities.args);
+        zero(out.node_label, bad ? 0 : sizes.entities + sizes.tuples, p.node_capacity);
         zero(out.edge_label, bad ? 0 : 2 * sizes.args, 2 * capacities.args);
         zero(as<I>(out.edge_index), bad ? 0 : 2 * sizes.args, 2 * capacities.args);
         if (out.edge_index)

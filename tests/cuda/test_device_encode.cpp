@@ -3222,6 +3222,69 @@ TEST(DeviceEncode, SimpleEqualsTheHostForEveryCoreConfiguration)
     RecordProperty("compared", compared);
 }
 
+TEST(DeviceEncode, SimpleNodesOfAnInstanceWithoutObjectsNeedTheirLabels)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    // no objects and no arguments, yet the nullary atoms and goal literals are atom nodes under Arity0
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks_flags", "no_blocks"));
+    const Batch batch = make_batch(table, 5, false, 29);
+    const DeviceRows rows(ctx, stream, batch);
+    encoding::FlatOptions options;
+    options.nullary = encoding::Nullary::Arity0;
+    options.outputs = {encoding::Output::Simple, encoding::Output::Relations};
+    const auto encoder = encoding::FlatEncoder::create(table, options);
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{batch.count, 0, 0, 0, 0}, stream);
+    const Inputs inputs{};
+    const Reference host = host_reference(*encoder, host_input(batch, batch.count, inputs));
+    ASSERT_EQ(host.sizes.entities, 0u);
+    ASSERT_EQ(host.sizes.args, 0u);
+    ASSERT_GT(host.sizes.tuples, 0u);
+    const cuda::BatchShape shape = shape_of(batch.count, host.sizes);
+    const auto result = run_device(device, ctx, stream, rows.input(batch, batch.count, inputs), shape);
+    expect_sizes(host.sizes, result.sizes);
+    expect_same_arrays(*host.bundle, result);
+
+    // the capacities hold an atom node per graph and argumentless relation: a null node_label is refused. The output
+    // also gives numeric_values, which this schema refuses after the Simple arrays, so no call here reaches a launch
+    const auto layout = device.output_layout(shape);
+    ASSERT_GE(encoding::simple_node_capacity(shape.graphs, shape, encoder->schema().argumentless_relations()),
+              host.sizes.tuples);
+    auto refused_for_the_simple_arrays = [](auto&& call)
+    {
+        try
+        {
+            call();
+        }
+        catch (const std::invalid_argument& error)
+        {
+            return std::string_view(error.what()).find("Simple arrays") != std::string_view::npos;
+        }
+        return false;
+    };
+    cuda::DeviceBuffer block(ctx, layout.bytes, stream), target(ctx, layout.bytes, stream);
+    cuda::DeviceOutput out = cuda::output_of(layout, shape, block.data());
+    out.arrays.node_label = nullptr;
+    out.arrays.numeric_values = block.data();
+    const auto in = rows.input(batch, batch.count, inputs);
+    EXPECT_TRUE(refused_for_the_simple_arrays([&] { device.encode(in, out, stream); }));
+
+    // and so is a collation into one
+    const cuda::DeviceOutput source = cuda::output_of(layout, shape, block.data());
+    device.encode(in, source, stream);
+    const cuda::DeviceCollator collator(
+        ctx, {cuda::collation_batch(*encoder, source.arrays, source.sizes, batch.count)}, stream);
+    cuda::DeviceBuffer scratch(ctx, collator.scratch_bytes(), stream);
+    cuda::DeviceOutput collated = cuda::output_of(layout, shape, target.data());
+    collated.arrays.node_label = nullptr;
+    collated.arrays.numeric_values = target.data();
+    EXPECT_TRUE(refused_for_the_simple_arrays([&] { collator.encode(scratch.data(), scratch.size(), collated); }));
+    collator.encode(scratch.data(), scratch.size(), cuda::output_of(layout, shape, target.data()));
+    expect_same_arrays(*host.bundle, download_encoding(ctx, stream, layout, target));
+}
+
 TEST(DeviceEncoderSchema, SimpleOutputsHaveTheirArraysAndPrivateRelationStorage)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));

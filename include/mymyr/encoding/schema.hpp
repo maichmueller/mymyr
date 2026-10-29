@@ -112,7 +112,7 @@ enum class SlotRole : u8
     SubgoalTarget,
     HistoryTarget,
     History,        // the entity of the history step
-    Auxiliary,      // the graph's auxiliary entity: the only argument of a nullary relation
+    Auxiliary,      // the graph's auxiliary entity: the only argument of a nullary relation (Nullary::Auxiliary)
 };
 
 /// The roles of the entities of a graph. Objects come first.
@@ -178,7 +178,8 @@ struct Relation
     i32 schema = -1;                            // first action schema of this name and arity, or -1
     i32 function = -1;                          // numeric function (DomainSignature::functions), or -1
     u32 arity = 0;                              // encoded arity: the slots of the other roles plus the arguments
-                                                // (one auxiliary slot for a nullary predicate)
+                                                // (one auxiliary slot for a nullary predicate, none under
+                                                // Nullary::Arity0)
     u32 logical_arity = 0;                      // arguments: the arity of the predicate or action schema
 };
 
@@ -206,7 +207,8 @@ public:
     [[nodiscard]] std::optional<u32> find(std::string_view name) const;
 
     /// The slot roles of a relation, one per encoded position: its leading slots (state, action, targets, history),
-    /// then the predicate slot, then the arguments (the auxiliary slot for a nullary predicate).
+    /// then the predicate slot, then the arguments (the auxiliary slot for a nullary predicate, nothing under
+    /// Nullary::Arity0: a nullary state relation then has no slot at all).
     [[nodiscard]] std::span<const SlotRole> slot_roles(u32 id) const;
     /// All slot roles, relation after relation, and the offset of each relation's roles (num_relations() + 1 entries).
     [[nodiscard]] std::span<const SlotRole> all_slot_roles() const noexcept { return m_roles; }
@@ -279,6 +281,10 @@ public:
     /// The largest encoded arity of a relation, K: slot k of an atom's tuple labels its edge to the entity k, and the
     /// edge back has the label K + k. At least 1.
     [[nodiscard]] u32 simple_max_arity() const noexcept { return m_simple_max_arity; }
+    /// The relations without argument slots (encoded arity 0: the nullary relations under Nullary::Arity0 that have no
+    /// leading slot). A cell of one holds at most one tuple, the empty one, which bounds the Simple nodes of a batch
+    /// within capacities (simple_node_capacity).
+    [[nodiscard]] u32 argumentless_relations() const noexcept { return m_argumentless_relations; }
     /// The domain's constants a node label of its own is given with FlatOptions::constant_labels (otherwise 0).
     [[nodiscard]] u32 simple_constants() const noexcept { return m_simple_constants; }
     /// The number of node labels of the Simple graph: the 9 entity roles, then one per relation, then one per
@@ -323,6 +329,7 @@ private:
     std::vector<u32> m_static_relations;
     u32 m_num_virtual_predicates = 0;
     u32 m_simple_max_arity = 1;
+    u32 m_argumentless_relations = 0;
     u32 m_simple_constants = 0;
     u32 m_first_numeric = 0;
     std::vector<std::string> m_constants;

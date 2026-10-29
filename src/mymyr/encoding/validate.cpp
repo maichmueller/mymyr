@@ -476,10 +476,12 @@ static void validate_relations(const rl::ArrayBundle& batch, const EncodingSchem
                 fail(where + " has tuples, the schema shares its static tuples");
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
-            const bool goal_target = roles.front() == SlotRole::GoalTarget;
-            const bool subgoal_target = roles.front() == SlotRole::SubgoalTarget;
-            const bool history_target = roles.front() == SlotRole::HistoryTarget;
-            const bool action = roles.front() == SlotRole::Action;
+            // a relation of arity 0 (a nullary state relation without its auxiliary slot) has no leading slot
+            const SlotRole first_role = roles.empty() ? SlotRole::Argument : roles.front();
+            const bool goal_target = first_role == SlotRole::GoalTarget;
+            const bool subgoal_target = first_role == SlotRole::SubgoalTarget;
+            const bool history_target = first_role == SlotRole::HistoryTarget;
+            const bool action = first_role == SlotRole::Action;
             const bool leading = goal_target || subgoal_target || history_target || action;
             // the tuples of a target or action relation start with their own entity, which is ascending by
             // construction, so that the tuples are compared past it

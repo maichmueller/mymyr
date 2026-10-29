@@ -158,8 +158,9 @@ struct DeviceCollator::Impl
                                 : (a.target_entity || a.target_group)))
                 invalid("collation target arrays do not match the schema");
             if (stored.relations && output.capacities.args && !a.relation_args) invalid("collation arguments are null");
-            if (stored.simple && (!a.node_offsets || !a.edge_offsets ||
-                ((output.capacities.entities || output.capacities.args) && !a.node_label) ||
+            const u64 nodes = encoding::simple_node_capacity(output.capacities.graphs, output.capacities,
+                                                             stored.argumentless_relations);
+            if (stored.simple && (!a.node_offsets || !a.edge_offsets || (nodes && !a.node_label) ||
                 (output.capacities.args && (!a.edge_index || !a.edge_label)) ||
                 a.edge_stride < mul(2, output.capacities.args)))
                 invalid("collation Simple arrays do not hold the capacities");
@@ -181,6 +182,8 @@ struct DeviceCollator::Impl
         p.static_totals = reinterpret_cast<encoding::StaticSizes*>(base + bad_offset + sizeof(u64));
         p.temp = base + temp_offset;
         p.output = output;
+        p.node_capacity = encoding::simple_node_capacity(output.capacities.graphs, output.capacities,
+                                                         stored.argumentless_relations);
         check(detail::launch_collation(p, phase, stream), "device collation kernels");
     }
 };

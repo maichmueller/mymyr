@@ -19,7 +19,8 @@
 //     same tuples in [c, d): it counts 0 tuples in every graph, and the tuples are written once per instance by
 //     fill_static_block. The cell still decides which entities the graph has (the auxiliary entity of a nullary static
 //     atom, the virtual node of the predicate);
-//   - a nullary predicate's atom is the unary tuple [auxiliary entity];
+//   - a nullary predicate's atom is the unary tuple [auxiliary entity], or the tuple without arguments when the context
+//     gives nullary tuples no auxiliary slot (ContextView::nullary_auxiliary false);
 //   - Goal cell, plain: one tuple per goal literal of the cell's predicate and sign, which is each set bit of the goal's
 //     positive (negative) mask in the cell's slot range, merged in lexicographic order with the cell's constant part,
 //     the literals no state can change (see below). With goal targets the tuple starts with its goal entity;
@@ -42,7 +43,7 @@
 //     target entity.
 //   - Numeric cell: one tuple per numeric slot [a, b) of the instance, in slot order (the slots of one function are
 //     consecutive and ascend in the objects of their function terms): the objects of the function term (the auxiliary
-//     entity for a nullary function). The cell has the same tuples in every graph of the instance, so its count is a
+//     entity for a nullary function, or no argument without the auxiliary slot). The cell has the same tuples in every graph of the instance, so its count is a
 //     constant; the value of each tuple is read from the numeric words of the row (RowInput::numeric);
 //   - Action cell: one tuple (action entity, objects...) per distinct ground action of the cell's action relation in the
 //     graph's expansion rows (RowInput::actions), in lexicographic order of the objects. A relation is the one of
@@ -54,7 +55,8 @@
 // plus the local index). Every `entity_ref` is graph-local or intrinsic to the catalog, so it is the same in both
 // layouts and in every slice of a batch:
 //   - the instance's objects (local index = object id); `entity_ref` is the object id;
-//   - one auxiliary entity (local index num_objects) iff some nullary tuple exists; `entity_ref` is -1;
+//   - one auxiliary entity (local index num_objects) iff some nullary tuple exists and nullary tuples have the auxiliary
+//     slot; `entity_ref` is -1;
 //   - one goal entity per tuple of a plain goal cell with goal targets, in the order the plain goal cells are filled
 //     (relation, then tuple); its `entity_ref` is the index of its tuple among the graph's tuples in graph-major order
 //     (the tuples of the graph's cells in relation order, the cell's first tuple at the sum of the counts of the cells
@@ -265,6 +267,9 @@ struct ContextView
     const i32* numeric_args = nullptr;  // [numeric slots of all instances, max_arity]: the objects of each numeric slot's
                                         // function term, -1 padded
     RepeatedLiterals repeated_literals = k_default_repeated_literals;
+    // Whether the tuples of nullary predicates and functions are over the graph's auxiliary entity; without it they have
+    // no argument and no graph has an auxiliary entity.
+    bool nullary_auxiliary = true;
     u32 numeric_storage = 0;            // how the rows store numeric values: k_numeric_storage_f64 or _i32
     // Literal resolution (literals.hpp): per instance and table domain predicate, its arity, its kind and the ranges
     // of its fluent slots, derived slots and static tuples (null: a view without the section).
@@ -304,6 +309,7 @@ struct InstanceView
                               // numeric_arg_row(*this)
     u32 numeric_storage;
     RepeatedLiterals repeated_literals = k_default_repeated_literals;
+    bool nullary_auxiliary = true;  // ContextView::nullary_auxiliary
 };
 
 /// Column `k` of the instance, one of the columns from k_ext_lists to k_instance_columns.
@@ -357,6 +363,7 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.numeric_args = c.numeric_args;
     v.numeric_storage = c.numeric_storage;
     v.repeated_literals = c.repeated_literals;
+    v.nullary_auxiliary = c.nullary_auxiliary;
     return v;
 }
 
@@ -1441,25 +1448,27 @@ MYMYR_HD bool cell_present(const Cell& c, u32 n)
 }
 
 
-/// Adds a cell with `n` tuples to the totals of its graph: tuples, arguments, the goal entities (the tuples of a plain
-/// goal cell with a goal target; the subgoal entities likewise), the action entities (the tuples of an action cell) and
-/// the auxiliary flag (a nullary cell that cell_present counts, goal cells and shared static cells included; an action
-/// relation has no auxiliary slot, its action entity is its only entity). The entity count, the used predicates and the
-/// bad-row flags are set by count_graph and finish_totals.
+/// Adds a cell of instance `v` with `n` tuples to the totals of its graph: tuples, arguments, the goal entities (the
+/// tuples of a plain goal cell with a goal target; the subgoal entities likewise), the action entities (the tuples of an
+/// action cell) and the auxiliary flag (a nullary cell that cell_present counts, goal cells and shared static cells
+/// included, when nullary tuples are over the auxiliary entity; an action relation has no auxiliary slot, its action
+/// entity is its only entity). The entity count, the used predicates and the bad-row flags are set by count_graph and
+/// finish_totals.
 template<bool Layered>
-MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
+MYMYR_HD void accumulate_cell(GraphTotals& t, const InstanceView& v, const Cell& c, u32 n)
 {
     t.tuples += n;
     t.args += static_cast<u64>(n) * c.arity;
+    const bool nullary = c.logical_arity == 0 && v.nullary_auxiliary;
     if (c.op <= static_cast<u32>(CellOp::Static))
     {
-        if (c.logical_arity == 0 && cell_present(c, n))
+        if (nullary && cell_present(c, n))
             t.flags |= k_graph_auxiliary;
         return;
     }
     if (is_numeric_op(c.op))
     {
-        if (c.logical_arity == 0 && n > 0)
+        if (nullary && n > 0)
             t.flags |= k_graph_auxiliary;
         return;
     }
@@ -1470,7 +1479,7 @@ MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
             t.targets += n;
         return;
     }
-    if (c.logical_arity == 0 && cell_present(c, n))
+    if (nullary && cell_present(c, n))
         t.flags |= k_graph_auxiliary;
     if (is_goal_op(c.op))
     {
@@ -1570,7 +1579,7 @@ MYMYR_HD_HOT GraphTotals count_graph(const InstanceView& v, const RowInput& in, 
         const u32 n = cell_count<Layered>(v, c, in);
         if (cell_counts)
             cell_counts[i] = n;
-        accumulate_cell<Layered>(t, c, n);
+        accumulate_cell<Layered>(t, v, c, n);
         if (virtual_nodes && cell_present(c, n))
         {
             const u32 p = v.relation_virtual[c.relation];
@@ -1628,7 +1637,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
         if (!mine)
             continue;
         sink(i, c, n);
-        accumulate_cell<Layered>(t, c, n);
+        accumulate_cell<Layered>(t, v, c, n);
         if (virtual_nodes && cell_present(c, n))
         {
             const u32 p = v.relation_virtual[c.relation];
@@ -1678,7 +1687,7 @@ MYMYR_HD GraphTotals totals_from_counts(const InstanceView& v, const RowInput& i
         t.history_steps = in.layers->history.masks.layers;
     const CellList list = cell_list<Layered>(v, in);
     for (u32 i = 0; i < list.count; ++i)
-        accumulate_cell<Layered>(t, list.cells[i], count(i, list.cells[i]));
+        accumulate_cell<Layered>(t, v, list.cells[i], count(i, list.cells[i]));
     return t;
 }
 
@@ -1885,8 +1894,16 @@ MYMYR_HD void fill_virtual_entities(const InstanceView& v, const EntityBlocks& b
         fill_virtual_entity<I>(v, blocks, rank, p, out);
 }
 
-/// The "no predicate slot" value of the `pred` argument of the tuple writers.
+/// The "no predicate slot" value of the `pred` argument of the tuple writers, and the "no auxiliary slot" value of their
+/// `auxiliary` argument.
 inline constexpr u64 k_no_entity = ~u64{0};
+
+/// The entity of the nullary tuples of a graph whose entities start at `entity_base`: the auxiliary entity, which
+/// follows the graph's objects, or k_no_entity when nullary tuples have no argument.
+MYMYR_HD u64 auxiliary_entity(const InstanceView& v, u64 entity_base)
+{
+    return v.nullary_auxiliary ? entity_base + v.num_objects : k_no_entity;
+}
 
 /// Writes the entity ids of one tuple of `arity` >= 1 objects, `row` holding their instance-local ids, to `dst` and
 /// returns the position after it.
@@ -1915,7 +1932,7 @@ MYMYR_HD I* emit_tuple(I* dst, const i32* row, u32 arity, u64 entity_base)
 }
 
 /// Writes one tuple of a state cell to `dst`: the predicate entity `pred` (unless k_no_entity), then the objects (the
-/// entity `auxiliary` for a nullary predicate); returns the position after it.
+/// entity `auxiliary` for a nullary predicate, unless k_no_entity); returns the position after it.
 template<class I>
 MYMYR_HD I* emit_state_tuple(I* dst, const i32* row, u32 arity, u64 entity_base, u64 auxiliary, u64 pred)
 {
@@ -1923,7 +1940,8 @@ MYMYR_HD I* emit_state_tuple(I* dst, const i32* row, u32 arity, u64 entity_base,
         *dst++ = static_cast<I>(pred);
     if (arity == 0)
     {
-        *dst++ = static_cast<I>(auxiliary);
+        if (auxiliary != k_no_entity)
+            *dst++ = static_cast<I>(auxiliary);
         return dst;
     }
     return emit_tuple<I>(dst, row, arity, entity_base);
@@ -1935,8 +1953,8 @@ inline constexpr u32 k_any_arity = ~u32{0};
 
 /// Writes the tuples of a state cell of K objects (K == k_any_arity: `arity` objects): the tuple of a row of instance-local
 /// object ids is, optionally behind the predicate entity `pred`, the entity ids of its objects (the entity `auxiliary`
-/// for a nullary predicate). The arity is a template argument so that the loops over the tuples have no per-tuple
-/// dispatch.
+/// for a nullary predicate, nothing if it is k_no_entity). The arity is a template argument so that the loops over the
+/// tuples have no per-tuple dispatch.
 template<class I, u32 K, bool Pred>
 struct StateTupleWriter
 {
@@ -1951,11 +1969,17 @@ struct StateTupleWriter
         if constexpr (Pred)
             *dst++ = static_cast<I>(pred);
         if constexpr (K == 0)
-            *dst++ = static_cast<I>(auxiliary);
+        {
+            if (auxiliary != k_no_entity)
+                *dst++ = static_cast<I>(auxiliary);
+        }
         else if constexpr (K == k_any_arity)
         {
             if (arity == 0)
-                *dst++ = static_cast<I>(auxiliary);
+            {
+                if (auxiliary != k_no_entity)
+                    *dst++ = static_cast<I>(auxiliary);
+            }
             else
                 for (u32 k = 0; k < arity; ++k)
                     *dst++ = static_cast<I>(entity_base + static_cast<u64>(row[k]));
@@ -2122,7 +2146,7 @@ MYMYR_HD u32 fill_numeric_cell(const InstanceView& v, const Cell& c, const RowIn
 /// cell's mask tuples (ascending slots) merged with its constant rows (the instance's goal only), in lexicographic
 /// order of their objects. With goal targets each tuple starts with its goal entity, the ids `first_target`,
 /// `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a
-/// nullary predicate is the entity `auxiliary`. Writes count * c.arity entries.
+/// nullary predicate ends with the entity `auxiliary` (unless k_no_entity). Writes count * c.arity entries.
 template<class I, u32 K, bool Target, bool Layered>
 MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
                                u64 auxiliary, u64 first_target, u64 pred, I* dst)
@@ -2142,11 +2166,17 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
         if (pred != k_no_entity)
             *dst++ = static_cast<I>(pred);
         if constexpr (K == 0)
-            *dst++ = static_cast<I>(auxiliary);
+        {
+            if (auxiliary != k_no_entity)
+                *dst++ = static_cast<I>(auxiliary);
+        }
         else if constexpr (K == k_any_arity)
         {
             if (arity == 0)
-                *dst++ = static_cast<I>(auxiliary);
+            {
+                if (auxiliary != k_no_entity)
+                    *dst++ = static_cast<I>(auxiliary);
+            }
             else
                 for (u32 k = 0; k < arity; ++k)
                     *dst++ = static_cast<I>(entity_base + static_cast<u64>(row[k]));
@@ -2384,9 +2414,9 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
 
 /// Writes the tuples of history cell `c` in this graph to `dst`: for each used step in order, the literals of the
 /// cell's predicate and sign in the step's mask, in ascending slot order, as [history target]? + [history step] +
-/// [predicate]? + objects (the entity `auxiliary` for a nullary predicate). With a history target the tuples start with
-/// the entities `first_target`, `first_target + 1`, ...; step j is the entity `first_step + j`. Returns the number of
-/// tuples. Writes count * c.arity entries.
+/// [predicate]? + objects (the entity `auxiliary` for a nullary predicate, unless k_no_entity). With a history target
+/// the tuples start with the entities `first_target`, `first_target + 1`, ...; step j is the entity `first_step + j`.
+/// Returns the number of tuples. Writes count * c.arity entries.
 template<class I>
 MYMYR_HD u32 fill_history_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                                u64 first_target, u64 first_step, u64 pred, I* dst)
@@ -2412,10 +2442,10 @@ MYMYR_HD u32 fill_history_cell(const InstanceView& v, const Cell& c, const RowIn
                 *dst++ = static_cast<I>(first_step + j);
                 if (pred != k_no_entity)
                     *dst++ = static_cast<I>(pred);
-                if (arity == 0)
-                    *dst++ = static_cast<I>(auxiliary);
-                else
+                if (arity != 0)
                     dst = emit_tuple<I>(dst, table + slot * A, arity, entity_base);
+                else if (auxiliary != k_no_entity)
+                    *dst++ = static_cast<I>(auxiliary);
                 ++n;
             }
         }
@@ -2571,7 +2601,7 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
     const RowInput& in = given;
     FillCursor cursor = begin_graph<I, Layered>(v, in, g, entity_base, totals, out, target_base, cell_counts,
                                                 virtual_scratch, history_base, numeric_base);
-    const u64 auxiliary = entity_base + v.num_objects;
+    const u64 auxiliary = auxiliary_entity(v, entity_base);
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
     const u32 num_cells = list.count;
@@ -2648,7 +2678,7 @@ MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u
 {
     FillCursor cursor = begin_graph<I, Layered>(v, in, g, entity_base, totals, out, target_base, cell_counts,
                                                 virtual_scratch, history_base);
-    const u64 auxiliary = entity_base + v.num_objects;
+    const u64 auxiliary = auxiliary_entity(v, entity_base);
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
     const u32 num_cells = list.count;
@@ -2859,7 +2889,7 @@ MYMYR_HD void fill_graph_group(const Group& grp, const InstanceView& v, const Ro
 {
     FillCursor cursor = begin_graph_group<I, Layered>(grp, v, in, g, entity_base, totals, out, target_base, cell_counts,
                                                       virtual_scratch, history_base, numeric_base);
-    const u64 auxiliary = entity_base + v.num_objects;
+    const u64 auxiliary = auxiliary_entity(v, entity_base);
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
@@ -2899,7 +2929,7 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
 {
     FillCursor cursor = begin_graph_group<I, Layered>(grp, v, in, g, entity_base, totals, out, target_base, cell_counts,
                                                       virtual_scratch, history_base);
-    const u64 auxiliary = entity_base + v.num_objects;
+    const u64 auxiliary = auxiliary_entity(v, entity_base);
     const u32 R = v.num_relations;
     const CellList list = cell_list<Layered>(v, in);
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
@@ -3089,7 +3119,8 @@ MYMYR_HD void simple_emit_cell_group(const Group& grp, const SimpleParams& param
             for (u32 slot = 0; slot < arity; ++slot)
                 emit(k * arity + slot, slot, atom);
     }
-    if (grp.size() == 1)
+    // a tuple without arguments is an atom node without edges
+    if (grp.size() == 1 || arity == 0)
         return;
     // Adjacent lanes write adjacent arguments. Advancing the tuple and slot together avoids a division per argument.
     const u64 arguments = static_cast<u64>(n) * arity;
@@ -3214,7 +3245,7 @@ MYMYR_HD void fill_static_block(const InstanceView& v, const u32* relations, u32
         cell.b = cell.d;
         cell.c = cell.d = 0;
         const u64 key = has_virtual_nodes(v) ? v.virtual_relation[v.relation_virtual[relation]] : k_no_entity;
-        const u32 n = fill_cell<I>(v, cell, none, 0, v.num_objects, key, args + positions);
+        const u32 n = fill_cell<I>(v, cell, none, 0, auxiliary_entity(v, 0), key, args + positions);
         tuples += n;
         positions += static_cast<u64>(n) * cell.arity;
     }
