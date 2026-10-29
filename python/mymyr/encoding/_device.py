@@ -781,10 +781,14 @@ class _Host:
                                   batch.relation_arg_offsets[segments + 1]), dim=1).tolist()
             args = torch.cat([batch.relation_args[a:b] for a, b in bounds]) if r else batch.relation_args[:0]
             lengths = [b - a for a, b in bounds]
+            tuples = (batch.relation_offsets[segments + 1] - batch.relation_offsets[segments]).tolist()
         else:
             offsets = batch.relation_arg_offsets[graph * r:(graph + 1) * r + 1].tolist()
             args = batch.relation_args[offsets[0]:offsets[-1]]
             lengths = np.diff(offsets)
+            tuples = np.diff(batch.relation_offsets[graph * r:(graph + 1) * r + 1].tolist())
+        # graph-local offsets: the tuples of a relation without argument slots have no entries in relation_args
+        self.relation_offsets = np.concatenate(([0], np.cumsum(tuples, dtype=np.int64)))
         self.relation_arg_offsets = np.concatenate(([0], np.cumsum(lengths, dtype=np.int64)))
         self.relation_args = args.cpu().numpy() - begin
         if batch._layout.shared:
@@ -793,8 +797,10 @@ class _Host:
             block = int(torch.searchsorted(ids[:blocks], int(self.task_ids[0])).item())
             count = batch._layout.static_relations
             offsets = batch.static_arg_offsets[block * count:(block + 1) * count + 1].cpu().numpy()
+            tuples = batch.static_offsets[block * count:(block + 1) * count + 1].cpu().numpy()
             self.static_task_ids = self.task_ids.copy()
             self.static_relations = batch.static_relations.cpu().numpy()
+            self.static_offsets = tuples - tuples[0]
             self.static_arg_offsets = offsets - offsets[0]
             self.static_args = batch.static_args[int(offsets[0]):int(offsets[-1])].cpu().numpy()
             if self.sizes is not None:
