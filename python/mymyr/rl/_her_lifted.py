@@ -66,6 +66,8 @@ def _relabel(states, done, task_ids, templates, prev_states, max_segments, max_g
     W = host.source.words if words is None else operator.index(words)
     if W < 0 or W >= 2**31:
         raise ValueError("mymyr: her_relabel_lifted words must be in [0, 2**31)")
+    if derived is not None and derived.ndim != 3:
+        raise ValueError("mymyr: her_relabel_lifted derived must have shape [T,N,DW]")
     D = 0 if derived is None else derived.shape[-1] // (2 if derived.dtype.itemsize == 4 else 1)
     stream, block = None, None
     if fw == "torch":
@@ -86,7 +88,7 @@ def _relabel(states, done, task_ids, templates, prev_states, max_segments, max_g
             templates._block.record_stream(current)
             block, stream = templates._block, current.cuda_stream
             for x in (states, done, task_ids, prev_states, derived, prev_derived, status):
-                if x is not None:
+                if isinstance(x, torch.Tensor) and x.is_cuda:
                     x.record_stream(current)
         elif isinstance(templates, DeviceGoalTemplates):
             raise ValueError("mymyr: CPU states require host templates")

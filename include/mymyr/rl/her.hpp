@@ -287,8 +287,8 @@ MYMYR_HD void scan(const Group& grp, const MatchTemplates& t, const HerLiftedBat
             if (!grp.lane())
                 for (i32 l = t.literal_offsets[k]; l < t.literal_offsets[k + 1]; ++l)
                 {
-                    const match_detail::Objects objects{t.terms + u64(l) * t.max_arity,
-                                                       b.matches.binding + row * t.max_vars};
+                    const match_detail::Objects objects{t.max_arity ? t.terms + u64(l) * t.max_arity : nullptr,
+                                                       t.max_vars ? b.matches.binding + row * t.max_vars : nullptr};
                     const auto slot = ed::resolve_literal(t.literals, static_cast<u32>(b.ids[row]), t.predicate[l],
                                                           objects, static_cast<u32>(t.arity[l]));
                     if (slot.kind == ed::LiteralKind::Fluent || slot.kind == ed::LiteralKind::Derived)

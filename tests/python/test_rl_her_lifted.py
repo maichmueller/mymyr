@@ -1151,13 +1151,22 @@ def assert_refine(tasks, previous, states, done, ids, templates, result, *, max_
 @needs_frontend
 @pytest.mark.parametrize("domain", DOMAINS)
 @pytest.mark.parametrize("distinct", [True, "equality"])
-def test_relabel_lifted_equals_golden_refine_on_ipc_windows(domain, distinct):
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_equals_golden_refine_on_ipc_windows(domain, distinct, on_device):
     task = ipc(domain, "train", "p01")
     prev, reached, done, previous, states, pd, d = lifted_window(task)
     t = rl.lifted_goal_templates(task, distinct=distinct)
     result = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=23,
                                     derived=d, prev_derived=pd, step_reward=-0.25, goal_reward=2.0)
     assert_refine([task], previous, states, done, np.zeros(3, np.int32), t, result)
+    if on_device:
+        torch = cuda_match_runtime()
+        x, p, flags, dd, pp = [torch.tensor(a, device="cuda:0") for a in
+                               (reached.view(np.int64), prev.view(np.int64), done, d.view(np.int64), pd.view(np.int64))]
+        actual = rl.her_relabel_lifted(x, flags, None, t.to("cuda:0"), prev_states=p, max_segments=23,
+                                      derived=dd, prev_derived=pp, step_reward=-0.25, goal_reward=2.0)
+        for a, b in zip(result, actual):
+            np.testing.assert_array_equal(a, b.cpu().numpy())
 
 
 @pytest.mark.parametrize("name", TEXT)
@@ -1339,3 +1348,141 @@ def test_relabel_lifted_compile_and_opcheck():
             torch.testing.assert_close(a, b)
     finally:
         unregister(handle)
+
+
+def suite_lifted_window():
+    tasks = [text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")]
+    rng = random.Random(27)
+    T, N = 19, 2
+    ids = np.empty((T, N), np.int32)
+    done = np.zeros((T, N), bool)
+    previous, states = [], []
+    current = [None, None]
+    for q in range(T):
+        before, after = [], []
+        for i in range(N):
+            g = (q // 7 + i) % 2
+            ids[q, i] = g
+            if q % 7 == 0:
+                current[i] = tasks[g].initial_state
+            before.append(current[i])
+            current[i] = rng.choice(tasks[g].successor_states(current[i]))
+            after.append(current[i])
+        previous.append(before)
+        states.append(after)
+        done[q] = q % 7 == 6
+    source, rows, _, d = match_rows(tasks, [(int(ids[q, i]), states[q][i]) for q in range(T) for i in range(N)])
+    _, prev, _, pd = match_rows(tasks, [(int(ids[q, i]), previous[q][i]) for q in range(T) for i in range(N)])
+    return tasks, source, rows.reshape(T, N, -1), prev.reshape(T, N, -1), ids, done, previous, states
+
+
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_suite_changes_instance_at_autoreset(on_device):
+    tasks, source, rows, prev, ids, done, previous, states = suite_lifted_window()
+    t = rl.lifted_goal_templates(source)
+    expected = rl.her_relabel_lifted(rows, done, ids, t, prev_states=prev, max_segments=19,
+                                    step_reward=-0.25, goal_reward=2.0, pool=rl.ThreadPool(2))
+    assert_refine(tasks, previous, states, done, ids, t, expected)
+    if on_device:
+        torch = cuda_match_runtime()
+        x, p, tid, d = [torch.tensor(a, device="cuda:0") for a in
+                       (rows.view(np.int64), prev.view(np.int64), ids, done)]
+        actual = rl.her_relabel_lifted(x, d, tid, t.to("cuda:0"), prev_states=p, max_segments=19,
+                                      step_reward=-0.25, goal_reward=2.0)
+        for a, b in zip(expected, actual):
+            np.testing.assert_array_equal(a, b.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("goal", ["(not (lit a))", "(done)", "(not (done))"])
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_static_negative_derived_and_constant_goals(goal, on_device):
+    from test_encoding_literals import goals_task
+    task = goals_task("static_true", atoms="dense")
+    # Alternate fluent and derived truth, while the static conjunct is satisfied throughout.
+    path = [task.state(a) for a in [[], ["(lit a)", "(lit home)", "(flag)"], ["(lit a)"], [],
+                                   ["(lit home)", "(flag)"], [], ["(lit a)"]]]
+    previous = [[s] for s in path[:-1]]
+    states = [[s] for s in path[1:]]
+    _, prev, _, pd = match_rows([task], [(0, s) for s in path[:-1]])
+    _, reached, _, d = match_rows([task], [(0, s) for s in path[1:]])
+    prev, reached = prev[:, None, :], reached[:, None, :]
+    pd, d = pd[:, None, :], d[:, None, :]
+    done = np.zeros((len(states), 1), bool)
+    t = rl.GoalTemplates.from_conditions(task, [[task.condition([], ["(heavy t1)", goal])]])
+    expected = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, derived=d, prev_derived=pd,
+                                    max_segments=8, step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(1, np.int32), t, expected)
+    assert expected.count.sum() > 0
+    if goal != "(not (lit a))":
+        for missing in ("derived", "prev_derived"):
+            kw = dict(derived=d, prev_derived=pd, prev_states=prev, max_segments=8)
+            kw[missing] = None
+            with pytest.raises(ValueError, match="derived"):
+                rl.her_relabel_lifted(reached, done, None, t, **kw)
+    if on_device:
+        torch = cuda_match_runtime()
+        x, p, dd, pp, flags = [torch.tensor(a, device="cuda:0") for a in
+                              (reached.view(np.int64), prev.view(np.int64), d.view(np.int64), pd.view(np.int64), done)]
+        actual = rl.her_relabel_lifted(x, flags, None, t.to("cuda:0"), prev_states=p, derived=dd, prev_derived=pp,
+                                      max_segments=8, step_reward=-0.25, goal_reward=2.0)
+        for a, b in zip(expected, actual):
+            np.testing.assert_array_equal(a, b.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("fixture", ["gripper", "counters"])
+def test_relabel_lifted_pddl_fixtures(fixture):
+    root = ROOT / "tests/data/pddl" / fixture
+    task = mymyr.Task.from_pddl(root / "domain.pddl", root / "p01.pddl")
+    prev, reached, done, previous, states, pd, d = lifted_window(task)
+    t = rl.lifted_goal_templates(task)
+    actual = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=23,
+                                  step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(3, np.int32), t, actual)
+
+
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_long_window(on_device):
+    task, t, prev, reached, done, _, _ = toggle_window()
+    # A window wider than shared-memory closed-set bounds uses the same exact scan.
+    base = np.concatenate([reached[:1, :1], prev[:1, :1]], axis=0)
+    reached = np.tile(base, (513, 2, 1))[:1025].copy()
+    prev = np.tile(base[::-1], (513, 2, 1))[:1025].copy()
+    done = np.zeros((1025, 2), bool)
+    expected = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=1)
+    assert expected.seg_start.tolist() == [[1024], [1024]]
+    assert expected.seg_end.tolist() == [[1024], [1024]]
+    if on_device:
+        torch = cuda_match_runtime()
+        x, p, d = [torch.tensor(a, device="cuda:0") for a in (reached.view(np.int64), prev.view(np.int64), done)]
+        actual = rl.her_relabel_lifted(x, d, None, t.to("cuda:0"), prev_states=p, max_segments=1)
+        for a, b in zip(expected, actual):
+            np.testing.assert_array_equal(a, b.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_numeric_words_participate_in_loop_equality(on_device):
+    root = ROOT / "tests/data/pddl/counters"
+    task = mymyr.Task.from_pddl(root / "domain.pddl", root / "p01.pddl")
+    t = rl.lifted_goal_templates(task)
+    W = t.source.words
+    row = np.asarray(task.encode([task.initial_state]))
+    prev = np.tile(row, (5, 1, 1))
+    reached = prev.copy()
+    # Distinct numeric tails with the same fluent atoms, followed by a newly achieved nullary goal.
+    prev[:, 0, W] = np.arange(5, dtype=np.uint64)
+    reached[:, 0, W] = np.arange(1, 6, dtype=np.uint64)
+    slot = task.literal("(done)").atom.slot
+    reached[-1, 0, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+    done = np.zeros((5, 1), bool)
+    want = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=1)
+    assert want.seg_start.tolist() == [[0]] and want.seg_end.tolist() == [[4]]
+    assert want.achieved[:, 0].tolist() == [False] * 4 + [True]
+    if on_device:
+        torch = cuda_match_runtime()
+        x, p, d = [torch.tensor(a, device="cuda:0") for a in (reached.view(np.int64), prev.view(np.int64), done)]
+        actual = rl.her_relabel_lifted(x, d, None, t.to("cuda:0"), prev_states=p, max_segments=1)
+        for a, b in zip(want, actual):
+            np.testing.assert_array_equal(a, b.cpu().numpy())

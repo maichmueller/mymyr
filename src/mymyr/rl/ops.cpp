@@ -80,7 +80,14 @@ void her_relabel_lifted(const MatchTemplates& t, const HerLiftedBatch& b, const 
     if (b.steps && b.envs && (!b.states || !b.prev_states || !b.done || !b.hashes || !b.prev_hashes || !b.ids ||
         !b.segment || !b.achieved || !b.reward || (b.words + b.derived_words && !b.work_goals)))
         throw std::invalid_argument("mymyr: her_relabel_lifted: missing window, outputs or scratch");
-    if (b.derived_words && (!b.derived || !b.prev_derived))
+    if (b.steps && b.envs && (!b.matches.found || !b.matches.template_id || !b.matches.count ||
+        (t.max_vars && !b.matches.binding)))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: missing matcher scratch");
+    if (b.envs && c.max_segments && (!b.seg_start || !b.seg_end || !b.seg_valid || !b.seg_template ||
+        (t.max_vars && !b.seg_binding) || (b.words && (!b.goal_pos || !b.goal_neg)) ||
+        (b.derived_words && (!b.goal_pos_derived || !b.goal_neg_derived))))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: missing segment outputs");
+    if (b.derived_words && b.steps && b.envs && (!b.derived || !b.prev_derived))
         throw std::invalid_argument("mymyr: her_relabel_lifted: derived and prev_derived are required");
     auto run = [&](u64 size, auto function)
     {
