@@ -1096,9 +1096,27 @@ def assert_lifted_parity(expected, actual):
         np.testing.assert_array_equal(host, value, err_msg=name)
 
 
-def lifted_window(task, *, n=3, steps=23, seed=13):
+def lifted_window(task, *, n=3, steps=23, seed=13, scripted=False):
     from test_rl_ops import trajectory
-    prev, reached, done = trajectory(task, n=n, steps=steps, seed=seed, max_steps=7)
+    if scripted:
+        env = _rl_torch.Env(task, seed=seed, max_steps=4)
+        current = np.tile(env.initial_states()[0], (n, 1))
+        step_count, draws = np.zeros(n, np.int32), np.zeros(n, np.uint64)
+        prev, reached, done = [], [], []
+        for q in range(steps):
+            final = np.zeros_like(current)
+            term, trunc = np.zeros(n, bool), np.zeros(n, bool)
+            prev.append(current.copy())
+            action = np.full(n, 2**31 - 1, np.int64) if q % 4 == 1 else None
+            env.step(current, steps=step_count, draws=draws, action=action,
+                     final_states=final, terminated=term, truncated=trunc)
+            reached.append(final)
+            done.append(term | trunc)
+        prev, reached, done = np.stack(prev), np.stack(reached), np.stack(done)
+        np.testing.assert_array_equal(prev[1::4], reached[1::4])
+        assert done.any()
+    else:
+        prev, reached, done = trajectory(task, n=n, steps=steps, seed=seed, max_steps=7)
     previous = [task.decode(row) for row in prev]
     states = [task.decode(row) for row in reached]
     _, _, _, pd = match_rows([task], [(0, s) for row in previous for s in row])
@@ -1520,3 +1538,23 @@ def test_relabel_lifted_preserves_the_high_goal_bit(framework):
                                   prev_states=p, max_segments=1)
     assert actual.goal_pos.item() == -(1 << 63)
     assert_lifted_parity(expected, actual)
+
+
+
+@needs_frontend
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("on_device", [False, True])
+def test_relabel_lifted_scripted_ipc_loops_and_resets(domain, on_device):
+    torch = cuda_match_runtime() if on_device else None
+    task = ipc(domain, "train", "p01")
+    prev, reached, done, previous, states, pd, d = lifted_window(task, n=2, steps=13, scripted=True)
+    t = rl.lifted_goal_templates(task)
+    expected = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, derived=d, prev_derived=pd,
+                                    max_segments=13, step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(2, np.int32), t, expected)
+    if on_device:
+        x, p, flags, dd, pp = [torch.tensor(a, device="cuda:0") for a in
+                               (reached.view(np.int64), prev.view(np.int64), done, d.view(np.int64), pd.view(np.int64))]
+        actual = rl.her_relabel_lifted(x, flags, None, t.to("cuda:0"), prev_states=p, derived=dd, prev_derived=pp,
+                                      max_segments=13, step_reward=-0.25, goal_reward=2.0)
+        assert_lifted_parity(expected, actual)
