@@ -46,7 +46,7 @@ def _exercise_ops(compile_ops=False):
             if device != "cpu":
                 template_handle = rt.register(templates.to(device))
                 handles.append(template_handle)
-            env = rt.BatchedEnv(table, 2, device=device, track_visited=True, observation=encoder, obs_actions=True,
+            env = rt.BatchedEnv(table, 2, device=device, track_visited=32, observation=encoder, obs_actions=True,
                                 obs_capacities=dict(entities=256, args=1024, targets=256))
             states = env.states
             schema = torch.zeros(2, dtype=torch.int32, device=device)
@@ -95,6 +95,7 @@ def _exercise_ops(compile_ops=False):
                 if compile_ops:
                     from torch._subclasses.fake_tensor import FakeTensorMode
 
+                    torch.compiler.reset()
                     with FakeTensorMode() as mode:
                         fake_inputs = tuple(mode.from_tensor(x) if isinstance(x, torch.Tensor) else x for x in inputs)
                         fake = op(*fake_inputs)
@@ -130,12 +131,17 @@ def _exercise_ops(compile_ops=False):
     check_imports()
 
 
-def test_eager_ops_leave_compiler_modules_unloaded():
+def _run_ops(*, compile_ops=False):
     pytest.importorskip("torch", exc_type=ImportError)
-    run_code(inspect.getsource(_exercise_ops) + "\n_exercise_ops()\n", timeout=None)
+    source = inspect.getsource(_exercise_ops) + f"\n_exercise_ops(compile_ops={compile_ops!r})\n"
+    result = run_code(source, timeout=None, capture_output=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_eager_ops_leave_compiler_modules_unloaded():
+    _run_ops()
 
 
 @pytest.mark.needs_gil
 def test_op_entry_points_support_fake_tensors_and_fullgraph_compile():
-    pytest.importorskip("torch", exc_type=ImportError)
-    run_code(inspect.getsource(_exercise_ops) + "\n_exercise_ops(compile_ops=True)\n", timeout=None)
+    _run_ops(compile_ops=True)
