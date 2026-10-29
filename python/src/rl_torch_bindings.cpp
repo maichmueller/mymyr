@@ -410,16 +410,24 @@ public:
     }
 
     void clear_visited(nb::handle states, nb::handle task_ids, nb::handle visited, nb::handle visited_count,
-                       nb::handle visited_status, nb::handle mask)
+                       nb::handle visited_status, nb::handle mask, nb::handle stream)
     {
-        Call c(*this, nb::none());
+        Call c(*this, stream);
         rl::EnvBatch b = batch(c.in, states, task_ids, nb::none(), nb::none(), nb::none(), nb::none(),
                                nb::none(), nb::none(), nb::none());
         track(c.in, b, visited, visited_count, visited_status);
         const u8* m = c.in.get<const u8>(mask, "mask", {boolt}, {static_cast<i64>(b.rows)}, false);
-        if (on_device())
-            throw nb::value_error("mymyr: clear_visited requires a CPU environment");
-        c.run([&] { m_host->clear_visited(b, m); });
+        c.run([&] { run_clear_visited(b, m); });
+    }
+
+    // states, task_ids, visited, visited_count, visited_status, mask
+    void clear_visited_ptrs(u64 rows, const Ptrs& p, StreamArg stream, u32 visited_capacity)
+    {
+        check_ptrs(p, 6);
+        Call c(*this, stream);
+        rl::EnvBatch b = raw_batch(rows, p[0], p[1], 0, 0, 0, 0, 0, 0, 0);
+        track_raw(b, visited_capacity, p[2], p[3], p[4]);
+        c.run([&] { run_clear_visited(b, ptr<const u8>(p[5])); });
     }
 
     void check_errors()
@@ -496,6 +504,14 @@ private:
             return m_host->step(b, o, *labels, next_task_ids, m_pool.get());
         m_host->step(b, o, rl::Actions{action, nullptr}, next_task_ids, m_pool.get());
     }
+    void run_clear_visited(rl::EnvBatch& b, const u8* mask)
+    {
+#if defined(MYMYR_HAS_CUDA)
+        if (m_dev)
+            return m_dev->clear_visited(b, mask);
+#endif
+        m_host->clear_visited(b, mask);
+    }
     void run_random_actions(const u64* d, const i32* cnt, u64 rows, u64 first_env, u32 max_actions, i64* o)
     {
         if (config().actions == rl::ActionSpace::Label)
@@ -527,10 +543,8 @@ private:
         if (p.size() != n)
             throw nb::value_error(("mymyr: expected " + std::to_string(n) + " data pointers").c_str());
     }
-    void track_raw(rl::EnvBatch& b, u32 H, std::uintptr_t table, std::uintptr_t count, std::uintptr_t status) const
+    static void track_raw(rl::EnvBatch& b, u32 H, std::uintptr_t table, std::uintptr_t count, std::uintptr_t status)
     {
-        if (H && on_device())
-            throw nb::value_error("mymyr: visited tracking requires a CPU environment");
         b.visited_capacity = H;
         b.visited = ptr<u64>(table);
         b.visited_count = ptr<i32>(count);
@@ -545,8 +559,6 @@ private:
                 throw nb::value_error("mymyr: visited tracking needs table, count and status arrays");
             return;
         }
-        if (on_device())
-            throw nb::value_error("mymyr: visited tracking requires a CPU environment");
         std::vector<i64> ext;
         b.visited = in.get<u64>(table, "visited", {i64t, u64t}, {static_cast<i64>(b.rows), -1}, true, &ext);
         if (ext[1] < 2 || ext[1] > (1 << 20))
@@ -854,10 +866,16 @@ void bind_rl_torch(nb::module_& parent)
             "[N, >= label_width] int32. Label mode takes action=(schema int32 [N], binding int32 [N, L]); "
             "inapplicable labels do not move, count is 0/1, and action=None is refused.")
         .def("clear_visited", [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg visited,
-                                 ArrayArg visited_count, ArrayArg visited_status, ArrayArg mask) {
-            e.clear_visited(states, task_ids, visited, visited_count, visited_status, mask);
+                                 ArrayArg visited_count, ArrayArg visited_status, ArrayArg mask, StreamArg stream) {
+            e.clear_visited(states, task_ids, visited, visited_count, visited_status, mask, stream);
         }, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "visited"_a, "visited_count"_a, "visited_status"_a, "mask"_a = nb::none(),
-             "Clear masked host visited tables and insert their current states.")
+             "stream"_a = nb::none(),
+             "Clears the visited tables of the rows with mask [N] bool (None: all) and inserts their current states; the "
+             "overflow status is kept. A device Env runs on `stream` without a host synchronization.")
+        .def("_clear_visited_ptrs", &PyEnv::clear_visited_ptrs, "rows"_a, "ptrs"_a, "stream"_a = nb::none(),
+             "visited_capacity"_a = 0,
+             "clear_visited() on data pointers (states, task_ids, visited, visited_count, visited_status, mask; 0: None) of "
+             "checked tensors.")
         .def("_reset_ptrs", &PyEnv::reset_ptrs, "rows"_a, "ptrs"_a, "keep_goals"_a = false, "stream"_a = nb::none(), "visited_capacity"_a = 0,
              "reset() on data pointers (states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal, visited, visited_count, visited_status; "
              "0: None) of checked tensors; the torch ops' entry point.")

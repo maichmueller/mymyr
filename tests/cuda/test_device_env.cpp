@@ -5,6 +5,7 @@
 //     and invalid flags, counts, final states and labels, over steps of the random policy and of given actions
 //     (including invalid ones), with truncation and autoreset; the TorchRL convention (no autoreset, masked resets);
 //   - the results do not depend on the chunk sizes, the path, or the batch an environment runs in (first_env).
+//   - the visited tables of every path equal the host's word for word, and captured calls replay the eager ones.
 // By default 256 environments step 60 times per task; MYMYR_TEST_FULL_SUITE=1 runs the gate's 1024 x 300.
 
 #include "../cpp/support/suite.hpp"
@@ -510,4 +511,226 @@ TEST(DeviceEnvStep, Refusals)
     rl::EnvBatch wide = d.b;
     wide.words += 1;
     EXPECT_THROW(fast.reset(wide), std::invalid_argument);
+}
+
+// ------------------------------------------------------------------------------------------------ visited tables
+
+namespace
+{
+/// The visited tables of a host batch.
+struct HostVisited
+{
+    std::vector<u64> table;
+    std::vector<i32> count, status{0};
+    std::vector<u8> revisited;
+
+    HostVisited(rl::EnvBatch& b, rl::StepOutputs& out, u64 rows, u32 H) : table(rows * H), count(rows), revisited(rows)
+    {
+        b.visited = table.data();
+        b.visited_count = count.data();
+        b.visited_capacity = H;
+        b.visited_status = status.data();
+        out.revisited = revisited.data();
+    }
+};
+
+/// The visited tables of a device batch.
+struct DeviceVisited
+{
+    u64 N;
+    u32 H;
+    cuda::DeviceBuffer table, count, status, revisited;
+
+    DeviceVisited(const cuda::ContextPtr& ctx, DeviceBatch& d, u32 capacity)
+        : N(d.N), H(capacity), table(ctx, d.N * capacity * 8, d.s), count(ctx, d.N * 4, d.s), status(ctx, 4, d.s),
+          revisited(ctx, d.N, d.s)
+    {
+        // not zero: reset() clears the tables
+        cuda::check(cudaMemsetAsync(table.data(), 0xA5, N * H * 8, d.s), "memset");
+        cuda::check(cudaMemsetAsync(count.data(), 0x5A, N * 4, d.s), "memset");
+        cuda::check(cudaMemsetAsync(status.data(), 0, 4, d.s), "memset");
+        d.b.visited = static_cast<u64*>(table.data());
+        d.b.visited_count = static_cast<i32*>(count.data());
+        d.b.visited_capacity = H;
+        d.b.visited_status = static_cast<i32*>(status.data());
+        d.out.revisited = static_cast<u8*>(revisited.data());
+    }
+
+    void expect_equal(const HostVisited& h, cudaStream_t s, const char* what, int t) const
+    {
+        ASSERT_EQ(to_host<u64>(table, N * H, s), h.table) << what << " step " << t;
+        ASSERT_EQ(to_host<i32>(count, N, s), h.count) << what << " step " << t;
+        ASSERT_EQ(to_host<i32>(status, 1, s), h.status) << what << " step " << t;
+        ASSERT_EQ(to_host<u8>(revisited, N, s), h.revisited) << what << " step " << t;
+    }
+};
+
+TaskPtr visited_task(const std::string& name)
+{
+    if (name == "cs-counters")
+        return Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
+    return load(name, true);
+}
+}  // namespace
+
+// Every path keeps the host's tables word for word: the finish's inserts, autoresets, masked resets, invalid actions
+// that stay in place, absorbing rows, overflow (H = 8) and clear_visited with a mask, over tasks with dead ends,
+// axioms (the general path) and numeric fluents (the keys cover the numeric words).
+TEST(DeviceEnvVisited, FinishInsertsEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    for (const char* name : {"gripper__prob05", "pegsol-08-strips__p22", "philosophers__p03-phil4", "cs-counters"})
+        for (bool autoreset : {true, false})
+            for (u32 H : {8u, 64u, cuda::envk::k_wide_visited / 2, cuda::envk::k_wide_visited})
+                for (auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
+                {
+                    SCOPED_TRACE(std::string(name) + (autoreset ? " autoreset" : " masked resets") + " H " +
+                                 std::to_string(H) + (path == cuda::DeviceEnv::Path::Auto ? " auto" : " general"));
+                    const auto task = visited_task(name);
+                    auto ctx = context();
+                    rl::EnvConfig cfg = config(23, autoreset);
+                    cfg.max_steps = 12;
+                    cuda::DeviceEnv env(ctx, rl::TaskTable::single(task), cfg, path);
+                    rl::HostEnv host(rl::TaskTable::single(task), cfg);
+                    const u64 N = 96;
+                    const u32 RW = env.row_words();
+                    HostBatch h(RW, env.label_width(), N, 0);
+                    h.b.words = host.words();
+                    h.b.numeric_words = host.numeric_words();
+                    DeviceBatch d(ctx, env, N, 0);
+                    d.b.numeric_words = env.numeric_words();
+                    if (RW != d.W)
+                    {
+                        // rows of atom and numeric words
+                        d.states = cuda::DeviceBuffer(ctx, N * RW * 8, d.s);
+                        d.final_states = cuda::DeviceBuffer(ctx, N * RW * 8, d.s);
+                        d.b.states = static_cast<u64*>(d.states.data());
+                        d.out.final_states = static_cast<u64*>(d.final_states.data());
+                        d.W = RW;
+                    }
+                    HostVisited hv(h.b, h.out, N, H);
+                    DeviceVisited dv(ctx, d, H);
+                    host.reset(h.b, nullptr, h.out.count);
+                    env.reset(d.b, nullptr, d.out.count);
+                    std::fill(hv.revisited.begin(), hv.revisited.end(), u8{0});
+                    cuda::check(cudaMemsetAsync(dv.revisited.data(), 0, N, d.s), "memset");
+                    dv.expect_equal(hv, d.s, "reset", -1);
+                    if (HasFatalFailure())
+                        return;
+                    u64 revisits = 0;
+                    for (int t = 0; t < 40; ++t)
+                    {
+                        const bool given = t % 3 == 2;
+                        const std::vector<i64> act = actions(h.v.count, t);
+                        if (given)
+                            to_device(d.action, act, d.s);
+                        env.step(d.b, d.out, rl::Actions{given ? static_cast<const i64*>(d.action.data()) : nullptr});
+                        host.step(h.b, h.out, rl::Actions{given ? act.data() : nullptr});
+                        ASSERT_EQ(to_host<u64>(d.states, N * RW, d.s), h.v.states) << "step " << t;
+                        dv.expect_equal(hv, d.s, "step", t);
+                        if (HasFatalFailure())
+                            return;
+                        for (u8 r : hv.revisited)
+                            revisits += r;
+                        if (!autoreset && t % 2 == 1)
+                        {
+                            std::vector<u8> mask(N);
+                            for (u64 i = 0; i < N; ++i)
+                                mask[i] = h.v.terminated[i] | h.v.truncated[i];
+                            to_device(d.mask, mask, d.s);
+                            host.reset(h.b, mask.data(), h.out.count);
+                            env.reset(d.b, static_cast<const u8*>(d.mask.data()), d.out.count);
+                            dv.expect_equal(hv, d.s, "masked reset", t);
+                        }
+                        if (t == 20)
+                        {
+                            std::vector<u8> mask(N);
+                            for (u64 i = 0; i < N; ++i)
+                                mask[i] = i % 3 == 0;
+                            to_device(d.mask, mask, d.s);
+                            host.clear_visited(h.b, mask.data());
+                            env.clear_visited(d.b, static_cast<const u8*>(d.mask.data()));
+                            dv.expect_equal(hv, d.s, "clear_visited", t);
+                        }
+                        if (t == 9 || t == 24)
+                        {
+                            // the caller acknowledges an overflow: saturated rows set the bit again on their next step
+                            hv.status[0] = 0;
+                            cuda::check(cudaMemsetAsync(dv.status.data(), 0, 4, d.s), "memset");
+                        }
+                        if (HasFatalFailure())
+                            return;
+                    }
+                    EXPECT_GT(revisits, 0u);
+                    if (H == 8)
+                    {
+                        EXPECT_EQ(hv.status[0], 1);
+                    }
+                    EXPECT_NO_THROW(env.check_errors());
+                }
+}
+
+// Resets, steps and clear_visited captured into a CUDA graph: every replay equals the same calls made eagerly on a
+// second batch.
+namespace
+{
+/// A captured reset, steps (with autoresets) and clear_visited replay as the same eager calls, with tables of H words.
+void expect_captured_tables_equal_eager(u32 H)
+{
+    const auto task = load("blocks__probBLOCKS-8-0", true);
+    auto ctx = context();
+    cuda::Stream capture;  // outlives the envs and batches that run on it
+    rl::EnvConfig cfg = config(5, true);
+    cfg.max_steps = 9;
+    cuda::DeviceEnv eager(ctx, rl::TaskTable::single(task), cfg), graph(ctx, rl::TaskTable::single(task), cfg);
+    ASSERT_TRUE(graph.fast());
+    const u64 N = 128;
+    DeviceBatch a(ctx, eager, N, 0), g(ctx, graph, N, 0);
+    DeviceVisited av(ctx, a, H), gv(ctx, g, H);
+    std::vector<u8> mask(N);
+    for (u64 i = 0; i < N; ++i)
+        mask[i] = i % 5 == 1;
+    to_device(a.mask, mask, a.s);
+    to_device(g.mask, mask, g.s);
+    eager.reset(a.b);
+    graph.reset(g.b);
+    graph.reserve(N);  // the steps' scratch, sized before the capture
+    cuda::check(cudaStreamSynchronize(g.s), "sync");
+    graph.set_stream(capture);
+    g.s = capture;
+    cudaGraph_t cg = nullptr;
+    cuda::check(cudaStreamBeginCapture(capture, cudaStreamCaptureModeThreadLocal), "begin capture");
+    graph.reset(g.b, static_cast<const u8*>(g.mask.data()));
+    for (int t = 0; t < 4; ++t)
+        graph.step(g.b, g.out);
+    graph.clear_visited(g.b, static_cast<const u8*>(g.mask.data()));
+    graph.step(g.b, g.out);
+    cuda::check(cudaStreamEndCapture(capture, &cg), "end capture");
+    cudaGraphExec_t exec = nullptr;
+    cuda::check(cudaGraphInstantiate(&exec, cg, 0), "instantiate");
+    for (int replay = 0; replay < 3; ++replay)
+    {
+        eager.reset(a.b, static_cast<const u8*>(a.mask.data()));
+        for (int t = 0; t < 4; ++t)
+            eager.step(a.b, a.out);
+        eager.clear_visited(a.b, static_cast<const u8*>(a.mask.data()));
+        eager.step(a.b, a.out);
+        cuda::check(cudaGraphLaunch(exec, capture), "launch");
+        cuda::check(cudaStreamSynchronize(capture), "sync");
+        ASSERT_TRUE(g.snapshot() == a.snapshot()) << "replay " << replay;
+        ASSERT_EQ(to_host<u64>(gv.table, N * H, g.s), to_host<u64>(av.table, N * H, a.s)) << "replay " << replay;
+        ASSERT_EQ(to_host<i32>(gv.count, N, g.s), to_host<i32>(av.count, N, a.s)) << "replay " << replay;
+        ASSERT_EQ(to_host<u8>(gv.revisited, N, g.s), to_host<u8>(av.revisited, N, a.s)) << "replay " << replay;
+    }
+    cuda::check(cudaGraphExecDestroy(exec), "destroy");
+    cuda::check(cudaGraphDestroy(cg), "destroy");
+    EXPECT_NO_THROW(graph.check_errors());
+}
+}  // namespace
+
+TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
+{
+    SKIP_WITHOUT_GPU();
+    expect_captured_tables_equal_eager(32);
+    expect_captured_tables_equal_eager(cuda::envk::k_wide_visited);  // the restarts' own kernel
 }

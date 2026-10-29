@@ -37,6 +37,10 @@ namespace ann
 struct ArrayLike
 {
 };
+/// An ArrayLike, or a mymyr._typing.TensorView (python/src/rl_imports.hpp).
+struct ArrayOrView
+{
+};
 /// typing.Any: arrays of the requested framework (numpy.ndarray, torch.Tensor, jax.Array or mymyr.DLArray), so that the
 /// stubs need none of the frameworks, and the values of dicts that mix kinds.
 struct Any
@@ -234,6 +238,11 @@ template<>
 struct type_caster<mymyr::python::ann::ArrayLike>
 {
     static constexpr auto Name = const_name("mymyr._typing.SupportsDLPack");
+};
+template<>
+struct type_caster<mymyr::python::ann::ArrayOrView>
+{
+    static constexpr auto Name = const_name("mymyr._typing.SupportsDLPack | mymyr._typing.TensorView");
 };
 template<>
 struct type_caster<mymyr::python::ann::Any>

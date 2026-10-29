@@ -3,6 +3,8 @@
 //     rl/her.hpp) byte for byte on suite windows: novelty rewards and tables, prefix and schema masks, hindsight
 //     relabels (every strategy, goal subsets, eligible-atom masks, env ids, the states the steps started from);
 //   - the random policy's actions without a step (envk::launch_random_actions) equal rl::rng::successor_index;
+//   - visited-table lookups (cuda::launch_visited_mask) equal rl::visited_mask, and the visited flags of action
+//     targets (cuda::launch_target_visited) equal rl::target_visited and a direct search of the batch;
 //   - the count cache's recorded keys (lifted::CountCache regions): sokoban p14 records its deep sorted schemas, its
 //     device steps still equal the host's, and a state written without refresh() is reported by check_errors().
 
@@ -686,4 +688,230 @@ TEST(DeviceRlOps, MatchFirstRequiresStatus)
     rl::MatchBatch b;
     EXPECT_THROW(rl::match_first(t, b), std::invalid_argument);
     EXPECT_EQ(cuda::launch_match_first(t, b, nullptr), cudaErrorInvalidValue);
+}
+
+// rl::visited_mask on the device equals the host loop: tables with zero and the reserved key, wrap-around probing and
+// saturated rows; parents with and without a row map, padding, and entries outside the table (not visited).
+TEST(DeviceRlOps, VisitedMaskDeviceEqualsHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const cudaStream_t s = ctx->stream();
+    for (u32 H : {2u, 8u, 64u})
+    {
+        SCOPED_TRACE("H " + std::to_string(H));
+        const u64 N = 37;
+        std::vector<u64> table(N * H, 0);
+        std::vector<i32> count(N, 0);
+        std::vector<u64> keys;
+        for (u64 i = 0; i < N; ++i)
+        {
+            // row i: i % 5 inserts, more than the capacity holds in some rows; keys that start probing at the last slot
+            const u64 inserts = (i % 5) * H / 3 + (i % 7 == 0 ? H : 0);
+            for (u64 k = 0; k < inserts; ++k)
+            {
+                u64 key = hash::mix64(i * 1000 + k);
+                if (k == 0 && i % 3 == 0)
+                    key = 0;
+                else if (k == 1 && i % 4 == 0)
+                    key = rl::k_visited_zero;
+                else if (k % 3 == 2)
+                    key = (key & ~u64{H - 1}) | (H - 1);
+                (void)rl::visited_insert(table.data() + i * H, H, count[i], key);
+                keys.push_back(key);
+            }
+        }
+        // queries: inserted keys, new keys, zero and the reserved key, in every row
+        std::vector<u64> hashes;
+        std::vector<i32> parent;
+        for (u64 j = 0; j < 4 * keys.size() + 64; ++j)
+        {
+            const u64 pick = hash::mix64(j ^ 0xBEEF);
+            hashes.push_back(j % 4 == 0 ? hash::mix64(j) : j % 9 == 1 ? 0 : j % 9 == 2 ? rl::k_visited_zero
+                                                                         : keys[pick % keys.size()]);
+            parent.push_back(j % 11 == 3 ? -1 : static_cast<i32>(pick % N));
+        }
+        const u64 M = hashes.size();
+        std::vector<u8> host(M);
+        rl::visited_mask(table.data(), count.data(), H, hashes.data(), parent.data(), nullptr, M, host.data());
+        u64 hits = 0;
+        for (u8 h : host)
+            hits += h;
+        EXPECT_GT(hits, 0u);
+        EXPECT_LT(hits, M);
+        cuda::DeviceBuffer dt = upload(ctx, table, s), dc = upload(ctx, count, s), dh = upload(ctx, hashes, s),
+                           dp = upload(ctx, parent, s), dout(ctx, M, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(dh),
+                                              ptr<const i32>(dp), nullptr, N, M, ptr<u8>(dout), s),
+                    "visited_mask");
+        ASSERT_EQ(download<u8>(dout, M, s), host);
+        // a row map: parent p is row map[p] (a permutation with -1 entries)
+        std::vector<i32> map(N + 4);
+        for (u64 p = 0; p < map.size(); ++p)
+            map[p] = p % 6 == 5 ? -1 : static_cast<i32>((p * 7 + 3) % N);
+        std::vector<i32> mapped(M);
+        for (u64 j = 0; j < M; ++j)
+            mapped[j] = parent[j] < 0 ? -1 : static_cast<i32>((static_cast<u64>(parent[j]) * 5 + j) % map.size());
+        rl::visited_mask(table.data(), count.data(), H, hashes.data(), mapped.data(), map.data(), M, host.data());
+        cuda::DeviceBuffer dm = upload(ctx, map, s), dq = upload(ctx, mapped, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(dh),
+                                              ptr<const i32>(dq), ptr<const i32>(dm), map.size(), M, ptr<u8>(dout), s),
+                    "visited_mask (rows)");
+        ASSERT_EQ(download<u8>(dout, M, s), host);
+        // entries outside the table read as not visited: parents past the map or the rows, mapped rows past the table
+        std::vector<i32> outside{static_cast<i32>(N), -2, 0, 1};
+        std::vector<i32> far_map{static_cast<i32>(N), -5};
+        std::vector<u64> any(outside.size(), keys.front());
+        cuda::DeviceBuffer d_out = upload(ctx, outside, s), d_far = upload(ctx, far_map, s),
+                           d_any = upload(ctx, any, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(d_any),
+                                              ptr<const i32>(d_out), ptr<const i32>(d_far), far_map.size(), outside.size(),
+                                              ptr<u8>(dout), s),
+                    "visited_mask (outside)");
+        ASSERT_EQ(download<u8>(dout, outside.size(), s), std::vector<u8>(outside.size(), 0));
+    }
+}
+
+/// A synthetic encoded batch over G graphs with its expansion rows (some graphs without rows or entities, rows
+/// dropped with row_index), its targets, and visited tables: target_visited of the host, of the device and of a
+/// direct search agree for index type I.
+template<class I>
+void check_target_visited(const cuda::ContextPtr& ctx, bool drop, bool mapped, i64 live, i32 status)
+{
+    const cudaStream_t s = ctx->stream();
+    const u64 G = 23, H = 16, N = G + 3;
+    std::vector<I> entity_offsets{0};
+    std::vector<u8> role;
+    std::vector<I> ref;
+    std::vector<i32> row_offsets{0}, row_index;
+    std::vector<u64> succ_hash;
+    for (u64 g = 0; g < G; ++g)
+    {
+        const u64 successors = g % 5 == 4 ? 0 : 3 + g % 4;  // before the drop
+        for (u64 k = 0; k < successors; ++k)
+            if (!drop || k % 3 != 1)
+            {
+                row_index.push_back(static_cast<i32>(k));
+                succ_hash.push_back(hash::mix64(g * 100 + k));
+            }
+        row_offsets.push_back(static_cast<i32>(succ_hash.size()));
+        const u64 entities = g % 7 == 6 ? 0 : 4 + successors;
+        for (u64 e = 0; e < entities; ++e)
+        {
+            // objects, then one action entity per successor before the drop (a dropped one too: it has no row)
+            const bool action = e >= 4;
+            role.push_back(action ? 4 : static_cast<u8>(e % 3));
+            ref.push_back(static_cast<I>(action ? static_cast<i64>(e - 4) : static_cast<i64>(e)));
+        }
+        entity_offsets.push_back(static_cast<I>(role.size()));
+    }
+    for (u64 k = 0; k < 5; ++k)
+    {
+        row_offsets.push_back(row_offsets.back());  // a suite's rows past the batch's graphs
+        entity_offsets.push_back(0);                // a capacity batch's graphs past its live ones
+    }
+    const u64 M = succ_hash.size();
+    std::vector<i32> env_rows(G);
+    for (u64 g = 0; g < G; ++g)
+        env_rows[g] = g % 9 == 8 ? -1 : static_cast<i32>((g * 5 + 2) % N);
+    // tables: every other successor of a graph visited, in its table row
+    std::vector<u64> table(N * H, 0);
+    std::vector<i32> count(N, 0);
+    for (u64 g = 0; g < G; ++g)
+    {
+        const i64 row = mapped ? env_rows[g] : static_cast<i64>(g);
+        if (row < 0)
+            continue;
+        for (i32 r = row_offsets[g]; r < row_offsets[g + 1]; ++r)
+            if (r % 2 == 0)
+                (void)rl::visited_insert(table.data() + row * H, H, count[row], succ_hash[r]);
+    }
+    // targets: every entity once, then out-of-range ones
+    std::vector<I> target;
+    for (u64 e = 0; e < role.size(); ++e)
+        target.push_back(static_cast<I>((e * 7) % role.size()));
+    target.push_back(static_cast<I>(-1));
+    target.push_back(static_cast<I>(role.size()));
+    const u64 T = target.size();
+    std::vector<u8> want(T, 0);
+    for (u64 t = 0; t < T; ++t)
+    {
+        const i64 e = static_cast<i64>(target[t]);
+        if ((live >= 0 && static_cast<i64>(t) >= live) || status || e < 0 || e >= static_cast<i64>(role.size()) ||
+            role[e] != 4)
+            continue;
+        u64 g = 0;
+        while (!(static_cast<i64>(entity_offsets[g]) <= e && e < static_cast<i64>(entity_offsets[g + 1])))
+            ++g;
+        i64 at = -1;
+        for (i32 r = row_offsets[g]; r < row_offsets[g + 1]; ++r)
+            if ((drop ? row_index[r] : r - row_offsets[g]) == static_cast<i64>(ref[e]))
+                at = r;
+        const i64 row = mapped ? env_rows[g] : static_cast<i64>(g);
+        if (at < 0 || row < 0)
+            continue;
+        want[t] = rl::visited_contains(table.data() + row * H, H, count[row], succ_hash[at]) ? 1 : 0;
+    }
+    u64 hits = 0;
+    for (const u8 w : want)
+        hits += w;
+    if (live < 0 && !status)
+    {
+        EXPECT_GT(hits, 3u);
+    }
+    const std::vector<i64> live_v{live};
+    const std::vector<i32> status_v{status};
+    rl::TargetRows<I> x;
+    x.target = target.data();
+    x.live = live >= 0 ? live_v.data() : nullptr;
+    x.targets = T;
+    x.role = role.data();
+    x.ref = ref.data();
+    x.entities = role.size();
+    x.action_role = 4;
+    x.entity_offsets = entity_offsets.data();
+    x.graphs = G + 5;
+    x.row_offsets = row_offsets.data();
+    x.row_index = drop ? row_index.data() : nullptr;
+    x.succ_hash = succ_hash.data();
+    x.rows = M;
+    x.status = status_v.data();
+    x.env_rows = mapped ? env_rows.data() : nullptr;
+    std::vector<u8> host(T);
+    rl::target_visited(x, table.data(), count.data(), N, H, host.data());
+    EXPECT_EQ(host, want);
+    cuda::DeviceBuffer dt = upload(ctx, target, s), dl = upload(ctx, live_v, s), dr = upload(ctx, role, s),
+                       df = upload(ctx, ref, s), de = upload(ctx, entity_offsets, s), dro = upload(ctx, row_offsets, s),
+                       dri = upload(ctx, row_index, s), dh = upload(ctx, succ_hash, s), ds = upload(ctx, status_v, s),
+                       dm = upload(ctx, env_rows, s), dtab = upload(ctx, table, s), dc = upload(ctx, count, s),
+                       dout(ctx, T, s);
+    rl::TargetRows<I> d = x;
+    d.target = ptr<const I>(dt);
+    d.live = live >= 0 ? ptr<const i64>(dl) : nullptr;
+    d.role = ptr<const u8>(dr);
+    d.ref = ptr<const I>(df);
+    d.entity_offsets = ptr<const I>(de);
+    d.row_offsets = ptr<const i32>(dro);
+    d.row_index = drop ? ptr<const i32>(dri) : nullptr;
+    d.succ_hash = ptr<const u64>(dh);
+    d.status = ptr<const i32>(ds);
+    d.env_rows = mapped ? ptr<const i32>(dm) : nullptr;
+    cuda::check(cuda::launch_target_visited(d, ptr<const u64>(dtab), ptr<const i32>(dc), N, H, ptr<u8>(dout), s),
+                "target_visited");
+    EXPECT_EQ(download<u8>(dout, T, s), want);
+}
+
+TEST(DeviceRlOps, TargetVisitedDeviceEqualsHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const bool drop : {false, true})
+        for (const bool mapped : {false, true})
+        {
+            SCOPED_TRACE(std::string(drop ? "drop" : "all rows") + (mapped ? ", mapped rows" : ""));
+            check_target_visited<i32>(ctx, drop, mapped, -1, 0);
+            check_target_visited<i64>(ctx, drop, mapped, -1, 0);
+            check_target_visited<i32>(ctx, drop, mapped, 40, 0);
+            check_target_visited<i64>(ctx, drop, mapped, -1, 1);
+        }
 }

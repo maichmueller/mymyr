@@ -59,6 +59,51 @@ __global__ void k_her(rl::HerBatch b, rl::HerConfig c)
         rl::her_one(b, c, ti / b.envs, ti % b.envs, j);
     }
 }
+__global__ void k_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
+                               const i32* parent, const i32* rows, u64 parents, u64 size, u8* out)
+{
+    for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < size; j += u64{gridDim.x} * blockDim.x)
+    {
+        const i32 p = parent[j];
+        i64 row = -1;
+        if (p >= 0 && static_cast<u64>(p) < parents)
+            row = rows ? rows[p] : p;
+        out[j] = row >= 0 && static_cast<u64>(row) < table_rows &&
+                 rl::visited_contains(table + static_cast<u64>(row) * capacity, capacity, count[row], succ_hash[j]);
+    }
+}
+
+template<class I>
+__global__ void k_target_visited(rl::TargetRows<I> x, const u64* table, const i32* count, u64 table_rows, u32 capacity,
+                                 u8* out)
+{
+    // rl::live_graphs, by the whole block: the first decrease of the entity offsets
+    __shared__ unsigned long long first;
+    if (threadIdx.x == 0)
+        first = x.graphs + 1;
+    __syncthreads();
+    for (u64 g = 1 + threadIdx.x; g <= x.graphs; g += blockDim.x)
+        if (x.entity_offsets[g] < x.entity_offsets[g - 1])
+            atomicMin(&first, static_cast<unsigned long long>(g));
+    __syncthreads();
+    const u64 graphs = first - 1;
+    for (u64 t = u64{blockIdx.x} * blockDim.x + threadIdx.x; t < x.targets; t += u64{gridDim.x} * blockDim.x)
+        out[t] = rl::target_visited(x, table, count, table_rows, capacity, graphs, t) ? 1 : 0;
+}
+
+template<class I>
+cudaError_t target_visited_on(const rl::TargetRows<I>& x, const u64* table, const i32* count, u64 table_rows,
+                              u32 capacity, u8* out, cudaStream_t s)
+{
+    if (x.targets == 0)
+        return cudaSuccess;
+    if (!table || !count || !out || !x.target || !x.role || !x.ref || !x.entity_offsets || !x.row_offsets ||
+        !x.succ_hash || capacity < 2 || (capacity & (capacity - 1)))
+        return cudaErrorInvalidValue;
+    k_target_visited<<<grid_for(x.targets), k_block, 0, s>>>(x, table, count, table_rows, capacity, out);
+    return cudaGetLastError();
+}
+
 __global__ void k_generated(u32 value, u32* out) { *out = value; }
 
 __global__ void k_hash_rows(const u64* states, u64 rows, u64 stride, u32 words, u32 nn, u64* out)
@@ -218,6 +263,30 @@ cudaError_t launch_hash_rows(const u64* states, u64 rows, u64 stride, u32 words,
     if (lifted::wide_row(words)) k_hash_wide<<<grid_for(rows * 32), k_block, 0, s>>>(states, rows, stride, words, nn, out);
     else k_hash_rows<<<grid_for(rows), k_block, 0, s>>>(states, rows, stride, words, nn, out);
     return cudaGetLastError();
+}
+
+cudaError_t launch_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
+                                const i32* parent, const i32* rows, u64 parents, u64 size, u8* out, cudaStream_t s)
+{
+    if (!size)
+        return cudaSuccess;
+    if (!table || !count || !succ_hash || !parent || !out || capacity < 2 || (capacity & (capacity - 1)))
+        return cudaErrorInvalidValue;
+    k_visited_mask<<<grid_for(size), k_block, 0, s>>>(table, count, table_rows, capacity, succ_hash, parent, rows,
+                                                     parents, size, out);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_target_visited(const rl::TargetRows<i32>& x, const u64* table, const i32* count, u64 table_rows,
+                                  u32 capacity, u8* out, cudaStream_t s)
+{
+    return target_visited_on(x, table, count, table_rows, capacity, out, s);
+}
+
+cudaError_t launch_target_visited(const rl::TargetRows<i64>& x, const u64* table, const i32* count, u64 table_rows,
+                                  u32 capacity, u8* out, cudaStream_t s)
+{
+    return target_visited_on(x, table, count, table_rows, capacity, out, s);
 }
 
 cudaError_t launch_noop_counts(ExpansionRows src, u64 rows, u32* counts, cudaStream_t s, const u32* status)

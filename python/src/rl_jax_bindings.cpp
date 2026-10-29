@@ -160,9 +160,6 @@ public:
         e->cfg = cfg;
         e->path = path;
         e->H = H;
-        if (H && !device.is_none())
-            throw nb::value_error("mymyr: JAX track_visited on CUDA requires device visited tables; "
-                                  "use mymyr.rl.jax.Env(..., device='cpu')");
         e->NN = e->suite->numeric_words();
         {
             nb::gil_scoped_release release;
@@ -1203,8 +1200,6 @@ struct OnStream
 /// The device environment of a call: the fast path for the fast path's cache columns, the general path for none.
 cuda::DeviceEnv& device_env(Entry& e, Entry::Device& d, const StateBufs& s)
 {
-    if (e.H)
-        fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
     if (!s.counts.cols && !s.views.cols)
     {
         if (!d.general)
@@ -1250,6 +1245,9 @@ ffi::Error env_init_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffe
         if (visited_count->size_bytes())
             cuda::check(cudaMemsetAsync(visited_count->untyped_data(), 0, visited_count->size_bytes(), st),
                         "cudaMemsetAsync (visited_count)");
+        if (visited_status->size_bytes())
+            cuda::check(cudaMemsetAsync(visited_status->untyped_data(), 0, visited_status->size_bytes(), st),
+                        "cudaMemsetAsync (visited_status)");
         env.reset(b, nullptr, s.count.as<i32>());
     });
 }
@@ -1282,7 +1280,9 @@ ffi::Error env_reset_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool keep_go
         cuda::DeviceEnv& env = device_env(*e, *d, s);
         env.set_stream(st);
         rl::EnvBatch b = make_batch(*e, s, N, ids);
-        if (!clear_visited)
+        if (clear_visited)
+            env.clear_visited(b, m.as<u8>());
+        else
             env.reset(b, m.as<u8>(), s.count.as<i32>(), keep_goals);
     });
 }
@@ -1319,8 +1319,6 @@ ffi::Error env_step_cuda(cudaStream_t st, i32 ordinal, i64 handle, MYMYR_STEP_PA
                                      task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal,
                                      visited, visited_count, visited_status, reward,
                                      terminated, truncated, goal, invalid, schema, binding, final_states, revisited, OnStream{st});
-        if (e->H)
-            fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
         if (revisited->size_bytes())
@@ -1460,8 +1458,6 @@ ffi::Error env_initialize_cuda(i32 ordinal, const ffi::Dictionary& attrs, const 
         if (!handle.has_value())
             fail("an environment call without its 'handle' attribute");
         EntryPtr e = entry(handle.value());
-        if (e->H)
-            fail("JAX track_visited on CUDA requires device visited tables; use the CPU");
         const auto dims = first.dimensions();
         u64 rows = first.element_count();
         if (!vector && dims.size() > 0)

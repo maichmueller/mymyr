@@ -27,6 +27,7 @@ class Observation(NamedTuple):
     at_goal: Tensor  # bool: the state is a goal (a solved reset, a goal mask that holds): the next step absorbs it
     encoding: Any = None  # the encoding of the rows (see BatchedEnv's observation)
     actions: Any = None  # the expansion rows of the encoding's action entities (ActionRows, with obs_actions)
+    action_visited: Any = None  # bool [targets]: the target's successor was visited (track_visited, obs_actions)
 
 
 class StepResult(NamedTuple):
@@ -59,6 +60,7 @@ class StepResult(NamedTuple):
     final_obs: Any = None  # the encoding of the reached states before the autoreset (final=True)
     revisited: Optional[Tensor] = None  # bool [N]: reached state was visited before this step
     actions: Any = None  # the expansion rows of obs's action entities (ActionRows, with obs_actions)
+    action_visited: Any = None  # bool [targets] of obs: the target's successor was visited (track_visited, obs_actions)
 
 
 def _mark_static(t: Tensor) -> None:
@@ -137,13 +139,18 @@ class BatchedEnv:
     the labels); they need tables without numeric fluents, axioms and conditional effects whose schemas have at most 16
     parameters (``fast_unsupported(table, actions="label")`` says why not).
 
-    ``track_visited=H`` keeps CPU hash tables ``visited`` int64 [N, H], ``visited_count`` int32 [N], and
-    ``visited_status`` int32 [1] (sticky bit 0: overflow). H is a power of two in [2, 2^20]; True selects the next
-    power of two at least 2 * (max_steps + 1), requiring bounded episodes. Reset inserts the initial state;
+    ``track_visited=H`` keeps hash tables ``visited`` int64 [N, H], ``visited_count`` int32 [N], and
+    ``visited_status`` int32 [1] (sticky bit 0: overflow) on ``device``. H is a power of two in [2, 2^20]; True selects
+    the next power of two at least 2 * (max_steps + 1), requiring bounded episodes. Reset inserts the initial state;
     step reports ``revisited`` before inserting the reached state and before any autoreset clears its table.
     Equal state hashes share one entry. Above 3/4 occupancy new keys are skipped, so membership can miss revisits.
     ``clear_visited(mask)`` clears selected histories and inserts their current states; refresh keeps histories.
     The table and counts are borrowed read-only views; status can be acknowledged with ``visited_status.zero_()``.
+    A device keeps the tables with the same layout and values as the CPU, without host synchronization, and captures
+    them with the steps. With ``obs_actions`` and an encoder that lists targets, ``Observation.action_visited`` and
+    ``StepResult.action_visited`` say for each target of the encoding (bool [targets], aligned with
+    ``target_entity``; a tuple per domain batch over a suite) whether it is an action entity whose successor is in its
+    environment's table, the table after the step and its autoreset (a no-op successor is always visited).
 
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over a
     suite of several domains: one encoder per domain, in the suite's order). Every step then encodes the next
@@ -210,8 +217,6 @@ class BatchedEnv:
         if actions not in ("index", "label"):
             raise ValueError("mymyr: actions must be 'index' or 'label'")
         self.visited_capacity = _rl._visited_capacity(track_visited, max_steps)
-        if self.visited_capacity and self.device.type != "cpu":
-            raise ValueError("mymyr: visited tracking requires device='cpu'")
         self.actions = actions
         index = _device_index(self.device)
         if index is not None:
@@ -310,8 +315,15 @@ class BatchedEnv:
         return Observation(
             keep(self.states), keep(self.task_ids), keep(self.count),
             keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
-            keep(self.at_goal), encoding, actions,
+            keep(self.at_goal), encoding, actions, self._action_visited(encoding, actions),
         )
+
+    def _action_visited(self, encoding: Any, actions: Any) -> Any:
+        """The observation's ``action_visited`` against the current tables (None without visited tables, action rows
+        or targets)."""
+        if not self.visited_capacity or actions is None or not self._observer.has_targets:
+            return None
+        return self._observer.action_visited(encoding, actions, self.visited, self.visited_count)
 
     def _goal_masks(self) -> Optional[tuple[Tensor, Tensor]]:
         return (self.goal_pos, self.goal_neg) if self.goals else None
@@ -470,7 +482,7 @@ class BatchedEnv:
         final_obs = self._final_obs(before, r[7], observation.encoding, final)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
                           observation.goal_pos, observation.goal_neg, observation.at_goal, observation.encoding,
-                          final_obs, args[-1], observation.actions)
+                          final_obs, args[-1], observation.actions, observation.action_visited)
 
     def _step_args(self, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool,
                    revisited: Optional[Tensor] = None) -> tuple:
@@ -505,9 +517,9 @@ class BatchedEnv:
 
     def _step_into(
         self, out: StepResult, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any]:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
-        outputs); returns the step's ``obs``, ``final_obs`` and ``actions``."""
+        outputs); returns the step's ``obs``, ``final_obs``, ``actions`` and ``action_visited``."""
         before = self._before_step(final)
         _ops.step_impl(*self._step_args(action, next_task_ids, final, out.revisited), out=tuple(out)[:8])
         if self._autoreset:
@@ -520,7 +532,7 @@ class BatchedEnv:
             out.goal_pos.copy_(self.goal_pos)
             out.goal_neg.copy_(self.goal_neg)
         obs, actions = self._observe()
-        return obs, self._final_obs(before, out.final_states, obs, final), actions
+        return obs, self._final_obs(before, out.final_states, obs, final), actions, self._action_visited(obs, actions)
 
     def random_actions(self, max_actions: Optional[int] = None) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``
