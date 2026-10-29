@@ -53,6 +53,29 @@ def test_deep_mixed_horizons_all_modes_roots_layouts_and_widths(mixed, depth, la
     assert all(torch.count_nonzero(a).item() == 0 for a in batch._arrays.values())
 
 
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+@pytest.mark.parametrize("root", ["include", "exclude", "encode_only"])
+def test_nullary_arity0_horizons_in_exact_and_capacity_forms(mixed, layout, mode, root):
+    # a node's handempty is a tuple of its state entity (and the predicate's virtual node), and under 'exclude' the
+    # root's is a tuple without arguments: the schema then has relations without argument slots
+    table, views = mixed
+    goals = ("plain", "satisfied", *ADDED) if mode == "delta" else ("plain", "satisfied", "unsatisfied")
+    encoder = encoding.FlatHorizonEncoder(table, nullary="arity0", horizon_mode=mode, root_policy=root, layout=layout,
+                                          parent_relation=True, sibling_relation=True, cousin_relation=True,
+                                          predicate_virtual_nodes=root != "exclude", goal_derivations=goals)
+    assert (0 in list(encoder.relation_arities)) == (root == "exclude")
+    host = encoder.encode(views[2])
+    assert "auxiliary" not in [encoder.entity_role_names[r] for r in np.asarray(host.entity_role)]
+    view = upload(views[2], gpu())
+    same(host, encoder.encode(view))
+    same(host, encoder.encode(view, capacities=caps(host)))
+    padded = {key: 2 * value for key, value in caps(host).items()}
+    same(encoder.encode(views[2], capacities=padded), encoder.encode(view, capacities=padded))
+    batch = encoder.encode(view, capacities={**caps(host), "args": 0})
+    assert batch.sizes["capacity_overflow"] and not batch.sizes["invalid_input"]
+
+
 ADDED = ("added_satisfied", "added_unsatisfied")
 CORPUS_OPTIONS = [
     dict(horizon_mode="full"),
