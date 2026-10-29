@@ -222,8 +222,6 @@ def _visited_ptrs(info: tuple, states: Tensor, visited: Optional[Tensor], visite
     n, H = states.shape[0], visited.shape[1]
     if H < 2 or H > 1 << 20 or H & (H - 1):
         raise ValueError("mymyr: visited capacity must be a power of two in [2, 2^20]")
-    if info[0].type != "cpu":
-        raise ValueError("mymyr: visited tracking requires a CPU environment")
     if visited_count is None or visited_status is None:
         raise ValueError("mymyr: visited tracking needs table, count and status arrays")
     return [
@@ -373,19 +371,18 @@ def visited_mask_impl(table: Tensor, count: Tensor, succ_hash: Tensor, parent: T
                       rows: Optional[Tensor] = None) -> Tensor:
     """The eager body of ``mymyr::visited_mask`` (no dispatcher: an eager call of a custom op imports
     torch._dynamo)."""
-    if table.device.type != "cpu":
-        raise ValueError("mymyr: visited_mask requires CPU tensors")
-    from mymyr._core import _rl
+    from mymyr._core import _rl_ops
 
     out = torch.empty(succ_hash.shape, dtype=torch.bool, device=table.device)
-    _rl.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
+    _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out, stream=_stream(table))
     return out
 
 
 @_op("mymyr::visited_mask", mutates_args=())
 def visited_mask(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
                  rows: Optional[Tensor] = None) -> Tensor:
-    """Membership of successor hashes in host visited tables; -1 parent or mapped row denotes padding."""
+    """Membership of successor hashes in visited tables (CPU or CUDA tensors; CUDA on torch's current stream, without
+    a host synchronization); -1 parent or mapped row denotes padding."""
     return visited_mask_impl(table, count, succ_hash, parent, rows)
 
 
@@ -397,14 +394,18 @@ def _(table, count, succ_hash, parent, rows=None):
 def clear_visited_impl(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,
                        visited_count: Tensor, visited_status: Tensor, mask: Optional[Tensor]) -> None:
     """The eager body of ``mymyr::clear_visited``."""
-    lookup(env).clear_visited(states, task_ids, visited=visited, visited_count=visited_count,
-                              visited_status=visited_status, mask=mask)
+    e, info = _env_info(env)
+    n = states.shape[0]
+    p = _batch_ptrs(info, states, task_ids, None, None, None, None, None, None)[:2]
+    vp, H = _visited_ptrs(info, states, visited, visited_count, visited_status)
+    e._clear_visited_ptrs(n, p + vp + [_ptr(mask, "mask", torch.bool, (n,), info[0])], _stream(states), H)
 
 
 @_op("mymyr::clear_visited", mutates_args=("visited", "visited_count"))
 def clear_visited(env: int, states: Tensor, task_ids: Optional[Tensor], visited: Tensor,
                   visited_count: Tensor, visited_status: Tensor, mask: Optional[Tensor]) -> None:
-    """Clear masked host visited tables and insert the current states."""
+    """``mymyr::clear_visited``: the visited tables of the rows with ``mask[i]`` (None: all) hold their current states
+    only; the overflow status is kept."""
     clear_visited_impl(env, states, task_ids, visited, visited_count, visited_status, mask)
 
 

@@ -45,6 +45,11 @@
 // for its absorbing rows instead of testing the current states, and writes those of the reached states (the goal test
 // of its finish, or the flat expansion's goal flags) and of autoresets (the initial state's), so no step tests a state
 // on the host; refresh() recomputes them.
+// Visited tables (rl::EnvBatch::visited, rl/visited.hpp): every path keeps them as the host does, in device memory, one
+// thread per row (so the tables' layout is the host's, word for word): reset() clears a row's table and inserts the
+// initial state's key, a step's finish tests and inserts the reached state's (StepOutputs::revisited) unless the row's
+// episode is over without autoreset, and an autoreset restarts the table with the new initial state; overflow sets
+// the status on the device (no host read). The keys are State::hash of the rows (an instance's own numeric words).
 // The results do not depend on the path, the chunk sizes, the bucket launches or the launch configuration, and an
 // environment's trajectory does not depend on the batch it runs in (its RNG stream is its id, EnvBatch::first_env +
 // row, or env_ids[row]).
@@ -157,6 +162,10 @@ public:
     /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
     /// per-env masks on the host).
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
+    /// rl::HostEnv::clear_visited on device arrays: the visited tables of the rows with mask[i] != 0 (mask [rows] device,
+    /// null: all rows) hold their current states' keys only; the overflow status is kept. A task id outside the suite
+    /// hashes as instance 0 and is reported by check_errors(). Capturable on every path.
+    void clear_visited(rl::EnvBatch& b, const u8* mask = nullptr);
     void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]
     /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it,

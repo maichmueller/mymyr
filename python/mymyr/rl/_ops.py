@@ -75,7 +75,9 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
     (u)int64 [M] contains State hashes and ``parent`` int32 [M] the environment of each successor (-1: padding).
     With ``rows`` int32 [P], parent indexes this mapping to environment rows; mapped -1 is padding too.
     Equal hashes share an entry, including zero and the reserved key 0x9E3779B97F4A7C15. Overflow can cause
-    false negatives. NumPy, torch CPU and JAX arrays are supported (JAX hashes use uint32 low/high halves).
+    false negatives. NumPy, torch (CPU and CUDA: on torch's current stream, without a host synchronization) and JAX
+    arrays are supported (JAX hashes use uint32 low/high halves). A parent or mapped row outside the table raises
+    ValueError on the host; on a CUDA device it reads as not visited.
     """
     fw = _framework(table)
     if fw == "jax":
@@ -90,12 +92,8 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
         if torch.compiler.is_compiling():
             return torch.ops.mymyr.visited_mask(table, count, succ_hash, parent, rows)
         return torch_ops.visited_mask_impl(table, count, succ_hash, parent, rows)
-    if fw != "numpy":
-        raise ValueError("mymyr: visited_mask requires NumPy, torch CPU or JAX arrays")
-    from mymyr._core import _rl
-
     out = np.empty(succ_hash.shape, dtype=np.bool_)
-    _rl.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
+    _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
     return out
 
 

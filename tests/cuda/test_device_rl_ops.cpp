@@ -3,6 +3,7 @@
 //     rl/her.hpp) byte for byte on suite windows: novelty rewards and tables, prefix and schema masks, hindsight
 //     relabels (every strategy, goal subsets, eligible-atom masks, env ids, the states the steps started from);
 //   - the random policy's actions without a step (envk::launch_random_actions) equal rl::rng::successor_index;
+//   - visited-table lookups (cuda::launch_visited_mask) equal rl::visited_mask;
 //   - the count cache's recorded keys (lifted::CountCache regions): sokoban p14 records its deep sorted schemas, its
 //     device steps still equal the host's, and a state written without refresh() is reported by check_errors().
 
@@ -686,4 +687,85 @@ TEST(DeviceRlOps, MatchFirstRequiresStatus)
     rl::MatchBatch b;
     EXPECT_THROW(rl::match_first(t, b), std::invalid_argument);
     EXPECT_EQ(cuda::launch_match_first(t, b, nullptr), cudaErrorInvalidValue);
+}
+
+// rl::visited_mask on the device equals the host loop: tables with zero and the reserved key, wrap-around probing and
+// saturated rows; parents with and without a row map, padding, and entries outside the table (not visited).
+TEST(DeviceRlOps, VisitedMaskDeviceEqualsHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    const cudaStream_t s = ctx->stream();
+    for (u32 H : {2u, 8u, 64u})
+    {
+        SCOPED_TRACE("H " + std::to_string(H));
+        const u64 N = 37;
+        std::vector<u64> table(N * H, 0);
+        std::vector<i32> count(N, 0);
+        std::vector<u64> keys;
+        for (u64 i = 0; i < N; ++i)
+        {
+            // row i: i % 5 inserts, more than the capacity holds in some rows; keys that start probing at the last slot
+            const u64 inserts = (i % 5) * H / 3 + (i % 7 == 0 ? H : 0);
+            for (u64 k = 0; k < inserts; ++k)
+            {
+                u64 key = hash::mix64(i * 1000 + k);
+                if (k == 0 && i % 3 == 0)
+                    key = 0;
+                else if (k == 1 && i % 4 == 0)
+                    key = rl::k_visited_zero;
+                else if (k % 3 == 2)
+                    key = (key & ~u64{H - 1}) | (H - 1);
+                (void)rl::visited_insert(table.data() + i * H, H, count[i], key);
+                keys.push_back(key);
+            }
+        }
+        // queries: inserted keys, new keys, zero and the reserved key, in every row
+        std::vector<u64> hashes;
+        std::vector<i32> parent;
+        for (u64 j = 0; j < 4 * keys.size() + 64; ++j)
+        {
+            const u64 pick = hash::mix64(j ^ 0xBEEF);
+            hashes.push_back(j % 4 == 0 ? hash::mix64(j) : j % 9 == 1 ? 0 : j % 9 == 2 ? rl::k_visited_zero
+                                                                         : keys[pick % keys.size()]);
+            parent.push_back(j % 11 == 3 ? -1 : static_cast<i32>(pick % N));
+        }
+        const u64 M = hashes.size();
+        std::vector<u8> host(M);
+        rl::visited_mask(table.data(), count.data(), H, hashes.data(), parent.data(), nullptr, M, host.data());
+        u64 hits = 0;
+        for (u8 h : host)
+            hits += h;
+        EXPECT_GT(hits, 0u);
+        EXPECT_LT(hits, M);
+        cuda::DeviceBuffer dt = upload(ctx, table, s), dc = upload(ctx, count, s), dh = upload(ctx, hashes, s),
+                           dp = upload(ctx, parent, s), dout(ctx, M, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(dh),
+                                              ptr<const i32>(dp), nullptr, N, M, ptr<u8>(dout), s),
+                    "visited_mask");
+        ASSERT_EQ(download<u8>(dout, M, s), host);
+        // a row map: parent p is row map[p] (a permutation with -1 entries)
+        std::vector<i32> map(N + 4);
+        for (u64 p = 0; p < map.size(); ++p)
+            map[p] = p % 6 == 5 ? -1 : static_cast<i32>((p * 7 + 3) % N);
+        std::vector<i32> mapped(M);
+        for (u64 j = 0; j < M; ++j)
+            mapped[j] = parent[j] < 0 ? -1 : static_cast<i32>((static_cast<u64>(parent[j]) * 5 + j) % map.size());
+        rl::visited_mask(table.data(), count.data(), H, hashes.data(), mapped.data(), map.data(), M, host.data());
+        cuda::DeviceBuffer dm = upload(ctx, map, s), dq = upload(ctx, mapped, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(dh),
+                                              ptr<const i32>(dq), ptr<const i32>(dm), map.size(), M, ptr<u8>(dout), s),
+                    "visited_mask (rows)");
+        ASSERT_EQ(download<u8>(dout, M, s), host);
+        // entries outside the table read as not visited: parents past the map or the rows, mapped rows past the table
+        std::vector<i32> outside{static_cast<i32>(N), -2, 0, 1};
+        std::vector<i32> far_map{static_cast<i32>(N), -5};
+        std::vector<u64> any(outside.size(), keys.front());
+        cuda::DeviceBuffer d_out = upload(ctx, outside, s), d_far = upload(ctx, far_map, s), d_any = upload(ctx, any, s);
+        cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(d_any),
+                                              ptr<const i32>(d_out), ptr<const i32>(d_far), far_map.size(), outside.size(),
+                                              ptr<u8>(dout), s),
+                    "visited_mask (outside)");
+        ASSERT_EQ(download<u8>(dout, outside.size(), s), std::vector<u8>(outside.size(), 0));
+    }
 }

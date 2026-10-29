@@ -5,8 +5,7 @@
 
 #include "capture_scope.hpp"
 #include "mymyr/cuda/env.hpp"
-
-
+#include "mymyr/core/hash.hpp"
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/cuda/expand.hpp"
 #include "mymyr/cuda/generator.hpp"
@@ -192,6 +191,8 @@ struct DeviceEnv::Impl
     cudaStream_t home = nullptr;  // the context's stream: the env's buffers are allocated there and used on s
     // constants on the device: per instance the initial row, count, cache and view, and the goal masks
     DeviceBuffer init_row, init_counts, init_goal, init_cache, init_view, goal_pos, goal_neg;
+    // the visited tables' constants: per instance the initial state's key and the numeric words of its hashes
+    DeviceBuffer init_hash, inst_numeric;
     // the fast path's per-instance view words and goal words (envk::Instances)
     DeviceBuffer inst_view_words, goal_off, goal_word, goal_wpos, goal_wneg, goal_never;
     bool mask_goals = false;
@@ -235,7 +236,7 @@ struct DeviceEnv::Impl
                                      &iota,        &starts,      &seed,        &ctl,        &pick_schema, &pick_rank,
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
                                      &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2,
-                                     &label_views};
+                                     &label_views, &init_hash,   &inst_numeric};
         for (Part& P : parts)
             for (DeviceBuffer* b : {&P.region, &P.rank, &P.rank_table, &P.sets, &P.fc_of})
                 v.push_back(b);
@@ -592,7 +593,23 @@ struct DeviceEnv::Impl
         }
         in.goal_pos = static_cast<const u64*>(goal_pos.data());
         in.goal_neg = static_cast<const u64*>(goal_neg.data());
+        in.init_hash = static_cast<const u64*>(init_hash.data());
+        in.numeric_words = NN ? static_cast<const u32*>(inst_numeric.data()) : nullptr;
         return in;
+    }
+
+    /// The batch's visited tables as the env kernels read them (capacity 0: none).
+    [[nodiscard]] static envk::VisitedRows visited_of(const rl::EnvBatch& b) noexcept
+    {
+        envk::VisitedRows v;
+        if (!b.visited_capacity)
+            return v;
+        v.table = b.visited;
+        v.count = b.visited_count;
+        v.capacity = b.visited_capacity;
+        v.status = b.visited_status;
+        v.status_per_row = b.visited_status_per_row ? 1 : 0;
+        return v;
     }
 
     void goals(const rl::EnvBatch& batch, u8* goal)
@@ -957,13 +974,17 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     // suite's width (an instance's domain table may be narrower: zero words)
     {
         const rl::HostEnv host(I.suite, I.cfg);
-        std::vector<u64> rows(u64{I.I} * (I.W + I.NN), 0), gp(u64{I.I} * I.W, 0), gn(u64{I.I} * I.W, 0);
+        std::vector<u64> rows(u64{I.I} * (I.W + I.NN), 0), gp(u64{I.I} * I.W, 0), gn(u64{I.I} * I.W, 0), ih(I.I);
+        std::vector<u32> inn(I.I);
         std::vector<u8> ig(I.I);
         for (u32 i = 0; i < I.I; ++i)
         {
             const rl::TaskTable::Instance& in = I.suite->instance(i);
             const u32 w = I.suite->table_of(i).words();
-            I.suite->initial_row(i, rows.data() + u64{i} * (I.W + I.NN), I.W, I.NN);
+            u64* row = rows.data() + u64{i} * (I.W + I.NN);
+            I.suite->initial_row(i, row, I.W, I.NN);
+            inn[i] = I.suite->task(i)->numeric_words();
+            ih[i] = hash::state(row, I.W, row + I.W, inn[i]);  // State::hash of the initial state
             std::copy_n(in.goal_pos.begin(), w, gp.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
             std::copy_n(in.goal_neg.begin(), w, gn.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
             I.init_count.push_back(host.initial_count(i));
@@ -974,6 +995,8 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
         I.init_goal = upload(I.ctx, ig, I.s);
         I.goal_pos = upload(I.ctx, gp, I.s);
         I.goal_neg = upload(I.ctx, gn, I.s);
+        I.init_hash = upload(I.ctx, ih, I.s);
+        I.inst_numeric = upload(I.ctx, inn, I.s);
         check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");  // the pageable sources
     }
     if (!I.fast)
@@ -1156,6 +1179,7 @@ void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goa
     r.keep_goals = keep_goals ? 1 : 0;
     r.at_goal = b.at_goal;
     r.error = I.dctl() + k_err;
+    r.visited = Impl::visited_of(b);
     check(envk::launch_reset(r, I.s), "launch_reset");
     I.order_rows(b.task_ids, b.rows, b.counts);
 }
@@ -1266,6 +1290,8 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     f.schema = out.schema;
     f.binding = out.binding;
     f.label_width = out.label_width;
+    f.visited = Impl::visited_of(b);
+    f.revisited = out.revisited;
     if (I.fast)
     {
         // 1. choose: (schema, rank) from the cached counts (and, over several instances, check the launch order)
@@ -1454,8 +1480,35 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Labels lab
     f.schema = out.schema;
     f.binding = out.binding;
     f.label_width = out.label_width;
+    f.visited = Impl::visited_of(b);
+    f.revisited = out.revisited;
     f.cache_counts = b.counts;
     check(envk::launch_finish(rl::dev::TaskView{}, f, s), "launch_finish");
+}
+
+void DeviceEnv::clear_visited(rl::EnvBatch& b, const u8* mask)
+{
+    Impl& I = *m;
+    rl::check_env(*I.suite, b, nullptr);
+    if (b.words != I.W)
+        throw std::invalid_argument("mymyr: device env: state rows of " + std::to_string(b.words) + " words; the device "
+                                    "env takes exactly " + std::to_string(I.W));
+    if (!b.visited_capacity || !b.rows)
+        return;
+    DeviceGuard g(I.ctx->device());
+    I.begin_call();
+    envk::ClearVisited c;
+    c.rows = b.rows;
+    c.words = I.W;
+    c.row_words = I.W + I.NN;
+    c.states = b.states;
+    c.mask = mask;
+    c.inst = b.task_ids;
+    c.instances = I.I;
+    c.numeric_words = I.NN ? static_cast<const u32*>(I.inst_numeric.data()) : nullptr;
+    c.visited = Impl::visited_of(b);
+    c.error = I.dctl() + k_err;
+    check(envk::launch_clear_visited(c, I.s), "launch_clear_visited");
 }
 
 void DeviceEnv::check_errors()

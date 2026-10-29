@@ -90,6 +90,17 @@ struct LabelStep
 };
 cudaError_t launch_label_step(const LabelStep& p, cudaStream_t s);
 
+/// The per-environment visited tables of rl::EnvBatch (rl/visited.hpp): table [rows, capacity] of keys, count [rows],
+/// and the sticky overflow status (bit 0), one word, or one per row with status_per_row. capacity 0: no tracking.
+struct VisitedRows
+{
+    u64* table = nullptr;
+    i32* count = nullptr;
+    u32 capacity = 0;
+    i32* status = nullptr;
+    u32 status_per_row = 0;
+};
+
 /// The flat path's move: states[i] = succ[pick_row[i]] (in place), the goal flag and the label of the successor row.
 struct Move
 {
@@ -137,11 +148,17 @@ struct Instances
     const u64* goal_wpos = nullptr;
     const u64* goal_wneg = nullptr;
     const u8* goal_never = nullptr;  // [I]
+    // with visited tables: per instance the key of its initial state, and the numeric words its state hashes cover
+    // (the instance's own; null: none)
+    const u64* init_hash = nullptr;      // [I]
+    const u32* numeric_words = nullptr;  // [I]
 };
 
 /// The end of a step: goal test (or given flags, or per-env goal masks), dead ends, rewards, termination, truncation,
-/// step counters, final states, the labels of non-moves, counts, and the autoreset (the initial row of the row's
-/// instance, or of next_task_ids[i], and, on the fast path, its cache).
+/// step counters, final states, the labels of non-moves, counts, the visited tables (the reached state's membership
+/// and insert, unless the row's episode is over without autoreset), and the autoreset (the initial row of the row's
+/// instance, or of next_task_ids[i], and, on the fast path, its cache; its visited table then holds the initial state
+/// only).
 struct Finish
 {
     u64 rows = 0;
@@ -185,13 +202,15 @@ struct Finish
     // on the fast path, the rows' cache (an autoreset copies its instance's initial cache)
     u32* cache_counts = nullptr;
     u64* views = nullptr;
+    VisitedRows visited;          // capacity 0: no tracking (revisited, if given, is written 0)
+    u8* revisited = nullptr;      // [rows] out: the reached state was in the row's table before the step
 };
 cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStream_t s);
 cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, cudaStream_t s);
 
 /// Resets rows with mask[i] != 0 (all without a mask) to the initial state of their instance: the initial row, step 0,
-/// the initial count and cache, (unless keep_goals) the instance's goal masks, and whether the row is at a goal (its
-/// goal masks' test with per-env goals, else the instance's init_goal).
+/// the initial count and cache, (unless keep_goals) the instance's goal masks, whether the row is at a goal (its
+/// goal masks' test with per-env goals, else the instance's init_goal) and a visited table holding the initial state.
 struct Reset
 {
     u64 rows = 0;
@@ -210,8 +229,27 @@ struct Reset
     u32 keep_goals = 0;
     u8* at_goal = nullptr;  // [rows] (null: not written)
     u32* error = nullptr;  // value 4: a task id outside the table (the row is reset into instance 0)
+    VisitedRows visited;
 };
 cudaError_t launch_reset(const Reset& p, cudaStream_t s);
+
+/// rl::HostEnv::clear_visited: the visited tables of the rows with mask[i] != 0 (all without a mask) are cleared and
+/// hold the row's current state only (its key: the row's atom words and its instance's numeric words); the overflow
+/// status is kept. A task id outside the instances hashes as instance 0 and sets error value 4.
+struct ClearVisited
+{
+    u64 rows = 0;
+    u32 words = 0;
+    u32 row_words = 0;
+    const u64* states = nullptr;
+    const u8* mask = nullptr;
+    const i32* inst = nullptr;           // [rows] task ids (null: instance 0)
+    u32 instances = 1;
+    const u32* numeric_words = nullptr;  // [instances] (null: none)
+    VisitedRows visited;
+    u32* error = nullptr;
+};
+cudaError_t launch_clear_visited(const ClearVisited& p, cudaStream_t s);
 
 /// count[i] = the sum of counts[i, :num_schemas] (the fast path's cache, rows `stride` words apart; 0: num_schemas), or
 /// offsets[i + 1] - offsets[i] when counts is null.

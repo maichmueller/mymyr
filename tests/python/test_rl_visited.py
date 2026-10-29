@@ -316,3 +316,367 @@ def test_numeric_successor_hashes_find_visited_states():
     np.testing.assert_array_equal(got, expected)
     np.testing.assert_array_equal(exp.succ_hash, mymyr.hash_rows(np.asarray(exp.succ), numeric_words=exp.numeric_words))
     env.close()
+
+
+# ------------------------------------------------------------------------------------------------ device tables
+
+
+def gpu_device():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
+    try:
+        import mymyr.cuda as mc
+    except ImportError:
+        pytest.skip("mymyr was built without the CUDA backend")
+    if not mc.available():
+        pytest.skip("mymyr sees no CUDA device")
+    return torch.device("cuda", 0)
+
+
+def ipc_table(domain, problems=("p01",)):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    base = ROOT / "tests/data/ipc" / f"{domain}-ipc" / "train"
+    return rl.TaskTable([mymyr.Task.from_pddl(base / "domain.pddl", base / f"{p}.pddl", atoms="dense")
+                         for p in problems])
+
+
+def device_table(kind):
+    """single: the single-instance kernels; multi: the multi-instance kernels; suite: a suite of two domains on the
+    fast path; general: a suite with numeric fluents (the general path)."""
+    if kind == "single":
+        return rl.TaskTable([task_of("gripper__prob05")])
+    if kind == "multi":
+        return ipc_table("blocksworld", ("p01", "p02", "p03"))
+    if kind == "suite":
+        return rl.TaskSuite([ipc_table("rovers"), ipc_table("floortile", ("p01", "p02"))])
+    return rl.TaskSuite.group([task_of("gripper__prob05"), task_of("numeric")])
+
+
+def assert_same(cpu, gpu, *names):
+    for name in names:
+        left, right = getattr(cpu, name), getattr(gpu, name)
+        assert torch_equal(left, right.cpu()), name
+
+
+def torch_equal(a, b):
+    import torch
+
+    return a.shape == b.shape and bool(torch.equal(a, b))
+
+
+@pytest.mark.parametrize("capacity", [True, 4])
+@pytest.mark.parametrize("autoreset", [True, False])
+@pytest.mark.parametrize("kind", ["single", "multi", "suite", "general"])
+def test_device_rollouts_equal_host(kind, autoreset, capacity):
+    """CPU and device BatchedEnvs keep the same tables word for word: steps of the random policy and invalid actions,
+    autoresets or masked resets, overflow (H = 4), clear_visited; device visited_mask equals the host's."""
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    table = device_table(kind)
+    n = 24
+    cfg = dict(seed=71, autoreset=autoreset, max_steps=9, track_visited=capacity, sampler=None)
+    cpu, gpu = BatchedEnv(table, n, **cfg), BatchedEnv(table, n, device=device, **cfg)
+    assert gpu.capturable == (kind != "general")
+    ids = torch.arange(n, dtype=torch.int32) % cpu.num_instances
+    cpu.reset(task_ids=ids)
+    gpu.reset(task_ids=ids.to(device))
+    tables = ("states", "visited", "visited_count", "visited_status")
+    assert_same(cpu, gpu, *tables)
+    revisits = 0
+    for step in range(30):
+        action = torch.full((n,), -1, dtype=torch.int64) if step % 4 == 3 else None
+        a = cpu.step(action)
+        b = gpu.step(None if action is None else action.to(device))
+        for name in ("states", "reward", "terminated", "truncated", "goal", "invalid", "count", "revisited"):
+            assert torch_equal(getattr(a, name), getattr(b, name).cpu()), (step, name)
+        assert_same(cpu, gpu, *tables)
+        revisits += int(a.revisited.sum())
+        if not autoreset and step % 2 == 1:
+            done = a.terminated | a.truncated
+            cpu.reset(done)
+            gpu.reset(done.to(device))
+            assert_same(cpu, gpu, *tables)
+        if step == 12:
+            mask = torch.arange(n) % 3 == 0
+            cpu.clear_visited(mask)
+            gpu.clear_visited(mask.to(device))
+            assert_same(cpu, gpu, *tables)
+        if step % 5 == 0:
+            exp = rl.expand(table, cpu.states, cpu._ids(), framework="torch", hashes=True)
+            want = rl.visited_mask(cpu.visited, cpu.visited_count, exp.succ_hash, exp.parent)
+            got = rl.visited_mask(gpu.visited, gpu.visited_count, exp.succ_hash.to(device), exp.parent.to(device))
+            assert torch_equal(want, got.cpu())
+    assert revisits
+    assert int(cpu.visited_status) == (1 if capacity == 4 else 0)
+    gpu.check_errors()
+    cpu.close()
+    gpu.close()
+
+
+def test_device_label_steps_equal_index_steps():
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    task = task_of("gripper__prob05")
+    opts = dict(track_visited=64, autoreset=True, max_steps=7, seed=12, device=device)
+    indexed = BatchedEnv(task, 8, **opts)
+    labelled = BatchedEnv(task, 8, actions="label", **opts)
+    for step in range(25):
+        exp = rl.expand(task, indexed.states, framework="torch", stream=torch.cuda.current_stream())
+        action = indexed.random_actions()
+        take = exp.offsets[:-1].to(torch.int64) + action
+        schema, binding = exp.schema[take].clone(), exp.binding[take].clone()
+        if step % 5 == 0:
+            schema.fill_(-1)
+            action.fill_(-1)
+        a, b = indexed.step(action), labelled.step((schema, binding))
+        assert torch.equal(a.revisited, b.revisited)
+        assert torch.equal(indexed.visited, labelled.visited)
+        assert torch.equal(indexed.visited_count, labelled.visited_count)
+    indexed.close()
+    labelled.close()
+
+
+def target_reference(table, batch, states, task_ids, history, env_rows=None):
+    """action_visited of a batch from sets of States: per target, whether its entity is an action whose successor (in
+    the full canonical expansion of its graph's state) is in the history of the graph's environment."""
+    torch = pytest.importorskip("torch")
+    columns = batch.as_dict("numpy")
+    sizes = batch.sizes
+    targets = np.asarray(columns["target_entity"])
+    live = len(targets) if sizes is None else int(sizes["targets"])
+    role, ref = np.asarray(columns["entity_role"]), np.asarray(columns["entity_ref"])
+    offsets = np.maximum.accumulate(np.asarray(columns["entity_offsets"]))
+    host_states = states.cpu().numpy().view(np.uint64)
+    ids = task_ids.cpu().numpy()
+    multi = isinstance(table, rl.TaskSuite) or table.num_instances > 1
+    full = rl.expand(table, host_states, ids if multi else None)
+    successors = rl.decode(table, np.asarray(full.succ), ids[np.asarray(full.parent)]) if multi else \
+        rl.decode(table, np.asarray(full.succ))
+    want = np.zeros(len(targets), bool)
+    for t in range(live):
+        e = int(targets[t])
+        if role[e] != 4:
+            continue
+        g = int(np.searchsorted(offsets, e, side="right") - 1)
+        row = g if env_rows is None else int(env_rows[g])
+        want[t] = successors[int(full.offsets[row]) + int(ref[e])] in history[row]
+    return torch.as_tensor(want)
+
+
+def noop_ipc_table():
+    return ipc_table("floortile")
+
+
+@pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_action_visited_matches_state_sets(dev, capacity, drop):
+    """Observation.action_visited / StepResult.action_visited against sets of States per episode, aligned with the
+    targets (goal targets are not actions: False), with and without dropped no-op actions."""
+    torch = pytest.importorskip("torch")
+    from mymyr import encoding
+    from mymyr.rl.torch import BatchedEnv
+
+    device = torch.device("cpu") if dev == "cpu" else gpu_device()
+    table = noop_ipc_table()
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action", "goal"))
+    caps = dict(entities=1 << 12, args=1 << 14, targets=1 << 12) if capacity else None
+    n = 6
+    env = BatchedEnv(table, n, device=device, seed=5, max_steps=6, dead_end="none", track_visited=True,
+                     observation=encoder, obs_actions=True, obs_drop_noops=drop, obs_capacities=caps)
+    observation = env.observation()
+    history = [{s} for s in rl.decode(table, observation.states.cpu().numpy().view(np.uint64))]
+    got = observation.action_visited
+    assert got.dtype == torch.bool and got.device == device
+    assert torch.equal(got.cpu(), target_reference(table, observation.encoding, observation.states,
+                                                   observation.task_ids, history))
+    hits = int(got.sum())
+    for _ in range(12):
+        step = env.step()
+        reached = rl.decode(table, step.final_states.cpu().numpy().view(np.uint64))
+        after = rl.decode(table, step.states.cpu().numpy().view(np.uint64))
+        done = (step.terminated | step.truncated).cpu().numpy()
+        for i in range(n):
+            history[i].add(reached[i])
+            if done[i]:
+                history[i] = {after[i]}
+        want = target_reference(table, step.obs, step.states, step.task_ids, history)
+        assert torch.equal(step.action_visited.cpu(), want)
+        hits += int(want.sum())
+    assert hits
+    env.close()
+    # without targets, visited tables or action rows there is no action_visited
+    plain = encoding.FlatRelationEncoder(table)
+    for opts in (dict(observation=plain, obs_actions=True, track_visited=8),
+                 dict(observation=encoder, track_visited=8), dict(observation=encoder, obs_actions=True)):
+        other = BatchedEnv(table, 2, device=device, **opts)
+        assert other.observation().action_visited is None and other.step().action_visited is None
+        other.close()
+
+
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_suite_action_visited_per_domain_batch(dev):
+    """Over a suite of two domains action_visited has one mask per domain batch; graph g of domain d's batch is the
+    environment row of domain d with index g."""
+    torch = pytest.importorskip("torch")
+    from mymyr import encoding
+    from mymyr.rl.torch import BatchedEnv
+
+    device = torch.device("cpu") if dev == "cpu" else gpu_device()
+    suite = rl.TaskSuite([ipc_table("rovers"), ipc_table("floortile")])
+    encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+    n = 10
+    caps = dict(entities=1 << 13, args=1 << 15, targets=1 << 13) if dev == "cuda" else None
+    env = BatchedEnv(suite, n, device=device, seed=4, max_steps=5, dead_end="none", track_visited=True,
+                     observation=encoder, obs_actions=True, obs_capacities=caps)
+    history = [{s} for s in rl.decode(suite, env.states.cpu().numpy().view(np.uint64), env.task_ids.cpu().numpy())]
+    hits = 0
+    for _ in range(8):
+        before = env.task_ids.cpu().numpy()
+        step = env.step()
+        reached = rl.decode(suite, step.final_states.cpu().numpy().view(np.uint64), before)
+        after = rl.decode(suite, step.states.cpu().numpy().view(np.uint64), step.task_ids.cpu().numpy())
+        done = (step.terminated | step.truncated).cpu().numpy()
+        for i in range(n):
+            history[i].add(reached[i])
+            if done[i]:
+                history[i] = {after[i]}
+        obs = step.obs
+        assert len(step.action_visited) == len(obs.batches) == 2
+        domain, index = obs.domain.cpu().numpy(), obs.index.cpu().numpy()
+        for d, (batch, got) in enumerate(zip(obs.batches, step.action_visited)):
+            rows = np.flatnonzero(domain == d)
+            env_rows = np.full(n, -1)
+            env_rows[index[rows]] = rows
+            want = target_reference(suite, batch, step.states, step.task_ids, history, env_rows)
+            assert torch.equal(got.cpu(), want)
+            hits += int(want.sum())
+    assert hits
+    env.close()
+
+
+def test_captured_rollout_replays_tables_and_action_visited():
+    """A captured rollout's replays equal eager steps of a twin environment (tables, revisited, action_visited), and
+    nothing changes between replays."""
+    torch = pytest.importorskip("torch")
+    from mymyr import encoding
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    table = noop_ipc_table()
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+    opts = dict(device=device, seed=3, max_steps=5, track_visited=True, observation=encoder, obs_actions=True,
+                obs_drop_noops=True, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    eager, graph = BatchedEnv(table, 8, **opts), BatchedEnv(table, 8, **opts)
+    rollout = graph.capture(3, final=True)
+    names = ("states", "visited", "visited_count", "visited_status")
+    hits = 0
+    for _ in range(3):
+        out = rollout.replay()
+        for k in range(3):
+            step = eager.step(final=True)
+            assert torch.equal(out.revisited[k], step.revisited)
+            assert torch.equal(out.action_visited[k], step.action_visited)
+            hits += int(step.action_visited.sum())
+        for name in names:
+            assert torch.equal(getattr(graph, name), getattr(eager, name)), name
+        kept = [getattr(graph, name).clone() for name in names] + [x.clone() for x in out.action_visited]
+        torch.cuda.synchronize(device)
+        now = [getattr(graph, name) for name in names] + list(out.action_visited)
+        assert all(torch.equal(a, b) for a, b in zip(kept, now))
+    assert hits
+    eager.close()
+    graph.close()
+
+
+@pytest.mark.needs_gil
+def test_compiled_device_steps_keep_tables():
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    task = task_of("gripper__prob05")
+    opts = dict(track_visited=32, max_steps=5, seed=3, device=device)
+    eager, compiled = BatchedEnv(task, 8, **opts), BatchedEnv(task, 8, **opts)
+
+    def loop(env):
+        env.reset()
+        first = env.step()
+        second = env.step(torch.full((8,), -1, dtype=torch.int64, device=device))
+        env.clear_visited(torch.arange(8, device=device) % 2 == 0)
+        third = env.step()
+        return first.revisited, second.revisited, third.revisited, env.visited_count.clone()
+
+    run = torch.compile(loop, fullgraph=True, backend="aot_eager")
+    for _ in range(2):
+        a, b = loop(eager), run(compiled)
+        for x, y in zip(a, b):
+            assert torch.equal(x, y)
+        for name in ("states", "visited", "visited_count", "visited_status"):
+            assert torch.equal(getattr(eager, name), getattr(compiled, name)), name
+    hashes = torch.from_numpy(state_hashes([task.initial_state] * 8, [task] * 8).view(np.int64)).to(device)
+    parents = torch.arange(8, dtype=torch.int32, device=device)
+    mask = torch.compile(rl.visited_mask, fullgraph=True, backend="aot_eager")
+    want = rl.visited_mask(eager.visited.cpu(), eager.visited_count.cpu(), hashes.cpu(), parents.cpu())
+    assert torch.equal(mask(eager.visited, eager.visited_count, hashes, parents).cpu(), want)
+    # the ops' fake implementations
+    ops = torch.ops.mymyr
+    rows = torch.tensor([7, -1, 0, 3], dtype=torch.int32, device=device)
+    cases = [
+        (ops.visited_mask.default, (eager.visited, eager.visited_count, hashes, parents, None)),
+        (ops.visited_mask.default, (eager.visited, eager.visited_count, hashes, parents % 4, rows)),
+        (ops.clear_visited.default, (eager.handle, eager.states, None, eager.visited, eager.visited_count,
+                                     eager.visited_status, parents % 3 == 0)),
+        (ops.step.default, (eager.handle, eager.states, None, eager.steps, eager.draws, eager.counts, eager.views,
+                            eager.count, eager.at_goal, None, None, None, None, 0, True, None, None, eager.visited,
+                            eager.visited_count, eager.visited_status, torch.zeros(8, dtype=torch.bool, device=device))),
+        (ops.reset.default, (eager.handle, eager.states, None, eager.steps, eager.counts, eager.views, None, None,
+                             eager.count, eager.at_goal, parents % 2 == 0, False, eager.visited, eager.visited_count,
+                             eager.visited_status)),
+    ]
+    for op, args in cases:
+        result = torch.library.opcheck(op, args)
+        assert set(result.values()) == {"SUCCESS"}, (op, result)
+    eager.close()
+    compiled.close()
+
+
+@pytest.mark.needs_gil
+def test_compiled_observations_carry_action_visited():
+    torch = pytest.importorskip("torch")
+    from mymyr import encoding
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    table = noop_ipc_table()
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action", "goal"))
+    opts = dict(device=device, seed=8, max_steps=4, track_visited=True, observation=encoder, obs_actions=True,
+                obs_drop_noops=True, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12))
+    eager, compiled = BatchedEnv(table, 6, **opts), BatchedEnv(table, 6, **opts)
+    run = torch.compile(lambda: compiled.step(final=False), fullgraph=True, backend="aot_eager")
+    for _ in range(4):
+        a, b = eager.step(final=False), run()
+        assert torch.equal(a.revisited, b.revisited)
+        assert torch.equal(a.action_visited, b.action_visited)
+        assert torch.equal(eager.visited, compiled.visited)
+    eager.close()
+    compiled.close()
+
+
+def test_device_mask_outside_rows_reads_unvisited():
+    torch = pytest.importorskip("torch")
+    device = gpu_device()
+    table = torch.zeros((2, 8), dtype=torch.int64, device=device)
+    count = torch.zeros(2, dtype=torch.int32, device=device)
+    hashes = torch.tensor([123, 5, 6], dtype=torch.int64, device=device)
+    got = rl.visited_mask(table, count, hashes, torch.tensor([2, -1, 0], dtype=torch.int32, device=device))
+    assert not got.any()
+    got = rl.visited_mask(table, count, hashes, torch.tensor([0, 0, 1], dtype=torch.int32, device=device),
+                          rows=torch.tensor([2, -3], dtype=torch.int32, device=device))
+    assert not got.any()

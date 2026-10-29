@@ -4,7 +4,9 @@
 // Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/env_kernels.hpp"
+#include "mymyr/core/hash.hpp"
 #include "mymyr/rl/rng.hpp"
+#include "mymyr/rl/visited.hpp"
 
 
 namespace mymyr::cuda::envk
@@ -165,6 +167,31 @@ __device__ __forceinline__ bool masks_hold(const u64* row, const u64* goal_pos, 
 /// The instance of row i (inst null: 0).
 __device__ __forceinline__ u32 instance_of(const Instances& in, u64 i) { return in.inst ? static_cast<u32>(in.inst[i]) : 0u; }
 
+/// The visited-table key of a row of instance k: State::hash of its atom words and the instance's numeric words.
+__device__ __forceinline__ u64 row_key(const u64* row, u32 words, const u32* numeric_words, u32 k)
+{
+    const u32 nn = numeric_words ? numeric_words[k] : 0u;
+    return hash::state(row, words, row + words, nn);
+}
+
+/// Row i's visited table holds `key` only (rl::visited_clear, then rl::visited_insert).
+__device__ __forceinline__ void visited_restart(const VisitedRows& v, u64 i, u64 key)
+{
+    u64* table = v.table + i * v.capacity;
+    rl::visited_clear(table, v.capacity, v.count[i]);
+    (void)rl::visited_insert(table, v.capacity, v.count[i], key);
+}
+
+/// Inserts `key` into row i's visited table; returns whether it was there. A saturated count (overflow) sets bit 0 of
+/// the row's status word.
+__device__ __forceinline__ bool visited_step(const VisitedRows& v, u64 i, u64 key)
+{
+    const bool seen = rl::visited_insert(v.table + i * v.capacity, v.capacity, v.count[i], key);
+    if (v.count[i] == static_cast<i32>(v.capacity))
+        atomicOr(v.status + (v.status_per_row ? i : 0), 1);
+    return seen;
+}
+
 __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p, u64 row_id, u32 instance)
 {
     const u64* row = p.states + row_id * p.row_words;
@@ -291,6 +318,12 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 for (u32 j = 0; j < p.label_width; ++j)
                     p.binding[i * p.label_width + j] = -1;
         }
+        bool revisited = false;
+        const bool over = !p.autoreset && (absorbed || (p.max_steps && p.steps && p.steps[i] >= static_cast<i32>(p.max_steps)));
+        if (p.visited.capacity && !over)
+            revisited = visited_step(p.visited, i, row_key(p.states + i * p.row_words, p.words, p.in.numeric_words, k));
+        if (p.revisited)
+            p.revisited[i] = revisited ? 1 : 0;
         if (p.autoreset && (term || trunc))
         {
             u32 next = k;
@@ -302,6 +335,8 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
             }
             const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
                                      stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);
+            if (p.visited.capacity)
+                visited_restart(p.visited, i, p.in.init_hash[next]);
             if (p.steps)
                 p.steps[i] = 0;
             if (p.count)
@@ -340,6 +375,13 @@ __global__ void k_reset(Reset p)
         }
         const u32 n0 = reset_row(p.in, k, i, p.states, p.words, p.row_words, p.cache_counts, p.count_stride, p.views,
                                  p.goal_pos, p.goal_neg, p.keep_goals != 0);
+        if (p.visited.capacity)
+        {
+            // the table was zeroed by k_visited_zero
+            p.visited.count[i] = 0;
+            (void)rl::visited_insert(p.visited.table + i * p.visited.capacity, p.visited.capacity, p.visited.count[i],
+                                     p.in.init_hash[k]);
+        }
         if (p.steps)
             p.steps[i] = 0;
         if (p.count)
@@ -350,6 +392,36 @@ __global__ void k_reset(Reset p)
                                              ? 1
                                              : 0)
                                       : p.in.init_goal[k];
+    }
+}
+
+/// Zeroes the visited tables of the rows with mask[i] != 0 (all without a mask): a thread per table word, so that the
+/// writes coalesce.
+__global__ void k_visited_zero(VisitedRows v, u64 rows, const u8* mask)
+{
+    const u32 shift = static_cast<u32>(__popc(v.capacity - 1));  // capacity is a power of two
+    const u64 n = rows << shift;
+    for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < n; j += u64{gridDim.x} * blockDim.x)
+        if (!mask || mask[j >> shift])
+            v.table[j] = 0;
+}
+
+__global__ void k_clear_visited(ClearVisited p)
+{
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < p.rows; i += u64{gridDim.x} * blockDim.x)
+    {
+        if (p.mask && !p.mask[i])
+            continue;
+        u32 k = p.inst ? static_cast<u32>(p.inst[i]) : 0u;
+        if (k >= p.instances)
+        {
+            if (p.error)
+                atomicOr(p.error, 4u);
+            k = 0;
+        }
+        p.visited.count[i] = 0;
+        (void)rl::visited_insert(p.visited.table + i * p.visited.capacity, p.visited.capacity, p.visited.count[i],
+                                 row_key(p.states + i * p.row_words, p.words, p.numeric_words, k));
     }
 }
 
@@ -429,6 +501,12 @@ __global__ void k_label_step(LabelStep p)
         p.status[i] = st;
     }
 }
+
+bool visited_ok(const VisitedRows& v)
+{
+    return !v.capacity || (v.table && v.count && v.status && v.capacity >= 2 && !(v.capacity & (v.capacity - 1)));
+}
+
 }  // namespace
 
 cudaError_t launch_label_step(const LabelStep& p, cudaStream_t s)
@@ -468,7 +546,8 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         return cudaSuccess;
     if (!p.states || !p.status || (!p.counts && !p.offsets) || !p.in.init_row || !p.in.init_count ||
         (p.goal_pos && !p.goal_neg) || (p.goal_pos && !p.in.goal_pos) || (p.cache_counts && !p.in.init_cache) ||
-        (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal))
+        (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) || !visited_ok(p.visited) ||
+        (p.visited.capacity && p.autoreset && !p.in.init_hash))
         return cudaErrorInvalidValue;
     k_finish<<<grid_for(p.rows), k_block, 0, s>>>(t, p);
     return cudaGetLastError();
@@ -486,9 +565,29 @@ cudaError_t launch_reset(const Reset& p, cudaStream_t s)
     if (p.rows == 0)
         return cudaSuccess;
     if (!p.states || !p.in.init_row || !p.in.init_count || (p.goal_pos && (!p.goal_neg || !p.in.goal_pos)) ||
-        (p.cache_counts && !p.in.init_cache) || (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal))
+        (p.cache_counts && !p.in.init_cache) || (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) ||
+        !visited_ok(p.visited) || (p.visited.capacity && !p.in.init_hash))
         return cudaErrorInvalidValue;
+    if (p.visited.capacity)
+    {
+        k_visited_zero<<<grid_for(p.rows * p.visited.capacity), k_block, 0, s>>>(p.visited, p.rows, p.mask);
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+            return e;
+    }
     k_reset<<<grid_for(p.rows), k_block, 0, s>>>(p);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_clear_visited(const ClearVisited& p, cudaStream_t s)
+{
+    if (p.rows == 0 || !p.visited.capacity)
+        return cudaSuccess;
+    if (!p.states || !visited_ok(p.visited))
+        return cudaErrorInvalidValue;
+    k_visited_zero<<<grid_for(p.rows * p.visited.capacity), k_block, 0, s>>>(p.visited, p.rows, p.mask);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        return e;
+    k_clear_visited<<<grid_for(p.rows), k_block, 0, s>>>(p);
     return cudaGetLastError();
 }
 

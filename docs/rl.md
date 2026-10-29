@@ -212,8 +212,7 @@ bit 0 once the row's table overflowed; every state array leads with the rows, so
 reached state before insertion and autoreset. Reset clears selected histories and inserts initial states;
 `env.clear_visited(state, mask=None)` returns a state with selected histories cleared and current states inserted,
 retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses `[N, 0]` table/status arrays and
-reports false revisit flags. CUDA tracking raises a clear construction error because device visit tables are
-unavailable. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
+reports false revisit flags. On CUDA a JAX `Env` refuses `track_visited` at construction. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
 hashes with JAX x64 enabled (64-bit inputs raise `TypeError` without it; `x.view(np.uint32)` gives the halves), and
 equals the NumPy membership operation under jit without host reads. The successor hashes in that layout are
 `env.expand_flat(state.states, capacity, hashes=True).succ_hash`, and `flat.parent` their parents.
@@ -292,11 +291,11 @@ CPU framework bundle used for validation; those packages remain optional runtime
 
 ## Revisit avoidance
 
-`CpuEnvPool(..., track_visited=H)` and torch CPU `BatchedEnv(..., track_visited=H)` keep one fixed-capacity hash table
-per environment. `H` is a power of two from 2 to 2²⁰. With `track_visited=True`, set `max_steps`: the capacity is the
-next power of two at least `2 * (max_steps + 1)`, up to 2²⁰. Tracking is disabled by default.
-Disabled tracking reports all-false `revisited` flags, including the `[K, N]` tensor in captured torch rollouts.
-CUDA environments reject enabled tracking because device visit tables are unavailable.
+`CpuEnvPool(..., track_visited=H)` and torch `BatchedEnv(..., track_visited=H)`, on the CPU or a CUDA device, keep one
+fixed-capacity hash table per environment. `H` is a power of two from 2 to 2²⁰. With `track_visited=True`, set
+`max_steps`: the capacity is the next power of two at least `2 * (max_steps + 1)`, up to 2²⁰. Tracking is disabled by
+default. Disabled tracking reports all-false `revisited` flags, including the `[K, N]` tensor in captured torch
+rollouts.
 
 Reset inserts the initial state. Each step reports `revisited`, whether the reached state was present before that
 step, then inserts it. This includes invalid actions that stay in place. Absorbing rows without autoreset report
@@ -309,7 +308,12 @@ hashes=True)`, equal to `mymyr.hash_rows(rows, numeric_words=k)` with the rows' 
 `0x9E3779B97F4A7C15`. An insertion above ¾ occupancy is skipped, saturates the row's count to `H`, and sets bit 0 of the
 sticky overflow status. Stored entries remain searchable: overflow can miss a revisit but cannot invent one, apart from
 hash collisions. The torch tensors `env.visited` (int64 `[N, H]`), `env.visited_count` (int32 `[N]`) and
-`env.visited_status` (int32 `[1]`) expose the live storage; treat the table and counts as read-only. The pool exposes
+`env.visited_status` (int32 `[1]`) expose the live storage on the environments' device; treat the table and counts as
+read-only. A CUDA environment keeps them with one thread per environment, so they hold the same words as the CPU's
+after the same calls, on every device path (the fast path, the general path and label steps). Reset, step,
+autoreset and `clear_visited` update them on torch's current stream without a host synchronization; overflow sets the
+status on the device. On the fast path they are captured with the steps (`capture`, `torch.cuda.graph`,
+`torch.compile`). The pool exposes
 the same status as an integer `pool.visited_status`. Resets and clears leave status set; torch callers can acknowledge
 it with `env.visited_status.zero_()`.
 
@@ -319,7 +323,10 @@ environments, like `reset`. Table storage uses `8 * N * H` bytes plus counts and
 
 `rl.visited_mask(table, count, succ_hash, parent, rows=None)` returns a boolean per successor. `parent` is int32;
 `-1` denotes padding. With a subset expansion, `rows` maps its parent ids to environment rows (mapped `-1` is also
-padding). NumPy and torch CPU inputs are supported, including `mymyr::visited_mask` under `torch.compile`.
+padding). NumPy and torch inputs are supported, CPU or CUDA tensors, including `mymyr::visited_mask` under
+`torch.compile`. CUDA tensors run one thread per successor on torch's current stream without a host synchronization,
+so the call is captured with a rollout; a parent or mapped row outside the table, which raises `ValueError` on the
+host, reads as not visited there.
 
 For a soft policy, suppress visited successors' scores. The example takes the successor hashes of the expansion:
 
@@ -351,6 +358,27 @@ for i in range(4):
 assert torch.all((chosen >= 0) | trapped)
 ```
 
+Encoded observations carry the mask for the policy's action targets. With `obs_actions=True` and an encoder whose
+`target_sources` list targets, `Observation.action_visited` and `StepResult.action_visited` (bool `[targets]`,
+aligned with the batch's `target_entity`; over a suite of several domains a tuple, one mask per domain batch) say for
+each target whether it is an action entity whose successor (its `actions.succ_hash`) is in the environment's table.
+Targets that are not action entities, the unused tail of a capacity batch and the targets of an overflowed
+observation are false. The tables are those after the step and its autoreset: the next observation's, in which a
+no-op successor is visited. The mask is computed by torch operations on the environments' device, so it is part of
+captured and compiled steps; `CapturedRollout` results hold one mask per step in `action_visited`.
+
+```python needs-torch
+from mymyr import encoding
+
+visit_encoder = encoding.FlatRelationEncoder(rl.TaskTable([visit_task]), target_sources=("action", "goal"))
+seen_env = BatchedEnv(visit_task, 4, max_steps=20, track_visited=True, observation=visit_encoder, obs_actions=True)
+seen_step = seen_env.step()
+targets = torch.as_tensor(seen_step.obs.as_dict("torch")["target_entity"])
+assert seen_step.action_visited.shape == targets.shape
+target_scores = torch.zeros(targets.shape).masked_fill(seen_step.action_visited, -1e6)
+seen_env.close()
+```
+
 Cycle detection can use the reached-state flag directly, without expanding successors. Compute any successor masks
 for the next policy observation after the step: its table already includes the reached state, or its new initial
 state following autoreset.
@@ -362,6 +390,23 @@ assert cycle.shape == (4,)
 visit_env.clear_visited()
 assert torch.all(visit_env.visited_count == 1)
 visit_env.close()
+```
+
+On a CUDA device the same environment captures its steps with the tables; replays continue from the tables' current
+contents:
+
+```python skip-if-no-cuda
+cuda_visits = BatchedEnv(visit_task, 4, device="cuda", max_steps=20, track_visited=True, autoreset=False)
+cuda_rollout = cuda_visits.capture(3)
+cuda_out = cuda_rollout.replay()
+assert cuda_out.revisited.shape == (3, 4)
+cuda_hashes = rl.expand(visit_task, cuda_visits.states, framework="torch", hashes=True,
+                        stream=torch.cuda.current_stream())
+cuda_seen = rl.visited_mask(cuda_visits.visited, cuda_visits.visited_count, cuda_hashes.succ_hash, cuda_hashes.parent)
+assert cuda_seen.device == cuda_visits.visited.device
+cuda_visits.clear_visited()
+assert torch.all(cuda_visits.visited_count == 1)
+cuda_visits.close()
 ```
 
 ## Lifted hindsight relabelling

@@ -3,6 +3,7 @@
 //   prefix_masks(parent, schema, binding, query, prefix, depth, mask)   factored action masks (rl/prefix.hpp)
 //   schema_masks(parent, schema, mask)                            the first factored decision
 //   her_relabel(states, done, goal, source, achieved, reward, ...)      hindsight relabels (rl/her.hpp)
+//   visited_mask(table, count, succ_hash, parent, rows, out)      membership in per-episode visited tables (rl/visited.hpp)
 // Destination-passing: every array is the caller's, read and written in place through DLPack. Host arrays run
 // the host loops; CUDA arrays (all on one device) the device kernels of cuda/rl_ops.hpp, enqueued on `stream` (None:
 // the legacy default stream; torch passes its current stream) with the array API's stream handoff and no host
@@ -20,6 +21,7 @@
 #include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
+#include "mymyr/rl/visited.hpp"
 
 #if defined(MYMYR_HAS_CUDA)
 #include "mymyr/cuda/rl_ops.hpp"
@@ -119,6 +121,39 @@ void novelty_update(ArrayArg seen, ArrayArg states, ArrayArg reward, StreamArg s
 #endif
     nb::gil_scoped_release release;
     rl::novelty_update(s, x, rows, W, SW, r);
+}
+
+void visited_mask(ArrayArg table, ArrayArg count, ArrayArg succ_hash, ArrayArg parent, ArrayArg rows, ArrayArg out,
+                  StreamArg stream)
+{
+    if (table.is_none() || count.is_none() || succ_hash.is_none() || parent.is_none() || out.is_none())
+        throw nb::type_error("mymyr: visited_mask requires table, count, succ_hash, parent and out arrays");
+    const Place pl = place_of(table, stream);
+    Imports in(pl.device, pl.stream, false);
+    std::vector<i64> ext, hashes, mapping;
+    const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
+    const i64 n = ext[0], H = ext[1];
+    if (H < 2 || H > (1 << 20) || (H & (H - 1)))
+        throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+    const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
+    const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &hashes);
+    const i64 size = hashes[0];
+    const i32* p = in.get<const i32>(parent, "parent", {i32t}, {size}, false);
+    const i32* map = in.get<const i32>(rows, "rows", {i32t}, {-1}, false, &mapping);
+    u8* dst = in.get<u8>(out, "out", {boolt}, {size}, true);
+    const i64 parents = rows.is_none() ? n : mapping[0];
+#if defined(MYMYR_HAS_CUDA)
+    if (pl.device >= 0)
+        return launch(pl, "visited_mask", [&](cudaStream_t cs) {
+            return cuda::launch_visited_mask(tab, cnt, static_cast<u64>(n), static_cast<u32>(H), hash, p, map,
+                                             static_cast<u64>(parents), static_cast<u64>(size), dst, cs);
+        });
+#endif
+    nb::gil_scoped_release release;
+    for (i64 j = 0; j < size; ++j)
+        if (p[j] < -1 || p[j] >= parents || (p[j] >= 0 && map && (map[p[j]] < -1 || map[p[j]] >= n)))
+            throw std::invalid_argument("mymyr: visited_mask: parent or mapped row is outside the table");
+    rl::visited_mask(tab, cnt, static_cast<u32>(H), hash, p, map, static_cast<u64>(size), dst);
 }
 
 rl::LabelRows label_rows(Imports& in, nb::handle parent, nb::handle schema, nb::handle binding)
@@ -323,6 +358,12 @@ void bind_rl_ops(nb::module_& parent)
           "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, "
           "2 invalid instance, 3 search budget exhausted. "
           "max_steps bounds candidate tiles and binding trials per row/template.");
+    m.def("visited_mask", &visited_mask, "table"_a, "count"_a, "succ_hash"_a, "parent"_a, nb::kw_only(),
+          "rows"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
+          "Writes one bool per successor hash into out [M]: whether succ_hash[j] is in the visited table (table [N, H] "
+          "64-bit keys, count [N] int32) of row parent[j], or of rows[parent[j]] when rows is supplied; -1 is padding. "
+          "Host arrays raise ValueError for a parent or mapped row outside the table; on CUDA arrays such an entry reads "
+          "as not visited.");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),
           "stream"_a = nb::none(),
           "Width-1 novelty update in place: reward[i] = popcount(states[i] & ~seen[i]) over the first S "

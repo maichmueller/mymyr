@@ -20,7 +20,8 @@ class Rollout(NamedTuple):
     autoreset (with ``final=True``), each the same arrays after every replay. ``mymyr.encoding.collate(rollout.obs)``
     concatenates them into one batch of the K * N rows in step order (over a suite: per domain,
     ``collate([o.batches[d] for o in rollout.obs])``). With ``obs_actions``, ``obs_actions`` holds step k's
-    ``StepResult.actions``: the expansion rows of the action entities of ``obs[k]``."""
+    ``StepResult.actions``: the expansion rows of the action entities of ``obs[k]``, and with visited tables
+    ``action_visited`` step k's ``StepResult.action_visited``."""
 
     action: Optional[Tensor]  # int64 [K, N]: the policy's actions (None: the random policy, or label mode)
     reward: Tensor  # float32 [K, N]
@@ -43,6 +44,7 @@ class Rollout(NamedTuple):
     action_schema: Optional[Tensor] = None  # int32 [K, N]: the policy's labels in label mode
     action_binding: Optional[Tensor] = None  # int32 [K, N, L]: their bindings (L: the policy's binding columns)
     obs_actions: Optional[tuple] = None  # the K steps' observation action rows (obs_actions=True)
+    action_visited: Optional[tuple] = None  # the K steps' StepResult.action_visited (track_visited, obs_actions)
 
 
 class CapturedRollout:
@@ -114,7 +116,7 @@ class CapturedRollout:
 
         self.graph = torch.cuda.CUDAGraph()
         K, n = self.steps, env.num_envs
-        obs, final_obs, obs_actions = [], [], []
+        obs, final_obs, obs_actions, visited = [], [], [], []
         with torch.cuda.graph(self.graph, pool=pool, stream=side):
             # the steps write into slices of the stacked outputs (no stacking copies)
             b = torch.empty((K, n), dtype=torch.bool, device=dev)
@@ -146,16 +148,18 @@ class CapturedRollout:
                     label_schema[k].copy_(schema.reshape(n))
                     label_binding[k].copy_(binding.reshape(n, -1))
                     a = (label_schema[k], label_binding[k])
-                step_obs, step_final, step_actions = env._step_into(
+                step_obs, step_final, step_actions, step_visited = env._step_into(
                     StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
                 )
                 obs.append(step_obs)
                 final_obs.append(step_final)
                 obs_actions.append(step_actions)
+                visited.append(step_visited)
             self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,
                                    tuple(final_obs) if observer is not None and final else None, out.revisited,
                                    action_schema=label_schema, action_binding=label_binding, obs_actions=(
-                                       tuple(obs_actions) if observer is not None and observer.actions else None))
+                                       tuple(obs_actions) if observer is not None and observer.actions else None),
+                                   action_visited=tuple(visited) if visited[0] is not None else None)
 
     @property
     def result(self) -> Rollout:

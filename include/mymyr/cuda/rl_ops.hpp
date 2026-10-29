@@ -11,6 +11,7 @@
 #include "mymyr/rl/match.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
+#include "mymyr/rl/visited.hpp"
 
 #include <cuda_runtime_api.h>
 
@@ -49,6 +50,12 @@ cudaError_t launch_noop_scatter(ExpansionRows src, ExpansionRows dst, u64 rows, 
 cudaError_t launch_expansion_indices(ExpansionRows out, u64 rows, cudaStream_t s, const u32* status = nullptr);
 /// counts[i] = offsets[i + 1] - offsets[i] for i < rows.
 cudaError_t launch_segment_counts(const i32* offsets, u64 rows, i32* counts, cudaStream_t s);
+/// rl::visited_mask on device arrays (one thread per successor): out[j] = whether succ_hash[j] is in the visited table
+/// (table [table_rows, capacity], count [table_rows]) of row parent[j], or of rows[parent[j]] with `rows` ([parents]
+/// entries; without it parents = table_rows). A parent or mapped row of -1 is padding (false); one outside [-1,
+/// parents) or [-1, table_rows) reads as not visited.
+cudaError_t launch_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
+                                const i32* parent, const i32* rows, u64 parents, u64 size, u8* out, cudaStream_t s);
 /// Lifted goal matching on caller-owned arrays; no allocation or host synchronization.
 cudaError_t launch_match_first(const rl::MatchTemplates& templates, const rl::MatchBatch& batch, cudaStream_t s);
 

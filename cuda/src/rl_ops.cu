@@ -59,6 +59,20 @@ __global__ void k_her(rl::HerBatch b, rl::HerConfig c)
         rl::her_one(b, c, ti / b.envs, ti % b.envs, j);
     }
 }
+__global__ void k_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
+                               const i32* parent, const i32* rows, u64 parents, u64 size, u8* out)
+{
+    for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < size; j += u64{gridDim.x} * blockDim.x)
+    {
+        const i32 p = parent[j];
+        i64 row = -1;
+        if (p >= 0 && static_cast<u64>(p) < parents)
+            row = rows ? rows[p] : p;
+        out[j] = row >= 0 && static_cast<u64>(row) < table_rows &&
+                 rl::visited_contains(table + static_cast<u64>(row) * capacity, capacity, count[row], succ_hash[j]);
+    }
+}
+
 __global__ void k_generated(u32 value, u32* out) { *out = value; }
 
 __global__ void k_hash_rows(const u64* states, u64 rows, u64 stride, u32 words, u32 nn, u64* out)
@@ -217,6 +231,18 @@ cudaError_t launch_hash_rows(const u64* states, u64 rows, u64 stride, u32 words,
     if (!rows) return cudaSuccess;
     if (lifted::wide_row(words)) k_hash_wide<<<grid_for(rows * 32), k_block, 0, s>>>(states, rows, stride, words, nn, out);
     else k_hash_rows<<<grid_for(rows), k_block, 0, s>>>(states, rows, stride, words, nn, out);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
+                                const i32* parent, const i32* rows, u64 parents, u64 size, u8* out, cudaStream_t s)
+{
+    if (!size)
+        return cudaSuccess;
+    if (!table || !count || !succ_hash || !parent || !out || capacity < 2 || (capacity & (capacity - 1)))
+        return cudaErrorInvalidValue;
+    k_visited_mask<<<grid_for(size), k_block, 0, s>>>(table, count, table_rows, capacity, succ_hash, parent, rows, parents,
+                                                     size, out);
     return cudaGetLastError();
 }
 

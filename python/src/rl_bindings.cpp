@@ -36,7 +36,6 @@
 #include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/masks.hpp"
 #include "mymyr/rl/pool.hpp"
-#include "mymyr/rl/visited.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <nanobind/nanobind.h>
@@ -2371,35 +2370,6 @@ void bind_rl(nb::module_& parent)
     m.def("_visited_capacity", [](Arg<std::variant<bool, int>> value, SizeArg max_steps) {
         return visited_capacity_arg(value, opt_int_arg<u32>(max_steps, "max_steps", 1).value_or(0));
     }, "value"_a, "max_steps"_a = nb::none(), "Resolve and validate an episode visited-table capacity.");
-
-    m.def("visited_mask", [](ArrayArg table, ArrayArg count, ArrayArg succ_hash, ArrayArg parent,
-                             ArrayArg rows, ArrayArg out) {
-        using namespace rlimp;
-        Imports in(-1, dl::k_stream_default, false);
-        if (table.is_none() || count.is_none() || succ_hash.is_none() || parent.is_none() || out.is_none())
-            throw nb::type_error("mymyr: visited_mask requires table, count, succ_hash, parent and out arrays");
-        std::vector<i64> ext, hashes, mapping;
-        const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
-        const i64 n = ext[0], H = ext[1];
-        if (H < 2 || H > (1 << 20) || (H & (H - 1)))
-            throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
-        const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
-        const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &hashes);
-        const i64 size = hashes[0];
-        const i32* p = in.get<const i32>(parent, "parent", {i32t}, {size}, false);
-        const i32* map = in.get<const i32>(rows, "rows", {i32t}, {-1}, false, &mapping);
-        u8* dst = in.get<u8>(out, "out", {boolt}, {size}, true);
-        const i64 parents = rows.is_none() ? n : mapping[0];
-        {
-            nb::gil_scoped_release release;
-            for (i64 j = 0; j < size; ++j)
-                if (p[j] < -1 || p[j] >= parents || (p[j] >= 0 && map && (map[p[j]] < -1 || map[p[j]] >= n)))
-                    throw std::invalid_argument("mymyr: visited_mask: parent or mapped row is outside the table");
-            rl::visited_mask(tab, cnt, static_cast<u32>(H), hash, p, map, static_cast<u64>(size), dst);
-        }
-    }, "table"_a, "count"_a, "succ_hash"_a, "parent"_a, nb::kw_only(), "rows"_a = nb::none(), "out"_a,
-       "Writes one bool per successor hash into out. parent indexes table rows, or rows when supplied; -1 is padding. "
-       "Host NumPy and torch arrays; equal 64-bit hashes share an entry.");
 
     // --- CpuEnvPool
     using OptArray = Arg<std::optional<ann::Any>>;
