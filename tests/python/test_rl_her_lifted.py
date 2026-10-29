@@ -1087,6 +1087,15 @@ def test_match_first_pair_budget_with_small_and_large_template_tables(on_device,
 # ------------------------------------------------------------------------------------------------ relabelling
 
 
+def assert_lifted_parity(expected, actual):
+    """Compare words as bit patterns across NumPy uint64 and torch int64 storage."""
+    for name, host, tensor in zip(expected._fields, expected, actual):
+        value = tensor.cpu().numpy()
+        if host.dtype == np.uint64:
+            value = value.view(np.uint64)
+        np.testing.assert_array_equal(host, value, err_msg=name)
+
+
 def lifted_window(task, *, n=3, steps=23, seed=13):
     from test_rl_ops import trajectory
     prev, reached, done = trajectory(task, n=n, steps=steps, seed=seed, max_steps=7)
@@ -1165,8 +1174,7 @@ def test_relabel_lifted_equals_golden_refine_on_ipc_windows(domain, distinct, on
                                (reached.view(np.int64), prev.view(np.int64), done, d.view(np.int64), pd.view(np.int64))]
         actual = rl.her_relabel_lifted(x, flags, None, t.to("cuda:0"), prev_states=p, max_segments=23,
                                       derived=dd, prev_derived=pp, step_reward=-0.25, goal_reward=2.0)
-        for a, b in zip(result, actual):
-            np.testing.assert_array_equal(a, b.cpu().numpy())
+        assert_lifted_parity(result, actual)
 
 
 @pytest.mark.parametrize("name", TEXT)
@@ -1278,8 +1286,7 @@ def test_relabel_lifted_torch_host_device_and_capture(via_op):
 
         try:
             out = run()
-            for a, b in zip(want, out):
-                np.testing.assert_array_equal(a, b.cpu().numpy())
+            assert_lifted_parity(want, out)
             if device == "cpu":
                 continue
             stream = torch.cuda.Stream()
@@ -1291,8 +1298,7 @@ def test_relabel_lifted_torch_host_device_and_capture(via_op):
             with torch.cuda.graph(graph, stream=stream):
                 captured = run()
             graph.replay()
-            for a, b in zip(want, captured):
-                np.testing.assert_array_equal(a, b.cpu().numpy())
+            assert_lifted_parity(want, captured)
             ids.fill_(-1)
             graph.replay()
             assert captured.status.item() == 4 and not captured.count.any().item()
@@ -1301,8 +1307,7 @@ def test_relabel_lifted_torch_host_device_and_capture(via_op):
             changed = rl.her_relabel_lifted(np.zeros_like(reached), done, None, templates, prev_states=prev,
                                            max_segments=3, max_generated=4)
             graph.replay()
-            for a, b in zip(changed, captured):
-                np.testing.assert_array_equal(a, b.cpu().numpy())
+            assert_lifted_parity(changed, captured)
             torch.cuda.synchronize()
         finally:
             unregister(handle)
@@ -1391,8 +1396,7 @@ def test_relabel_lifted_suite_changes_instance_at_autoreset(on_device):
                        (rows.view(np.int64), prev.view(np.int64), ids, done)]
         actual = rl.her_relabel_lifted(x, d, tid, t.to("cuda:0"), prev_states=p, max_segments=19,
                                       step_reward=-0.25, goal_reward=2.0)
-        for a, b in zip(expected, actual):
-            np.testing.assert_array_equal(a, b.cpu().numpy())
+        assert_lifted_parity(expected, actual)
 
 
 @needs_frontend
@@ -1428,8 +1432,7 @@ def test_relabel_lifted_static_negative_derived_and_constant_goals(goal, on_devi
                               (reached.view(np.int64), prev.view(np.int64), d.view(np.int64), pd.view(np.int64), done)]
         actual = rl.her_relabel_lifted(x, flags, None, t.to("cuda:0"), prev_states=p, derived=dd, prev_derived=pp,
                                       max_segments=8, step_reward=-0.25, goal_reward=2.0)
-        for a, b in zip(expected, actual):
-            np.testing.assert_array_equal(a, b.cpu().numpy())
+        assert_lifted_parity(expected, actual)
 
 
 @needs_frontend
@@ -1459,8 +1462,7 @@ def test_relabel_lifted_long_window(on_device):
         torch = cuda_match_runtime()
         x, p, d = [torch.tensor(a, device="cuda:0") for a in (reached.view(np.int64), prev.view(np.int64), done)]
         actual = rl.her_relabel_lifted(x, d, None, t.to("cuda:0"), prev_states=p, max_segments=1)
-        for a, b in zip(expected, actual):
-            np.testing.assert_array_equal(a, b.cpu().numpy())
+        assert_lifted_parity(expected, actual)
 
 
 @needs_frontend
@@ -1486,5 +1488,4 @@ def test_relabel_lifted_numeric_words_participate_in_loop_equality(on_device):
         torch = cuda_match_runtime()
         x, p, d = [torch.tensor(a, device="cuda:0") for a in (reached.view(np.int64), prev.view(np.int64), done)]
         actual = rl.her_relabel_lifted(x, d, None, t.to("cuda:0"), prev_states=p, max_segments=1)
-        for a, b in zip(want, actual):
-            np.testing.assert_array_equal(a, b.cpu().numpy())
+        assert_lifted_parity(want, actual)
