@@ -18,12 +18,16 @@
 #include <cstring>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -39,6 +43,25 @@ namespace
         if (cuda::device_count() == 0)                                                                                  \
             GTEST_SKIP() << "no CUDA device";                                                                           \
     } while (0)
+
+/// Whether compute-sanitizer (or another CUDA injection tool) instruments this process: its injection libraries are
+/// named in the environment or mapped into the process once CUDA is initialized. It reports every CUDA API call that
+/// returns an error, also the ones a test provokes on purpose.
+bool compute_sanitizer_attached()
+{
+    if (const char* e = std::getenv("CUDA_INJECTION64_PATH"); e && *e)
+        return true;
+    std::string names;
+    if (const char* e = std::getenv("LD_PRELOAD"))
+        names = e;
+    if (std::ifstream maps("/proc/self/maps"); maps)
+    {
+        std::ostringstream text;
+        text << maps.rdbuf();
+        names += text.str();
+    }
+    return names.find("libsanitizer") != std::string::npos || names.find("TreeLauncher") != std::string::npos;
+}
 
 cuda::ContextPtr context()
 {
@@ -413,6 +436,8 @@ TEST(CudaRuntime, WaitsAndGraphDestructionDuringForeignCapture)
 TEST(CudaRuntime, HostWaitsOnCapturedWorkThrow)
 {
     SKIP_WITHOUT_GPU();
+    if (compute_sanitizer_attached())
+        GTEST_SKIP() << "the host waits fail with CUDA API errors on purpose, which compute-sanitizer reports as errors";
     for (bool event : {false, true})
     {
         cuda::Stream stream;
