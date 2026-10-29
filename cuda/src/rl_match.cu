@@ -67,7 +67,7 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
                 i32 binding[MaxVars];
                 u32 base[MaxVars], masks[MaxVars], need[MaxVars];
                 rl::match_detail::Budget budget{b.max_steps};
-                const bool found = rl::match_detail::search<MatchWarp, (MaxVars > 2)>(grp, t, static_cast<u32>(g), static_cast<u32>(k),
+                const bool found = rl::match_detail::search<MatchWarp, (MaxVars > 2), (MaxVars > 2)>(grp, t, static_cast<u32>(g), static_cast<u32>(k),
                         b.states + row * b.row_words, b.derived ? b.derived + row * b.derived_words : nullptr,
                         binding, base, masks, need, budget);
                 if (budget.exhausted)

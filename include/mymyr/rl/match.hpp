@@ -167,9 +167,12 @@ MYMYR_HD u32 lower_row(const MatchTemplates& t, u32 l, const i32* rows, u32 begi
 /// Narrows tup to the rows that share literal l's leading constant and bound arguments and, when `position` directly
 /// follows them, have an object of base + [0, 32) at `position`: a binary search instead of a scan of every row. In
 /// that case it returns true and sets `after` so that rows [tup.end, after) share the leading arguments and have larger
-/// objects at `position`.
-MYMYR_HD bool narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, const i32* binding, Tuples& tup, u32& after)
+/// objects at `position`. Ranges of at most 8 rows per lane are scanned as they are, which is cheaper than searching.
+MYMYR_HD bool narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, const i32* binding, u32 lanes, Tuples& tup,
+                     u32& after)
 {
+    if (tup.end - tup.begin <= 8 * lanes)
+        return false;
     i32 known = 0;
     while (known < t.arity[l] && known != position && resolved(t, l, known, binding) >= 0)
         ++known;
@@ -193,99 +196,131 @@ MYMYR_HD bool narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, con
     return true;
 }
 
+/// Whether tuple `row` of literal l's predicate fits l with `object` at `position`: in the candidate scan of `variable`
+/// (domain = false) every constant, bound and repeated argument agrees; in a projection (domain = true) its constant
+/// and bound arguments agree and unbound variables are wildcards.
+MYMYR_HD bool fits(const MatchTemplates& t, u32 l, const i32* row, i32 position, i32 variable, i32 object,
+                   const i32* binding, bool domain)
+{
+    const i32* terms = t.terms + u64{l} * t.max_arity;
+    bool same = true;
+    for (i32 j = 0; j < t.arity[l]; ++j)
+    {
+        const i32 term = terms[j];
+        if (domain)
+        {
+            const i32 want = term < 0 ? -(term + 1) : binding[term];
+            if (j != position && want >= 0)
+                same &= row[j] == want;
+            continue;
+        }
+        const i32 want = term == variable ? object : term < 0 ? -(term + 1) : binding[term];
+        if (want >= 0)
+            same &= row[j] == want;
+        if (term >= 0 && want < 0)
+            for (i32 before = 0; before < j; ++before)
+                if (terms[before] == term)
+                    same &= row[before] == row[j];
+    }
+    return same;
+}
+
+/// The argument position of `variable` in literal l (its last occurrence), -1 when it does not occur.
+MYMYR_HD i32 position_of(const MatchTemplates& t, u32 l, i32 variable)
+{
+    i32 position = -1;
+    for (i32 j = 0; j < t.arity[l]; ++j)
+        if (t.terms[u64{l} * t.max_arity + j] == variable)
+            position = j;
+    return position;
+}
+
 /// Candidate objects base + [0, 32) of `variable`: those satisfying every positive literal it occurs in. With
 /// domain_literal >= 0, instead the projection of that literal's true tuples on domain_position, filtered only by its
-/// constant and bound arguments. Under distinct, bound objects are removed. With `ahead`, also which of the next 32
-/// tiles may hold candidates (bit j: objects base + 32 * (j + 1) + [0, 32)), from the matching tuples the scan reads
-/// and, for a literal whose scan reads only the tile's tuples, the first tuple after them; it costs no further reads.
+/// constant and bound arguments. Under distinct, bound objects are removed.
 template<class Group>
 MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k, i32 variable, u32 base, u32 objects,
                          const i32* binding, const u64* state, const u64* derived, i32 domain_literal = -1,
-                         u32 domain_position = 0, u32* ahead = nullptr)
+                         u32 domain_position = 0)
 {
     u32 mask = objects - base >= 32 ? ~u32{0} : (u32{1} << (objects - base)) - 1;
-    const u32 tiles_after = objects - base > 32 ? (objects - base - 1) / 32 : 0;
-    u32 later = tiles_after >= 32 ? ~u32{0} : (u32{1} << tiles_after) - 1;
-    const u32 horizon = ahead ? 33 * 32 : 32;
-    const u32 begin_literal =
-        domain_literal < 0 ? static_cast<u32>(t.literal_offsets[k]) : static_cast<u32>(domain_literal);
-    const u32 end_literal = domain_literal < 0 ? static_cast<u32>(t.literal_offsets[k + 1]) : begin_literal + 1;
+    const bool domain = domain_literal >= 0;
+    const u32 begin_literal = domain ? static_cast<u32>(domain_literal) : static_cast<u32>(t.literal_offsets[k]);
+    const u32 end_literal = domain ? begin_literal + 1 : static_cast<u32>(t.literal_offsets[k + 1]);
     for (u32 l = begin_literal; l < end_literal; ++l)
     {
         if (!t.polarity[l])
             continue;
-        i32 position = domain_literal < 0 ? -1 : static_cast<i32>(domain_position);
-        const i32* terms = t.terms + u64{l} * t.max_arity;
-        if (domain_literal < 0)
-            for (i32 j = 0; j < t.arity[l]; ++j)
-                if (terms[j] == variable)
-                    position = j;
+        const i32 position = domain ? static_cast<i32>(domain_position) : position_of(t, l, variable);
         if (position < 0)
             continue;
         Tuples tup = tuples(t, g, l);
         u32 after = 0;
-        const bool tiled = narrow(t, l, position, base, binding, tup, after);
-        u32 lane_mask = 0, lane_later = 0;
+        narrow(t, l, position, base, binding, grp.size(), tup, after);
+        u32 lane_mask = 0;
         for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
         {
             const i32* row = tup.rows + u64{n} * t.literals.max_arity;
             const u32 object = static_cast<u32>(row[position]);
-            if (object < base || object - base >= horizon || !tup.holds(n, state, derived))
+            if (object < base || object - base >= 32 || !tup.holds(n, state, derived))
                 continue;
-            bool same = true;
-            for (i32 j = 0; j < t.arity[l]; ++j)
-            {
-                const i32 term = terms[j];
-                if (domain_literal >= 0)
-                {
-                    // A projection keeps only constant and bound arguments; unbound variables are wildcards.
-                    const i32 want = term < 0 ? -(term + 1) : binding[term];
-                    if (j != position && want >= 0)
-                        same &= row[j] == want;
-                    continue;
-                }
-                const i32 want = term == variable ? static_cast<i32>(object) : term < 0 ? -(term + 1) : binding[term];
-                if (want >= 0)
-                    same &= row[j] == want;
-                if (term >= 0 && want < 0)
-                    for (i32 before = 0; before < j; ++before)
-                        if (terms[before] == term)
-                            same &= row[before] == row[j];
-            }
-            if (!same)
-                continue;
-            if (object - base < 32)
+            if (fits(t, l, row, position, variable, static_cast<i32>(object), binding, domain))
                 lane_mask |= u32{1} << (object - base);
-            else
-                lane_later |= u32{1} << ((object - base) / 32 - 1);
         }
         mask &= grp.bit_or(lane_mask);
-        if (ahead)
-        {
-            u32 seen = grp.bit_or(lane_later);
-            if (tiled && tup.end < after)
-            {
-                // Rows past the tile are sorted by their object here: none of them lies before the first one's tile.
-                const u32 next = static_cast<u32>(tup.rows[u64{tup.end} * t.literals.max_arity + position]) - base;
-                if (next < horizon)
-                    seen |= ~u32{0} << (next / 32 - 1);
-            }
-            later &= seen;
-        }
-        if (!mask && (!ahead || !later))
-        {
-            if (ahead)
-                *ahead = 0;
+        if (!mask)
             return 0;
-        }
     }
-    if (ahead)
-        *ahead = later;
     if (t.distinct[k])
         for (u32 v = 0; v < static_cast<u32>(t.num_vars[k]); ++v)
             if (binding[v] >= 0 && static_cast<u32>(binding[v]) >= base && static_cast<u32>(binding[v]) - base < 32)
                 mask &= ~(u32{1} << (static_cast<u32>(binding[v]) - base));
     return mask;
+}
+
+/// Which of the 32 tiles after base + [0, 32) may hold candidates of `variable` (bit j: objects base + 32 * (j + 1) +
+/// [0, 32)): those where every positive literal of the variable has a matching tuple. A literal whose leading
+/// constant and bound arguments are followed by the variable reads only rows up to the first one past the tile (its
+/// rows are sorted by the variable's object there), whose tile bounds the later ones from below.
+template<class Group>
+MYMYR_HD u32 later_tiles(const Group& grp, const MatchTemplates& t, u32 g, u32 k, i32 variable, u32 base, u32 objects,
+                          const i32* binding, const u64* state, const u64* derived)
+{
+    const u32 count = objects - base > 32 ? (objects - base - 1) / 32 : 0;
+    u32 later = count >= 32 ? ~u32{0} : (u32{1} << count) - 1;
+    for (u32 l = static_cast<u32>(t.literal_offsets[k]); l < static_cast<u32>(t.literal_offsets[k + 1]) && later; ++l)
+    {
+        const i32 position = t.polarity[l] ? position_of(t, l, variable) : -1;
+        if (position < 0)
+            continue;
+        Tuples tup = tuples(t, g, l);
+        u32 after = 0;
+        const bool tiled = narrow(t, l, position, base, binding, grp.size(), tup, after);
+        u32 seen = 0;
+        if (tiled)
+        {
+            if (tup.end < after)
+            {
+                const u32 next = static_cast<u32>(tup.rows[u64{tup.end} * t.literals.max_arity + position]) - base;
+                seen = next < 33 * 32 ? ~u32{0} << (next / 32 - 1) : 0;
+            }
+        }
+        else
+        {
+            for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
+            {
+                const i32* row = tup.rows + u64{n} * t.literals.max_arity;
+                const u32 object = static_cast<u32>(row[position]);
+                if (object < base + 32 || object - base >= 33 * 32 || !tup.holds(n, state, derived))
+                    continue;
+                if (fits(t, l, row, position, variable, static_cast<i32>(object), binding, false))
+                    seen |= u32{1} << ((object - base) / 32 - 1);
+            }
+            seen = grp.bit_or(seen);
+        }
+        later &= seen;
+    }
+    return later;
 }
 
 /// Whether positive literal `other` has the predicate of `l`, an unbound variable at `position`, and at every other
@@ -350,7 +385,7 @@ MYMYR_HD u32 supported(const Group& grp, const MatchTemplates& t, u32 g, u32 k, 
 {
     Tuples tup = tuples(t, g, l);
     u32 after = 0;
-    narrow(t, l, position, base, binding, tup, after);
+    narrow(t, l, position, base, binding, grp.size(), tup, after);
     const u32 vars = static_cast<u32>(t.num_vars[k]), cap = 255 / grp.size();
     u32 counts[8] = {}, saturated = 0;
     for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
@@ -596,8 +631,9 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
 /// variable without candidates), at every node with more than two unbound variables (candidate filtering decides the
 /// last two directly); the nodes entered before that failure are tested when the search returns to them. A search
 /// without failures thus pays for one test. PruneDomains = false compiles the tests out of searches of at most
-/// two variables.
-template<class Group, bool PruneDomains = true>
+/// two variables, and SkipTiles = false the jumps over tiles without candidates (a scanned tile is then followed by
+/// the next one): both make a smaller search for short ones.
+template<class Group, bool PruneDomains = true, bool SkipTiles = true>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
                       i32* binding, u32* base, u32* masks, u32* need, Budget& budget)
 {
@@ -635,27 +671,32 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
             enter = false;
             continue;
         }
-        // After an exhausted tile the next one is scanned; a scan without candidates skips the tiles it rules out.
-        u32 ahead = ~u32{0};
+        // After an exhausted tile the next one is scanned; a scanned tile without candidates is followed by the next
+        // tile that later_tiles leaves (its scan is part of the step that found the tile empty).
+        bool skip = enter;
         if (enter)
         {
             if (!budget.take())
                 return false;
             base[depth] = 0;
-            masks[depth] = objects ? candidates(grp, t, g, k, variable, 0, objects, binding, state, derived, -1, 0, &ahead)
-                                   : 0;
+            masks[depth] = objects ? candidates(grp, t, g, k, variable, 0, objects, binding, state, derived) : 0;
             enter = false;
         }
-        while (!masks[depth])
+        while (!masks[depth] && objects - base[depth] > 32)
         {
-            const u32 skip = ahead ? ed::lowest_bit64(ahead) + 1 : 33;
-            if (objects - base[depth] <= 32 * skip)
-                break;
+            u32 next = 1;
+            if (SkipTiles && skip)
+            {
+                const u32 later = later_tiles(grp, t, g, k, variable, base[depth], objects, binding, state, derived);
+                next = later ? ed::lowest_bit64(later) + 1 : 33;
+                if (objects - base[depth] <= 32 * next)
+                    break;
+            }
             if (!budget.take())
                 return false;
-            base[depth] += 32 * skip;
-            masks[depth] =
-                candidates(grp, t, g, k, variable, base[depth], objects, binding, state, derived, -1, 0, &ahead);
+            base[depth] += 32 * next;
+            masks[depth] = candidates(grp, t, g, k, variable, base[depth], objects, binding, state, derived);
+            skip = true;
         }
         if (!masks[depth])
         {
