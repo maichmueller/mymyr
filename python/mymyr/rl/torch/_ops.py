@@ -72,7 +72,6 @@ from typing import Any, Optional
 
 import torch
 from torch import Tensor
-from torch._subclasses.fake_tensor import FakeTensor
 
 import mymyr.rl
 from mymyr.encoding import _device
@@ -99,30 +98,81 @@ __all__ = [
 
 _unsafe = (torch.Tag.cudagraph_unsafe,)
 
+_key = torch._C.DispatchKey
+_keyset = torch._C.DispatchKeySet
+_eager_tls_keys = (_keyset(_key.BackendSelect) | _keyset(_key.ADInplaceOrView)).raw_repr()
+_eager_tensor_keys = (
+    _keyset(_key.CPU) | _keyset(_key.CUDA) | _keyset(_key.ADInplaceOrView)
+    | _keyset(_key.AutogradCPU) | _keyset(_key.AutogradCUDA)
+    | _keyset(_key.AutocastCPU) | _keyset(_key.AutocastCUDA)
+).raw_repr()
+
 
 class _EagerOp(torch.library.CustomOpDef):
-    """A custom op with direct eager execution and dispatcher execution for tracing."""
+    """A custom op with direct execution for plain CPU/CUDA tensors in ordinary dispatch state."""
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if (
             torch.compiler.is_compiling()
-            or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None
-            or any(isinstance(x, Tensor) and (isinstance(x, FakeTensor) or x.is_meta) for x in args)
-            or any(isinstance(x, Tensor) and (isinstance(x, FakeTensor) or x.is_meta) for x in kwargs.values())
+            or self._eager_disabled
+            # Modes, transforms and functionalization add keys to the thread's dispatch state.
+            or torch._C._dispatch_tls_local_include_set().raw_repr() & ~_eager_tls_keys
+            or torch._C._len_torch_dispatch_stack()
+            or torch._C._are_functorch_transforms_active()
+            or torch._C._is_torch_function_mode_enabled()
+            or torch.jit.is_tracing()
         ):
             return super().__call__(*args, **kwargs)
-        return self._init_fn(*args, **kwargs)
+        for index, name, default in self._eager_tensors:
+            tensor = args[index] if index < len(args) else kwargs.get(name, default)
+            if tensor is not None and (
+                type(tensor) is not Tensor
+                or torch._C._dispatch_keys(tensor).raw_repr() & ~_eager_tensor_keys
+                or tensor.requires_grad
+                or (tensor.is_inference() and not torch.is_inference_mode_enabled())
+            ):
+                return super().__call__(*args, **kwargs)
+        result = self._init_fn(*args, **kwargs)
+        if self._eager_mutations:
+            # Native pointer writes need the same saved-tensor invalidation as dispatcher mutations.
+            torch.autograd.graph.increment_version([
+                tensor for index, name, default in self._eager_mutations
+                if (tensor := args[index] if index < len(args) else kwargs.get(name, default)) is not None
+            ])
+        return result
+
+    def register_kernel(self, device_types: Any, fn: Any = None, /) -> Any:
+        self._eager_disabled = True
+        return super().register_kernel(device_types, fn)
+
+    def register_autograd(self, backward: Any, /, *, setup_context: Any = None) -> None:
+        self._eager_disabled = True
+        return super().register_autograd(backward, setup_context=setup_context)
+
+    def register_vmap(self, func: Any = None) -> Any:
+        self._eager_disabled = True
+        return super().register_vmap(func)
+
+    def register_autocast(self, device_type: str, cast_inputs: torch.dtype) -> None:
+        self._eager_disabled = True
+        return super().register_autocast(device_type, cast_inputs)
 
 
 def _op(name: str, **kwargs: Any) -> Any:
     """Register a traceable op with a direct eager entry point and the implementation's signature and docstring.
 
-    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and fake or meta tensors
-    use the registered op, including its fake implementation.
+    Ordinary eager calls avoid the dispatcher and its compiler imports. Subclasses, non-data tensors, tracing,
+    transforms, gradient inputs and ops with additional registrations use the registered op.
     """
 
     def wrap(fn: Any) -> Any:
         op = torch.library.custom_op(name, **kwargs)(fn)
+        arguments = op._opoverload._schema.arguments
+        op._eager_tensors = tuple((i, arg.name, arg.default_value) for i, arg in enumerate(arguments)
+                                  if "Tensor" in str(arg.type))
+        op._eager_mutations = tuple((i, arg.name, arg.default_value) for i, arg in enumerate(arguments)
+                                    if arg.alias_info is not None and arg.alias_info.is_write)
+        op._eager_disabled = False
         # Keep the registered object and its registration methods, including CustomOpDef's opcheck support.
         op.__class__ = _EagerOp
         return functools.update_wrapper(op, fn)

@@ -23,7 +23,7 @@ def _exercise_ops(compile_ops=False):
     def check_imports():
         if compile_ops:
             return
-        assert not {"torch._dynamo", "torch._inductor"}.intersection(sys.modules)
+        assert not {"torch._dynamo", "torch._inductor", "triton"}.intersection(sys.modules)
         if sysconfig.get_config_var("Py_GIL_DISABLED"):
             assert not sys._is_gil_enabled()
 
