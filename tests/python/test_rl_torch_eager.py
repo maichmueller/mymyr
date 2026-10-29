@@ -102,15 +102,20 @@ def _exercise_ops(compile_ops=False):
                     op(*fake_inputs)
                     if name == "applicable_schemas":
                         op(table=inputs[0], states=fake_inputs[1])
+                    meta_inputs = tuple(torch.empty_like(x, device="meta") if isinstance(x, torch.Tensor) else x
+                                        for x in inputs)
+                    meta = op(*meta_inputs)
                     result = torch.compile(op, fullgraph=True, backend="aot_eager")(*inputs)
                     if name == "applicable_schemas":
                         checked = torch.library.opcheck(op, inputs)
                         assert set(checked.values()) == {"SUCCESS"}, checked
                     fake = () if fake is None else (fake,) if isinstance(fake, torch.Tensor) else fake
+                    meta = () if meta is None else (meta,) if isinstance(meta, torch.Tensor) else meta
                     actual = () if result is None else (result,) if isinstance(result, torch.Tensor) else result
                     assert [(x.shape, x.dtype, x.device) for x in fake] == [
                         (x.shape, x.dtype, x.device) for x in actual
                     ], name
+                    assert [(x.shape, x.dtype) for x in meta] == [(x.shape, x.dtype) for x in actual], name
                 else:
                     result = op(*inputs)
                 assert result is None or isinstance(result, (torch.Tensor, tuple, list)), name

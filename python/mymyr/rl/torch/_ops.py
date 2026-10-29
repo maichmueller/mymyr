@@ -107,8 +107,8 @@ class _EagerOp(torch.library.CustomOpDef):
         if (
             torch.compiler.is_compiling()
             or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None
-            or any(isinstance(x, FakeTensor) for x in args)
-            or any(isinstance(x, FakeTensor) for x in kwargs.values())
+            or any(isinstance(x, Tensor) and (isinstance(x, FakeTensor) or x.is_meta) for x in args)
+            or any(isinstance(x, Tensor) and (isinstance(x, FakeTensor) or x.is_meta) for x in kwargs.values())
         ):
             return super().__call__(*args, **kwargs)
         return self._init_fn(*args, **kwargs)
@@ -117,7 +117,7 @@ class _EagerOp(torch.library.CustomOpDef):
 def _op(name: str, **kwargs: Any) -> Any:
     """Register a traceable op with a direct eager entry point and the implementation's signature and docstring.
 
-    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and fake-tensor calls
+    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and fake or meta tensors
     use the registered op, including its fake implementation.
     """
 

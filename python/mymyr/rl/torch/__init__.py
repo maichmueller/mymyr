@@ -23,7 +23,7 @@ of one):
   ``applicable_schemas`` / ``applicable_objects`` / ``is_applicable`` (:mod:`mymyr.rl.torch._masks`) are the action
   masks of mymyr.rl on a table handle, with a status scalar in place of errors on a device.
   These Python entry points call their implementations directly in eager mode, keeping torch's compiler modules
-  unloaded. Compilation and fake-tensor calls use the registered ``torch.ops.mymyr`` ops.
+  unloaded. Compilation and fake or meta tensors use the registered ``torch.ops.mymyr`` ops.
   All have fake implementations: they trace under ``torch.compile`` without graph breaks
   (``fullgraph=True`` works for loops of ``step``; the TorchRL env's own Python and TensorDict code is not meant to be
   compiled).
