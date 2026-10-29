@@ -65,6 +65,7 @@ eleven fields: succ, parent, schema, binding, goal, offsets, derived, succ_hash,
 are empty tensors; a capacity keeps counts and status on the device.
 """
 
+import functools
 import itertools
 import threading
 from typing import Any, Optional
@@ -98,13 +99,27 @@ __all__ = [
 _unsafe = (torch.Tag.cudagraph_unsafe,)
 
 
+class _EagerOp(torch.library.CustomOpDef):
+    """A custom op with direct eager execution and dispatcher execution for tracing."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if torch.compiler.is_compiling() or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None:
+            return super().__call__(*args, **kwargs)
+        return self._init_fn(*args, **kwargs)
+
+
 def _op(name: str, **kwargs: Any) -> Any:
-    """torch.library.custom_op that keeps the function's docstring on the op."""
+    """Register a traceable op with a direct eager entry point and the implementation's signature and docstring.
+
+    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and active fake-tensor modes
+    use the registered op, including its fake implementation.
+    """
 
     def wrap(fn: Any) -> Any:
         op = torch.library.custom_op(name, **kwargs)(fn)
-        op.__doc__ = fn.__doc__
-        return op
+        # Keep the registered object and its registration methods, including CustomOpDef's opcheck support.
+        op.__class__ = _EagerOp
+        return functools.update_wrapper(op, fn)
 
     return wrap
 
@@ -165,7 +180,7 @@ def _stream(t: Tensor | torch.device) -> Optional[int]:
 # ------------------------------------------------------------------------------------------------ environments
 # The ops check the tensors here (dtype, shape, device, contiguity) and pass their data pointers to the native Env
 # (Env._step_ptrs, ...), which runs on torch's current stream: a DLPack import costs about 10 us per torch tensor, a
-# check about 1 us. The *_impl functions are the eager entry points of BatchedEnv (no dispatcher round trip).
+# check about 1 us. The *_impl functions also support calls into preallocated environment buffers.
 
 _info: dict[int, tuple] = {}  # handle -> (env, (device, row_words, words, S, V, L))
 
@@ -375,8 +390,7 @@ def step_impl(
 
 def visited_mask_impl(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
                       rows: Optional[Tensor] = None) -> Tensor:
-    """The eager body of ``mymyr::visited_mask`` (no dispatcher: an eager call of a custom op imports
-    torch._dynamo)."""
+    """The body of ``mymyr::visited_mask``."""
     from mymyr._core import _rl_ops
 
     out = torch.empty(succ_hash.shape, dtype=torch.bool, device=table.device)
@@ -998,7 +1012,7 @@ def _(
                                 static_args)
 
 
-@torch.library.custom_op("mymyr::literal_slots", mutates_args=())
+@_op("mymyr::literal_slots", mutates_args=())
 def literal_slots(encoder: int, predicates: Tensor, objects: Tensor,
                   task_ids: Optional[Tensor] = None) -> list[Tensor]:
     """CUDA literal lookup on a registered encoder: kinds uint8 [N], slots int32 [N], status int64 scalar.
@@ -1018,7 +1032,7 @@ def _(encoder, predicates, objects, task_ids=None):
             predicates.new_empty((), dtype=torch.int64)]
 
 
-@torch.library.custom_op("mymyr::literal_masks", mutates_args=())
+@_op("mymyr::literal_masks", mutates_args=())
 def literal_masks(encoder: int, predicates: Tensor, objects: Tensor, positive: Tensor, rows: Tensor,
                   num_rows: int, task_ids: Optional[Tensor] = None, layers: Optional[Tensor] = None,
                   num_layers: int = 1) -> list[Tensor]:
@@ -1043,7 +1057,7 @@ def _(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, lay
             predicates.new_empty(shape, dtype=torch.bool), predicates.new_empty((), dtype=torch.int64)]
 
 
-@torch.library.custom_op("mymyr::match_first", mutates_args=())
+@_op("mymyr::match_first", mutates_args=())
 def match_first(templates: int, rows: Tensor, task_ids: Optional[Tensor] = None, first: bool = False,
                 derived: Optional[Tensor] = None, capacity: Optional[int] = None,
                 max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
