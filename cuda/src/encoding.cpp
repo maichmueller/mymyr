@@ -144,10 +144,26 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             if (goal_reads || layer_reads)
                 modes[i] |= 1u << (m + 3);
         }
+        // the constant literals of the instance's goal with the table predicate `tp` and the sign of goal op `op`
+        const auto instance_constants = [&inst](u32 tp, u32 op)
+        {
+            u64 n = 0;
+            for (u32 k = 0; k < inst.goal_constants.count; ++k)
+            {
+                const i32* row = inst.goal_constants.row(k);
+                n += static_cast<u32>(row[ed::k_constant_predicate]) == tp &&
+                     (row[ed::k_constant_negative] != 0) == ed::goal_op_negative(op);
+            }
+            return n;
+        };
         // Cell scratch covers every optional lane combination. Fixed-row output bounds omit expansion tuples,
-        // whose count belongs to the input.
-        for (const ed::CellList list : {ed::cell_list(inst, false, schema.options().include_actions, levels, history),
-                                        ed::cell_list(inst, true, schema.options().include_actions, levels, history)})
+        // whose count belongs to the input, and the constant literals of the rows (bounded per literal below).
+        const bool actions = schema.options().include_actions;
+        for (const auto& [list, row_goals] :
+             {std::pair{ed::cell_list(inst, false, actions, levels, history), false},
+              std::pair{ed::cell_list(inst, true, actions, levels, history), true},
+              std::pair{ed::cell_list(inst, false, actions, levels, history, true), false},
+              std::pair{ed::cell_list(inst, true, actions, levels, history, true), true}})
         {
             u64 tuples = 0, args = 0, targets = 0;
             u64 step_tuples = 0, step_args = 0, step_targets = 0;
@@ -168,7 +184,8 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
                 }
                 if (ed::is_action_op(cell.op) || ed::is_horizon_op(cell.op))
                     continue;
-                const u64 n = u64{cell.b - cell.a} + (ed::is_goal_op(cell.op) ? cell.d - cell.c : 0u);
+                const bool instance_goal = ed::is_goal_op(cell.op) && !row_goals && ed::goal_op_level(cell.op) == 0;
+                const u64 n = u64{cell.b - cell.a} + (instance_goal ? instance_constants(cell.c, cell.op) : 0u);
                 tuples = add(tuples, n);
                 args = add(args, mul(n, cell.arity));
                 if (ed::is_goal_op(cell.op) && ed::goal_op_mode(cell.op) == ed::GoalMode::PlainTarget)
@@ -188,6 +205,32 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
             bounds.step_tuples = std::max(bounds.step_tuples, step_tuples);
             bounds.step_args = std::max(bounds.step_args, step_args);
             bounds.step_targets = std::max(bounds.step_targets, step_targets);
+            // a constant literal goes to the goal cells of its predicate, sign and level (one per goal variant)
+            for (u32 c = 0; c < list.count; ++c)
+            {
+                const ed::Cell& key = list.cells[c];
+                if (!ed::is_goal_op(key.op) || ed::is_history_op(key.op) || ed::is_action_op(key.op) ||
+                    ed::is_horizon_op(key.op))
+                    continue;
+                u64 literal_tuples = 0, literal_args = 0, literal_targets = 0;
+                for (u32 other = 0; other < list.count; ++other)
+                {
+                    const ed::Cell& cell = list.cells[other];
+                    if (!ed::is_goal_op(cell.op) || ed::is_history_op(cell.op) || ed::is_action_op(cell.op) ||
+                        ed::is_horizon_op(cell.op) || cell.c != key.c ||
+                        ed::goal_op_negative(cell.op) != ed::goal_op_negative(key.op) ||
+                        ed::goal_op_level(cell.op) != ed::goal_op_level(key.op))
+                        continue;
+                    ++literal_tuples;
+                    literal_args += cell.arity;
+                    literal_targets += ed::goal_op_mode(cell.op) == ed::GoalMode::PlainTarget ? 1 : 0;
+                }
+                bounds.constant_tuples = std::max(bounds.constant_tuples, literal_tuples);
+                bounds.constant_args = std::max(bounds.constant_args, literal_args);
+                bounds.constant_targets = std::max(bounds.constant_targets, literal_targets);
+                bounds.constant_auxiliary =
+                    bounds.constant_auxiliary || (key.logical_arity == 0 && inst.nullary_auxiliary);
+            }
         }
     }
     if (!facts.derived_words ||
@@ -307,12 +350,15 @@ u64 history_steps_of(const encoding::EncodingSchema& schema, u64 history_steps, 
             "mymyr: encoding: the schema encodes every history step: give the most steps one row's history has");
     return history_steps;
 }
-BatchShape worst_shape(u64 graphs, const GraphBounds& bounds, u64 steps)
+BatchShape worst_shape(u64 graphs, const GraphBounds& bounds, u64 steps, u64 constants = 0)
 {
+    const u64 constant_entities =
+        constants ? add(mul(constants, bounds.constant_targets), bounds.constant_auxiliary ? 1 : 0) : 0;
     return {graphs,
-            mul(graphs, add(bounds.entities, mul(steps, bounds.step_entities))),
-            mul(graphs, add(bounds.args, mul(steps, bounds.step_args))),
-            mul(graphs, add(bounds.targets, mul(steps, bounds.step_targets))),
+            mul(graphs, add(add(bounds.entities, mul(steps, bounds.step_entities)), constant_entities)),
+            mul(graphs, add(add(bounds.args, mul(steps, bounds.step_args)), mul(constants, bounds.constant_args))),
+            mul(graphs, add(add(bounds.targets, mul(steps, bounds.step_targets)),
+                            mul(constants, bounds.constant_targets))),
             mul(graphs, steps), mul(graphs, bounds.numeric)};
 }
 }  // namespace
@@ -793,9 +839,9 @@ GraphBounds DeviceEncoder::bounds() const
     std::shared_lock lock(m_state_mutex);
     return m_bounds;
 }
-BatchShape DeviceEncoder::worst_case(u64 graphs, u64 history_steps) const
+BatchShape DeviceEncoder::worst_case(u64 graphs, u64 history_steps, u64 constant_literals) const
 {
-    return worst_shape(graphs, bounds(), history_steps_of(schema(), history_steps, true));
+    return worst_shape(graphs, bounds(), history_steps_of(schema(), history_steps, true), constant_literals);
 }
 OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
 {
@@ -852,11 +898,12 @@ u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
     const auto output = output_layout(shape);
     return add(detail::encoding_scratch_layout(shape, *m_context->m_facts, options().layout, schema().num_relations()).bytes, output.bytes);
 }
-u64 DeviceEncoder::bytes_needed(u64 graphs, u64 history_steps) const
+u64 DeviceEncoder::bytes_needed(u64 graphs, u64 history_steps, u64 constant_literals) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto shape = worst_shape(graphs, m_bounds, history_steps_of(schema(), history_steps, true));
+    const auto shape =
+        worst_shape(graphs, m_bounds, history_steps_of(schema(), history_steps, true), constant_literals);
     return add(detail::encoding_scratch_layout(shape, *m_context->m_facts, options().layout, schema().num_relations()).bytes,
                output_layout(shape).bytes);
 }
@@ -1162,6 +1209,41 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
+    const auto check_constants = [](const encoding::ConstantInput& c, const char* what, bool masks)
+    {
+        if (!c.rows)
+            return;
+        if (!masks)
+            invalid(std::string("the constant literals of the ") + what + " need the " + what + " masks");
+        if (c.width < encoding::detail::k_constant_objects)
+            invalid(std::string("the constant literals of the ") + what + " have " + std::to_string(c.width) +
+                    " columns, at least " + std::to_string(encoding::detail::k_constant_objects) + " are needed");
+        if (c.stride != 0 && c.stride < u64{c.capacity} * c.width)
+            invalid(std::string("the row stride of the constant literals of the ") + what +
+                    " is smaller than their literals");
+    };
+    check_constants(in.goal_constants, "goals", in.goal_pos != nullptr);
+    check_constants(in.subgoal_constants, "subgoal layers", sub.layers != 0);
+    if (const u64 literals = add(in.goal_constants.rows ? in.goal_constants.capacity : 0u,
+                                 in.subgoal_constants.rows ? in.subgoal_constants.capacity : 0u);
+        literals && !layout.wide)
+    {
+        // the totals of the scan are 32 bits wide unless the bounds need more: the constant literals must not either
+        const GraphBounds& b = facts.bounds;
+        u64 graph = add(add(b.entities, b.targets), add(b.tuples, b.numeric));
+        u64 literal = add(mul(2, b.constant_targets), b.constant_tuples);
+        if (!relation_major)
+        {
+            graph = add(graph, b.args);
+            literal = add(literal, b.constant_args);
+        }
+        if (mul(graphs, add(add(graph, mul(literals, literal)), b.constant_auxiliary ? 1 : 0)) >
+            std::numeric_limits<u32>::max())
+            invalid("the constant literals of the rows could take the sizes past the 32-bit totals of the scratch: "
+                    "give fewer literals per row or fewer rows");
+    }
+    if (in.row_start && in.subgoal_constants.rows)
+        invalid("a circular row view carries no subgoal layers or history steps");
     // the masks of an empty batch may be null (an empty tensor has no data pointer), but not only one of them
     const auto check_layers = [graphs](const encoding::LayerInput& l, const char* what, bool rows_share)
     {
@@ -1271,7 +1353,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
 
     // how it is launched
     const u64 launched_instances = in.task_ids ? facts.widths.size() : std::min<usize>(1, facts.widths.size());
-    const encoding::detail::LayerSource layers{sub, hist, opts.history_max_steps.value_or(0)};
+    encoding::detail::LayerSource layers{sub, hist, opts.history_max_steps.value_or(0)};
+    if (sub.layers != 0)
+        layers.constants = in.subgoal_constants;
     const auto [lanes, fill_mask, fill_floor] =
         plan_launch(context.view.num_virtual, R, relation_major, opts.index == encoding::IndexType::I64,
                     layers.layered(), facts.widths, launched_instances, launch);
@@ -1310,6 +1394,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.goal_derived_neg = in.goal_derived_neg;
     p.goal_derived_stride = in.goal_derived_stride;
     p.goal_derived_words = in.goal_derived_words;
+    if (in.goal_pos)
+        p.goal_constants = in.goal_constants;
     p.actions = in.actions;
     p.horizon = in.horizon;
     p.schema_relations = facts.schema_relations;

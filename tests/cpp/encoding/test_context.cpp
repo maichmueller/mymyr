@@ -421,7 +421,9 @@ TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
     for (u32 i = 0; i < v.num_row_cells; ++i)
     {
         if (lanes::is_goal_op(v.row_cells[i].op))
+        {
             EXPECT_LT(v.row_cells[i].a, v.row_cells[i].b);
+        }
     }
     const lanes::CellList fixed = lanes::cell_list(v, true, false, false, false, true);
     u32 fixed_goal_cells = 0;

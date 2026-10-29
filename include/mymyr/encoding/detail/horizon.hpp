@@ -11,7 +11,7 @@
 //   - minus: the deleting variant of a delta cell, the falsifying variant of an added-satisfaction cell;
 //   - low: the flat op that says where the tuple's atoms come from: a CellOp for the cells of facts and delta, the goal
 //     op (goal_op, lanes.hpp) for the cells of goal literals.
-// Cell::a and b are the slot range (or static rows) as in the flat cells, c and d the rows of the constant goal tuples.
+// Cell::a and b are the slot range (or static rows) as in the flat cells, c the table predicate of a goal cell.
 //
 // The per-graph rules are written once for the host and for device kernels, like those of lanes.hpp, and this header is
 // part of the same device-code subset: a graph is a HorizonGraph (POD views of the nodes, the edges and the graph's

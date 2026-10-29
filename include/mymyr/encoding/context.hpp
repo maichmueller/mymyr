@@ -39,8 +39,9 @@ public:
     /// One block: inst (u64 [instances, detail::k_instance_columns]), cell (u32 [cells, 8]), slot_args, derived_args
     /// and static_args (i32 [rows, max_arity]; the objects of each fluent slot, derived slot and sorted, deduplicated
     /// static tuple of an instance, -1 padded), goal_words (u64: per instance the positive and negative goal masks over
-    /// its fluent words, then over its derived words) and goal_args (i32 [rows, max_arity]: the constant goal tuples of
-    /// each goal cell, sorted and without duplicates, -1 padded), action_schemas (u32: the schemas of each action
+    /// its fluent words, then over its derived words) and goal_constants (i32 [rows, detail::k_constant_objects +
+    /// max_arity]: per instance the constant literals of its goal, its literals of fixed truth, as
+    /// encoding::ConstantInput lays them out: sorted, without duplicates, -1 padded), action_schemas (u32: the schemas of each action
     /// relation, ascending), schema_arity (u32 [schemas]: the objects of each action schema's ground actions),
     /// relation_virtual (u32 [relations]: the virtual index of each relation's predicate, k_no_virtual for none) and
     /// virtual_relation (u32: the key relation of each virtual index), both empty without predicate virtual nodes, and
@@ -68,7 +69,8 @@ public:
     /// not fixed (one over a fluent or derived predicate). With the instance's goal a goal cell exists for each goal
     /// relation of a predicate that has a goal literal over atom slots or a constant literal, over the slots from the
     /// first to the last of those literals; with goals of the row, for each goal relation of a predicate that has atom
-    /// slots, over all of its slots.
+    /// slots, over all of its slots. Each list has a fixed variant for rows with constant literals of their own (of
+    /// their goal or their subgoal layers), which also has the goal cells of the predicates without atom slots.
     [[nodiscard]] const rl::ArrayBundle& arrays() const noexcept { return m_arrays; }
     /// The arrays as a POD view on the copy of the block that starts at `block` (the host block by default; a device
     /// copy of the same bytes gives a device view).
