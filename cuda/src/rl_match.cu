@@ -14,6 +14,12 @@ struct MatchWarp
             value |= __shfl_xor_sync(0xffffffffu, value, offset);
         return value;
     }
+    __device__ u32 sum(u32 value) const
+    {
+        for (int offset = 16; offset; offset /= 2)
+            value += __shfl_xor_sync(0xffffffffu, value, offset);
+        return value;
+    }
 };
 __global__ void initialize(rl::MatchTemplates t, rl::MatchBatch b)
 {
@@ -59,11 +65,11 @@ __global__ void match(rl::MatchTemplates t, rl::MatchBatch b, u64 jobs)
                     continue;
                 }
                 i32 binding[MaxVars];
-                u32 base[MaxVars], masks[MaxVars];
+                u32 base[MaxVars], masks[MaxVars], need[MaxVars];
                 rl::match_detail::Budget budget{b.max_steps};
                 const bool found = rl::match_detail::search<MatchWarp, (MaxVars > 2)>(grp, t, static_cast<u32>(g), static_cast<u32>(k),
                         b.states + row * b.row_words, b.derived ? b.derived + row * b.derived_words : nullptr,
-                        binding, base, masks, budget);
+                        binding, base, masks, need, budget);
                 if (budget.exhausted)
                     flags |= 8;
                 if (!found)

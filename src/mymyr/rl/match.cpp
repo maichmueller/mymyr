@@ -16,7 +16,7 @@ void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
     {
         const auto [begin, end] = ThreadPool::slice(b.rows, worker, pool ? pool->size() : 1);
         std::vector<i32> binding(t.max_vars);
-        std::vector<u32> base(t.max_vars), masks(t.max_vars);
+        std::vector<u32> base(t.max_vars), masks(t.max_vars), need(t.max_vars);
         u64 flags = 0;
         for (u64 row = begin; row < end; ++row)
         {
@@ -40,7 +40,7 @@ void match_first(const MatchTemplates& t, const MatchBatch& b, ThreadPool* pool)
                 match_detail::Budget budget{b.max_steps};
                 const bool found = match_detail::search(encoding::detail::SoloGroup{}, t, static_cast<u32>(g),
                     static_cast<u32>(k), b.states + row * b.row_words,
-                    b.derived ? b.derived + row * b.derived_words : nullptr, binding.data(), base.data(), masks.data(), budget);
+                    b.derived ? b.derived + row * b.derived_words : nullptr, binding.data(), base.data(), masks.data(), need.data(), budget);
                 if (budget.exhausted)
                     flags |= 8;
                 if (!found)
