@@ -1215,6 +1215,8 @@ def test_relabel_lifted_validation_budget_invalid_ids_and_padding():
     out = rl.her_relabel_lifted(reached, done, None, t, status=status, **kwargs)
     assert out.status is status and int(status) == 0
     empty = rl.GoalTemplates.from_conditions(task, [[]])
+    absent = rl.her_relabel_lifted(reached, done, None, empty, **kwargs)
+    assert int(absent.status) == 0 and not absent.count.any() and (absent.segment == -1).all()
     for templates in (empty, t):
         out = rl.her_relabel_lifted(reached, done, np.full(2, -1, np.int32), templates, **kwargs)
         assert int(out.status) == 4 and not out.seg_valid.any() and not out.count.any()
@@ -1445,7 +1447,7 @@ def test_relabel_lifted_pddl_fixtures(fixture):
 @pytest.mark.parametrize("on_device", [False, True])
 def test_relabel_lifted_long_window(on_device):
     task, t, prev, reached, done, _, _ = toggle_window()
-    # A window wider than shared-memory closed-set bounds uses the same exact scan.
+    # Long windows retain exact loop detection.
     base = np.concatenate([reached[:1, :1], prev[:1, :1]], axis=0)
     reached = np.tile(base, (513, 2, 1))[:1025].copy()
     prev = np.tile(base[::-1], (513, 2, 1))[:1025].copy()

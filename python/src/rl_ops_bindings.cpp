@@ -352,7 +352,8 @@ void match_first(ArrayArg states, ArrayArg task_ids, Arg<ann::GoalTemplates> tem
 }
 
 void her_relabel_lifted(ArrayArg states, ArrayArg done, ArrayArg task_ids, Arg<ann::GoalTemplates> templates,
-                        ArrayArg block, ArrayArg prev_states, nb::tuple outputs, nb::tuple scratch,
+                        ArrayArg block, ArrayArg prev_states, nb::typed<nb::tuple, ann::ArrayOrView, nb::ellipsis> outputs,
+                        nb::typed<nb::tuple, ann::ArrayOrView, nb::ellipsis> scratch,
                         ArrayArg derived, ArrayArg prev_derived, u64 max_generated, u64 max_steps,
                         f32 step_reward, f32 goal_reward, StreamArg stream, Arg<PyPool> pool)
 {
@@ -543,7 +544,7 @@ void bind_rl_ops(nb::module_& parent)
           "derived"_a = nb::none(), "prev_derived"_a = nb::none(), "max_generated"_a, "max_steps"_a,
           "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "stream"_a = nb::none(), "pool"_a = nb::none(),
           "Destination-passing lifted hindsight relabelling with fixed outputs and scratch. Window [T,N,RW], "
-          "task_ids int32 [N] or [T,N]. Outputs follow HerLiftedBatch's field order; scratch holds hashes, "
+          "task_ids int32 [N] or [T,N]. Outputs follow mymyr.rl.HerLiftedBatch's field order; scratch holds hashes, "
           "previous hashes, expanded ids, match found/binding/template/count, and working goal masks. "
           "Status bits: 0 segment overflow, 1 variable limit, 2 invalid instance, 3 matcher budget exhaustion.");
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
