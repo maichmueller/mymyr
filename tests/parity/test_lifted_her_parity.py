@@ -12,11 +12,11 @@ import subprocess
 import sys
 
 DOMAIN = """(define (domain marking) (:requirements :strips :negative-preconditions)
- (:predicates (marked ?x) (free))
- (:action mark :parameters (?x) :precondition (free) :effect (and (marked ?x) (not (free))))
- (:action clear :parameters (?x) :precondition (marked ?x) :effect (and (not (marked ?x)) (free)))
+ (:predicates (marked ?x ?y) (free))
+ (:action mark :parameters (?x ?y) :precondition (free) :effect (and (marked ?x ?y) (not (free))))
+ (:action clear :parameters (?x ?y) :precondition (marked ?x ?y) :effect (and (not (marked ?x ?y)) (free)))
  (:action wait :parameters () :precondition (and) :effect (and)))"""
-PROBLEM = """(define (problem p) (:domain marking) (:objects a b) (:init (free)) (:goal (marked a)))"""
+PROBLEM = """(define (problem p) (:domain marking) (:objects a b) (:init (free)) (:goal (marked a b)))"""
 
 
 def _reference(payload):
@@ -42,9 +42,10 @@ def _reference(payload):
                 states[key(reached)] = reached
                 stack.append(reached)
     x = problem.new_variable("x", 0)
+    y = problem.new_variable("y", 1)
     pred = problem.get_domain().get_predicate("marked")
-    literal = problem.new_literal(problem.new_atom(pred, [x]), True)
-    condition = problem.new_conjunctive_condition([x], [literal])
+    literal = problem.new_literal(problem.new_atom(pred, [x, y]), True)
+    condition = problem.new_conjunctive_condition([x, y], [literal])
 
     class Episode:
         def __init__(self, env, first, path):
@@ -96,7 +97,9 @@ def test_lifted_segments_equal_pymimir_rl_refine(seed, cap):
     if probe.returncode:
         pytest.skip("pymimir-rl reference is not importable")
     task = mymyr.Task(mymyr.Domain.from_string(DOMAIN).instantiate_string(PROBLEM))
-    templates = rl.GoalTemplates.from_conditions(task, [[task.condition(["?x"], ["(marked ?x)"])]])
+    fixed = rl.lifted_goal_templates(task, distinct="equality").conditions(0)
+    assert len(fixed) == 1 and fixed[0].arity == 2 and not fixed[0].equalities
+    templates = rl.GoalTemplates.from_conditions(task, [fixed])
     T, N = 24, 2
     rng = random.Random(seed)
     paths = []
@@ -107,7 +110,8 @@ def test_lifted_segments_equal_pymimir_rl_refine(seed, cap):
                 label = [0, 1, 1, 0, 2, 0, 1, 0, 0][(q + i) % 9]
             else:
                 label = rng.choice([0, label]) if q and label else rng.randrange(3)
-            path.append(["(free)"] if label == 0 else [f"(marked {'a' if label == 1 else 'b'})"])
+            obj = "a" if label == 1 else "b"
+            path.append(["(free)"] if label == 0 else [f"(marked {obj} {obj})"])
         paths.append(path)
     prev = np.stack([np.asarray(task.encode([task.state(paths[i][q]) for i in range(N)])) for q in range(T)])
     reached = np.stack([np.asarray(task.encode([task.state(paths[i][q+1]) for i in range(N)])) for q in range(T)])
