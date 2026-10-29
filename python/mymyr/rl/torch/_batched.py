@@ -502,7 +502,7 @@ class BatchedEnv:
 
     def _step_into(
         self, out: StepResult, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool
-    ) -> tuple[Any, Any]:
+    ) -> tuple[Any, Any, Any]:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
         outputs); returns the step's ``obs``, ``final_obs`` and ``actions``."""
         before = self._before_step(final)

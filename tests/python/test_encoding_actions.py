@@ -510,6 +510,60 @@ def test_captured_observations_drop_noop_actions(drop):
     env.close()
 
 
+@pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.parametrize("dev", ["cpu", "cuda"])
+def test_label_mode_observations_carry_action_rows(dev, drop):
+    """A label-mode environment steps with the label of an observation's action row and reaches its successor."""
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = torch.device("cpu") if dev == "cpu" else cuda_or_skip()
+    table = noop_table("floortile")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    env = rt.BatchedEnv(table, 6, device=device, seed=5, max_steps=8, observation=encoder, obs_actions=True,
+                        obs_drop_noops=drop, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12),
+                        actions="label")
+    observation = env.observation()
+    for _ in range(4):
+        check_observation(encoder, table, observation.states, observation.task_ids, observation.encoding,
+                          observation.actions, drop)
+        batch, actions = observation.encoding, observation.actions
+        entities = encoding.action_entities(batch)
+        graphs = np.searchsorted(np.asarray(batch.as_dict("numpy")["entity_offsets"]), entities, side="right") - 1
+        rows = torch.as_tensor(encoding.action_rows(batch, actions, entities[np.searchsorted(graphs, np.arange(6))]),
+                               device=device)
+        binding = torch.full((6, env.label_width), -1, dtype=torch.int32, device=device)
+        binding[:, :actions.binding.shape[1]] = actions.binding[rows]
+        step = env.step((actions.schema[rows].to(torch.int32), binding))
+        assert not step.invalid.any()
+        assert torch.equal(mymyr.hash_rows(step.final_states), actions.succ_hash[rows])
+        check_observation(encoder, table, step.states, step.task_ids, step.obs, step.actions, drop)
+        observation = env.observation()
+    env.close()
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_captured_label_steps_carry_action_rows(drop):
+    torch = torch_or_skip()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device = cuda_or_skip()
+    from test_rl_masks_cuda import mask_policy
+
+    table = noop_table("rovers")
+    encoder = encoding.FlatRelationEncoder(table, **OPTIONS)
+    env = rt.BatchedEnv(table, 8, device=device, seed=2, max_steps=5, observation=encoder, obs_actions=True,
+                        obs_drop_noops=drop, obs_capacities=dict(entities=1 << 12, args=1 << 14, targets=1 << 12),
+                        actions="label")
+    rollout = env.capture(3, mask_policy(table), final=True)
+    for _ in range(2):
+        out = rollout.replay()
+        torch.cuda.synchronize(device)
+        assert out.action is None and out.action_schema.shape == (3, 8) and len(out.obs_actions) == 3
+        assert (out.schema >= 0).any()
+        for k in range(3):
+            check_observation(encoder, table, out.states[k], out.task_ids[k], out.obs[k], out.obs_actions[k], drop)
+    env.close()
+
+
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("successors", [None, 1 << 16])
 @pytest.mark.parametrize("drop", [False, True])
