@@ -840,7 +840,8 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
                 return std::vector<std::string>(names.begin(), names.end());
             },
             "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by "
-            "the nullary relations under nullary='auxiliary'.")
+            "the nullary relations under nullary='auxiliary', and by the nullary numeric functions under "
+            "nullary='auxiliary' and nullary='omit'.")
         .def_prop_ro(
             "simple_label_names",
             [schema_of](const Py& self) { return schema_of(self).simple_label_names(); },

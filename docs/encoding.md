@@ -299,7 +299,7 @@ A graph's entities come in blocks, each present only when the options and the in
 | Block | Role (`entity_role`) | `entity_ref` |
 |---|---|---|
 | the objects of the instance, in the task's object order | 0 `object` | the instance-local object id: `task.objects[entity_ref]` is its name |
-| the auxiliary entity, when the graph has a tuple over it (a nullary tuple, `nullary='auxiliary'`) | 8 `auxiliary` | -1 |
+| the auxiliary entity, when the graph has a tuple over it (a nullary atom with `nullary='auxiliary'`, or a nullary numeric function with `'auxiliary'` or `'omit'`) | 8 `auxiliary` | -1 |
 | the goal entities | 2 `goal` | the tuple's index among the graph's tuples in graph-major order |
 | the subgoal entities | 3 `subgoal` | the same as a goal entity |
 | the action entities | 4 `action` | the action's row among its state's rows of `actions` |
@@ -341,12 +341,13 @@ A relation's lane (`schema.relation_lanes`) says what fills its tuples:
   tuple. The types are static unary predicates, so `object` has one tuple per object. The `=` predicate has relations
   only with `equality=True`.
 - the **nullary** atoms, as `nullary` chooses. With `'auxiliary'` (the default) all nullary atoms of a graph share one
-  auxiliary entity, and each one is the unary tuple over it; the graph has the auxiliary entity exactly when it has
-  such a tuple. With `'arity0'` a nullary atom is a tuple without an argument: its cell counts it in `relation_counts`
-  and has no entry in `relation_args`, and no graph has an auxiliary entity. With `'omit'` there are no nullary
-  relations and no auxiliary entity. The nullary literals of goals, subgoal layers and history steps follow the same
-  choice: tuples over the auxiliary entity, or tuples of their leading slots alone (the goal entity of a goal tuple
-  that has one, the step entity of a history tuple, the predicate's virtual node).
+  auxiliary entity, and each one is the unary tuple over it; the graph has the auxiliary entity exactly when it has such
+  a tuple. With `'arity0'` a nullary atom is a tuple without an argument: its cell counts it in `relation_counts` and
+  has no entry in `relation_args`, and no graph has an auxiliary entity. With `'omit'` there are no nullary predicate
+  relations; a graph has the auxiliary entity only for the tuple of a nullary [numeric function](#numeric-functions).
+  The nullary literals of goals, subgoal layers and history steps follow the same choice: tuples over the auxiliary
+  entity, or tuples of their leading slots alone (the goal entity of a goal tuple that has one, the step entity of a
+  history tuple, the predicate's virtual node).
 - **goal**, **goal_derivation** and **goal_satisfaction**: the [goal](#goals) and [subgoal](#subgoals) literals;
 - **action**: one tuple per action of the state ([Actions](#actions));
 - **history**: the literals of the row's [history](#history) steps;
