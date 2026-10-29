@@ -173,11 +173,11 @@ public:
     void set_seed(u64 seed, StreamArg stream)
     {
         const std::intptr_t dl = select_stream(stream);
+        nb::gil_scoped_release release;
         std::lock_guard lock(m_mutex);
 #if defined(MYMYR_HAS_CUDA)
         if (m_dev)
         {
-            nb::gil_scoped_release release;
             m_dev->set_stream(reinterpret_cast<cudaStream_t>(dl));
             m_dev->set_seed(seed);
             return;
@@ -192,10 +192,10 @@ public:
     void reserve(u64 rows)
     {
 #if defined(MYMYR_HAS_CUDA)
+        nb::gil_scoped_release release;
         std::lock_guard lock(m_mutex);
         if (m_dev)
         {
-            nb::gil_scoped_release release;
             m_dev->reserve(rows);
         }
 #else
@@ -217,6 +217,7 @@ public:
 #if defined(MYMYR_HAS_CUDA)
         if (launch != "widest" && launch != "per_bucket")
             throw nb::value_error("mymyr: launch must be 'widest' or 'per_bucket'");
+        nb::gil_scoped_release release;
         std::lock_guard lock(m_mutex);
         if (m_dev)
             m_dev->set_launch(launch == "widest" ? cuda::BucketLaunch::Widest : cuda::BucketLaunch::PerBucket);
@@ -435,9 +436,9 @@ public:
 #if defined(MYMYR_HAS_CUDA)
         if (m_dev)
         {
-            std::lock_guard lock(m_mutex);
             {
                 nb::gil_scoped_release release;
+                std::lock_guard lock(m_mutex);
                 m_dev->check_errors();
             }
             drain(true);
@@ -456,8 +457,8 @@ private:
         void run(F&& f)
         {
             {
-                std::lock_guard lock(m_env.m_mutex);
                 nb::gil_scoped_release release;
+                std::lock_guard lock(m_env.m_mutex);
 #if defined(MYMYR_HAS_CUDA)
                 if (m_env.m_dev)
                     m_env.m_dev->set_stream(reinterpret_cast<cudaStream_t>(m_dl));  // DLPack 1, 2: legacy, per-thread
@@ -700,7 +701,7 @@ private:
 #endif
     std::unique_ptr<rl::HostEnv> m_host;
     std::unique_ptr<ThreadPool> m_pool;
-    std::mutex m_mutex;  // one call at a time (the Env's scratch)
+    std::mutex m_mutex;  // one call at a time (the Env's scratch); held only while detached from Python
     int m_device = -1;
     u32 m_W = 1, m_NN = 0, m_L = 1, m_S = 0;
     u64 m_V = 0;
