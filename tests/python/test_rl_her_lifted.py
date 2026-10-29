@@ -1082,3 +1082,260 @@ def test_match_first_pair_budget_with_small_and_large_template_tables(on_device,
                                 templates.to("cuda:0"), capacity=1, max_steps=max_steps)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+# ------------------------------------------------------------------------------------------------ relabelling
+
+
+def lifted_window(task, *, n=3, steps=23, seed=13):
+    from test_rl_ops import trajectory
+    prev, reached, done = trajectory(task, n=n, steps=steps, seed=seed, max_steps=7)
+    previous = [task.decode(row) for row in prev]
+    states = [task.decode(row) for row in reached]
+    _, _, _, pd = match_rows([task], [(0, s) for row in previous for s in row])
+    _, _, _, d = match_rows([task], [(0, s) for row in states for s in row])
+    return prev, reached, done, previous, states, pd.reshape(steps, n, -1), d.reshape(steps, n, -1)
+
+
+def assert_refine(tasks, previous, states, done, ids, templates, result, *, max_generated=None,
+                  step_reward=-0.25, goal_reward=2.0):
+    from her_lifted_reference import refine
+
+    T, N = done.shape
+    S = result.seg_valid.shape[1]
+    W, D = result.goal_pos.shape[-1], result.goal_pos_derived.shape[-1]
+    expected = [np.zeros_like(x) for x in result]
+    for at in (0, 3, 4, 6, 7):
+        expected[at].fill(-1)
+    remaining = 2**63 if max_generated is None else max_generated
+    overflow = False
+    offsets = templates.arrays()["instance_offsets"]
+    for i in range(N):
+        emitted = []
+        first = 0
+        for last in range(T):
+            if not done[last, i] and last + 1 < T:
+                continue
+            g = int(ids[i] if ids.ndim == 1 else ids[last, i])
+            transitions = [(previous[t][i], states[t][i]) for t in range(first, last + 1)]
+            for start, end, k, binding, goal in refine(tasks[g], transitions, templates.conditions(g)):
+                emitted.append((start + first, end + first, g, int(offsets[g]) + k, binding, goal))
+            first = last + 1
+        allowed = min(remaining, len(emitted))
+        remaining -= allowed
+        overflow |= allowed > S
+        keep = min(S, allowed)
+        expected[12][i] = keep
+        for j, (start, end, g, k, binding, goal) in enumerate(emitted[:keep]):
+            expected[0][start:end+1, i] = j
+            expected[1][start:end+1, i] = step_reward
+            expected[1][end, i] = goal_reward
+            expected[2][end, i] = True
+            expected[3][i, j], expected[4][i, j] = start, end
+            expected[5][i, j], expected[6][i, j] = True, k
+            expected[7][i, j, :len(binding)] = binding
+            for literals, width, positive, negative, slot_name in [
+                (goal.fluent_literals, W, 8, 9, "slot"),
+                (goal.derived_literals, D, 10, 11, "derived_slot"),
+            ]:
+                for literal in literals:
+                    slot = getattr(literal.atom, slot_name)
+                    which = positive if literal.positive else negative
+                    mask = expected[which].view(np.uint64)
+                    mask[i, j, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+    expected[13][...] = int(overflow)
+    for name, actual, want in zip(result._fields, result, expected):
+        np.testing.assert_array_equal(actual, want, err_msg=name)
+
+
+@needs_frontend
+@pytest.mark.parametrize("domain", DOMAINS)
+@pytest.mark.parametrize("distinct", [True, "equality"])
+def test_relabel_lifted_equals_golden_refine_on_ipc_windows(domain, distinct):
+    task = ipc(domain, "train", "p01")
+    prev, reached, done, previous, states, pd, d = lifted_window(task)
+    t = rl.lifted_goal_templates(task, distinct=distinct)
+    result = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=23,
+                                    derived=d, prev_derived=pd, step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(3, np.int32), t, result)
+
+
+@pytest.mark.parametrize("name", TEXT)
+def test_relabel_lifted_equals_golden_refine_on_fixtures(name):
+    task = text_task(name)
+    prev, reached, done, previous, states, pd, d = lifted_window(task)
+    t = rl.lifted_goal_templates(task)
+    result = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=23,
+                                    derived=d, prev_derived=pd, step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(3, np.int32), t, result)
+
+
+def toggle_window():
+    task = text_task("gripper__prob05")
+    # Ground goals make first achievement, loops, unmatched endpoints and generation order explicit.
+    s0 = task.initial_state
+    s1 = next(s for s in task.successor_states(s0) if s != s0)
+    # Select a ground literal changed by the first action, without object-variable ambiguities.
+    added = next(a for a in s1.atoms() if a not in s0.atoms())
+    conditions = [task.condition([], [str(added)])]
+    t = rl.GoalTemplates.from_conditions(task, [conditions])
+    paths = [[s0, s1, s1, s0, s1, s0, s1, s0, s1],
+             [s1, s0, s1, s0, s1, s0, s1, s0, s1]]
+    previous = [[path[q] for path in paths] for q in range(8)]
+    states = [[path[q+1] for path in paths] for q in range(8)]
+    reached = np.stack([np.asarray(task.encode(row)) for row in states])
+    prev = np.stack([np.asarray(task.encode(row)) for row in previous])
+    done = np.zeros((8, 2), bool)
+    done[3] = True
+    return task, t, prev, reached, done, previous, states
+
+
+@pytest.mark.parametrize("S", [0, 1, 2, 8])
+@pytest.mark.parametrize("cap", [None, 0, 1, 3, 5, 20])
+def test_relabel_lifted_scripted_loops_episode_order_and_caps(S, cap):
+    task, t, prev, reached, done, previous, states = toggle_window()
+    result = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=S,
+                                    max_generated=cap, step_reward=-0.25, goal_reward=2.0)
+    assert_refine([task], previous, states, done, np.zeros(2, np.int32), t, result, max_generated=cap)
+
+
+def test_relabel_lifted_validation_budget_invalid_ids_and_padding():
+    task, t, prev, reached, done, _, _ = toggle_window()
+    kwargs = dict(prev_states=prev, max_segments=8)
+    status = np.array(99, np.int64)
+    out = rl.her_relabel_lifted(reached, done, None, t, status=status, **kwargs)
+    assert out.status is status and int(status) == 0
+    empty = rl.GoalTemplates.from_conditions(task, [[]])
+    for templates in (empty, t):
+        out = rl.her_relabel_lifted(reached, done, np.full(2, -1, np.int32), templates, **kwargs)
+        assert int(out.status) == 4 and not out.seg_valid.any() and not out.count.any()
+        assert (out.segment == -1).all() and (out.seg_binding == -1).all() and not out.reward.any()
+    # A variable-bearing query exhausts immediately with budget zero.
+    full = rl.lifted_goal_templates(task)
+    out = rl.her_relabel_lifted(reached, done, None, full, max_steps=0, **kwargs)
+    assert int(out.status) == 8 and not out.count.any()
+    for kw, value, error in [("max_segments", -1, "max_segments"), ("max_generated", -1, "max_generated"),
+                              ("max_steps", -1, "max_steps"), ("words", 0, "widths"),
+                              ("prev_states", None, "prev_states")]:
+        with pytest.raises(ValueError, match=error):
+            rl.her_relabel_lifted(reached, done, None, t, **{**kwargs, kw: value})
+    with pytest.raises((TypeError, ValueError), match="done"):
+        rl.her_relabel_lifted(reached, done.astype(np.int32), None, t, **kwargs)
+    with pytest.raises((ValueError, TypeError), match="contiguous"):
+        rl.her_relabel_lifted(reached[::2], done[::2], None, t, prev_states=prev[::2], max_segments=8)
+    with pytest.raises(ValueError, match="prev_states"):
+        rl.her_relabel_lifted(reached, done, None, t, prev_states=prev[:1], max_segments=8)
+
+
+def test_relabel_lifted_empty_windows_and_half_words():
+    task, t, prev, reached, done, _, _ = toggle_window()
+    expected = rl.her_relabel_lifted(reached, done, None, t, prev_states=prev, max_segments=8)
+    halves = rl.her_relabel_lifted(reached.view(np.uint32), done, None, t, prev_states=prev.view(np.uint32), max_segments=8)
+    for a, b in zip(expected, halves):
+        np.testing.assert_array_equal(a, b)
+    for T, N in [(0, 2), (8, 0), (0, 0)]:
+        out = rl.her_relabel_lifted(reached[:T, :N].copy(), done[:T, :N].copy(), None, t,
+                                   prev_states=prev[:T, :N].copy(), max_segments=2)
+        assert not out.count.any() and not out.seg_valid.any() and int(out.status) == 0
+
+
+@pytest.mark.parametrize("via_op", [False, True])
+def test_relabel_lifted_torch_host_device_and_capture(via_op):
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import register, unregister, her_relabel_lifted as op
+    task, templates, prev, reached, done, _, _ = toggle_window()
+    want = rl.her_relabel_lifted(reached, done, None, templates, prev_states=prev, max_segments=3, max_generated=4)
+    devices = ["cpu"]
+    try:
+        import mymyr.cuda as mc
+        if torch.cuda.is_available() and mc.available():
+            devices.append("cuda:0")
+    except ImportError:
+        pass
+    for device in devices:
+        x = torch.tensor(reached.view(np.int64), device=device)
+        p = torch.tensor(prev.view(np.int64), device=device)
+        d = torch.tensor(done, device=device)
+        ids = torch.zeros(2, dtype=torch.int32, device=device)
+        t = templates if device == "cpu" else templates.to(device)
+        handle = register(t)
+
+        def run():
+            if via_op:
+                return rl.HerLiftedBatch(*op(handle, x, d, ids, p, 3, 4))
+            return rl.her_relabel_lifted(x, d, ids, t, prev_states=p, max_segments=3, max_generated=4)
+
+        try:
+            out = run()
+            for a, b in zip(want, out):
+                np.testing.assert_array_equal(a, b.cpu().numpy())
+            if device == "cpu":
+                continue
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                run()
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = run()
+            graph.replay()
+            for a, b in zip(want, captured):
+                np.testing.assert_array_equal(a, b.cpu().numpy())
+            ids.fill_(-1)
+            graph.replay()
+            assert captured.status.item() == 4 and not captured.count.any().item()
+            ids.zero_()
+            x.zero_()
+            changed = rl.her_relabel_lifted(np.zeros_like(reached), done, None, templates, prev_states=prev,
+                                           max_segments=3, max_generated=4)
+            graph.replay()
+            for a, b in zip(changed, captured):
+                np.testing.assert_array_equal(a, b.cpu().numpy())
+            torch.cuda.synchronize()
+        finally:
+            unregister(handle)
+
+
+def test_relabel_lifted_device_does_not_wait_for_its_stream():
+    torch = cuda_match_runtime()
+    task, templates, prev, reached, done, _, _ = toggle_window()
+    t = templates.to("cuda:0")
+    x = torch.tensor(reached.view(np.int64), device="cuda:0")
+    p = torch.tensor(prev.view(np.int64), device="cuda:0")
+    d = torch.tensor(done, device="cuda:0")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        rl.her_relabel_lifted(x, d, None, t, prev_states=p, max_segments=8)
+    stream.synchronize()
+    event = torch.cuda.Event()
+    try:
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(300_000_000)
+            event.record()
+            result = rl.her_relabel_lifted(x, d, None, t, prev_states=p, max_segments=8)
+        pending = not event.query()
+    finally:
+        stream.synchronize()
+    assert pending
+    assert result.count.sum().item() > 0 and result.status.item() == 0
+
+
+@pytest.mark.needs_gil
+def test_relabel_lifted_compile_and_opcheck():
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import register, unregister, her_relabel_lifted as op
+    from mymyr.rl.torch._ops import _her_relabel_lifted_op
+    task, t, prev, reached, done, _, _ = toggle_window()
+    handle = register(t)
+    x, p, d = torch.tensor(reached.view(np.int64)), torch.tensor(prev.view(np.int64)), torch.tensor(done)
+    try:
+        args = (handle, x, d, None, p, 3)
+        torch.library.opcheck(_her_relabel_lifted_op, args)
+        expected = op(*args)
+        actual = torch.compile(lambda a, b, c: op(handle, a, b, None, c, 3), backend="eager", fullgraph=True)(x, d, p)
+        for a, b in zip(expected, actual):
+            torch.testing.assert_close(a, b)
+    finally:
+        unregister(handle)

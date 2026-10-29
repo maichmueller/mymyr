@@ -22,6 +22,8 @@
 // kernel (cuda/rl_ops.hpp) and the jnp version (mymyr.rl.jax.her_relabel) agree bit for bit.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/core/hash.hpp"
+#include "mymyr/rl/match.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/rng.hpp"
 
@@ -151,4 +153,260 @@ MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j
 /// Every relabel of the window (host loop; T * N * k independent relabels, valid tests O(t - start) states each).
 /// Throws std::invalid_argument for a missing array or k == 0.
 void her_relabel(const HerBatch& b, const HerConfig& c);
+}  // namespace mymyr::rl
+
+
+namespace mymyr::rl
+{
+/// Lifted hindsight relabelling. Episodes are runs between done flags, including partial episodes at window edges.
+/// Environments and episodes are processed in ascending order; segments within an episode are generated backwards.
+/// A matching reached state's first template/binding defines the goal. The backward scan excludes the first step
+/// whose starting state either satisfies that goal or equals a successor already scanned (hashes only prefilter
+/// exact equality, including numeric words). Scanning continues before that excluded step.
+struct HerLiftedConfig
+{
+    u32 max_segments = 1;
+    u64 max_generated = ~u64{0};
+    u64 max_steps = 100000000;  // matcher budget per reached row and template
+    f32 step_reward = 0.0f, goal_reward = 1.0f;
+};
+
+/// Caller-owned contiguous window, outputs and scratch. task_ids is [N] (task_stride=0) or [T,N] (task_stride=N);
+/// the instance must be constant within each episode. State/derived row strides also apply to their prev arrays.
+/// Outputs: segment/reward/achieved [T,N]; segment metadata [N,S], binding [N,S,V], fluent masks [N,S,W],
+/// derived masks [N,S,DW], count [N] (retained segments). Invalid metadata and binding are -1; masks/rewards are zero.
+/// Status is cleared per call: bit 0 segment overflow, 1 device variable limit, 2 invalid instance, 3 matcher budget
+/// exhaustion. An exhausted template is skipped; later templates may match. Counts describe completed searches.
+/// Scratch sizes depend only on shapes. All arrays, including scratch, must remain live through graph replay.
+struct HerLiftedBatch
+{
+    u64 steps = 0, envs = 0;
+    u32 row_words = 0, words = 0, derived_words = 0, task_stride = 0;
+    const u64 *states = nullptr, *prev_states = nullptr, *derived = nullptr, *prev_derived = nullptr;
+    const u8* done = nullptr;
+    const i32* task_ids = nullptr;
+    i32 *segment = nullptr, *seg_start = nullptr, *seg_end = nullptr, *seg_template = nullptr, *seg_binding = nullptr;
+    u8 *achieved = nullptr, *seg_valid = nullptr;
+    f32* reward = nullptr;
+    u64 *goal_pos = nullptr, *goal_neg = nullptr, *goal_pos_derived = nullptr, *goal_neg_derived = nullptr;
+    i32* count = nullptr;
+    u64* status = nullptr;
+    // Scratch: hashes [T,N], previous hashes [T,N], ids [T,N], matches with capacity=1, work goals [N,2*(W+DW)].
+    u64 *hashes = nullptr, *prev_hashes = nullptr, *work_goals = nullptr;
+    i32* ids = nullptr;
+    MatchBatch matches{};
+};
+
+namespace her_lifted_detail
+{
+struct Solo
+{
+    MYMYR_HD u32 lane() const { return 0; }
+    MYMYR_HD u32 size() const { return 1; }
+    MYMYR_HD u32 bit_or(u32 x) const { return x; }
+    MYMYR_HD void sync() const {}
+};
+
+MYMYR_HD void prepare(const HerLiftedBatch& b, u64 row)
+{
+    b.hashes[row] = hash::state_words(b.states + row * b.row_words, b.row_words);
+    b.prev_hashes[row] = hash::state_words(b.prev_states + row * b.row_words, b.row_words);
+    b.ids[row] = b.task_ids ? b.task_ids[(row / b.envs) * b.task_stride + row % b.envs] : 0;
+}
+
+MYMYR_HD MatchBatch matches(const HerLiftedBatch& b, const HerLiftedConfig& c)
+{
+    MatchBatch m = b.matches;
+    m.states = b.states;
+    m.derived = b.derived;
+    m.task_ids = b.ids;
+    m.rows = b.steps * b.envs;
+    m.row_words = b.row_words;
+    m.derived_words = b.derived_words;
+    m.capacity = 1;
+    m.first = true;
+    m.max_steps = c.max_steps;
+    m.status = b.status;
+    return m;
+}
+
+/// Clear padding as well as live entries, so replays never expose stale outputs.
+template<class Group>
+MYMYR_HD void clear_slot(const Group& grp, const MatchTemplates& t, const HerLiftedBatch& b,
+                         const HerLiftedConfig& c, u64 i, u32 j)
+{
+    const u64 at = i * c.max_segments + j;
+    if (!grp.lane())
+    {
+        b.seg_valid[at] = 0;
+        b.seg_start[at] = b.seg_end[at] = b.seg_template[at] = -1;
+    }
+    for (u32 v = grp.lane(); v < t.max_vars; v += grp.size())
+        b.seg_binding[at * t.max_vars + v] = -1;
+    for (u32 w = grp.lane(); w < b.words; w += grp.size())
+        b.goal_pos[at * b.words + w] = b.goal_neg[at * b.words + w] = 0;
+    for (u32 w = grp.lane(); w < b.derived_words; w += grp.size())
+        b.goal_pos_derived[at * b.derived_words + w] = b.goal_neg_derived[at * b.derived_words + w] = 0;
+}
+
+template<class Group>
+MYMYR_HD void scan(const Group& grp, const MatchTemplates& t, const HerLiftedBatch& b,
+                   const HerLiftedConfig& c, u64 i)
+{
+    namespace ed = encoding::detail;
+    const u32 GW = 2 * (b.words + b.derived_words);
+    u64* goals = GW ? b.work_goals + i * GW : nullptr;
+    for (u32 j = 0; j < c.max_segments; ++j)
+        clear_slot(grp, t, b, c, i, j);
+    for (u64 q = grp.lane(); q < b.steps; q += grp.size())
+    {
+        const u64 at = q * b.envs + i;
+        b.segment[at] = -1;
+        b.reward[at] = 0;
+        b.achieved[at] = 0;
+    }
+    u32 generated = 0;
+    for (i64 first = 0; first < static_cast<i64>(b.steps);)
+    {
+        i64 last = first;
+        while (last + 1 < static_cast<i64>(b.steps) && !b.done[u64(last) * b.envs + i])
+            ++last;
+        i64 end = last;
+        while (end >= first)
+        {
+            const u64 row = u64(end) * b.envs + i;
+            const i32 k = b.matches.template_id[row];
+            if (k < 0)
+            {
+                --end;
+                continue;
+            }
+            for (u32 w = grp.lane(); w < GW; w += grp.size())
+                goals[w] = 0;
+            grp.sync();
+            if (!grp.lane())
+                for (i32 l = t.literal_offsets[k]; l < t.literal_offsets[k + 1]; ++l)
+                {
+                    const match_detail::Objects objects{t.terms + u64(l) * t.max_arity,
+                                                       b.matches.binding + row * t.max_vars};
+                    const auto slot = ed::resolve_literal(t.literals, static_cast<u32>(b.ids[row]), t.predicate[l],
+                                                          objects, static_cast<u32>(t.arity[l]));
+                    if (slot.kind == ed::LiteralKind::Fluent || slot.kind == ed::LiteralKind::Derived)
+                    {
+                        const u32 offset = slot.kind == ed::LiteralKind::Fluent ? (t.polarity[l] ? 0 : b.words)
+                            : 2 * b.words + (t.polarity[l] ? 0 : b.derived_words);
+                        goals[offset + slot.slot / 64] |= u64{1} << (slot.slot % 64);
+                    }
+                }
+            grp.sync();
+            i64 start = end;
+            while (start >= first)
+            {
+                const u64 at = u64(start) * b.envs + i;
+                u32 loop = 0, failed = 0;
+                for (i64 q = start + grp.lane(); q <= end; q += grp.size())
+                {
+                    const u64 past = u64(q) * b.envs + i;
+                    if (b.prev_hashes[at] != b.hashes[past])
+                        continue;
+                    bool equal = true;
+                    for (u32 w = 0; w < b.row_words && equal; ++w)
+                        equal = b.prev_states[at * b.row_words + w] == b.states[past * b.row_words + w];
+                    loop |= equal;
+                }
+                for (u32 w = grp.lane(); w < b.words; w += grp.size())
+                {
+                    const u64 value = b.prev_states[at * b.row_words + w];
+                    failed |= (value & goals[w]) != goals[w] || (value & goals[b.words + w]) != 0;
+                }
+                for (u32 w = grp.lane(); w < b.derived_words; w += grp.size())
+                {
+                    const u64 value = b.prev_derived[at * b.derived_words + w];
+                    failed |= (value & goals[2 * b.words + w]) != goals[2 * b.words + w] ||
+                              (value & goals[2 * b.words + b.derived_words + w]) != 0;
+                }
+                if (grp.bit_or(loop) || !grp.bit_or(failed))
+                    break;
+                --start;
+            }
+            if (start < end)
+            {
+                if (generated < c.max_segments)
+                {
+                    const u64 at = i * c.max_segments + generated;
+                    if (!grp.lane())
+                    {
+                        b.seg_valid[at] = 1;
+                        b.seg_start[at] = static_cast<i32>(start + 1);
+                        b.seg_end[at] = static_cast<i32>(end);
+                        b.seg_template[at] = k;
+                    }
+                    for (u32 v = grp.lane(); v < static_cast<u32>(t.num_vars[k]); v += grp.size())
+                        b.seg_binding[at * t.max_vars + v] = b.matches.binding[row * t.max_vars + v];
+                    for (u32 w = grp.lane(); w < b.words; w += grp.size())
+                    {
+                        b.goal_pos[at * b.words + w] = goals[w];
+                        b.goal_neg[at * b.words + w] = goals[b.words + w];
+                    }
+                    for (u32 w = grp.lane(); w < b.derived_words; w += grp.size())
+                    {
+                        b.goal_pos_derived[at * b.derived_words + w] = goals[2 * b.words + w];
+                        b.goal_neg_derived[at * b.derived_words + w] = goals[2 * b.words + b.derived_words + w];
+                    }
+                    for (i64 q = start + 1 + grp.lane(); q <= end; q += grp.size())
+                    {
+                        const u64 out = u64(q) * b.envs + i;
+                        b.segment[out] = static_cast<i32>(generated);
+                        b.achieved[out] = q == end;
+                        b.reward[out] = q == end ? c.goal_reward : c.step_reward;
+                    }
+                }
+                ++generated;
+            }
+            end = start - 1;
+        }
+        first = last + 1;
+    }
+    if (!grp.lane())
+        b.count[i] = static_cast<i32>(generated);
+}
+
+/// Exclusive prefix in environment order, counting generated segments even when their output capacity overflows.
+MYMYR_HD u64 cap_counts(const HerLiftedBatch& b, const HerLiftedConfig& c)
+{
+    u64 remaining = c.max_generated, flags = 0;
+    for (u64 i = 0; i < b.envs; ++i)
+    {
+        const u64 total = static_cast<u64>(b.count[i]);
+        const u64 allowed = total < remaining ? total : remaining;
+        remaining -= allowed;
+        if (allowed > c.max_segments)
+            flags |= 1;
+        b.count[i] = static_cast<i32>(allowed < c.max_segments ? allowed : c.max_segments);
+    }
+    return flags;
+}
+
+template<class Group>
+MYMYR_HD void trim(const Group& grp, const MatchTemplates& t, const HerLiftedBatch& b,
+                   const HerLiftedConfig& c, u64 i)
+{
+    for (u32 j = static_cast<u32>(b.count[i]); j < c.max_segments; ++j)
+        clear_slot(grp, t, b, c, i, j);
+    for (u64 q = grp.lane(); q < b.steps; q += grp.size())
+    {
+        const u64 at = q * b.envs + i;
+        if (b.segment[at] >= b.count[i])
+        {
+            b.segment[at] = -1;
+            b.reward[at] = 0;
+            b.achieved[at] = 0;
+        }
+    }
+}
+}  // namespace her_lifted_detail
+
+/// Destination-passing host form; a pool partitions reached rows and environment scans among its workers.
+void her_relabel_lifted(const MatchTemplates& templates, const HerLiftedBatch& batch, const HerLiftedConfig& config,
+                        ThreadPool* pool = nullptr);
 }  // namespace mymyr::rl

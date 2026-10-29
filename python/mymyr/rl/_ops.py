@@ -13,7 +13,7 @@ import numpy as np
 
 from mymyr._core import _rl_ops
 
-__all__ = ["match_first", "HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
+__all__ = ["her_relabel_lifted", "match_first", "HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
 
 
 class HerBatch(NamedTuple):
@@ -294,3 +294,9 @@ def match_first(rows, task_ids, templates, *, first=False, derived=None, status=
     from ._match import match_first as match
     return match(rows, task_ids, templates, first=first, derived=derived, status=status, capacity=capacity,
                  pool=pool, max_steps=max_steps)
+
+
+def her_relabel_lifted(states, done, task_ids, templates, **kwargs):
+    """Lifted hindsight segments; see mymyr.rl.her_relabel_lifted for the window contract."""
+    from ._her_lifted import her_relabel_lifted as relabel
+    return relabel(states, done, task_ids, templates, **kwargs)

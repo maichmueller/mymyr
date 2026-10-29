@@ -82,6 +82,7 @@ __all__ = [
     "literal_masks",
     "literal_slots",
     "match_first",
+    "her_relabel_lifted",
     "expand",
     "expand_flat",
     "lookup",
@@ -1065,3 +1066,58 @@ def _(templates, rows, task_ids=None, first=False, derived=None, capacity=None, 
             rows.new_empty((*shape, t.max_vars), dtype=torch.int32),
             rows.new_empty(shape, dtype=torch.int32), rows.new_empty((rows.shape[0],), dtype=torch.int32),
             rows.new_empty((), dtype=torch.int64)]
+
+
+def her_relabel_lifted_impl(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
+                            prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
+                            step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
+                            derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
+                            max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    from mymyr.rl._her_lifted import _relabel
+    return list(_relabel(states, done, task_ids, lookup(templates), prev_states, max_segments, max_generated,
+                         step_reward, goal_reward, words, derived, prev_derived, max_steps=max_steps))
+
+
+@_op("mymyr::her_relabel_lifted", mutates_args=())
+def _her_relabel_lifted_op(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
+                        prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
+                        step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
+                        derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
+                        max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    """Lifted hindsight segments; the output field order and shapes are those of mymyr.rl.HerLiftedBatch.
+
+    Register host or uploaded templates before compilation. Fixed shapes support CUDA capture after warm-up.
+    Eager callers use her_relabel_lifted_impl directly to avoid a dispatcher round trip.
+    """
+    return her_relabel_lifted_impl(templates, states, done, task_ids, prev_states, max_segments, max_generated,
+                                  step_reward, goal_reward, words, derived, prev_derived, max_steps)
+
+
+@_her_relabel_lifted_op.register_fake
+def _(templates, states, done, task_ids, prev_states, max_segments, max_generated=None, step_reward=0.0,
+      goal_reward=1.0, words=None, derived=None, prev_derived=None, max_steps=100_000_000):
+    t = lookup(int(templates))
+    T, N, _ = states.shape
+    W = t.source.words if words is None else words
+    D = 0 if derived is None else derived.shape[-1] // (2 if derived.dtype.itemsize == 4 else 1)
+    S = max_segments
+    specs = [((T, N), torch.int32), ((T, N), torch.float32), ((T, N), torch.bool),
+             ((N, S), torch.int32), ((N, S), torch.int32), ((N, S), torch.bool), ((N, S), torch.int32),
+             ((N, S, t.max_vars), torch.int32), *(( (N, S, w), torch.int64) for w in (W, W, D, D)),
+             ((N,), torch.int32), ((), torch.int64)]
+    return [states.new_empty(shape, dtype=dtype) for shape, dtype in specs]
+
+
+def her_relabel_lifted(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
+                        prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
+                        step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
+                        derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
+                        max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    """Lifted hindsight segments on a registered template handle; eager calls run the native implementation directly.
+
+    torch.compile uses mymyr::her_relabel_lifted with static padded output shapes. Register and, on CUDA, upload
+    templates before compiling or capturing. The output field order is mymyr.rl.HerLiftedBatch's.
+    """
+    call = _her_relabel_lifted_op if torch.compiler.is_compiling() else her_relabel_lifted_impl
+    return call(templates, states, done, task_ids, prev_states, max_segments, max_generated,
+                step_reward, goal_reward, words, derived, prev_derived, max_steps)
