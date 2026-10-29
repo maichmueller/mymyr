@@ -1161,8 +1161,8 @@ def _her_relabel_lifted_op(templates: int, states: Tensor, done: Tensor, task_id
                         max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
     """Lifted hindsight segments; the output field order and shapes are those of mymyr.rl.HerLiftedBatch.
 
-    Register host or uploaded templates before compilation. Fixed shapes support CUDA capture after warm-up.
-    Eager callers use her_relabel_lifted_impl directly to avoid a dispatcher round trip.
+    Register and, on CUDA, upload templates before compiling or capturing. Fixed padded output shapes support
+    torch.compile and CUDA capture after warm-up. Ordinary eager calls run the native implementation directly.
     """
     return her_relabel_lifted_impl(templates, states, done, task_ids, prev_states, max_segments, max_generated,
                                   step_reward, goal_reward, words, derived, prev_derived, max_steps)
@@ -1183,16 +1183,4 @@ def _(templates, states, done, task_ids, prev_states, max_segments, max_generate
     return [states.new_empty(shape, dtype=dtype) for shape, dtype in specs]
 
 
-def her_relabel_lifted(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
-                        prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
-                        step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
-                        derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
-                        max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
-    """Lifted hindsight segments on a registered template handle; eager calls run the native implementation directly.
-
-    torch.compile uses mymyr::her_relabel_lifted with static padded output shapes. Register and, on CUDA, upload
-    templates before compiling or capturing. The output field order is mymyr.rl.HerLiftedBatch's.
-    """
-    call = _her_relabel_lifted_op if torch.compiler.is_compiling() else her_relabel_lifted_impl
-    return call(templates, states, done, task_ids, prev_states, max_segments, max_generated,
-                step_reward, goal_reward, words, derived, prev_derived, max_steps)
+her_relabel_lifted = _her_relabel_lifted_op

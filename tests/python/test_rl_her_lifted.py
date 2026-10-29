@@ -1408,7 +1408,6 @@ def test_relabel_lifted_device_does_not_wait_for_its_stream():
 def test_relabel_lifted_compile_and_opcheck(static_only):
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import register, unregister, her_relabel_lifted as op
-    from mymyr.rl.torch._ops import _her_relabel_lifted_op
     if static_only:
         if not hasattr(mymyr, "Domain"):
             pytest.skip("built without the loki front end")
@@ -1421,7 +1420,8 @@ def test_relabel_lifted_compile_and_opcheck(static_only):
     x, p, d = torch.tensor(reached.view(np.int64)), torch.tensor(prev.view(np.int64)), torch.tensor(done)
     try:
         args = (handle, x, d, None, p, 3)
-        torch.library.opcheck(_her_relabel_lifted_op, args)
+        checked = torch.library.opcheck(op, args)
+        assert set(checked.values()) == {"SUCCESS"}, checked
         expected = op(*args)
         actual = torch.compile(lambda a, b, c: op(handle, a, b, None, c, 3), backend="eager", fullgraph=True)(x, d, p)
         for a, b in zip(expected, actual):

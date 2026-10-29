@@ -31,6 +31,43 @@ def state_pair():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.parametrize("tensor_arg", ["states", "prev_states", "done"])
+@pytest.mark.parametrize("tensor_kind", ["fake", "meta"])
+def test_her_relabel_lifted_non_data_arguments_match_dispatcher(tensor_arg, tensor_kind, monkeypatch):
+    import numpy as np
+
+    torch = pytest.importorskip("torch")
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from mymyr import rl
+    from mymyr.rl import torch as rt
+
+    task = text_task("gripper__prob05")
+    handle = rt.register(rl.lifted_goal_templates(task))
+    states = torch.tensor(np.asarray(task.encode([task.initial_state])).view(np.int64)).unsqueeze(0)
+    args = dict(templates=handle, states=states, done=torch.zeros((1, 1), dtype=torch.bool),
+                task_ids=None, prev_states=states.clone(), max_segments=2)
+    if tensor_kind == "fake":
+        args[tensor_arg] = FakeTensorMode(allow_non_fake_inputs=True).from_tensor(args[tensor_arg])
+    else:
+        args[tensor_arg] = torch.empty_like(args[tensor_arg], device="meta")
+
+    def reject_direct(*args, **kwargs):
+        pytest.fail("a non-data argument reached the direct implementation")
+
+    monkeypatch.setattr(rt.her_relabel_lifted, "_init_fn", reject_direct)
+    try:
+        expected = rt.her_relabel_lifted._opoverload(**args)
+        actual = rt.her_relabel_lifted(**args)
+        assert len(actual) == len(expected) == 14
+        assert [(x.shape, x.dtype, x.device, type(x)) for x in actual] == [
+            (x.shape, x.dtype, x.device, type(x)) for x in expected
+        ]
+    finally:
+        rt.unregister(handle)
+
+
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("keywords", [False, True])
 def test_refresh_invalidates_saved_goal_mask(keywords):
     torch = pytest.importorskip("torch")

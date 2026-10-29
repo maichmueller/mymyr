@@ -81,6 +81,9 @@ def _exercise_ops(compile_ops=False):
                 "applicable_objects": (table_handle, states, schema, None, 0),
                 "is_applicable": (table_handle, states, schema, binding),
                 "match_first": (template_handle, states),
+                "her_relabel_lifted": (template_handle, states.unsqueeze(0),
+                                       torch.zeros((1, 2), dtype=torch.bool, device=device),
+                                       None, states.clone().unsqueeze(0), 2),
                 "bounded_actions": (encoder_handle, states, None, 256),
                 "encode_flat": (encoder_handle, states, *([None] * 16), 2, 256, 1024, 256, 0),
                 "literal_slots": (encoder_handle, predicates, objects),
@@ -106,7 +109,7 @@ def _exercise_ops(compile_ops=False):
                                         for x in inputs)
                     meta = op(*meta_inputs)
                     result = torch.compile(op, fullgraph=True, backend="aot_eager")(*inputs)
-                    if name == "applicable_schemas":
+                    if name in {"applicable_schemas", "her_relabel_lifted"}:
                         checked = torch.library.opcheck(op, inputs)
                         assert set(checked.values()) == {"SUCCESS"}, checked
                     fake = () if fake is None else (fake,) if isinstance(fake, torch.Tensor) else fake
