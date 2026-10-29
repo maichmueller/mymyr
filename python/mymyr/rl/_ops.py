@@ -123,13 +123,9 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
 
         return jnp_mask(table, count, succ_hash, parent, rows=rows)
     if fw == "torch":
-        import torch
-
         from mymyr.rl.torch import _ops as torch_ops
 
-        if torch.compiler.is_compiling():
-            return torch.ops.mymyr.visited_mask(table, count, succ_hash, parent, rows)
-        return torch_ops.visited_mask_impl(table, count, succ_hash, parent, rows)
+        return torch_ops.visited_mask(table, count, succ_hash, parent, rows)
     out = np.empty(succ_hash.shape, dtype=np.bool_)
     _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
     return out

@@ -15,13 +15,15 @@ of one):
   task_ids=...)``, ``step(action, next_task_ids=...)`` (``action=None``: the random policy of the counter-based RNG)
   and ``refresh()``. The device step makes no host round trip.
 
-- torch custom ops (``torch.library``; :mod:`mymyr.rl.torch._ops`): ``torch.ops.mymyr.reset / refresh / step /
-  random_actions`` on an environment handle, and ``torch.ops.mymyr.expand`` (padded [N, K]) / ``expand_flat`` (CSR;
+- torch custom ops (``torch.library``; :mod:`mymyr.rl.torch._ops`): ``reset / refresh / step /
+  random_actions`` on an environment handle, and ``expand`` (padded [N, K]) / ``expand_flat`` (CSR;
   ``capacity=None``: the row count is an unbacked symbolic size under ``torch.compile``; ``derived=True``
   includes the derived words of the successors) on a table or suite handle
   (:func:`register`); ``literal_slots`` / ``literal_masks`` resolve CUDA literals on an encoder handle;
   ``applicable_schemas`` / ``applicable_objects`` / ``is_applicable`` (:mod:`mymyr.rl.torch._masks`) are the action
   masks of mymyr.rl on a table handle, with a status scalar in place of errors on a device.
+  These Python entry points call their implementations directly in eager mode, keeping torch's compiler modules
+  unloaded. Compilation and fake or meta tensors use the registered ``torch.ops.mymyr`` ops.
   All have fake implementations: they trace under ``torch.compile`` without graph breaks
   (``fullgraph=True`` works for loops of ``step``; the TorchRL env's own Python and TensorDict code is not meant to be
   compiled).
