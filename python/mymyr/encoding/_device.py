@@ -109,7 +109,7 @@ class _Layout:
 
     __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets",
                  "numeric", "numeric_dtype", "numeric_relations", "emits_relations", "simple", "shared",
-                 "static_relations")
+                 "static_relations", "argumentless_relations")
 
     def __init__(self, encoder: Any):
         options = encoder.options
@@ -126,6 +126,8 @@ class _Layout:
         self.static_relations = sum(lane == "static" for lane in encoder.relation_lanes)
         self.index = options["index_dtype"]
         self.relations = encoder.num_relations
+        # a cell of a relation without argument slots holds at most one tuple: they bound the Simple nodes
+        self.argumentless_relations = list(encoder.relation_arities).count(0)
         self.entity_arrays = not encoder.implicit_entities
         self.emits_relations = "relations" in options["outputs"]
         self.simple = "simple" in options["outputs"]
@@ -180,7 +182,8 @@ class _Layout:
             "history_entity": ((history,), index),
             "history_dt": ((history,), torch.int32),
             "node_offsets": ((g + 1,), index),
-            "node_label": ((entities + (args if tuples is None else tuples),), torch.int32),
+            "node_label": ((entities + (args + g * self.argumentless_relations if tuples is None else tuples),),
+                           torch.int32),
             "edge_offsets": ((g + 1,), index),
             "edge_index": ((2, 2 * args), index),
             "edge_label": ((2 * args,), torch.int32),

@@ -69,6 +69,25 @@ def test_simple_device_arrays_equal_host(name, index, form, options):
 
 @pytest.mark.parametrize("form", ["graph", "relation", "simple"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
+def test_simple_nullary_arity0_nodes_fit_capacities_with_more_tuples_than_arguments(form, index):
+    dev = gpu()
+    tasks = [pddl_task("features", p) for p in ("p01", "p02", "p03")]
+    case = Case("features", rl.TaskTable(tasks), tasks, derived=True, steps=4)
+    encoder = encoder_of(case.source, form, index_dtype=index, nullary="arity0", goal_derivations=GOALS)
+    goals = (*fluent_goals(case), case.derived.copy(), np.zeros_like(case.derived))
+    host = host_encode(encoder, case, goals=goals)
+    same_batch(host, device_encode(encoder, case, dev, goals=goals))
+    exact = capacities(host)
+    assert int(host.node_offsets[-1]) - exact["entities"] > exact["args"]
+    for caps in (exact, capacities(host, 2), dict(exact, args=0)):
+        h = host_encode(encoder, case, goals=goals, capacities=caps)
+        d = device_encode(encoder, case, dev, goals=goals, capacities=caps)
+        same_batch(h, d)
+        assert h.sizes == d.sizes
+
+
+@pytest.mark.parametrize("form", ["graph", "relation", "simple"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
 def test_simple_capacities_goals_layers_history_and_overflow(form, index):
     dev = gpu()
     case = make_case("mixed_derived")

@@ -38,6 +38,7 @@ struct CollationParams
     void* temp = nullptr;
     u64 temp_bytes = 0;
     DeviceOutput output;
+    u64 node_capacity = 0;  // the Simple nodes within the output's capacities (encoding::simple_node_capacity)
 };
 /// The temporary storage of both scans.
 u64 collation_scan_bytes(u64 graphs, u64 cells);

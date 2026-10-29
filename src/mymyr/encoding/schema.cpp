@@ -539,7 +539,10 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         });
     const FlatOptions& o = schema->m_options;
     for (const Relation& relation : schema->m_relations)
+    {
         schema->m_simple_max_arity = std::max(schema->m_simple_max_arity, relation.arity);
+        schema->m_argumentless_relations += relation.arity == 0 ? 1 : 0;
+    }
     if (o.constant_labels)
     {
         if (!domain.constants_recorded)

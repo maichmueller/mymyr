@@ -281,6 +281,10 @@ public:
     /// The largest encoded arity of a relation, K: slot k of an atom's tuple labels its edge to the entity k, and the
     /// edge back has the label K + k. At least 1.
     [[nodiscard]] u32 simple_max_arity() const noexcept { return m_simple_max_arity; }
+    /// The relations without argument slots (encoded arity 0: the nullary relations under Nullary::Arity0 that have no
+    /// leading slot). A cell of one holds at most one tuple, the empty one, which bounds the Simple nodes of a batch
+    /// within capacities (simple_node_capacity).
+    [[nodiscard]] u32 argumentless_relations() const noexcept { return m_argumentless_relations; }
     /// The domain's constants a node label of its own is given with FlatOptions::constant_labels (otherwise 0).
     [[nodiscard]] u32 simple_constants() const noexcept { return m_simple_constants; }
     /// The number of node labels of the Simple graph: the 9 entity roles, then one per relation, then one per
@@ -325,6 +329,7 @@ private:
     std::vector<u32> m_static_relations;
     u32 m_num_virtual_predicates = 0;
     u32 m_simple_max_arity = 1;
+    u32 m_argumentless_relations = 0;
     u32 m_simple_constants = 0;
     u32 m_first_numeric = 0;
     std::vector<std::string> m_constants;

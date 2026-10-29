@@ -637,7 +637,7 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     const u64 numeric = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
     if (p.numeric_f64) zero_tail(static_cast<f64*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
     else zero_tail(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
-    zero_tail(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples, p.capacities.entities + p.capacities.args);
+    zero_tail(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples, p.node_capacity);
     zero_tail(a.edge_label, overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args);
     zero_tail(static_cast<I*>(a.edge_index), overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args);
     if (a.edge_index)
@@ -717,8 +717,7 @@ __device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& si
         else zero_range(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric, stride);
         zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
         zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
-        zero_range(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples,
-                   p.capacities.entities + p.capacities.args, stride);
+        zero_range(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples, p.node_capacity, stride);
         zero_range(a.edge_label, overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args, stride);
         zero_range(static_cast<I*>(a.edge_index), overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args, stride);
         if (a.edge_index)

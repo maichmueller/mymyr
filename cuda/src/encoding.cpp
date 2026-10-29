@@ -546,6 +546,7 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
     arrays.simple = schema.emits_simple();
     arrays.shared_statics = schema.shared_statics();
     arrays.static_relations = schema.shared_statics() ? schema.static_relations().size() : 0;
+    arrays.argumentless_relations = schema.argumentless_relations();
     return arrays;
 }
 
@@ -581,7 +582,7 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.history_entity, arrays.history ? mul(I, S) : 0);
     place(out.history_dt, arrays.history ? mul(4, S) : 0);
     place(out.node_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
-    place(out.node_label, arrays.simple ? mul(4, add(E, A)) : 0);
+    place(out.node_label, arrays.simple ? mul(4, add(add(E, A), mul(G, arrays.argumentless_relations))) : 0);
     place(out.edge_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
     place(out.edge_index, arrays.simple ? mul(I, mul(4, A)) : 0);
     place(out.edge_label, arrays.simple ? mul(4, mul(2, A)) : 0);
@@ -1337,6 +1338,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         p.out = out.arrays;
         p.capacities = out.capacities;
+        p.node_capacity = encoding::simple_node_capacity(out.capacities, schema.argumentless_relations());
     }
     p.index64 = index == encoding::IndexType::I64;
     p.zero_unused = out.zero_unused;

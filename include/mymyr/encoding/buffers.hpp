@@ -10,8 +10,8 @@ namespace mymyr::encoding
 /// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
 /// args the entries of relation_args, targets the target_entity and target_group arrays, history the history_entity
 /// and history_dt arrays, and numeric the entries of numeric_values (only a schema that stores numeric values has a
-/// numeric capacity; the true count is FlatEncoder::numeric_tuples). Tuple counts have no separate capacity because every
-/// tuple has at least one argument and no array is indexed by tuple alone.
+/// numeric capacity; the true count is FlatEncoder::numeric_tuples). Tuple counts have no separate capacity: the only
+/// arrays indexed by tuple are the Simple node arrays, which simple_node_capacity bounds.
 struct BatchShape
 {
     u64 graphs = 0;
@@ -23,8 +23,16 @@ struct BatchShape
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
+/// The Simple nodes (entities and tuples) of a batch within `capacities`, at most: a tuple with arguments takes at
+/// least one of the args, and a cell of a relation without argument slots holds at most one tuple, the empty one.
+/// `argumentless_relations` is the schema's number of such relations (EncodingSchema::argumentless_relations).
+MYMYR_HD u64 simple_node_capacity(const BatchShape& capacities, u64 argumentless_relations)
+{
+    return capacities.entities + capacities.args + capacities.graphs * argumentless_relations;
+}
+
 /// Capacities of the static blocks of a batch with shared statics: the instances that have a block and the entries of
-/// static_args. Tuples have no separate capacity because every tuple has at least one argument. Kept apart from
+/// static_args. Tuples have no separate capacity because no static array is indexed by tuple. Kept apart from
 /// BatchShape because only encoders that store the static tuples once per instance have these arrays.
 struct StaticShape
 {
@@ -86,7 +94,7 @@ static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 /// (stores_node_value); numeric_values holds at least the batch's numeric tuples, node_value at least its nodes.
 /// Nothing is written past the sizes: the entries of the variable-size arrays beyond them keep their old values.
 ///
-/// The Simple arrays hold the nodes (entities + tuples of the batch, at most entities + args) and edges (twice the
+/// The Simple arrays hold the nodes (entities + tuples of the batch, at most simple_node_capacity) and edges (twice the
 /// args): node_label holds at least the nodes and edge_label at least the edges, and edge_index is two rows of
 /// `edge_stride` entries each (at least the edges), row 0 the sources and row 1 the targets.
 struct FlatBuffers

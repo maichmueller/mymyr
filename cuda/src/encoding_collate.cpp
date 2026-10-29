@@ -181,6 +181,7 @@ struct DeviceCollator::Impl
         p.static_totals = reinterpret_cast<encoding::StaticSizes*>(base + bad_offset + sizeof(u64));
         p.temp = base + temp_offset;
         p.output = output;
+        p.node_capacity = encoding::simple_node_capacity(output.capacities, stored.argumentless_relations);
         check(detail::launch_collation(p, phase, stream), "device collation kernels");
     }
 };

@@ -227,6 +227,36 @@ def test_the_simple_graph_has_an_atom_node_without_edges(layout):
     assert np.array_equal(np.asarray(only.edge_index), edges)
 
 
+@pytest.mark.parametrize("outputs", [("relations", "simple"), ("simple",)])
+def test_simple_capacities_hold_more_tuples_than_arguments(outputs):
+    # unary atoms and the nullary (ready): a batch has more tuples than arguments, so the nodes are bounded by one
+    # tuple per graph and relation without argument slots
+    features = ROOT / "tests/data/pddl/features"
+    tasks = [pddl(features / "domain.pddl", features / f"{p}.pddl") for p in ("p01", "p02")]
+    table = rl.TaskTable(tasks)
+    parts = [np.asarray(task.encode(walk(task, steps=5, seed=3))) for task in tasks]
+    rows = np.zeros((sum(len(p) for p in parts), table.words), np.uint64)
+    ids = np.repeat(np.arange(len(tasks), dtype=np.int64), [len(p) for p in parts])
+    for k, part in enumerate(parts):
+        rows[ids == k, :part.shape[1]] = part
+    encoder = encoding.FlatRelationEncoder(table, nullary="arity0", goal_derivations=ALL, outputs=outputs)
+    argumentless = list(encoder.relation_arities).count(0)
+    exact = encoder.encode(rows, ids)
+    graphs, entities = exact.num_graphs, int(exact.entity_offsets[-1])
+    nodes, args = int(exact.node_offsets[-1]), int(exact.edge_offsets[-1]) // 2
+    assert argumentless > 0 and nodes - entities > args
+    for extra in (0, 3):
+        caps = {"graphs": graphs, "entities": entities + extra, "args": args + extra}
+        padded = encoder.encode(rows, ids, capacities=caps)
+        assert not padded.sizes["overflow"] and padded.sizes["entities"] + padded.sizes["tuples"] == nodes
+        label = np.asarray(padded.node_label)
+        assert label.shape == (entities + args + 2 * extra + graphs * argumentless,)
+        assert np.array_equal(label[:nodes], np.asarray(exact.node_label)) and not label[nodes:].any()
+        assert np.array_equal(np.asarray(padded.edge_offsets), np.asarray(exact.edge_offsets))
+        again = encoder.encode(rows, ids, capacities=caps, into=padded)
+        assert np.array_equal(np.asarray(again.node_label), label)
+
+
 def test_the_hgraph_view_has_a_node_type_without_edge_types():
     task = blocksworld()
     states = walk(task, steps=6, seed=13)

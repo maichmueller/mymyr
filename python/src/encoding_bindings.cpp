@@ -1349,13 +1349,14 @@ encoding::FlatBuffers reusable_buffers(const encoding::FlatEncoder& encoder, con
     out.history_entity = at("history_entity", shape.history);
     out.history_dt = static_cast<i32*>(at("history_dt", shape.history));
     out.node_offsets = at("node_offsets", any);
-    out.node_label = static_cast<i32*>(at("node_label", shape.entities + shape.args));
+    const u64 nodes = encoding::simple_node_capacity(shape, schema.argumentless_relations());
+    out.node_label = static_cast<i32*>(at("node_label", nodes));
     out.edge_offsets = at("edge_offsets", any);
     out.edge_index = at("edge_index", 2 * (2 * shape.args));
     out.edge_stride = 2 * shape.args;
     out.edge_label = static_cast<i32*>(at("edge_label", 2 * shape.args));
     out.numeric_values = at("numeric_values", shape.numeric);
-    out.node_value = static_cast<f32*>(at("node_value", shape.entities + shape.args));
+    out.node_value = static_cast<f32*>(at("node_value", nodes));
     return out;
 }
 
