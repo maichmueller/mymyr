@@ -72,6 +72,7 @@ from typing import Any, Optional
 
 import torch
 from torch import Tensor
+from torch._subclasses.fake_tensor import FakeTensor
 
 import mymyr.rl
 from mymyr.encoding import _device
@@ -103,7 +104,12 @@ class _EagerOp(torch.library.CustomOpDef):
     """A custom op with direct eager execution and dispatcher execution for tracing."""
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if torch.compiler.is_compiling() or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None:
+        if (
+            torch.compiler.is_compiling()
+            or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None
+            or any(isinstance(x, FakeTensor) for x in args)
+            or any(isinstance(x, FakeTensor) for x in kwargs.values())
+        ):
             return super().__call__(*args, **kwargs)
         return self._init_fn(*args, **kwargs)
 
@@ -111,7 +117,7 @@ class _EagerOp(torch.library.CustomOpDef):
 def _op(name: str, **kwargs: Any) -> Any:
     """Register a traceable op with a direct eager entry point and the implementation's signature and docstring.
 
-    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and active fake-tensor modes
+    Ordinary eager calls avoid the dispatcher and its compiler imports. Compilation and fake-tensor calls
     use the registered op, including its fake implementation.
     """
 

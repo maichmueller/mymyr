@@ -99,6 +99,9 @@ def _exercise_ops(compile_ops=False):
                     with FakeTensorMode() as mode:
                         fake_inputs = tuple(mode.from_tensor(x) if isinstance(x, torch.Tensor) else x for x in inputs)
                         fake = op(*fake_inputs)
+                    op(*fake_inputs)
+                    if name == "applicable_schemas":
+                        op(table=inputs[0], states=fake_inputs[1])
                     result = torch.compile(op, fullgraph=True, backend="aot_eager")(*inputs)
                     if name == "applicable_schemas":
                         checked = torch.library.opcheck(op, inputs)
