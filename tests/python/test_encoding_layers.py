@@ -463,3 +463,103 @@ def test_layer_placement_keeps_constant_goal_literals(policy):
         if any(f"]{p}[g]" in relation for p in static):
             assert after[relation] == before[relation]
     assert batch.goal_complete.tolist() == baseline.goal_complete.tolist()
+
+
+DEPOT_DOMAIN = """(define (domain depot) (:requirements :strips :negative-preconditions)
+  (:predicates (at ?x) (heavy ?x) (ready) (closed) (busy))
+  (:action move :parameters (?x) :precondition (ready) :effect (and (at ?x) (busy)))
+  (:action drop :parameters (?x) :precondition (at ?x) :effect (not (at ?x))))"""
+DEPOT_PROBLEM = """(define (problem depot) (:domain depot) (:objects a b c)
+  (:init (ready) (heavy a) (heavy b)) (:goal (and (ready) (heavy a) (not (heavy c)) (at b))))"""
+DEPOT_LAYERS = [[["(ready)", "(heavy a)", "(at a)"], ["(heavy a)", "(not (closed))", "(not (heavy b))", "(busy)"]],
+                [["(closed)", "(heavy c)"]], [], [["(at c)"], ["(ready)"]]]
+DEPOT_GOALS = [["(heavy a)", "(at c)", "(closed)"], [], ["(not (ready))"], ["(heavy b)", "(ready)"]]
+
+
+def depot_task(tmp_path):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    (tmp_path / "domain.pddl").write_text(DEPOT_DOMAIN)
+    (tmp_path / "problem.pddl").write_text(DEPOT_PROBLEM)
+    return mymyr.Task.from_pddl(tmp_path / "domain.pddl", tmp_path / "problem.pddl")
+
+
+def placed(task, goal, layers, policy, nullary):
+    """{(role, entity name)}: the goal and subgoal entities of a goal and its layers (lists of literals) under the
+    placement policy; a nullary literal is left out with nullary='omit'."""
+    levels = [goal, *layers]
+    out = set()
+    for level, literals in enumerate(levels):
+        for text in literals:
+            ground = task.literal(text)
+            if nullary == "omit" and not ground.atom.objects:
+                continue
+            found = [k for k, other in enumerate(levels) if text in other]
+            if (policy == "lowest" and level != found[0]) or (policy == "highest" and level != found[-1]):
+                continue
+            sign = "+" if ground.positive else "-"
+            out.add((2 if level == 0 else SUBGOAL_ROLE, f"[{sign}]{ground.atom}[{'s' * level}g]"))
+    return out
+
+
+@pytest.mark.parametrize("nullary", ["auxiliary", "arity0", "omit"])
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+def test_static_literals_of_layers_are_placed_and_satisfied_like_slotted_ones(tmp_path, policy, nullary):
+    task = depot_task(tmp_path)
+    state = task.initial_state
+    encoder = make(task, history=False, nullary=nullary, repeated_literals=policy,
+                   goal_derivations=("plain", "satisfied", "unsatisfied"), target_sources=("goal", "subgoal"))
+    instance_goal = [str(x) for x in task.encoding_goal]
+    states = [state] * len(DEPOT_LAYERS)
+    layers = encoding.subgoal_masks(encoder, DEPOT_LAYERS, fixed="encode")
+    goals = encoding.goal_masks(encoder, DEPOT_GOALS, fixed="encode")
+    true = {str(a) for a in [*state.atoms(), *task.formalism.static_init]}
+    for given in (None, goals):
+        batch = encoder.encode(states, goals=given, subgoals=layers)
+        for graph in range(len(states)):
+            goal = instance_goal if given is None else DEPOT_GOALS[graph]
+            expected = placed(task, goal, DEPOT_LAYERS[graph], policy, nullary)
+            names = encoder.entity_names(batch, graph)
+            begin = int(batch.entity_offsets[graph])
+            roles = batch.entity_role[begin:int(batch.entity_offsets[graph + 1])].tolist()
+            assert {(r, n) for n, r in zip(names, roles) if r in (2, SUBGOAL_ROLE)} == expected
+            relations = encoder.describe(batch, graph).relations
+            for _, name in expected:
+                sign, rest = name[1], name[3:]
+                atom, level = rest[: rest.rindex("[")], rest[rest.rindex("[") :]
+                holds = (atom in true) == (sign == "+")
+                predicate = atom[1:-1].split()[0]
+                derived = f"[{sign}]{predicate}{level}[{'sat' if holds else 'unsat'}]"
+                assert any(row[0] == name for row in relations[f"[{sign}]{predicate}{level}"]), name
+                assert relations[derived], derived
+            if given is None:
+                assert batch.goal_complete.tolist()[graph] == int(task.encoding_goal_complete)
+        # single rows, a stream and a mutable stream give the batch
+        for graph in range(len(states)):
+            one = encoder.encode([state], goals=None if given is None else encoding.goal_masks(
+                encoder, [DEPOT_GOALS[graph]], fixed="encode"),
+                subgoals=encoding.subgoal_masks(encoder, [DEPOT_LAYERS[graph]], fixed="encode"))
+            assert encoder.describe(one, 0).relations == encoder.describe(batch, graph).relations
+        stream = encoder.stream()
+        mutable = encoder.mutable_stream()
+        for graph in range(len(states)):
+            row = {"subgoals": encoding.subgoal_masks(encoder, [DEPOT_LAYERS[graph]], fixed="encode")}
+            if given is not None:
+                row["goals"] = encoding.goal_masks(encoder, [DEPOT_GOALS[graph]], fixed="encode")
+            stream.append([state], **row)
+            mutable.append([graph], [state], **row)
+        same(stream.flush(), batch)
+        same(mutable.flush(), batch)
+
+
+def test_constant_literals_of_layers_beyond_the_levels_are_refused(tmp_path):
+    task = depot_task(tmp_path)
+    encoder = make(task, history=False, max_goal_level=1, target_sources=("subgoal",))
+    within = encoding.subgoal_masks(encoder, [[["(at a)", "(heavy a)"]]], fixed="encode")
+    names = encoder.entity_names(encoder.encode([task.initial_state], subgoals=within), 0)
+    assert "[+](heavy a)[sg]" in names
+    beyond = within.constants.copy()
+    beyond[0, 0, 0] = 1
+    masks = encoding.LayerMasks(within.pos, within.neg, None, None, within.unsatisfiable, constants=beyond)
+    with pytest.raises(ValueError, match="subgoal layers of row 0: constant literal 0 has the layer 1, outside"):
+        encoder.encode([task.initial_state], subgoals=masks)

@@ -353,3 +353,38 @@ def test_given_derived_words_equal_the_evaluated_ones_of_a_horizon():
     blank = encoder.encode(view, derived=np.zeros_like(words))
     assert any(encoder.describe(expected, 0).relations.get(name) for name in derived)
     assert not any(encoder.describe(blank, 0).relations.get(name) for name in derived)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+def test_a_row_goal_with_constant_literals_encodes_as_the_instance_goal(mode):
+    from test_encoding_goals import goals_task
+
+    task = goals_task("static_true")
+    roots = walk(task, steps=3, walks=2)[:3]
+    _, view = horizon_of(task, depth=2, max_children=3, roots=roots)
+    derivations = ("plain", "satisfied", "added_satisfied", "added_unsatisfied") if mode == "delta" else (
+        "plain", "satisfied", "unsatisfied")
+    encoder = encoder_of(task, horizon_mode=mode, goal_derivations=derivations, max_goal_level=1)
+    own = encoder.encode(view)
+    literals = [str(x) for x in task.encoding_goal]
+    goals = encoding.goal_masks(task, [literals], fixed="encode")
+    assert goals.constants.shape[1] == 2  # (heavy t1) and (not (heavy t2))
+    given = encoder.encode(view, goals=goals)
+    for key, value in own.as_dict().items():
+        if key != "goal_complete":
+            assert np.array_equal(value, given.as_dict()[key]), key
+    # the static literals of a subgoal layer: (heavy t1) holds, (heavy t2) does not
+    layers = encoding.subgoal_masks(task, [[["(heavy t1)", "(not (heavy t2))", "(heavy t2)", "(lit b)"]]] * 3,
+                                    fixed="encode")
+    batch = encoder.encode(view, goals=goals, subgoals=layers)
+    for graph in range(len(roots)):
+        relations = encoder.describe(batch, graph).relations
+        heavy = relations["[+]heavy[sg]"]
+        assert sorted(row[-1] for row in heavy if row[-1] in ("t1", "t2")) == ["t1", "t2"]
+        assert {row[-1] for row in relations["[-]heavy[sg]"]} == {"t2"}
+        if mode != "delta":
+            assert {row[-1] for row in relations["[+]heavy[sg][sat]"]} == {"t1"}
+            assert {row[-1] for row in relations["[+]heavy[sg][unsat]"]} == {"t2"}
+        alone = encoder.encode(view, goals=goals, subgoals=encoding.subgoal_masks(
+            task, [[["(lit b)"]]] * 3, fixed="encode"))
+        assert "[+]heavy[sg]" not in encoder.describe(alone, graph).relations

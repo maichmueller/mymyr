@@ -115,7 +115,7 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
                                         ")");
     if (placement.num_layers == 0 && n > 0)
         throw std::invalid_argument("mymyr: encoding: literals need at least one layer");
-    if (placement.instance_constants && (placement.num_layers != 1 || !placement.layers.empty()))
+    if (placement.instance_constants && placement.num_layers != 1)
         throw std::invalid_argument("mymyr: encoding: the instance's constant goal literals go to goals of one layer");
 
     LiteralMasks out;

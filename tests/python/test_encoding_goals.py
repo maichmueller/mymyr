@@ -423,3 +423,155 @@ def test_the_fingerprint_depends_on_the_targets():
         encoding.EncodingSchema(task, target_sources=("goal",)).schema_fingerprint
         != encoding.EncodingSchema(task).schema_fingerprint
     )
+
+
+GOAL_PROBLEMS = sorted(p.stem for p in GOALS.glob("*.pddl") if p.stem != "domain")
+ALL_DERIVATIONS = ("plain", "satisfied", "unsatisfied")
+
+
+def same_but_goal_complete(a, b):
+    first, second = a.as_dict(), b.as_dict()
+    assert first.keys() == second.keys()
+    for key, value in first.items():
+        if key != "goal_complete":
+            assert np.array_equal(value, second[key]), key
+
+
+def slotted(literal):
+    atom = literal.atom
+    return (atom.slot if atom.kind == "fluent" else atom.derived_slot if atom.kind == "derived" else None) is not None
+
+
+def ids_of(task, text):
+    """(table predicate id, objects padded to the widest predicate) of an atom given by name."""
+    table = rl.as_table(task)
+    atom = task.literal(text).atom
+    objects = list(atom.object_indices)
+    width = max(table.predicate_arities)
+    return table.predicate_names.index(atom.predicate.name), objects + [-1] * (width - len(objects))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("problem", GOAL_PROBLEMS)
+def test_a_row_goal_of_the_instance_goal_literals_encodes_as_the_instance_goal(problem, layout):
+    task = goals_task(problem)
+    states = walk(task, steps=6, walks=2)
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, goal_derivations=ALL_DERIVATIONS,
+                                           target_sources=("goal",))
+    default = encoder.encode(states)
+    literals = [str(x) for x in task.encoding_goal]
+    whole = encoding.goal_masks(task, [literals], fixed="encode")
+    width = 3 + max(rl.as_table(task).predicate_arities)
+    assert whole.constants.dtype == np.int32 and whole.constants.shape[::2] == (1, width)
+    batch = encoder.encode(states, goals=whole)
+    same_but_goal_complete(default, batch)
+    assert batch.goal_complete.tolist() == [1] * len(states)
+    # the slotted literals of the goal, with the instance's constant part
+    own = [str(x) for x in task.encoding_goal if slotted(x)]
+    kept = encoding.goal_masks(task, [own], fixed="raise", instance_constants=True)
+    # the instance's goal has no constant part for a literal without goal relations (equality)
+    assert {tuple(x) for x in kept.constants[0]} <= {tuple(x) for x in whole.constants[0]}
+    same_but_goal_complete(default, encoder.encode(states, goals=kept))
+
+
+ROW_GOALS = [["(heavy t1)", "(lit a)"], ["(not (heavy t2))", "(road a b)", "(heavy t2)", "(lit t1)", "(lit b)"], [],
+             ["(not (lit t1))", "(road b a)"], ["(not (road a a))"]]
+
+
+def triples(task, texts):
+    out = []
+    for text in texts:
+        ground = task.literal(text)
+        out.append((ground.positive, ground.atom.predicate.name, tuple(ground.atom.object_indices)))
+    return out
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_the_constant_literals_of_rows_are_encoded_by_their_truth(layout):
+    task = goals_task("static_true")
+    states = walk(task, steps=8, walks=2)
+    rows = [ROW_GOALS[g % len(ROW_GOALS)] for g in range(len(states))]
+    masks = encoding.goal_masks(task, rows, fixed="encode")
+    assert masks.constants.shape[:2] == (len(states), 4)  # the second row: four literals of fixed truth
+    assert masks.unsatisfiable.tolist()[:len(ROW_GOALS)] == [False, True, False, False, False]
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, goal_derivations=ALL_DERIVATIONS,
+                                           target_sources=("goal",))
+    batch = encoder.encode(states, goals=masks)
+    check_goal_graphs(encoder, batch, states,
+                      lambda g, s, names: goal_reference(task, s, triples(task, rows[g]), names), True)
+    assert batch.goal_complete.tolist() == [1] * len(states)
+    for graph, state in enumerate(states[:len(ROW_GOALS)]):
+        alone = encoder.encode([state], goals=encoding.goal_masks(task, [rows[graph]], fixed="encode"))
+        assert goal_cells(alone, 0, True)[:2] == goal_cells(batch, graph, True)[:2]
+    many = states * 200
+    rows = [ROW_GOALS[g % len(ROW_GOALS)] for g in range(len(many))]
+    masks = encoding.goal_masks(task, rows, fixed="encode")
+    serial = encoder.encode(many, goals=masks)
+    for threads in (2, 3):
+        same_but_goal_complete(serial, encoder.encode(many, goals=masks, threads=threads))
+
+
+def test_rows_of_several_instances_carry_the_constant_literals_of_their_own_instance():
+    first, second = goals_task("static_true"), goals_task("static_false")
+    table = rl.TaskTable([first, second])
+    encoder = encoding.FlatRelationEncoder(table, goal_derivations=ALL_DERIVATIONS)
+    states = [first.initial_state, second.initial_state, first.initial_state]
+    ids = [0, 1, 0]
+    rows = [["(lit b)"], ["(lit a)"], []]
+    masks = encoding.goal_masks(table, rows, ids, fixed="encode", instance_constants=True)
+    batch = encoder.encode(states, ids, goals=masks)
+    names = set(batch.schema.relation_names)
+    for graph, task in enumerate([first, second, first]):
+        literals = [str(x) for x in task.encoding_goal if not slotted(x)] + rows[graph]
+        assert goal_cells(batch, graph, False)[0] == goal_reference(task, states[graph], triples(task, literals), names)
+
+
+def test_a_stream_of_rows_with_and_without_constant_literals_flushes_as_one_encode():
+    task = goals_task("static_true")
+    states = walk(task, steps=6, walks=2)
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=ALL_DERIVATIONS, target_sources=("goal",))
+    rows = [ROW_GOALS[g % len(ROW_GOALS)] for g in range(len(states))]
+    expected = encoder.encode(states, goals=encoding.goal_masks(task, rows, fixed="encode"))
+    stream = encoder.stream()
+    for begin in range(0, len(states), 3):
+        stream.append(states[begin:begin + 3], goals=encoding.goal_masks(task, rows[begin:begin + 3], fixed="encode"))
+    same_but_goal_complete(expected, stream.flush())
+    mutable = encoder.mutable_stream()
+    for index, state in enumerate(states):
+        mutable.append([index], [state], goals=encoding.goal_masks(task, [ROW_GOALS[1]], fixed="encode"))
+    for index, state in enumerate(states):
+        mutable.update(index, state, goals=encoding.goal_masks(task, [rows[index]], fixed="encode"))
+    same_but_goal_complete(expected, mutable.flush())
+    mutable.remove(1)
+    rest = [g for g in range(len(states)) if g != 1]
+    alone = encoder.encode([states[g] for g in rest],
+                           goals=encoding.goal_masks(task, [rows[g] for g in rest], fixed="encode"))
+    same_but_goal_complete(alone, mutable.flush())
+
+
+def constant_masks(task, constants):
+    table = rl.as_table(task)
+    zeros = np.zeros((1, table.words), np.uint64)
+    return encoding.GoalMasks(zeros, zeros, None, None, np.zeros(1, np.uint8),
+                              constants=np.asarray(constants, np.int32).reshape(1, len(constants), -1))
+
+
+def test_invalid_constant_literals_are_refused():
+    task = goals_task("static_true")
+    encoder = encoding.FlatRelationEncoder(task)
+    state = task.initial_state
+    (heavy, t1), (_, t2), (lit, a) = ids_of(task, "(heavy t1)"), ids_of(task, "(heavy t2)"), ids_of(task, "(lit a)")
+    good = [[0, heavy, 0, *t1], [0, heavy, 0, *t2]]
+    encoder.encode([state], goals=constant_masks(task, good))
+    cases = {
+        "is not after the one before it": good[::-1],
+        "has the layer 1, outside": [[1, heavy, 0, *t1]],
+        "has the sign 2": [[0, heavy, 2, *t1]],
+        "is invalid": [[0, heavy, 0, t1[0], 0, -1]],
+        "has a slot": [[0, lit, 0, *a]],
+    }
+    for message, constants in cases.items():
+        with pytest.raises(ValueError, match=f"^mymyr: encoding: the goal of row 0: constant literal [01] .*{message}"):
+            encoder.encode([state], goals=constant_masks(task, constants))
+    with pytest.raises(ValueError, match="at least 3 are needed"):
+        encoder.encode([state], goals=constant_masks(task, [[0, heavy]]))
