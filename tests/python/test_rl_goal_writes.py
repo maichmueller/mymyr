@@ -71,10 +71,14 @@ def test_direct_instance_write(suite, backend, tracked, mode, request):
     if backend.startswith("torch"):
         env = BatchedEnv(suite, 2, task_ids=1 - ids, device=device, path=path, **cfg)
         request.addfinalizer(env.close)
+        if mode in ("kept", "stale"):
+            env.goal_pos.copy_(as_tensor(pos))
+            env.goal_neg.copy_(as_tensor(neg))
         env.states.copy_(as_tensor(states))
         env.task_ids.copy_(torch.from_numpy(ids).to(device))
-        env.goal_pos.copy_(as_tensor(pos))
-        env.goal_neg.copy_(as_tensor(neg))
+        if mode not in ("kept", "stale"):
+            env.goal_pos.copy_(as_tensor(pos))
+            env.goal_neg.copy_(as_tensor(neg))
         if invalid:
             if cuda:
                 env.refresh()
@@ -106,7 +110,6 @@ def test_direct_instance_write(suite, backend, tracked, mode, request):
             pytest.skip("built without XLA FFI")
         from mymyr.rl.jax import Env
         env = Env(suite, device=device, path=path, **cfg)
-        request.addfinalizer(env.close)
         state, _ = env.reset(0, 1 - ids)
         state = state._replace(states=jax.device_put(halves(states), env.device),
                                task_id=jax.device_put(ids, env.device),
@@ -120,7 +123,7 @@ def test_direct_instance_write(suite, backend, tracked, mode, request):
                     env.check_errors()
                 env.check_errors()
             else:
-                with pytest.raises(jax.errors.JaxRuntimeError, match="goal masks.*fluent slots"):
+                with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="goal masks.*fluent slots"):
                     jax.block_until_ready(env.refresh(state))
             pos, neg = masks(suite, ids, "new")
             state = state._replace(goal_pos=jax.device_put(halves(pos), env.device),
@@ -163,7 +166,8 @@ def test_direct_instance_write(suite, backend, tracked, mode, request):
                 np.testing.assert_array_equal(value, expected_value, err_msg=field)
         env.check_errors()
     finally:
-        env.close()
+        if backend.startswith("torch"):
+            env.close()
         target.close()
 
 
@@ -177,15 +181,16 @@ def test_pool_rejects_goal_bits_outside_instance(suite, negative, padding):
     bad = neg if negative else pos
     bad[1, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
     pool = rl.CpuEnvPool(suite, 2, goals=True, sampler=None, threads=1)
-    before = pool.reset(task_ids=ids)
+    before = pool.reset(task_ids=1 - ids)
     with pytest.raises(ValueError, match="goal masks.*fluent slots"):
         pool.reset(task_ids=ids, goal_pos=pos, goal_neg=neg)
-    after = pool.reset(task_ids=ids)
+    after = pool.step(actions=np.full(2, -1, np.int64))
     np.testing.assert_array_equal(before.states, after.states)
+    np.testing.assert_array_equal(before.task_ids, after.task_ids)
 
 
 @pytest.mark.parametrize("device,path", [("cpu", "auto"), ("cuda", "auto"), ("cuda", "general")])
-def test_jax_reset_validates_custom_goals(suite, device, path, request):
+def test_jax_reset_validates_custom_goals(suite, device, path):
     jax = pytest.importorskip("jax")
     from mymyr._core import _rl_jax
     if not _rl_jax.has_ffi():
@@ -196,11 +201,10 @@ def test_jax_reset_validates_custom_goals(suite, device, path, request):
     from mymyr.rl.jax import Env
 
     env = Env(suite, device=device, path=path, goals=True, sampler=None)
-    request.addfinalizer(env.close)
     ids = np.array([0, 1], np.int32)
     pos, neg = (halves(a) for a in masks(suite, ids, "negative"))
     if device == "cpu":
-        with pytest.raises(jax.errors.JaxRuntimeError, match="goal masks.*fluent slots"):
+        with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="goal masks.*fluent slots"):
             jax.block_until_ready(env.reset(0, ids, goal_pos=pos, goal_neg=neg))
     else:
         jax.block_until_ready(env.reset(0, ids, goal_pos=pos, goal_neg=neg))
@@ -212,7 +216,7 @@ def test_jax_reset_validates_custom_goals(suite, device, path, request):
     jax.block_until_ready(state)
     env.check_errors()
     if device == "cpu":
-        with pytest.raises(jax.errors.JaxRuntimeError, match="goal masks.*fluent slots"):
+        with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="goal masks.*fluent slots"):
             jax.block_until_ready(env.reset_where(state, np.array([True, True]), goal_pos=pos, goal_neg=neg))
     else:
         jax.block_until_ready(env.reset_where(state, np.array([True, True]), goal_pos=pos, goal_neg=neg))
