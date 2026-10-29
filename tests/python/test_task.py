@@ -277,6 +277,7 @@ from concurrent.futures import Future
 import mymyr
 from conftest import text_task
 
+gc.disable()
 lazy = text_task("gripper__prob05", atoms="lazy")
 retained = lazy.frozen() if {cached!r} else None
 probe = mymyr._core._FrozenCacheProbe()
