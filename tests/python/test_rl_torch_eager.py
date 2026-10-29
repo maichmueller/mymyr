@@ -32,7 +32,7 @@ def _exercise_ops(compile_ops=False):
                   if name.startswith("mymyr::")}
     task = mymyr.Task.from_text(str(Path("tests/data/tasks/gripper__prob05.txt")))
     table = rl.TaskTable([task])
-    encoder = encoding.FlatRelationEncoder(table)
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action", "goal"))
     templates = rl.lifted_goal_templates(task)
     handles = [rt.register(obj) for obj in (table, encoder, templates)]
     table_handle, encoder_handle, template_handle = handles
@@ -46,7 +46,8 @@ def _exercise_ops(compile_ops=False):
             if device != "cpu":
                 template_handle = rt.register(templates.to(device))
                 handles.append(template_handle)
-            env = rt.BatchedEnv(table, 2, device=device, track_visited=True)
+            env = rt.BatchedEnv(table, 2, device=device, track_visited=True, observation=encoder, obs_actions=True,
+                                obs_capacities=dict(entities=256, args=1024, targets=256))
             states = env.states
             schema = torch.zeros(2, dtype=torch.int32, device=device)
             binding = torch.zeros((2, table.label_width), dtype=torch.int32, device=device)
