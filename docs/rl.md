@@ -591,11 +591,13 @@ The returned `HerLiftedBatch` has fixed padded shapes:
 | `count` | int32 `[N]` | retained segments |
 | `status` | int64 scalar | flags cleared at the start of each call |
 
-`S=max_segments` is the capacity per environment, `V=templates.max_vars`, and `W` defaults to the template source's
-fluent width. An explicit `words` must cover the source's slots and fit the row width. Supply matching `derived`
-and `prev_derived` windows `[T,N,DW]` whenever templates use derived literals. Satisfied static literals are dropped
-from the goals. Masks are uint64 for NumPy and int64 bit patterns for torch. Invalid segment metadata and bindings
-are -1; padding masks and rewards are zero.
+`S=max_segments` is the capacity per environment, `V=templates.max_vars`, and `W` defaults to `templates.words`, the
+normalized table/suite's fluent width (at least one). State rows must include this padding even for static-only
+tasks whose `Task.encode` rows have zero fluent words. An explicit `words` must cover the normalized width and fit
+the row width. Supply matching `derived` and `prev_derived` windows `[T,N,DW]` whenever templates use derived
+literals; `DW` follows the supplied window's width in 64-bit words, or is zero without derived inputs. Satisfied
+static literals are dropped from the goals. Masks are uint64 for NumPy and int64 bit patterns for torch. Invalid
+segment metadata and bindings are -1; padding masks and rewards are zero.
 
 An environment exceeding S keeps its first S generated segments and sets status bit 0. `max_generated` caps total
 generation in environment, episode, then backward scan order; it includes segments lost to capacity overflow.

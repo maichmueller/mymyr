@@ -1098,7 +1098,7 @@ def _(templates, states, done, task_ids, prev_states, max_segments, max_generate
       goal_reward=1.0, words=None, derived=None, prev_derived=None, max_steps=100_000_000):
     t = lookup(int(templates))
     T, N, _ = states.shape
-    W = t.source.words if words is None else words
+    W = t.words if words is None else words
     D = 0 if derived is None else derived.shape[-1] // (2 if derived.dtype.itemsize == 4 else 1)
     S = max_segments
     specs = [((T, N), torch.int32), ((T, N), torch.float32), ((T, N), torch.bool),

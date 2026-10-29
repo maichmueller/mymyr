@@ -1276,6 +1276,53 @@ def test_relabel_lifted_empty_windows_and_half_words():
         assert not out.count.any() and not out.seg_valid.any() and int(out.status) == 0
 
 
+def static_goal_task():
+    domain = mymyr.Domain.from_string("""(define (domain fixed)
+        (:requirements :strips) (:predicates (ok))
+        (:action idle :parameters () :precondition (and) :effect (and)))""")
+    return mymyr.Task(domain.instantiate_string("""(define (problem fixed) (:domain fixed)
+        (:init (ok)) (:goal (ok)))"""))
+
+
+@needs_frontend
+@pytest.mark.parametrize("source_kind", ["task", "table", "suite"])
+@pytest.mark.parametrize("framework", ["numpy", "torch", "cuda"])
+@pytest.mark.parametrize("half_words", [False, True])
+def test_relabel_lifted_static_only_default_goal_width(source_kind, framework, half_words):
+    task = static_goal_task()
+    assert task.words == 0
+    table = rl.TaskTable([task])
+    source = {"task": task, "table": table, "suite": rl.TaskSuite.group([task])}[source_kind]
+    templates = rl.lifted_goal_templates(source)
+    assert templates.words == table.words == 1
+    states = np.zeros((2, 1, 2), np.uint64)
+    done = np.zeros((2, 1), bool)
+    torch = None if framework == "numpy" else (
+        cuda_match_runtime() if framework == "cuda" else pytest.importorskip("torch"))
+
+    def array(value):
+        if value.dtype == np.uint64:
+            value = value.view(np.uint32) if half_words else value
+            if torch is not None:
+                value = value.view(np.int32 if half_words else np.int64)
+        return value if torch is None else torch.tensor(value, device="cuda:0" if framework == "cuda" else "cpu")
+
+    x, flags = array(states), array(done)
+    if framework == "cuda":
+        templates = templates.to("cuda:0")
+        assert templates.words == table.words
+    for derived_width in (None, 0, 2):
+        derived = None if derived_width is None else array(np.zeros((2, 1, derived_width), np.uint64))
+        for words in (None, 2):
+            out = rl.her_relabel_lifted(x, flags, None, templates, prev_states=x, max_segments=3,
+                                       words=words, derived=derived, prev_derived=derived)
+            assert out.goal_pos.shape == out.goal_neg.shape == (1, 3, 1 if words is None else words)
+            assert out.goal_pos_derived.shape == out.goal_neg_derived.shape == (1, 3, derived_width or 0)
+            assert int(out.status) == 0 and out.count.tolist() == [0]
+            assert (out.segment == -1).all() and not out.seg_valid.any()
+            assert all(not mask.any() for mask in (out.goal_pos, out.goal_neg, out.goal_pos_derived, out.goal_neg_derived))
+
+
 @pytest.mark.parametrize("via_op", [False, True])
 def test_relabel_lifted_torch_host_device_and_capture(via_op):
     torch = pytest.importorskip("torch")
@@ -1357,11 +1404,19 @@ def test_relabel_lifted_device_does_not_wait_for_its_stream():
 
 
 @pytest.mark.needs_gil
-def test_relabel_lifted_compile_and_opcheck():
+@pytest.mark.parametrize("static_only", [False, True])
+def test_relabel_lifted_compile_and_opcheck(static_only):
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import register, unregister, her_relabel_lifted as op
     from mymyr.rl.torch._ops import _her_relabel_lifted_op
-    task, t, prev, reached, done, _, _ = toggle_window()
+    if static_only:
+        if not hasattr(mymyr, "Domain"):
+            pytest.skip("built without the loki front end")
+        t = rl.lifted_goal_templates(static_goal_task())
+        prev = reached = np.zeros((1, 1, 1), np.uint64)
+        done = np.zeros((1, 1), bool)
+    else:
+        task, t, prev, reached, done, _, _ = toggle_window()
     handle = register(t)
     x, p, d = torch.tensor(reached.view(np.int64)), torch.tensor(prev.view(np.int64)), torch.tensor(done)
     try:

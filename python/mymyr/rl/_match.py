@@ -54,6 +54,7 @@ class DeviceGoalTemplates:
         self.num_instances = host.num_instances
         self.needs_derived = host.needs_derived
         self.source = host.source
+        self.words = host.words
 
     @property
     def nbytes(self):

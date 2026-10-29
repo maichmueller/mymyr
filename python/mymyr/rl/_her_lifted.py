@@ -63,7 +63,7 @@ def _relabel(states, done, task_ids, templates, prev_states, max_segments, max_g
     generated = _limit(max_generated, "max_generated", 2**64 - 1)
     budget = _limit(max_steps, "max_steps", 2**64 - 1)
     host = templates.host if isinstance(templates, DeviceGoalTemplates) else templates
-    W = host.source.words if words is None else operator.index(words)
+    W = host.words if words is None else operator.index(words)
     if W < 0 or W >= 2**31:
         raise ValueError("mymyr: her_relabel_lifted words must be in [0, 2**31)")
     if derived is not None and derived.ndim != 3:
@@ -134,8 +134,10 @@ def her_relabel_lifted(states: Any, done: Any, task_ids: Any, templates: Any, *,
     status bit 0. max_generated caps generation globally in environment, episode, then backward scan order, including
     segments lost to capacity overflow. count counts retained segments. max_generated=0 retains none. The last
     transition has reward goal_reward and achieved=True; others inside have step_reward; outside rewards are zero.
-    words defaults to the template source's fluent width and must cover its slots. derived and prev_derived are
-    required together when templates use derived literals. Goals drop satisfied static literals.
+    words defaults to templates.words, the normalized table/suite's fluent width (at least one), and must cover its
+    slots. State rows must include this padding even for static-only tasks whose Task encoding has zero words.
+    derived and prev_derived are required together when templates use derived literals. Goals drop satisfied static
+    literals.
 
     max_steps bounds matcher work per reached row and template (None: unlimited). Exhaustion sets status bit 3 and
     skips that template; later templates may match. Outputs then describe only completed searches. Status is cleared
