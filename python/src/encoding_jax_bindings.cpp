@@ -18,7 +18,9 @@
 //               uint32 [N, H, 2 HD] (or [0]: none), the H history steps of each row, oldest first (the layouts and
 //               rules of encoding::LayerInput and encoding::HistoryInput); live uint32 [2] (a u64 as halves, low first;
 //               or [0]: every row), the live rows: only the first min(live, N) rows are graphs, the per-graph and
-//               per-cell arrays keep the entries of N graphs and are zero past the live ones
+//               per-cell arrays keep the entries of N graphs and are zero past the live ones; goal_constants and
+//               subgoal_constants int32 [M, K, C] (or [0]: none), the constant literals of the goals and of the
+//               subgoal layers (encoding::ConstantInput; M = 1: of every row)
 //   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
 //               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
 //               worker threads (0: one per hardware thread; the CUDA target ignores it)
@@ -388,13 +390,15 @@ enum : usize
     history_derived_pos,
     history_derived_neg,
     live,
+    goal_constants,
+    subgoal_constants,
     count
 };
 constexpr const char* names[count] = {
     "states",          "task_ids",          "derived",           "goal_pos",           "goal_neg",
     "goal_derived_pos", "goal_derived_neg", "subgoal_pos",       "subgoal_neg",        "subgoal_derived_pos",
     "subgoal_derived_neg", "history_pos",   "history_neg",       "history_dt",         "history_count",
-    "history_derived_pos", "history_derived_neg", "live"};
+    "history_derived_pos", "history_derived_neg", "live", "goal_constants", "subgoal_constants"};
 }  // namespace operand
 
 /// One call's inputs and destinations, checked against the encoder (shapes and dtypes; the rows' contents are the
@@ -407,6 +411,7 @@ struct Call
     Words derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
     encoding::LayerInput subgoals{};
     encoding::HistoryInput history{};
+    encoding::ConstantInput goal_constants{}, subgoal_constants{};
     const u64* live = nullptr;  // the live rows, or null: every row
     encoding::BatchShape capacities;
     std::array<void*, k_arrays> arrays{};   // null: absent or without entries
@@ -574,6 +579,25 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 history, i64 tar
             fail("'live' is not 8-byte aligned");
         c.live = static_cast<const u64*>(live.untyped_data());
     }
+    // the constant literals: int32 [M, K, C] (M = N, or 1 for every row) or [0]
+    auto constants = [&](usize k, bool masks) -> encoding::ConstantInput {
+        const ffi::AnyBuffer& b = buffers[k];
+        const auto dims = b.dimensions();
+        if (b.element_type() != ffi::DataType::S32 || !(dims.size() == 3 || (dims.size() == 1 && dims[0] == 0)))
+            fail(std::string("'") + operand::names[k] + "' must be int32 [rows, literals, columns] or [0]");
+        if (dims.size() == 1 || b.element_count() == 0)
+            return {};
+        if (!masks)
+            fail(std::string("'") + operand::names[k] + "' is given without their masks");
+        const u64 rows = static_cast<u64>(dims[0]);
+        if (rows != c.graphs && rows != 1)
+            fail(std::string("'") + operand::names[k] + "' must have one row per state or one row for all");
+        const u32 capacity = static_cast<u32>(dims[1]), width = static_cast<u32>(dims[2]);
+        return {static_cast<const i32*>(b.untyped_data()), rows == 1 && c.graphs != 1 ? 0 : u64{capacity} * width,
+                capacity, width};
+    };
+    c.goal_constants = constants(operand::goal_constants, c.goal_pos.data != nullptr || c.goal_pos.rows != 0);
+    c.subgoal_constants = constants(operand::subgoal_constants, sub.layers != 0);
     c.capacities = {c.graphs, static_cast<u64>(entities), static_cast<u64>(args), static_cast<u64>(targets),
                     static_cast<u64>(history)};
 
@@ -726,7 +750,9 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
         in.derived_stride = c.derived.words;
         set_goal(c, c.goal_pos, c.goal_neg, in, false);
         set_goal(c, c.goal_derived_pos, c.goal_derived_neg, in, true);
+        in.goal_constants = c.goal_constants;
         in.subgoals = c.subgoals;
+        in.subgoal_constants = c.subgoal_constants;
         in.history = c.history;
         const encoding::FlatBuffers out = buffers_of(c);
         encoding::FlatSizes sizes;
@@ -863,7 +889,9 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         in.derived_stride = c.derived.words;
         set_goal(c, c.goal_pos, c.goal_neg, in, false);
         set_goal(c, c.goal_derived_pos, c.goal_derived_neg, in, true);
+        in.goal_constants = c.goal_constants;
         in.subgoals = c.subgoals;
+        in.subgoal_constants = c.subgoal_constants;
         in.history = c.history;
         in.graphs_device = c.live;
         cuda::DeviceOutput out;

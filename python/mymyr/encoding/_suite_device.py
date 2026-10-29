@@ -7,6 +7,8 @@ import weakref
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
+
 from mymyr.encoding import _device as d
 from mymyr.encoding._device_actions import action_states, bounded_actions
 
@@ -42,7 +44,17 @@ def _input(value: Any, idx: Any, count: int, keep: list) -> Any:
     if value is None:
         return None
     if isinstance(value, (tuple, list)):
-        return tuple(_input(v, idx, count, keep) for v in value)
+        taken = tuple(_input(v, idx, count, keep) for v in value)
+        constants = getattr(value, "constants", None)
+        if constants is None:
+            return taken
+        # the constant literals of the rows (GoalMasks, LayerMasks), on the rows' device
+        torch = d._torch()
+        c = constants if isinstance(constants, torch.Tensor) else torch.as_tensor(np.asarray(constants))
+        c = c.to(idx.device)
+        out = d._ConstantMasks(taken)
+        out.constants = c if c.shape[0] == 1 and count != 1 else c[idx]
+        return out
     torch = d._torch()
     value = d._cuda_tensor(torch, value, "per-row input", keep)
     if value.shape[0] == 1 and count != 1:

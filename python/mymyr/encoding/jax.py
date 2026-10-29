@@ -414,6 +414,26 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     return masks[0], masks[1], masks[2], masks[3]
 
 
+def _constants(masks: Any, name: str, graphs: int) -> Any:
+    """The constant literals of a GoalMasks or LayerMasks as an int32 operand [N or 1, K, C], [0] without."""
+    constants = getattr(masks, "constants", None)
+    if constants is None:
+        return jnp.zeros((0,), jnp.int32)
+    if isinstance(constants, jax.Array):
+        if constants.dtype != jnp.int32:
+            raise _error(f"'{name}' must be int32, not {constants.dtype}")
+        c = constants
+    else:
+        a = np.asarray(constants)
+        if a.dtype != np.int32:
+            raise _error(f"'{name}' must be int32, not {a.dtype}")
+        c = jnp.asarray(a)
+    if c.ndim != 3 or c.shape[0] not in (graphs, 1):
+        raise _error(f"'{name}' must be int32 [N, K, C] with one row per state ({graphs}) or one row for all, not of "
+                     f"shape {tuple(c.shape)}")
+    return c
+
+
 def _layer_halves(x: Any, name: str) -> Any:
     """``x`` as uint32 [rows, layers, 2 words]: masks of u64 words as halves, low half first."""
     if x is None:
@@ -644,7 +664,8 @@ def encode(
     required where a graph reads derived atoms whose axioms the device cannot evaluate (otherwise the target evaluates
     them). goals: ``(goal_pos, goal_neg)`` or ``(goal_pos, goal_neg,
     goal_derived_pos, goal_derived_neg)``, each with N rows or one row for all (halves or words), replacing the
-    instances' goals as in ``FlatRelationEncoder.encode``.
+    instances' goals as in ``FlatRelationEncoder.encode``; a ``GoalMasks`` (a pytree) also gives the constant literals
+    of its rows (``constants``), and a ``LayerMasks`` those of its layers.
 
     subgoals: ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)``, the subgoal layers of the rows as masks
     [N, L, 2 W] (halves; or [N, L, W] words; one row [1, L, ...] for all), at most as many layers as the encoder's
@@ -712,7 +733,8 @@ def encode(
         live_count = jnp.clip(jnp.asarray(live).reshape(()), 0, graphs).astype(jnp.int32)
         live_words = jnp.stack([live_count.astype(jnp.uint32), jnp.uint32(0)])
     operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps,
-                live_words)
+                live_words, _constants(goals, "goals.constants", graphs),
+                _constants(subgoals, "subgoals.constants", graphs))
     static = (
         tuple(n for n in _ARRAYS if reg.layout.present(n)),
         reg.layout.relations,
@@ -774,8 +796,8 @@ def _check_sizes(sizes: dict) -> None:
     """Raises for a batch with an invalid row or one that its index type cannot hold."""
     if sizes["invalid_input"]:
         raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or history "
-                     "step narrower than its instance, a history count outside [0, steps], or a bit that its instance "
-                     "has no atom for")
+                     "step narrower than its instance, a history count outside [0, steps], a bit that its instance "
+                     "has no atom for, or a constant literal that it cannot encode")
     if sizes["index_overflow"]:
         history = f", history {sizes['history']}" if "history" in sizes else ""
         raise OverflowError(

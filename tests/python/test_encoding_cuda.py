@@ -1703,3 +1703,152 @@ def test_prepared_collation_keeps_ring_capacity_when_relations_grow(layout, inde
             consumer.replay()
             stream.synchronize()
             same_batch(encoder.encode(host_rows, capacities=caps), result)
+
+
+# ------------------------------------------------------------------------------------------------ constant literals
+
+
+def device_masks(masks, dev):
+    """GoalMasks or LayerMasks with their masks and constant literals on the device."""
+    arrays = (masks.pos, masks.neg, masks.derived_pos, masks.derived_neg)
+    return type(masks)(*(None if x is None else to_device(np.asarray(x), dev) for x in arrays), masks.unsatisfiable,
+                       constants=None if masks.constants is None else to_device(masks.constants, dev))
+
+
+def with_constants(masks, constants):
+    """Masks with other constant literals."""
+    return type(masks)(*masks, *[None] * (4 - len(masks)), masks.unsatisfiable, constants=constants)
+
+
+def depot_rows(tmp_path):
+    """The depot task of the layer tests, walked states as rows, and per row goals and layers whose literals mix
+    slotted literals with static and slotless ones."""
+    from test_encoding_layers import DEPOT_GOALS, DEPOT_LAYERS, depot_task
+
+    task = depot_task(tmp_path)
+    states = walk(task, steps=6, walks=3)
+    goals = [DEPOT_GOALS[g % len(DEPOT_GOALS)] for g in range(len(states))]
+    layers = [DEPOT_LAYERS[g % len(DEPOT_LAYERS)] for g in range(len(states))]
+    return task, np.asarray(task.encode(states)), goals, layers
+
+
+@pytest.mark.parametrize("nullary", ["auxiliary", "arity0", "omit"])
+@pytest.mark.parametrize("policy", ["every", "lowest", "highest"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_constant_literals_of_goals_and_layers_equal_host(tmp_path, layout, policy, nullary):
+    dev = gpu()
+    task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, max_goal_level=2, nullary=nullary,
+                                           repeated_literals=policy, goal_derivations=ALL_GOALS,
+                                           target_sources=("goal", "subgoal"))
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    shared = encoding.goal_masks(encoder, goal_rows[:1], fixed="encode", instance_constants=True)
+    layers = encoding.subgoal_masks(encoder, layer_rows, fixed="encode")
+    assert goals.constants.shape[1] and layers.constants.shape[1] and shared.constants.shape[0] == 1
+    device_rows = to_device(rows, dev)
+    for given in ({"goals": goals}, {"subgoals": layers}, {"goals": goals, "subgoals": layers},
+                  {"goals": shared, "subgoals": layers}):
+        host = encoder.encode(rows, **given)
+        on_device = {key: device_masks(masks, dev) for key, masks in given.items()}
+        same_batch(host, encoder.encode(device_rows, **on_device))
+        # host constant literals are copied to the rows' device
+        same_batch(host, encoder.encode(device_rows, **{key: with_constants(on_device[key], masks.constants)
+                                                        for key, masks in given.items()}))
+        exact = exact_capacities(host)
+        for caps in (exact, exact_capacities(host, 2)):
+            same_batch(encoder.encode(rows, capacities=caps, **given),
+                       encoder.encode(device_rows, capacities=caps, **on_device))
+        short = encoder.encode(device_rows, capacities=dict(exact, args=exact["args"] - 1), **on_device)
+        assert short.sizes["capacity_overflow"] and not short.sizes["invalid_input"]
+        without = encoder.encode(rows, **{key: tuple(masks) for key, masks in given.items()})
+        assert len(host.relation_args) > len(without.relation_args)
+
+
+def test_constant_literals_that_cannot_be_encoded_are_invalid_input_on_the_device(tmp_path):
+    dev = gpu()
+    task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
+    encoder = encoding.FlatRelationEncoder(task, max_goal_level=1, target_sources=("goal", "subgoal"))
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    layers = encoding.subgoal_masks(encoder, [rows_[:1] for rows_ in layer_rows], fixed="encode")
+    caps = exact_capacities(encoder.encode(rows, goals=goals, subgoals=layers), 2)
+    device_rows = to_device(rows, dev)
+    row = next(g for g in range(len(rows)) if goals.constants[g, 0, 1] >= 0)
+    wrong_layer = goals.constants.copy()
+    wrong_layer[row, 0, 0] = 1
+    wrong_sign = goals.constants.copy()
+    wrong_sign[row, 0, 2] = 2
+    past_levels = layers.constants.copy()
+    past_levels[next(g for g in range(len(rows)) if past_levels[g, 0, 1] >= 0), 0, 0] = 1
+    for key, masks, constants in (("goals", goals, wrong_layer), ("goals", goals, wrong_sign),
+                                  ("subgoals", layers, past_levels)):
+        given = {"goals": goals, "subgoals": layers}
+        given[key] = with_constants(masks, constants)
+        with pytest.raises(ValueError, match="constant literal"):
+            encoder.encode(rows, **given)
+        on_device = {k: device_masks(m, dev) for k, m in given.items()}
+        flagged = encoder.encode(device_rows, capacities=caps, **on_device)
+        assert flagged.sizes["invalid_input"] and not torch.count_nonzero(flagged.entity_offsets).item()
+        with pytest.raises(ValueError, match="constant literal"):
+            encoder.encode(device_rows, **on_device)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_a_device_row_stream_holds_rows_with_and_without_constant_literals(tmp_path, layout):
+    dev = gpu()
+    task, rows, goal_rows, _ = depot_rows(tmp_path)
+    n = len(rows)
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, goal_derivations=ALL_GOALS, target_sources=("goal",))
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    plain = encoding.goal_masks(encoder, goal_rows, fixed="decide")
+    host = encoder.encode(np.concatenate([rows, rows]), goals=encoding.GoalMasks(
+        np.concatenate([goals.pos, plain.pos]), np.concatenate([goals.neg, plain.neg]), None, None,
+        np.concatenate([goals.unsatisfiable, plain.unsatisfiable]),
+        constants=np.concatenate([goals.constants, np.full_like(goals.constants, -1)])))
+    caps = exact_capacities(host, 2)
+    caps["graphs"] = 2 * n + 3
+    ring = encoder.device_stream(2 * n + 3, goals=True, constant_literals=goals.constants.shape[1] + 2)
+    device_rows = to_device(rows, dev)
+    for _ in range(2):
+        for begin in range(0, n, 4):
+            part = encoding.goal_masks(encoder, goal_rows[begin:begin + 4], fixed="encode")
+            ring.append(device_rows[begin:begin + 4], goals=device_masks(part, dev))
+        ring.append(device_rows, goals=tuple(device_masks(plain, dev)))
+        same_batch(host, ring.flush(capacities=caps))
+    # three more literal rows than the ring holds
+    padding = np.full((n, 3, goals.constants.shape[2]), -1, dtype=np.int32)
+    wide = with_constants(goals, np.concatenate([goals.constants, padding], axis=1))
+    with pytest.raises(ValueError, match="constant goal literals of the appended rows"):
+        ring.append(device_rows, goals=device_masks(wide, dev))
+    with pytest.raises(ValueError):
+        encoder.device_stream(8, goals=True).append(device_rows, goals=device_masks(goals, dev))
+    with pytest.raises(ValueError, match="need goal masks"):
+        encoder.device_stream(8, constant_literals=2)
+
+
+def test_the_op_takes_the_constant_literals_of_goals_and_layers(tmp_path):
+    dev = gpu()
+    task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
+    encoder = encoding.FlatRelationEncoder(task, max_goal_level=2, goal_derivations=ALL_GOALS,
+                                           target_sources=("goal", "subgoal"))
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    layers = encoding.subgoal_masks(encoder, layer_rows, fixed="encode")
+    expected = encoder.encode(rows, goals=goals, subgoals=layers)
+    caps = exact_capacities(expected, 2)
+    expected = encoder.encode(rows, goals=goals, subgoals=layers, capacities=caps)
+    handle = rt.register(encoder)
+    g = [to_device(x, dev) for x in goals] + [None, None]
+    sg = [to_device(x, dev) for x in layers]
+    out = call_op(handle, to_device(rows, dev), None, None, g, caps, subgoals=sg)
+    without = encoding.DeviceFlatBatch.from_arrays(encoder, out)
+    assert without.sizes["args"] < expected.sizes["args"]
+    out = torch.ops.mymyr.encode_flat(
+        handle, to_device(rows, dev), None, None, *g, *sg, None, None, *([None] * 6),
+        caps["graphs"], caps["entities"], caps["args"], caps["targets"], 0,
+        goal_constants=to_device(goals.constants, dev), subgoal_constants=to_device(layers.constants, dev))
+    same_batch(expected, encoding.DeviceFlatBatch.from_arrays(encoder, out))
+    with pytest.raises(ValueError, match="goal_constants need the goal masks"):
+        torch.ops.mymyr.encode_flat(
+            handle, to_device(rows, dev), None, None, None, None, None, None, *sg, None, None, *([None] * 6),
+            caps["graphs"], caps["entities"], caps["args"], caps["targets"], 0,
+            goal_constants=to_device(goals.constants, dev))
+    rt.unregister(handle)

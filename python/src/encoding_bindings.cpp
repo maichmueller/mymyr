@@ -2861,6 +2861,11 @@ void bind_encoding(nb::module_& parent)
                "The atom is over a fluent or derived predicate but has no slot: it holds in no state.")
         .value("INVALID", encoding::LiteralKind::Invalid,
                "The task id, the predicate, an object or the -1 padding is out of range.");
+    module.def(
+        "_constant_width",
+        [](LiteralSourceArg source)
+        { return encoding::detail::k_constant_objects + literal_source(source).context->max_arity(); },
+        "source"_a, "The columns of a constant literal of the source's encodings (3 + the context's max_arity).");
     module.def("_literal_slots", &literal_slots, "source"_a, "predicates"_a, "objects"_a, "task_ids"_a.none(),
                "(kind uint8 [N], slot int32 [N]) of N literals given as arrays (mymyr.encoding.literal_slots).");
     module.def("_literal_masks", &literal_masks, "source"_a, "predicates"_a, "objects"_a, "positive"_a, "rows"_a,
@@ -3101,15 +3106,17 @@ void bind_encoding(nb::module_& parent)
             "flushes return (default NumPy).")
         .def(
             "device_stream",
-            [](nb::handle self, IntArg capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
+            [](nb::handle self, IntArg capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals,
+               IntArg constant_literals)
             {
                 return Arg<ann::EncodingDeviceStream>(nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
                     self, capacity, "device"_a = device, "goals"_a = goals, "derived"_a = derived,
-                    "derived_goals"_a = derived_goals));
+                    "derived_goals"_a = derived_goals, "constant_literals"_a = constant_literals));
             },
             "capacity"_a, nb::kw_only(), "device"_a = nb::none(), "goals"_a = false, "derived"_a = false,
-            "derived_goals"_a = false,
-            "A ring of CUDA rows bound to the current torch stream, with capturable append and capacity flush.")
+            "derived_goals"_a = false, "constant_literals"_a = 0,
+            "A ring of CUDA rows bound to the current torch stream, with capturable append and capacity flush. "
+            "constant_literals: the constant literals of its goal each row can hold (needs goals).")
         .def(
             "mutable_stream",
             [](PyFlatEncoder& self, Arg<ann::Framework> framework)

@@ -52,7 +52,8 @@ the states again; required on a device).
   stream first; no scratch reservation is needed) and traces under ``torch.compile``. The expansion rows and horizon
   views follow as keyword tensors: ``action_schema``, ``action_binding``, ``action_offsets``, ``action_parent``,
   ``node_offsets``, ``edge_offsets``, ``edge_src``, ``edge_dst``, ``edge_schema``, ``edge_binding`` and
-  ``action_succ``.
+  ``action_succ``, and so do the constant literals of the goals and subgoal layers (``goal_constants``,
+  ``subgoal_constants``: int32 [N or 1, K, C], ``GoalMasks.constants``).
 - ``mymyr::literal_slots`` / ``mymyr::literal_masks``: CUDA lookup of table predicate ids and instance-local objects
   on a registered encoder; kinds and slots, or goal/subgoal masks, with a device status scalar for invalid input.
 The expansion ops take ``derived``, ``rows``, ``hashes``, ``noops`` and ``drop_noops`` flags and return the same
@@ -849,6 +850,8 @@ def encode_flat(
     expand_actions: bool = False,
     action_index: Optional[Tensor] = None,
     action_status: Optional[Tensor] = None,
+    goal_constants: Optional[Tensor] = None,
+    subgoal_constants: Optional[Tensor] = None,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -870,12 +873,15 @@ def encode_flat(
     ``action_parent``) may carry ``action_index``, each row's position in its state's full canonical successor order
     (``mymyr::expand_flat``'s ``index`` with ``drop_noops``: the ``entity_ref`` of its action entity), and
     ``action_status``, the expansion's int32 or int64 device status word [1] (bit 0 overflow, bit 1 invalid input),
-    which the batch's overflow flags then report (capacity, invalid row): such a batch is all zero. The arguments after ``numeric`` are passed by
-    keyword."""
+    which the batch's overflow flags then report (capacity, invalid row): such a batch is all zero. ``goal_constants``
+    and ``subgoal_constants`` (int32 [N or 1, K, C]) are the constant literals of the goals and the subgoal layers
+    (``GoalMasks.constants``, ``LayerMasks.constants``). The arguments after ``numeric`` are passed by keyword."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
         raise ValueError("mymyr: encoding: goals are (goal_pos, goal_neg) or all four masks")
+    if goal_constants is not None and not given:
+        raise ValueError("mymyr: encoding: goal_constants need the goal masks")
     enc = lookup(encoder)
     caps = _device._capacities(
         {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history, "numeric": numeric,
@@ -885,6 +891,9 @@ def encode_flat(
     subgoals = _layer_tuple(
         "subgoals", (subgoal_pos, subgoal_neg), (subgoal_derived_pos, subgoal_derived_neg), ()
     )
+    if subgoal_constants is not None and subgoals is None:
+        raise ValueError("mymyr: encoding: subgoal_constants need the subgoal masks")
+    subgoals = _with_constants(subgoals, subgoal_constants)
     steps = _layer_tuple(
         "history", (history_pos, history_neg), (history_derived_pos, history_derived_neg), (history_dt, history_count)
     )
@@ -918,10 +927,19 @@ def encode_flat(
         horizon = build_horizon(enc, states, task_ids, actions, merge=False)
         actions = None
     arrays = _device.encode_arrays(
-        enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps,
-        actions=actions, horizon=horizon
+        enc, states, task_ids, derived, _with_constants(tuple(given) or None, goal_constants), caps,
+        subgoals=subgoals, history=steps, actions=actions, horizon=horizon
     )
     return [arrays[name] for name in _device.DeviceFlatBatch.array_names]
+
+
+def _with_constants(masks: Optional[tuple], constants: Optional[Tensor]) -> Optional[tuple]:
+    """The masks of the op's goals or subgoal layers with their constant literals (None: without)."""
+    if masks is None or constants is None:
+        return masks
+    out = _device._ConstantMasks(masks)
+    out.constants = constants
+    return out
 
 
 def _layer_tuple(name: str, masks: tuple, derived: tuple, rest: tuple) -> Optional[tuple]:
@@ -950,6 +968,8 @@ def _(
     expand_actions=False,
     action_index=None,
     action_status=None,
+    goal_constants=None,
+    subgoal_constants=None,
 ):  # fmt: skip
     if node_offsets is not None:
         states = states[:node_offsets.shape[0] - 1]

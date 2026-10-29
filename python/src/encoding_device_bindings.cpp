@@ -73,13 +73,16 @@ struct Rows
     // scratch words, status (mymyr.encoding._device._ROW_HORIZON and after)
     std::array<std::uintptr_t, 12> horizon{};
     static constexpr usize k_horizon_nodes = 6;
+    // the constant literals of the goals, then of the subgoal layers: rows, row stride, capacity, width
+    // (mymyr.encoding._device._ROW_CONSTANTS and after)
+    std::array<std::uintptr_t, 4> goal_constants{}, subgoal_constants{};
     // the rows the scratch covers: the graphs, or every node of a horizon view
     [[nodiscard]] u64 input_rows() const noexcept
     {
         return horizon[0] ? std::max<u64>(graphs, horizon[k_horizon_nodes]) : graphs;
     }
 };
-constexpr usize k_row_fields = 55;
+constexpr usize k_row_fields = 63;
 
 Rows rows_of(const std::vector<std::uintptr_t>& v)
 {
@@ -111,6 +114,9 @@ Rows rows_of(const std::vector<std::uintptr_t>& v)
         field = v[i++];
     for (auto& field : r.horizon)
         field = v[i++];
+    for (auto* constants : {&r.goal_constants, &r.subgoal_constants})
+        for (std::uintptr_t& field : *constants)
+            field = v[i++];
     return r;
 }
 
@@ -118,6 +124,11 @@ template<class T>
 T* ptr(std::uintptr_t p)
 {
     return reinterpret_cast<T*>(p);
+}
+
+encoding::ConstantInput constants_of(const std::array<std::uintptr_t, 4>& f)
+{
+    return {ptr<const i32>(f[0]), f[1], static_cast<u32>(f[2]), static_cast<u32>(f[3])};
 }
 
 encoding::LayerInput layers_of(const std::array<std::uintptr_t, 9>& f)
@@ -155,7 +166,9 @@ cuda::DeviceEncodeInput input_of(const Rows& r, u32 numeric_words = 0)
     in.goal_derived_neg = ptr<const u64>(r.goal_derived_neg);
     in.goal_derived_stride = r.goal_derived_stride;
     in.goal_derived_words = r.goal_derived_words;
+    in.goal_constants = constants_of(r.goal_constants);
     in.subgoals = layers_of(r.subgoals);
+    in.subgoal_constants = constants_of(r.subgoal_constants);
     in.history.masks = layers_of(r.history);
     in.history.dt = ptr<const i32>(r.history_dt);
     in.history.count = ptr<const i32>(r.history_count);

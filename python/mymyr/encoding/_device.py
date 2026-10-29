@@ -30,6 +30,8 @@ import threading
 import weakref
 from typing import Any, Optional
 
+import numpy as np
+
 from mymyr._core._encoding import FlatBatch
 
 __all__ = ["DeviceFlatBatch"]
@@ -70,13 +72,14 @@ _POINTER_FIELDS = len(_OUTPUTS) + len(_RELATION_SCRATCH) + 1
 # (11, with dt and count); the expansion rows (offsets, schema, binding, parent, capacity, label width, status,
 # canonical index); the
 # horizon view (node offsets, edge offsets, src, dst, schema, binding, nodes, edges, label width, scratch, scratch
-# words, status).
+# words, status); the constant literals of the goals and of the subgoal layers (rows, row stride, capacity, width).
 _ROW_STATES = 1
 _ROW_DERIVED = 5
 _ROW_ACTIONS = 35
 _ROW_HORIZON = 43
 _ROW_HORIZON_NODES = _ROW_HORIZON + 6
-_ROW_FIELDS = 55
+_ROW_CONSTANTS = 55
+_ROW_FIELDS = 63
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
 _SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
@@ -262,13 +265,32 @@ def _cuda_tensor(torch: Any, x: Any, name: str, keep: list) -> Any:
     return t
 
 
+class _ConstantMasks(tuple):
+    """CUDA masks (a tuple of tensors) with the constant literals of their rows (``constants``)."""
+
+    constants: Any = None
+
+
+def _with_constants(masks: Optional[tuple], given: Any) -> Optional[tuple]:
+    """``masks`` (a tuple, or None) with the constant literals of ``given`` (a GoalMasks or LayerMasks) if it has
+    any."""
+    constants = getattr(given, "constants", None)
+    if masks is None or constants is None:
+        return masks
+    out = _ConstantMasks(masks)
+    out.constants = constants
+    return out
+
+
 def _cuda_tuple(torch: Any, items: Any, name: str, keep: list) -> Optional[tuple]:
-    """The arrays of ``items`` (a tuple of masks, with None for an absent entry) as CUDA tensors."""
+    """The arrays of ``items`` (a tuple of masks, with None for an absent entry) as CUDA tensors, with the constant
+    literals of a GoalMasks or LayerMasks."""
     if items is None:
         return None
     if isinstance(items, str) or not hasattr(items, "__len__"):
         raise _error(f"{name} must be a tuple of arrays")
-    return tuple(None if x is None else _cuda_tensor(torch, x, f"{name}[{k}]", keep) for k, x in enumerate(items))
+    return _with_constants(
+        tuple(None if x is None else _cuda_tensor(torch, x, f"{name}[{k}]", keep) for k, x in enumerate(items)), items)
 
 
 def _words(torch: Any, t: Any, name: str) -> Any:
@@ -398,10 +420,14 @@ class _Rows:
                 goal[at:at + 4] = [pos.data_ptr(), neg.data_ptr(), 0 if shared else _stride(pos), pos.shape[1]]
         sub = self._subgoals(torch, subgoals, graphs, tensors)
         hist, self.history_layers = self._history(torch, history, graphs, tensors)
+        constants = [*self._constants(torch, getattr(goals, "constants", None), "goals.constants", graphs, tensors),
+                     *self._constants(torch, getattr(subgoals, "constants", None), "subgoals.constants", graphs,
+                                      tensors)]
         self.tensors = tensors
         self.fields = [graphs, w.data_ptr() if w.numel() else 0, _stride(w), w.shape[1], ids_ptr, derived_ptr,
                        derived_stride, *goal[:4], *goal[4:], *sub, *hist]
-        self.fields += [0] * (_ROW_FIELDS - _ROW_ACTIONS)  # no expansion rows, no horizon view
+        self.fields += [0] * (_ROW_CONSTANTS - _ROW_ACTIONS)  # no expansion rows, no horizon view
+        self.fields += constants
         if len(self.fields) != _ROW_FIELDS:
             raise AssertionError("the row fields have a fixed length")
 
@@ -441,6 +467,38 @@ class _Rows:
             fields[5:] = [dpos.data_ptr() if dpos.numel() else 0, dneg.data_ptr() if dneg.numel() else 0, dstride,
                           dpos.shape[2]]
         return fields
+
+    def _constants(self, torch: Any, constants: Any, name: str, graphs: int, tensors: list) -> list[int]:
+        """The fields of constant literals (rows, row stride, capacity, width; zeros without): an int32 array
+        ``[N, K, C]`` with one row per state or a single shared row, on the rows' device (a host array is copied to
+        it)."""
+        if constants is None:
+            return [0] * 4
+        if isinstance(constants, torch.Tensor):
+            c = constants
+        elif hasattr(constants, "__cuda_array_interface__") or (
+                hasattr(constants, "__dlpack_device__") and constants.__dlpack_device__()[0] == 2):
+            c = torch.from_dlpack(constants)
+        else:
+            c = torch.as_tensor(np.asarray(constants))
+        if c.device != self.device:
+            if c.device.type != "cpu":
+                raise _error(f"'{name}' is on {c.device}, the states on {self.device}")
+            if torch.cuda.is_current_stream_capturing():
+                raise _error(f"'{name}' is a host array: give CUDA constant literals under capture")
+            c = c.to(self.device)
+        if c.dtype != torch.int32 or c.ndim != 3:
+            raise _error(f"'{name}' must be an int32 array [N, K, C], not a {c.dtype} array of shape {list(c.shape)}")
+        rows, capacity, width = c.shape
+        if rows != graphs and rows != 1:
+            raise _error(f"'{name}' has {rows} rows: one per state ({graphs}) or a single shared row")
+        if capacity == 0 or c.numel() == 0:
+            return [0] * 4
+        if not c[0].is_contiguous():
+            c = c.contiguous()
+        tensors.append(c)
+        shared = rows == 1 and graphs != 1
+        return [c.data_ptr(), 0 if shared else (c.stride(0) if rows > 1 else capacity * width), capacity, width]
 
     def _subgoals(self, torch: Any, subgoals: Any, graphs: int, tensors: list) -> list[int]:
         if subgoals is None:
@@ -702,8 +760,8 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
             if flags & _OVERFLOW_INPUT:
                 raise _error(_INVALID + ": a task id outside the table, a state row, goal mask, subgoal layer or "
                              "history step narrower than its instance, invalid expansion labels, horizon offsets or "
-                             "endpoints, a history count outside [0, steps], or a bit that its instance has no atom "
-                             "for")
+                             "endpoints, a history count outside [0, steps], a bit that its instance has no atom "
+                             "for, or a constant literal that it cannot encode")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
                                     f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}, "
@@ -756,7 +814,8 @@ def encode(
     if goals is not None:
         if isinstance(goals, str) or not hasattr(goals, "__len__"):
             raise _error("goals must be (goal_pos, goal_neg) or (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)")
-        g = tuple(_cuda_tensor(torch, mask, f"goals[{k}]", keep) for k, mask in enumerate(goals))
+        g = _with_constants(tuple(_cuda_tensor(torch, mask, f"goals[{k}]", keep) for k, mask in enumerate(goals)),
+                            goals)
     sub = _cuda_tuple(torch, subgoals, "subgoals", keep)
     hist = _cuda_tuple(torch, history, "history", keep)
     arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist, actions=actions)
@@ -1109,11 +1168,12 @@ class DeviceFlatStream:
     The ring is bound to the current torch stream at construction. Append and capacity flush may be captured;
     keep the stream, inputs, returned batches and this ring alive through the last replay. Append copies all rows
     or sets the sticky device overflow flag without changing the ring. ``clear`` clears that flag. The mutable
-    stream remains host-only.
+    stream remains host-only. With ``constant_literals``, each row holds up to that many constant literals of its goal:
+    appended goals may carry them (``GoalMasks.constants``, at most that many per row; under capture a CUDA array).
     """
 
     def __init__(self, encoder: Any, capacity: int, *, device: Any = None, goals: bool = False,
-                 derived: bool = False, derived_goals: bool = False):
+                 derived: bool = False, derived_goals: bool = False, constant_literals: int = 0):
         torch = _torch()
         from mymyr import rl
         from mymyr.rl.torch._ops import _stream
@@ -1122,6 +1182,10 @@ class DeviceFlatStream:
             raise _error("a device stream needs a positive integer capacity")
         if derived_goals and not goals:
             raise _error("derived goal masks need fluent goal masks")
+        if isinstance(constant_literals, bool) or not isinstance(constant_literals, int) or constant_literals < 0:
+            raise _error(f"constant_literals must be an int of at least 0, got {constant_literals!r}")
+        if constant_literals and not goals:
+            raise _error("constant goal literals need goal masks")
         self.encoder, self.capacity = encoder, capacity
         self.device = torch.device("cuda", _device_index(torch, device))
         self._stream = torch.cuda.current_stream(self.device)
@@ -1142,6 +1206,12 @@ class DeviceFlatStream:
             self._goals = tuple(torch.empty((capacity, table.words), dtype=torch.int64, device=self.device) for _ in range(2))
             if derived_goals:
                 self._goals += tuple(torch.empty((capacity, table.derived_words), dtype=torch.int64, device=self.device) for _ in range(2))
+            if constant_literals:
+                from mymyr._core._encoding import _constant_width
+
+                self._goals = _ConstantMasks(self._goals)
+                self._goals.constants = torch.full((capacity, constant_literals, _constant_width(encoder)), -1,
+                                                   dtype=torch.int32, device=self.device)
         self._rows = _Rows(torch, self._states, self._ids, self._derived, self._goals)
 
     def _check_stream(self) -> None:
@@ -1167,7 +1237,7 @@ class DeviceFlatStream:
         states = _cuda_tensor(torch, states, "states", keep)
         ids = None if task_ids is None else _cuda_tensor(torch, task_ids, "task_ids", keep)
         d = None if derived is None else _cuda_tensor(torch, derived, "derived", keep)
-        g = None if goals is None else tuple(_cuda_tensor(torch, x, f"goals[{i}]", keep) for i, x in enumerate(goals))
+        g = _cuda_tuple(torch, goals, "goals", keep)
         rows = _Rows(torch, states, ids, d, g)
         if rows.device != self.device:
             raise _error("appended rows and the device ring must be on the same device")

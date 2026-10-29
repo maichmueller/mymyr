@@ -1344,3 +1344,43 @@ def test_live_rows_with_subgoals_and_history_equal_host_capacity(platform, layou
     same_batch(expected, batch)
     for name in ("entity_offsets", "history_offsets", "target_offsets"):
         assert not np.asarray(batch._arrays[name])[count + 1:].any(), name
+
+
+@pytest.mark.parametrize("policy", ["every", "highest"])
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_constant_literals_of_goals_and_layers_equal_the_host(tmp_path, platform, policy):
+    from test_encoding_layers import DEPOT_GOALS, DEPOT_LAYERS, depot_task
+
+    task = depot_task(tmp_path)
+    states = walk(task, steps=6, walks=3)
+    rows = np.asarray(task.encode(states))
+    encoder = encoding.FlatRelationEncoder(task, max_goal_level=2, repeated_literals=policy,
+                                           goal_derivations=("plain", "satisfied", "unsatisfied"),
+                                           target_sources=("goal", "subgoal"))
+    goal_rows = [DEPOT_GOALS[g % len(DEPOT_GOALS)] for g in range(len(states))]
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    shared = encoding.goal_masks(encoder, goal_rows[:1], fixed="encode", instance_constants=True)
+    layers = encoding.subgoal_masks(encoder, [DEPOT_LAYERS[g % len(DEPOT_LAYERS)] for g in range(len(states))],
+                                    fixed="encode")
+    for given in ({"goals": goals}, {"subgoals": layers}, {"goals": goals, "subgoals": layers},
+                  {"goals": shared, "subgoals": layers}):
+        caps = exact_capacities(encoder.encode(rows, **given))
+        expected = encoder.encode(rows, capacities=caps, **given)
+        converted = {}
+        for key, masks in given.items():
+            leaves, tree = jax.tree_util.tree_flatten(masks)
+            assert len(leaves) == len(masks) + 2  # the masks, unsatisfiable and the constant literals
+            converted[key] = jax.tree_util.tree_unflatten(
+                tree, [put(halves(a) if a.dtype == np.uint64 else a, platform) for a in leaves])
+        actual = jax.jit(lambda r, m: ej.encode(encoder, r, capacities=caps, **m))(put(halves(rows), platform),
+                                                                                   converted)
+        same_batch(expected, actual)
+        without = encoder.encode(rows, capacities=caps, **{key: tuple(masks) for key, masks in given.items()})
+        assert without.sizes["args"] < expected.sizes["args"]
+    # constant literals that cannot be encoded: a ValueError on the host, invalid rows inside jit
+    wrong = goals.constants.copy()
+    wrong[:, 0, 0] = np.where(wrong[:, 0, 1] >= 0, 1, -1)
+    bad = encoding.GoalMasks(*goals, None, None, goals.unsatisfiable, constants=wrong)
+    caps = exact_capacities(encoder.encode(rows, goals=goals), 2)
+    flagged = ej.encode(encoder, put(halves(rows), platform), capacities=caps, goals=bad)
+    assert flagged.sizes["invalid_input"]
