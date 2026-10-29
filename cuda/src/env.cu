@@ -167,7 +167,7 @@ __device__ __forceinline__ bool masks_hold(const Instances& in, u32 instance, co
             atomicOr(error, 16u);
         return false;
     }
-    const u32 own_words = (slots + 63u) >> 6;
+    const u32 own_words = (slots >> 6) + ((slots & 63u) != 0);
     for (u32 word = 0; word < own_words; ++word)
         if ((row[word] & goal_pos[word]) != goal_pos[word] || (row[word] & goal_neg[word]) != 0)
             return false;

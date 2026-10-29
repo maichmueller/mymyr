@@ -285,15 +285,15 @@ struct DeviceEnv::Impl
     [[nodiscard]] u32* dctl() const { return static_cast<u32*>(ctl.data()); }
 
     /// Waits for the stream and raises pending argument errors (task ids or goal masks), clearing the flags.
-    /// Unless `ids_only`, also reports stale caches and over-wide successors (std::logic_error).
-    void raise_errors(bool ids_only)
+    /// Unless `arguments_only`, also reports stale caches and over-wide successors (std::logic_error).
+    void raise_errors(bool arguments_only)
     {
         u32* d = dctl();
         auto* h = static_cast<u32*>(host_ctl.data());
         check(cudaMemcpyAsync(h, d, k_ctl_words * sizeof(u32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
         const u32 err = h[k_err], wide = h[k_words_needed];
-        if (ids_only ? !(err & (4u | 16u)) : !(err || wide))
+        if (arguments_only ? !(err & (4u | 16u)) : !(err || wide))
             return;
         check(cudaMemsetAsync(d + k_err, 0, 2 * sizeof(u32), s), "cudaMemsetAsync");
         if (err & 4u)
