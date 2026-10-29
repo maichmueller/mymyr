@@ -81,6 +81,27 @@ def test_declared_optional_and_keyword_mutations_increment_versions(optional):
 
 
 @pytest.mark.needs_gil
+def test_dispatch_key_exclusions_preserve_mutation_versions():
+    import ctypes
+
+    torch = pytest.importorskip("torch")
+    from torch import Tensor
+
+    from mymyr.rl.torch._ops import _op
+
+    @_op("mymyr_test::excluded_mutation", mutates_args=("x",))
+    def mutate(x: Tensor) -> None:
+        ctypes.c_bool.from_address(x.data_ptr()).value = False
+
+    for call in (mutate, mutate._opoverload):
+        tensor = torch.ones(1, dtype=torch.bool)
+        with torch._C._AutoDispatchBelowADInplaceOrView():
+            call(tensor)
+        assert not tensor.item()
+        assert tensor._version == 0
+
+
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("tracing_mode", ["real", "fake", "symbolic"])
 def test_make_fx_retains_custom_op_and_uses_new_states(state_pair, tracing_mode):
     import torch

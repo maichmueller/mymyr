@@ -106,6 +106,10 @@ _eager_tensor_keys = (
     | _keyset(_key.AutogradCPU) | _keyset(_key.AutogradCUDA)
     | _keyset(_key.AutocastCPU) | _keyset(_key.AutocastCUDA)
 ).raw_repr()
+_eager_excluded_keys = (_keyset(_key.AutogradOther) | _keyset(_key.AutogradNestedTensor)).raw_repr()
+# The default autocast exclusions include keys that the Python enum does not expose.
+for _backend in ("CPU", "MTIA", "MAIA", "XPU", "IPU", "HPU", "XLA", "MPS", "CUDA", "PrivateUse1"):
+    _eager_excluded_keys |= _keyset(torch._C._parse_dispatch_key(f"Autocast{_backend}")).raw_repr()
 
 
 class _EagerOp(torch.library.CustomOpDef):
@@ -117,6 +121,7 @@ class _EagerOp(torch.library.CustomOpDef):
             or self._eager_disabled
             # Modes, transforms and functionalization add keys to the thread's dispatch state.
             or torch._C._dispatch_tls_local_include_set().raw_repr() & ~_eager_tls_keys
+            or torch._C._dispatch_tls_local_exclude_set().raw_repr() & ~_eager_excluded_keys
             or torch._C._len_torch_dispatch_stack()
             or torch._C._are_functorch_transforms_active()
             or torch._C._is_torch_function_mode_enabled()
