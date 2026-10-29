@@ -181,6 +181,63 @@ def test_her_relabel(strategy, subset):
         assert np.array_equal(a[:, 4:9], b) and np.array_equal(b, c)
 
 
+@pytest.mark.parametrize("arg, value", [
+    ("env_ids", (0, 1)), ("env_ids", (0, 1, 2, 3, 4, 5)), ("env_ids", (7, 1, 2, -1, 4, 5)), ("env_ids", [0, 1, 2]),
+    ("goal_atoms", (1,)), ("prev_states", ()),
+])
+def test_tuples_and_lists_are_not_arrays(arg, value):
+    states, done = np.zeros((3, 6, 1), np.uint64), np.zeros((3, 6), bool)
+    with pytest.raises(TypeError, match=f"'{arg}' must be an array that speaks DLPack"):
+        rl.her_relabel(states, done, **{arg: value})
+
+
+def test_native_helpers_check_tensor_views():
+    """Only tuples led by the private marker read as tensor views, and their fields are checked before use."""
+    from mymyr._core import _rl_ops
+
+    states, done = np.zeros((3, 6, 1), np.uint64), np.zeros((3, 6), bool)
+    out = [np.zeros((3, 6, 1, 1), np.uint64), np.zeros((3, 6, 1), np.int32), np.zeros((3, 6, 1), bool),
+           np.zeros((3, 6, 1), np.float32), np.zeros((3, 6, 1), bool)]
+    ids = np.arange(6, dtype=np.int32)
+    marker = _rl_ops.TENSOR_VIEW
+    cases = {
+        (object(), ids.ctypes.data, 0, 32, -1, (6,), (1,)): "speaks DLPack",
+        (marker, ids.ctypes.data, 0, 32, -1, (6,)): "speaks DLPack",
+        (marker, ids.ctypes.data, 0, 32, -1, (6,), (1,), 0): "speaks DLPack",
+        (marker, "data", 0, 32, -1, (6,), (1,)): "fields of the wrong types",
+        (marker, ids.ctypes.data, 0, 32, -1, 6, (1,)): "fields of the wrong types",
+        (marker, ids.ctypes.data, 0, 32, "cpu", (6,), (1,)): "without a device",
+        (marker, ids.ctypes.data, 0, 0, -1, (6,), (1,)): "no whole bytes",
+        (marker, ids.ctypes.data, 0, 32, -1, (6,), (1, 1)): "mismatched shape and strides",
+        (marker, ids.ctypes.data, 0, 32, -1, (-6,), (1,)): "negative extent or stride",
+        (marker, ids.ctypes.data, 0, 32, -1, (6,), (-1,)): "negative extent or stride",
+        (marker, 0, 0, 32, -1, (6,), (1,)): "elements but no memory",
+    }
+    for view, message in cases.items():
+        with pytest.raises(TypeError, match=message):
+            _rl_ops.her_relabel(states, done, *out, prev_states=None, strategy="future", subset=0, seed=0, first_env=0,
+                                env_ids=view, goal_atoms=None, step_reward=0.0, goal_reward=1.0, stream=None)
+    view = (marker, ids.ctypes.data, 0, 32, -1, (6,), (1,))
+    _rl_ops.her_relabel(states, done, *out, prev_states=None, strategy="future", subset=0, seed=0, first_env=0,
+                        env_ids=view, goal_atoms=None, step_reward=0.0, goal_reward=1.0, stream=None)
+
+
+def test_tensors_off_host_and_cuda_take_the_dlpack_path():
+    """A meta tensor is no tensor view: the DLPack import refuses it."""
+    torch = pytest.importorskip("torch")
+    from mymyr.rl._ops import tensor_view
+    from mymyr.rl.torch._ops import visited_mask_impl
+
+    def meta(*shape, dtype=torch.int64):
+        return torch.zeros(*shape, dtype=dtype, device="meta")
+
+    assert tensor_view(meta(4, 8)).device.type == "meta"
+    args = meta(4, 8), meta(4, dtype=torch.int32), meta(6), meta(6, dtype=torch.int32)
+    for call in (rl.visited_mask, visited_mask_impl):
+        with pytest.raises(ValueError, match="meta"):
+            call(*args)
+
+
 # ------------------------------------------------------------------------------------------------ torch
 
 

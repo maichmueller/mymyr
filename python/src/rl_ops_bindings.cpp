@@ -409,7 +409,7 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
     {
         std::vector<i64> alead;
         u32 AW = 0;
-        const nb::object shape = is_tensor_view(goal_atoms) ? nb::object(nb::borrow<nb::tuple>(goal_atoms)[4])
+        const nb::object shape = is_tensor_view(goal_atoms) ? nb::borrow(view_item(goal_atoms, k_view_shape))
                                                             : nb::getattr(goal_atoms, "shape", nb::none());
         const bool per_env = !shape.is_none() && nb::len(shape) == 2;
         b.goal_atoms = per_env ? in.words_nd(goal_atoms, "goal_atoms", {N}, false, alead, AW)
@@ -430,6 +430,10 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
 void bind_rl_ops(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
+    nb::class_<TensorViewMarker>(m, "TensorViewMarker",
+                                 "The type of TENSOR_VIEW, the first item of a tensor view (mymyr._typing.TensorView)");
+    view_marker() = nb::cast(TensorViewMarker{}).release();
+    m.attr("TENSOR_VIEW") = view_marker();
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
           "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
           "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(), "max_steps"_a,

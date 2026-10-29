@@ -6,7 +6,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from mymyr._core import _rl_ops
-from ._ops import _framework
+from ._ops import _arrays, _framework
 
 
 class MatchResult(NamedTuple):
@@ -90,6 +90,7 @@ def _match(rows, task_ids, templates, first, derived, capacity, status=None, poo
     fw = _framework(rows)
     if fw not in ("numpy", "torch"):
         raise TypeError("mymyr: match_first supports NumPy and torch arrays")
+    _arrays(task_ids=task_ids, derived=derived, status=status)
     if rows.ndim != 2:
         raise ValueError("mymyr: match_first rows must have shape [N, RW]")
     host = templates.host if isinstance(templates, DeviceGoalTemplates) else templates

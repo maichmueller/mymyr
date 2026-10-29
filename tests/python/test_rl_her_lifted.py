@@ -622,6 +622,10 @@ def test_match_first_empty_padding_truncation_and_invalid_ids():
         rl.match_first(rows[:, :0].copy(), ids, full)
     with pytest.raises(ValueError, match="task_ids"):
         rl.match_first(rows, None, full)
+    for arg, value in (("task_ids", (0, 1)), ("derived", (0,)), ("status", ())):
+        given = {"task_ids": ids, arg: value}
+        with pytest.raises(TypeError, match=f"'{arg}' must be an array that speaks DLPack"):
+            rl.match_first(rows, given.pop("task_ids"), full, **given)
     with pytest.raises(ValueError, match="capacity"):
         rl.match_first(row, None, templates, first=True, capacity=0)
 

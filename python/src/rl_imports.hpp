@@ -28,36 +28,88 @@ constexpr DType i32t{dl::k_int, 32}, u32t{dl::k_uint, 32}, i64t{dl::k_int, 64}, 
 
 inline std::string quoted(const char* name) { return std::string("mymyr: '") + name + "'"; }
 
-/// Whether obj is a tensor view: a tuple (data pointer, DLPack dtype code, bits, CUDA device or -1 for host memory,
-/// shape, strides in elements). The caller keeps the memory alive for the call and has ordered its pending writes
-/// before the call's stream (mymyr.rl's torch wrappers pass torch's current stream).
-[[nodiscard]] inline bool is_tensor_view(nb::handle obj) { return nb::isinstance<nb::tuple>(obj); }
+/// The type of the first item of every tensor view (mymyr._core._rl_ops.TensorViewMarker).
+struct TensorViewMarker
+{
+};
 
-/// The memory of a tensor view (is_tensor_view), as an import with nothing to keep.
+/// The first item of every tensor view (mymyr._core._rl_ops.TENSOR_VIEW): the one TensorViewMarker, which the module
+/// creates when it is imported, so that no other tuple reads as a view.
+[[nodiscard]] inline nb::handle& view_marker()
+{
+    static nb::handle marker;
+    return marker;
+}
+
+/// The items of a tensor view after its marker.
+enum ViewItem : Py_ssize_t
+{
+    k_view_data = 1,  // data pointer
+    k_view_code,      // DLPack dtype code
+    k_view_bits,      // DLPack dtype bits
+    k_view_device,    // CUDA device, or -1 for host memory
+    k_view_shape,     // shape
+    k_view_strides,   // strides in elements
+    k_view_size
+};
+
+/// Whether obj is a tensor view: a tuple (view_marker(), data pointer, DLPack dtype code, bits, CUDA device or -1 for
+/// host memory, shape, strides in elements). The caller keeps the memory alive for the call and has ordered its
+/// pending writes before the call's stream (mymyr.rl's torch wrappers pass torch's current stream).
+[[nodiscard]] inline bool is_tensor_view(nb::handle obj)
+{
+    return PyTuple_CheckExact(obj.ptr()) && PyTuple_GET_SIZE(obj.ptr()) == k_view_size &&
+        view_marker().ptr() && PyTuple_GET_ITEM(obj.ptr(), 0) == view_marker().ptr();
+}
+
+/// Item k of a tensor view (is_tensor_view).
+[[nodiscard]] inline nb::handle view_item(nb::handle view, ViewItem k) { return PyTuple_GET_ITEM(view.ptr(), k); }
+
+/// The device of a tensor view (is_tensor_view).
+[[nodiscard]] inline dl::Device view_device(nb::handle view, const char* name)
+{
+    int device = -1;
+    if (!nb::try_cast(view_item(view, k_view_device), device))
+        throw nb::type_error((quoted(name) + " is a tensor view without a device").c_str());
+    return device < 0 ? dl::Device{dl::k_cpu, 0} : dl::Device{dl::k_cuda, device};
+}
+
+/// The memory of a tensor view (is_tensor_view), as an import with nothing to keep: its fields typed, its extents and
+/// strides nonnegative, and its pointer set unless it has no elements.
 inline dl::Imported tensor_view(nb::handle obj, const char* name)
 {
-    const auto t = nb::borrow<nb::tuple>(obj);
-    if (t.size() != 6)
-        throw nb::type_error((quoted(name) + " is a tuple but not a tensor view").c_str());
+    const auto bad = [&](const char* what)
+    { return nb::type_error((quoted(name) + " is a tensor view " + what).c_str()); };
     dl::Imported im;
-    im.data = reinterpret_cast<void*>(nb::cast<std::uintptr_t>(t[0]));
-    im.dtype = dl::DataType{nb::cast<u8>(t[1]), nb::cast<u8>(t[2]), 1};
-    const int device = nb::cast<int>(t[3]);
-    im.device = device < 0 ? dl::Device{dl::k_cpu, 0} : dl::Device{dl::k_cuda, device};
-    im.shape = nb::cast<std::vector<i64>>(t[4]);
-    im.strides = nb::cast<std::vector<i64>>(t[5]);
+    std::uintptr_t data = 0;
+    u8 code = 0, bits = 0;
+    if (!nb::try_cast(view_item(obj, k_view_data), data) || !nb::try_cast(view_item(obj, k_view_code), code) ||
+        !nb::try_cast(view_item(obj, k_view_bits), bits) || !nb::try_cast(view_item(obj, k_view_shape), im.shape) ||
+        !nb::try_cast(view_item(obj, k_view_strides), im.strides))
+        throw bad("with fields of the wrong types");
+    if (bits == 0 || bits % 8)
+        throw bad("with a dtype of no whole bytes");
     if (im.strides.size() != im.shape.size())
-        throw nb::type_error((quoted(name) + " is a tensor view with mismatched shape and strides").c_str());
+        throw bad("with mismatched shape and strides");
+    u64 elements = 1;
+    for (usize k = 0; k < im.shape.size(); ++k)
+    {
+        if (im.shape[k] < 0 || im.strides[k] < 0)
+            throw bad("with a negative extent or stride");
+        elements *= static_cast<u64>(im.shape[k]);
+    }
+    if (!data && elements)
+        throw bad("with elements but no memory");
+    im.data = reinterpret_cast<void*>(data);
+    im.dtype = dl::DataType{code, bits, 1};
+    im.device = view_device(obj, name);
     return im;
 }
 
 /// The (device type, device id) of an array or tensor view; {-1, -1} for neither.
-[[nodiscard]] inline dl::Device device_of(nb::handle obj)
+[[nodiscard]] inline dl::Device device_of(nb::handle obj, const char* name = "array")
 {
-    if (!is_tensor_view(obj))
-        return dl::dlpack_device(obj);
-    const int device = nb::cast<int>(nb::borrow<nb::tuple>(obj)[3]);
-    return device < 0 ? dl::Device{dl::k_cpu, 0} : dl::Device{dl::k_cuda, device};
+    return is_tensor_view(obj) ? view_device(obj, name) : dl::dlpack_device(obj);
 }
 
 /// The arrays of one call, read and written in place: host memory for a host Env, CUDA memory on the Env's device for
@@ -205,7 +257,7 @@ private:
         const bool view = is_tensor_view(obj);
         if (write && !view && framework_of(obj) == Framework::Jax)
             throw nb::type_error((quoted(name) + " is a JAX array; JAX arrays are immutable").c_str());
-        const dl::Device d = device_of(obj);
+        const dl::Device d = device_of(obj, name);
         if (d.device_type < 0)
             throw nb::type_error((quoted(name) + " must be an array that speaks DLPack").c_str());
         if (m_device < 0 && !dl::host_accessible(d.device_type))
