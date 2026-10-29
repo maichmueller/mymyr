@@ -241,8 +241,8 @@ cudaError_t launch_visited_mask(const u64* table, const i32* count, u64 table_ro
         return cudaSuccess;
     if (!table || !count || !succ_hash || !parent || !out || capacity < 2 || (capacity & (capacity - 1)))
         return cudaErrorInvalidValue;
-    k_visited_mask<<<grid_for(size), k_block, 0, s>>>(table, count, table_rows, capacity, succ_hash, parent, rows, parents,
-                                                     size, out);
+    k_visited_mask<<<grid_for(size), k_block, 0, s>>>(table, count, table_rows, capacity, succ_hash, parent, rows,
+                                                     parents, size, out);
     return cudaGetLastError();
 }
 

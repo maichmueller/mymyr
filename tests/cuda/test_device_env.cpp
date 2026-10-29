@@ -657,7 +657,9 @@ TEST(DeviceEnvVisited, FinishInsertsEqualHost)
                     }
                     EXPECT_GT(revisits, 0u);
                     if (H == 8)
+                    {
                         EXPECT_EQ(hv.status[0], 1);
+                    }
                     EXPECT_NO_THROW(env.check_errors());
                 }
 }
@@ -669,6 +671,7 @@ TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
     SKIP_WITHOUT_GPU();
     const auto task = load("blocks__probBLOCKS-8-0", true);
     auto ctx = context();
+    cuda::Stream capture;  // outlives the envs and batches that run on it
     rl::EnvConfig cfg = config(5, true);
     cfg.max_steps = 9;
     cuda::DeviceEnv eager(ctx, rl::TaskTable::single(task), cfg), graph(ctx, rl::TaskTable::single(task), cfg);
@@ -683,9 +686,9 @@ TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
     to_device(a.mask, mask, a.s);
     to_device(g.mask, mask, g.s);
     eager.reset(a.b);
-    graph.reset(g.b);  // a call of the batch's size before the capture
+    graph.reset(g.b);
+    graph.reserve(N);  // the steps' scratch, sized before the capture
     cuda::check(cudaStreamSynchronize(g.s), "sync");
-    cuda::Stream capture;
     graph.set_stream(capture);
     g.s = capture;
     cudaGraph_t cg = nullptr;

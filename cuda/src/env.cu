@@ -319,7 +319,9 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                     p.binding[i * p.label_width + j] = -1;
         }
         bool revisited = false;
-        const bool over = !p.autoreset && (absorbed || (p.max_steps && p.steps && p.steps[i] >= static_cast<i32>(p.max_steps)));
+        // an episode over without autoreset (absorbed, or truncated before) keeps its table
+        const bool over =
+            !p.autoreset && (absorbed || (p.max_steps && p.steps && p.steps[i] >= static_cast<i32>(p.max_steps)));
         if (p.visited.capacity && !over)
             revisited = visited_step(p.visited, i, row_key(p.states + i * p.row_words, p.words, p.in.numeric_words, k));
         if (p.revisited)

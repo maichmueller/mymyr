@@ -162,8 +162,8 @@ public:
     /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
     /// per-env masks on the host).
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
-    /// rl::HostEnv::clear_visited on device arrays: the visited tables of the rows with mask[i] != 0 (mask [rows] device,
-    /// null: all rows) hold their current states' keys only; the overflow status is kept. A task id outside the suite
+    /// rl::HostEnv::clear_visited on device arrays: the visited tables of the rows with mask[i] != 0 (mask [rows]
+    /// device, null: all rows) hold their current states' keys only; the overflow status is kept. A task id outside the suite
     /// hashes as instance 0 and is reported by check_errors(). Capturable on every path.
     void clear_visited(rl::EnvBatch& b, const u8* mask = nullptr);
     void goal(const rl::EnvBatch& b, u8* goal);

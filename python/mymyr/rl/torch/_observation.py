@@ -472,7 +472,8 @@ def _target_arrays(batch: Any, device: torch.device) -> tuple[Tensor, Tensor, Te
 _ACTION_ROLE = 4
 
 
-def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tensor, env_rows: Optional[Tensor]) -> Tensor:
+def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tensor,
+                     env_rows: Optional[Tensor]) -> Tensor:
     """Observer.action_visited of one batch and its expansion rows; ``env_rows`` maps the batch's graphs to the
     environment rows (None: graph g is row g)."""
     device = visited.device

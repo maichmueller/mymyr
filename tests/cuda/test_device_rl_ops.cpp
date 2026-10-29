@@ -761,7 +761,8 @@ TEST(DeviceRlOps, VisitedMaskDeviceEqualsHost)
         std::vector<i32> outside{static_cast<i32>(N), -2, 0, 1};
         std::vector<i32> far_map{static_cast<i32>(N), -5};
         std::vector<u64> any(outside.size(), keys.front());
-        cuda::DeviceBuffer d_out = upload(ctx, outside, s), d_far = upload(ctx, far_map, s), d_any = upload(ctx, any, s);
+        cuda::DeviceBuffer d_out = upload(ctx, outside, s), d_far = upload(ctx, far_map, s),
+                           d_any = upload(ctx, any, s);
         cuda::check(cuda::launch_visited_mask(ptr<const u64>(dt), ptr<const i32>(dc), N, H, ptr<const u64>(d_any),
                                               ptr<const i32>(d_out), ptr<const i32>(d_far), far_map.size(), outside.size(),
                                               ptr<u8>(dout), s),

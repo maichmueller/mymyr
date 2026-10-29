@@ -3,7 +3,7 @@
 //   prefix_masks(parent, schema, binding, query, prefix, depth, mask)   factored action masks (rl/prefix.hpp)
 //   schema_masks(parent, schema, mask)                            the first factored decision
 //   her_relabel(states, done, goal, source, achieved, reward, ...)      hindsight relabels (rl/her.hpp)
-//   visited_mask(table, count, succ_hash, parent, rows, out)      membership in per-episode visited tables (rl/visited.hpp)
+//   visited_mask(table, count, succ_hash, parent, rows, out)      visited-table membership (rl/visited.hpp)
 // Destination-passing: every array is the caller's, read and written in place through DLPack. Host arrays run
 // the host loops; CUDA arrays (all on one device) the device kernels of cuda/rl_ops.hpp, enqueued on `stream` (None:
 // the legacy default stream; torch passes its current stream) with the array API's stream handoff and no host

@@ -212,7 +212,8 @@ bit 0 once the row's table overflowed; every state array leads with the rows, so
 reached state before insertion and autoreset. Reset clears selected histories and inserts initial states;
 `env.clear_visited(state, mask=None)` returns a state with selected histories cleared and current states inserted,
 retaining overflow status. `refresh(state)` preserves histories. Disabled tracking uses `[N, 0]` table/status arrays and
-reports false revisit flags. On CUDA a JAX `Env` refuses `track_visited` at construction. `mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
+reports false revisit flags. On CUDA a JAX `Env` refuses `track_visited` at construction.
+`mymyr.rl.jax.visited_mask` (also dispatched by `rl.visited_mask`) accepts these uint32 halves, or (u)int64
 hashes with JAX x64 enabled (64-bit inputs raise `TypeError` without it; `x.view(np.uint32)` gives the halves), and
 equals the NumPy membership operation under jit without host reads. The successor hashes in that layout are
 `env.expand_flat(state.states, capacity, hashes=True).succ_hash`, and `flat.parent` their parents.
