@@ -23,12 +23,14 @@ struct BatchShape
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
-/// The Simple nodes (entities and tuples) of a batch within `capacities`, at most: a tuple with arguments takes at
-/// least one of the args, and a cell of a relation without argument slots holds at most one tuple, the empty one.
-/// `argumentless_relations` is the schema's number of such relations (EncodingSchema::argumentless_relations).
-MYMYR_HD u64 simple_node_capacity(const BatchShape& capacities, u64 argumentless_relations)
+/// The Simple nodes (entities and tuples) of a batch of `graphs` graphs within `capacities`, at most: a tuple with
+/// arguments takes at least one of the args, and a cell of a relation without argument slots holds at most one tuple,
+/// the empty one. `graphs` are those the per-graph arrays are laid out for (the rows of a host call, the graph capacity
+/// of a device output); `argumentless_relations` is the schema's number of such relations
+/// (EncodingSchema::argumentless_relations).
+MYMYR_HD u64 simple_node_capacity(u64 graphs, const BatchShape& capacities, u64 argumentless_relations)
 {
-    return capacities.entities + capacities.args + capacities.graphs * argumentless_relations;
+    return capacities.entities + capacities.args + graphs * argumentless_relations;
 }
 
 /// Capacities of the static blocks of a batch with shared statics: the instances that have a block and the entries of

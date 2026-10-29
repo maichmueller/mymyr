@@ -1338,7 +1338,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         p.out = out.arrays;
         p.capacities = out.capacities;
-        p.node_capacity = encoding::simple_node_capacity(out.capacities, schema.argumentless_relations());
+        p.node_capacity =
+            encoding::simple_node_capacity(out.capacities.graphs, out.capacities, schema.argumentless_relations());
     }
     p.index64 = index == encoding::IndexType::I64;
     p.zero_unused = out.zero_unused;

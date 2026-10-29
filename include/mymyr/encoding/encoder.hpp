@@ -316,11 +316,12 @@ public:
                           ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities = nullptr,
                           ExtraSizes* extra = nullptr) const;
     /// The capacity form's tails: zeroes the entries of `out` (arrays with the sizes that encode_capacity gives for
-    /// `capacities` and `static_capacities`, edge_index with an edge_stride of 2 * capacities.args) past the sizes of
-    /// a batch that fits them (`sizes`, `extra`: an encode_into's), and sets the offsets of the static blocks past the
-    /// batch's to their last entry, so that the arrays equal those of an encode_capacity of the same input.
+    /// `graphs` rows, `capacities` and `static_capacities`, edge_index with an edge_stride of 2 * capacities.args) past
+    /// the sizes of a batch that fits them (`sizes`, `extra`: an encode_into's), and sets the offsets of the static
+    /// blocks past the batch's to their last entry, so that the arrays equal those of an encode_capacity of the same
+    /// input.
     /// `static_capacities` is ignored unless the schema shares its statics.
-    void clear_capacity_tails(const FlatBuffers& out, const FlatSizes& sizes, const ExtraSizes& extra,
+    void clear_capacity_tails(const FlatBuffers& out, const FlatSizes& sizes, const ExtraSizes& extra, u64 graphs,
                               const BatchShape& capacities, const StaticShape& static_capacities) const;
 
 private:

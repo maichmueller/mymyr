@@ -965,9 +965,9 @@ batch, and `simple_node_labels` and `simple_edge_labels` (the vocabulary sizes),
 with `outputs=('relations', 'simple')` it has them as well. The Simple arrays are the same in both layouts, and
 encoding rows alone, in a batch, in a stream or with capacities gives the same graphs: a graph encoded alone is the
 slice of the batch's arrays with the node ids shifted by `node_offsets[g]`. With
-capacities the Simple arrays have `entities + args + graphs * Z` nodes, `Z` the relations without argument slots
-(`relation_arities` 0, which only `nullary='arity0'` gives; a cell of one holds at most one tuple), and `2 * args`
-edges; the first `sizes['entities'] + sizes['tuples']` nodes and `2 * sizes['args']` edges hold the graphs and the
+capacities the Simple arrays have `entities + args + G * Z` nodes, `G` the rows of the call and `Z` the relations
+without argument slots (`relation_arities` 0, which only `nullary='arity0'` gives; a cell of one holds at most one
+tuple), and `2 * args` edges; the first `sizes['entities'] + sizes['tuples']` nodes and `2 * sizes['args']` edges hold the graphs and the
 rest is zero. `edge_index` is then `[2, 2 * args]`.
 
 **Refusals.** `predicate_virtual_nodes` (a tuple's node already names its predicate), `entity_arrays='auto'` (the
@@ -1143,7 +1143,7 @@ model):
 | Key | Required | Bounds |
 |---|---|---|
 | `graphs` | always | the number of input rows |
-| `entities` | always | `entity_role`, `entity_ref` (the Simple graph: `entities + args + graphs * Z` nodes, [Z](#the-simple-graph) the relations without argument slots) |
+| `entities` | always | `entity_role`, `entity_ref` (the Simple graph: `entities + args + G * Z` nodes, [Z](#the-simple-graph) the relations without argument slots) |
 | `args` | always | `relation_args` (the Simple graph: `2 * args` edges) |
 | `targets` | iff the schema has targets | `target_entity`, `target_group` |
 | `history` | iff the schema has history | `history_entity`, `history_dt` |

@@ -1349,7 +1349,7 @@ encoding::FlatBuffers reusable_buffers(const encoding::FlatEncoder& encoder, con
     out.history_entity = at("history_entity", shape.history);
     out.history_dt = static_cast<i32*>(at("history_dt", shape.history));
     out.node_offsets = at("node_offsets", any);
-    const u64 nodes = encoding::simple_node_capacity(shape, schema.argumentless_relations());
+    const u64 nodes = encoding::simple_node_capacity(graphs, shape, schema.argumentless_relations());
     out.node_label = static_cast<i32*>(at("node_label", nodes));
     out.edge_offsets = at("edge_offsets", any);
     out.edge_index = at("edge_index", 2 * (2 * shape.args));
@@ -1378,7 +1378,8 @@ void encode_into_batch(PyFlatEncoder& self, ImportedRows& rows, u32 threads, Poo
         for (const rl::ArrayInfo& info : batch.arrays->arrays())
             std::memset(const_cast<void*>(batch.arrays->data(info)), 0, info.elements() * rl::dtype_bytes(info.dtype));
     else
-        encoder.clear_capacity_tails(out, sizes, extra, caps.batch, caps.statics.value_or(encoding::StaticShape{}));
+        encoder.clear_capacity_tails(out, sizes, extra, rows.input.states.rows, caps.batch,
+                                     caps.statics.value_or(encoding::StaticShape{}));
     batch.sizes = sizes;
     batch.extra = extra;
 }
