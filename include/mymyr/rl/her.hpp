@@ -251,7 +251,7 @@ MYMYR_HD void clear_slot(const Group& grp, const MatchTemplates& t, const HerLif
 
 template<class Group>
 MYMYR_HD void scan(const Group& grp, const MatchTemplates& t, const HerLiftedBatch& b,
-                   const HerLiftedConfig& c, u64 i)
+                   const HerLiftedConfig& c, u64 i, const u64* closed_hashes = nullptr)
 {
     namespace ed = encoding::detail;
     const u32 GW = 2 * (b.words + b.derived_words);
@@ -307,7 +307,7 @@ MYMYR_HD void scan(const Group& grp, const MatchTemplates& t, const HerLiftedBat
                 for (i64 q = start + grp.lane(); q <= end; q += grp.size())
                 {
                     const u64 past = u64(q) * b.envs + i;
-                    if (b.prev_hashes[at] != b.hashes[past])
+                    if (b.prev_hashes[at] != (closed_hashes ? closed_hashes[q] : b.hashes[past]))
                         continue;
                     bool equal = true;
                     for (u32 w = 0; w < b.row_words && equal; ++w)
