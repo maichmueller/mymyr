@@ -115,6 +115,8 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
                                         ")");
     if (placement.num_layers == 0 && n > 0)
         throw std::invalid_argument("mymyr: encoding: literals need at least one layer");
+    if (placement.instance_constants && (placement.num_layers != 1 || !placement.layers.empty()))
+        throw std::invalid_argument("mymyr: encoding: the instance's constant goal literals go to goals of one layer");
 
     LiteralMasks out;
     out.rows = placement.num_rows;
@@ -128,6 +130,16 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
     out.derived_neg.assign(cells * out.derived_words, 0);
     out.unsatisfiable.assign(cells, 0);
     const detail::ContextView v = context.view();
+    const u32 width = detail::k_constant_objects + v.max_arity;
+    std::vector<std::vector<std::vector<i32>>> constants(out.rows);  // per row its constant literals
+    if (placement.instance_constants)
+        for (u32 row = 0; row < out.rows; ++row)
+        {
+            const detail::ConstantRows own =
+                instance_goal_constants(context, placement.instances.empty() ? 0 : static_cast<u32>(placement.instances[row]));
+            for (u32 k = 0; k < own.count; ++k)
+                constants[row].emplace_back(own.row(k), own.row(k) + width);
+        }
     for (u64 i = 0; i < n; ++i)
     {
         const i32 row = placement.rows[i];
@@ -168,9 +180,74 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
                          : " is over a static predicate: it has no slot"));
             if (!detail::fixed_literal_holds(s.kind, positive))
                 out.unsatisfiable[cell] = 1;
+            if (fixed == FixedLiterals::Encode)
+            {
+                std::vector<i32> literal(width, -1);
+                literal[detail::k_constant_layer] = layer;
+                literal[detail::k_constant_predicate] = predicate;
+                literal[detail::k_constant_negative] = positive ? 0 : 1;
+                for (u32 k = 0; k < literals.width && k < v.max_arity; ++k)
+                    literal[detail::k_constant_objects + k] = objects[k];
+                constants[static_cast<u32>(row)].push_back(std::move(literal));
+            }
             break;
         }
     }
+    if (fixed == FixedLiterals::Encode || placement.instance_constants)
+    {
+        for (auto& row : constants)
+        {
+            std::sort(row.begin(), row.end());
+            row.erase(std::unique(row.begin(), row.end()), row.end());
+            out.constant_capacity = std::max(out.constant_capacity, static_cast<u32>(row.size()));
+        }
+        out.constant_width = width;
+        out.constants.assign(u64{out.rows} * out.constant_capacity * width, -1);
+        for (u32 row = 0; row < out.rows; ++row)
+            for (u32 k = 0; k < constants[row].size(); ++k)
+                std::ranges::copy(constants[row][k],
+                                  out.constants.begin() + static_cast<std::ptrdiff_t>((u64{row} * out.constant_capacity + k) * width));
+    }
     return out;
+}
+
+detail::ConstantRows instance_goal_constants(const EncodingContext& context, u32 instance)
+{
+    const detail::ContextView v = context.view();
+    if (instance >= v.num_instances)
+        throw std::invalid_argument("mymyr: encoding: task id " + std::to_string(instance) + " is not in [0, " +
+                                    std::to_string(v.num_instances) + ")");
+    return detail::instance_view(v, instance).goal_constants;
+}
+
+std::string constant_fault_text(const EncodingContext& context, u32 instance, const detail::ConstantRows& rows,
+                                u32 layers)
+{
+    const detail::ContextView v = context.view();
+    u32 at = 0;
+    const detail::ConstantFault fault = detail::constant_fault(detail::instance_view(v, instance), rows, layers, at);
+    if (fault == detail::ConstantFault::None)
+        return {};
+    const i32* row = rows.row(at);
+    const std::span<const i32> objects(row + detail::k_constant_objects, rows.width - detail::k_constant_objects);
+    const std::string which = "constant literal " + std::to_string(at) + " ";
+    switch (fault)
+    {
+    case detail::ConstantFault::Unordered:
+        return which + "is not after the one before it: the literals of a row are strictly ascending (layer, "
+                       "predicate, sign, objects)";
+    case detail::ConstantFault::Layer:
+        return which + "has the layer " + std::to_string(row[detail::k_constant_layer]) + ", outside [0, " +
+               std::to_string(layers) + ")";
+    case detail::ConstantFault::Sign:
+        return which + "has the sign " + std::to_string(row[detail::k_constant_negative]) + ", not 0 or 1";
+    case detail::ConstantFault::Invalid:
+        return which + "is invalid: " +
+               invalid_reason(context, instance, row[detail::k_constant_predicate], objects);
+    default:
+        return which + literal_text(context, instance, row[detail::k_constant_predicate], objects,
+                                    row[detail::k_constant_negative] == 0) +
+               " has a slot: the goal masks hold it";
+    }
 }
 }  // namespace mymyr::encoding

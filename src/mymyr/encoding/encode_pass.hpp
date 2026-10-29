@@ -6,6 +6,7 @@
 
 #include "mymyr/encoding/detail/horizon.hpp"
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/literals.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -23,6 +24,20 @@ inline constexpr usize k_cache_line = 64;
 // strided writes (G entries apart) fill whole cache lines.
 inline constexpr u64 k_scan_tile = 128;
 inline constexpr u64 k_none = std::numeric_limits<u64>::max();
+
+/// Why the constant literals of graph g of `in` (of `instance`, named `graph` in the message) cannot be encoded: those
+/// of its goal, else those of its subgoal layers.
+inline std::string constant_input_fault(const EncodingContext& context, const EncodeInput& in, u32 instance, u64 g,
+                                        const std::string& graph)
+{
+    if (in.goal_pos && in.goal_constants.rows)
+        if (std::string why = constant_fault_text(context, instance, constant_rows(in.goal_constants, g), 1);
+            !why.empty())
+            return "the goal of " + graph + ": " + why;
+    return "the subgoal layers of " + graph + ": " +
+           constant_fault_text(context, instance, constant_rows(in.subgoal_constants, g),
+                               std::min(in.subgoals.layers, k_max_subgoal_levels));
+}
 
 /// The kin scratch of the graphs of a member's slice (horizon relations _sibling_ and _cousin_): per graph, the words
 /// of horizon_kin_words followed by its far lists, from the count to the fill. Made when the schema needs it, behind a
@@ -48,7 +63,7 @@ struct alignas(k_cache_line) Member
     u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0;  // the slice's sizes
     u64 numeric = 0;  // the slice's numeric tuples (the entries of its numeric values)
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
-    u64 narrow_goal = k_none, bad_goal_bits = k_none;
+    u64 narrow_goal = k_none, bad_goal_bits = k_none, bad_constants = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none;
     u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;

@@ -1,6 +1,7 @@
 #include "mymyr/encoding/stream.hpp"
 
 #include "mymyr/core/hash.hpp"
+#include "mymyr/encoding/literals.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -73,7 +74,8 @@ public:
         : m_encoder(encoder), m_words(encoder.table().words()), m_numeric_words(encoder.table().numeric_words()),
           m_row_words(m_words + m_numeric_words), m_derived_words(encoder.context().max_derived_words()),
           m_label_width(encoder.table().label_width()), m_subgoals(encoder.schema().has_subgoals()),
-          m_history(encoder.schema().has_history()), m_levels(encoder.schema().options().max_goal_level)
+          m_history(encoder.schema().has_history()), m_levels(encoder.schema().options().max_goal_level),
+          m_constant_width(detail::k_constant_objects + encoder.context().view().max_arity)
     {
     }
 
@@ -131,7 +133,8 @@ public:
         std::vector<u64> mapped_state;
         for (u64 g = 0; g < n; ++g)
         {
-            const rl::TaskTable::Instance& instance = table.instance(in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0);
+            const u32 instance_id = in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0;
+            const rl::TaskTable::Instance& instance = table.instance(instance_id);
             const SlotMapView map = in.slot_maps ? in.slot_maps[g] : SlotMapView{in.slot_map, in.slot_map_size};
             if (map.data)
             {
@@ -189,6 +192,11 @@ public:
                     invalid("the history steps of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
             }
+            if (in.goal_pos && in.goal_constants.rows)
+                check_constants(in.goal_constants, g, instance_id, 1, "the goal of state " + std::to_string(g));
+            if (in.subgoals.layers != 0 && in.subgoal_constants.rows)
+                check_constants(in.subgoal_constants, g, instance_id, std::min(in.subgoals.layers, m_levels),
+                                "the subgoal layers of state " + std::to_string(g));
             if (const rl::Expansion* x = in.actions)
             {
                 const i32 first = x->offsets[g], last = x->offsets[g + 1];
@@ -202,6 +210,20 @@ public:
             }
         }
         return given;
+    }
+
+    /// Throws std::invalid_argument unless the constant literals of row g of `c` can be encoded for the row's instance
+    /// with `layers` layers, and fit the stream's rows (no object column past the widest predicate set).
+    void check_constants(const ConstantInput& c, u64 g, u32 instance, u32 layers, const std::string& what) const
+    {
+        const detail::ConstantRows rows = detail::constant_rows(c, g);
+        for (u32 k = 0; k < rows.count; ++k)
+            for (u32 j = m_constant_width; j < rows.width; ++j)
+                if (rows.row(k)[j] != -1)
+                    invalid(what + ": constant literal " + std::to_string(k) + " has more objects than any predicate");
+        if (const std::string why = constant_fault_text(m_encoder.context(), instance, rows, layers);
+            !why.empty())
+            invalid(what + ": " + why);
     }
 
     /// Whether the first `layers` layers of row g of `l` are zero beyond the words (derived words) of the table.
@@ -277,6 +299,8 @@ public:
             m_states.resize(m_slots * m_row_words);
             m_task_ids.resize(m_slots);
             m_spans.resize(m_slots);
+            m_goal_constants.resize(m_slots);
+            m_sub_constants.resize(m_slots);
             if (m_subgoals)
             {
                 m_has_layers.resize(m_slots, 0);
@@ -329,6 +353,7 @@ public:
             copy_words(&m_goal_pos[usize{slot} * m_words], m_words, in.goal_pos + at, in.goal_words);
             copy_words(&m_goal_neg[usize{slot} * m_words], m_words, in.goal_neg + at, in.goal_words);
         }
+        store_constants(m_goal_constants[slot], m_inputs.goals ? in.goal_constants : ConstantInput{}, g);
         if (m_inputs.derived_goals)
         {
             const u64 at = g * in.goal_derived_stride;
@@ -368,6 +393,8 @@ public:
         drop_actions(slot);
         drop_history(slot);
         mark_layers(slot, false);
+        m_goal_constants[slot].clear();
+        m_sub_constants[slot].clear();
         m_free.push_back(slot);
         if (--m_live == 0)
             reset();
@@ -385,6 +412,8 @@ public:
         m_goal_neg.clear();
         m_goal_derived_pos.clear();
         m_goal_derived_neg.clear();
+        m_goal_constants.clear();
+        m_sub_constants.clear();
         m_spans.clear();
         m_schema.clear();
         m_index.clear();
@@ -452,6 +481,8 @@ public:
             gather(m_gather_goal_derived_neg, m_goal_derived_neg, m_derived_words, in.goal_derived_neg);
             in.goal_derived_stride = in.goal_derived_words = m_derived_words;
         }
+        if (m_inputs.goals)
+            in.goal_constants = gather_constants(m_gather_goal_constants, m_goal_constants, order, n);
         if (m_subgoals && m_layered_rows != 0)  // rows without layers need no layer input
         {
             gather(m_gather_sub_pos, m_sub_pos, m_levels * m_words, in.subgoals.pos);
@@ -467,6 +498,7 @@ public:
                 in.subgoals.derived_stride = u64{m_levels} * m_derived_words;
                 in.subgoals.derived_words = m_derived_words;
             }
+            in.subgoal_constants = gather_constants(m_gather_sub_constants, m_sub_constants, order, n);
         }
         if (m_history)
             assemble_history(order, n, in);
@@ -515,12 +547,45 @@ private:
             --m_layered_rows;
     }
 
+    /// Stores the constant literals of row g of `c` (none if `c` has none) as rows of the stream's width.
+    void store_constants(std::vector<i32>& to, const ConstantInput& c, u64 g) const
+    {
+        to.clear();
+        if (!c.rows)
+            return;
+        const detail::ConstantRows rows = detail::constant_rows(c, g);
+        to.assign(u64{rows.count} * m_constant_width, -1);
+        for (u32 k = 0; k < rows.count; ++k)
+            std::copy_n(rows.row(k), std::min(rows.width, m_constant_width), to.data() + u64{k} * m_constant_width);
+    }
+
+    /// The constant literals of the rows in the order `order` (null: slots 0 .. n - 1) as one input, in `to`, as wide
+    /// as the most literals of a row; no input if no row has any.
+    [[nodiscard]] ConstantInput gather_constants(std::vector<i32>& to, const std::vector<std::vector<i32>>& from,
+                                                 const u32* order, u64 n) const
+    {
+        u64 capacity = 0;
+        for (u64 i = 0; i < n; ++i)
+            capacity = std::max<u64>(capacity, from[order ? order[i] : i].size() / m_constant_width);
+        if (capacity == 0)
+            return {};
+        const u64 stride = capacity * m_constant_width;
+        to.assign(n * stride, -1);
+        for (u64 i = 0; i < n; ++i)
+        {
+            const std::vector<i32>& rows = from[order ? order[i] : i];
+            std::ranges::copy(rows, to.begin() + static_cast<std::ptrdiff_t>(i * stride));
+        }
+        return {to.data(), stride, static_cast<u32>(capacity), m_constant_width};
+    }
+
     /// Stores the subgoal layers of row g of `in` into `slot`: its layers, then zero layers up to the schema's levels.
     void write_subgoals(u32 slot, const EncodeInput& in, u64 g)
     {
         const LayerInput& l = in.subgoals;
         const u32 given = std::min(l.layers, m_levels);
         mark_layers(slot, given != 0);
+        store_constants(m_sub_constants[slot], given != 0 ? in.subgoal_constants : ConstantInput{}, g);
         const auto store = [&](std::vector<u64>& to, const u64* from, u32 width, u32 from_width, u64 at)
         {
             u64* dst = to.data() + usize{slot} * m_levels * width;
@@ -780,6 +845,10 @@ private:
     u64 m_garbage = 0;                     // rows of the arena that no slot owns
     std::vector<u64> m_sub_pos, m_sub_neg, m_sub_derived_pos, m_sub_derived_neg;  // [slots, levels * words]
     std::vector<u8> m_has_layers;  // [slots] whether the row holds subgoal layers
+    // [slots] the constant literals of each row's goal and subgoal layers, rows of m_constant_width
+    std::vector<std::vector<i32>> m_goal_constants, m_sub_constants;
+    std::vector<i32> m_gather_goal_constants, m_gather_sub_constants;
+    u32 m_constant_width;
     u64 m_layered_rows = 0;        // the live rows that do
     // the history arena: the steps of each slot's history one after the other (a slot's span), oldest first
     std::vector<Span> m_history_spans;

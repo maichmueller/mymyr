@@ -918,7 +918,14 @@ MYMYR_HD u32 horizon_cell_count(const Cell& c, const HorizonGraph& h)
         return (nodes.last - nodes.first) * (c.b - c.a);
     if (horizon_cell_empty(c, h))
         return 0;
-    const u32 constants = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d - c.c : 0u;
+    // the constant literals are the same at every node: their truth is fixed
+    u32 constants = 0;
+    if (kind == HorizonKind::Goal || kind == HorizonKind::Sat)
+    {
+        Cell flat = c;
+        flat.op = horizon_low(c.op);
+        constants = constant_count<true>(*h.v, flat, h.goal, h.row);
+    }
     u32 n = 0;
     for (u32 node = nodes.first; node < nodes.last; ++node)
     {
@@ -931,7 +938,7 @@ MYMYR_HD u32 horizon_cell_count(const Cell& c, const HorizonGraph& h)
 }
 
 /// Calls out.put(node, objects) for the tuples of a slot based cell at `node`, in the order of the cell: the cell's
-/// slots in ascending order, with the constant goal tuples merged in.
+/// slots in ascending order, with the constant literals the cell lists merged in.
 template<class Out>
 MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, Out& out)
 {
@@ -943,8 +950,23 @@ MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, 
                              : goal_op_derived(low);
     const i32* rows = derived ? v.derived_args : v.slot_args;
     const u32 stride = v.max_arity;
-    u32 k = c.c;
-    const u32 end = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d : c.c;
+    Cell flat = c;
+    flat.op = low;
+    i32 layer = 0;
+    ConstantRows constants{};
+    u32 k = 0, end = 0;
+    if (kind == HorizonKind::Goal || kind == HorizonKind::Sat)
+    {
+        constants = cell_constant_rows<true>(flat, h.goal, h.row, layer);
+        constant_run(flat, constants, layer, k, end);
+    }
+    // the next constant literal the cell lists (k == end: none is left)
+    auto next_constant = [&]
+    {
+        while (k < end && !constant_listed<true>(v, flat, h.goal, h.row, constants.row(k)))
+            ++k;
+    };
+    next_constant();
     if (c.a < c.b)
         for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
         {
@@ -954,13 +976,16 @@ MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, 
                 const u32 slot = w * 64u + lowest_bit64(bits);
                 bits &= bits - 1;
                 const i32* objects = rows + u64{slot} * stride;
-                while (k < end && tuple_before(v.goal_args + u64{k} * stride, objects, c.logical_arity))
-                    out.put(node, v.goal_args + u64{k++} * stride);
+                while (k < end && tuple_before(constants.row(k) + k_constant_objects, objects, c.logical_arity))
+                {
+                    out.put(node, constants.row(k++) + k_constant_objects);
+                    next_constant();
+                }
                 out.put(node, objects);
             }
         }
-    while (k < end)
-        out.put(node, v.goal_args + u64{k++} * stride);
+    for (; k < end; next_constant())
+        out.put(node, constants.row(k++) + k_constant_objects);
 }
 
 /// Calls out.put(node, objects) / out.put_pair(src, dst) for the tuples of cell `c`, in order.

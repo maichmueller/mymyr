@@ -369,7 +369,8 @@ TEST(EncodingContext, TheCellsOfTheInstanceGoalHoldOnlyTheSlotsItsMasksCanSetAnd
         const Cell& state = *std::ranges::find(state_cells_of_instance, state_relation, &Cell::relation);
         EXPECT_EQ(cell.a, state.a) << relation.name;
         EXPECT_EQ(cell.b, state.b) << relation.name;
-        EXPECT_EQ(cell.c, cell.d) << relation.name;
+        EXPECT_EQ(cell.c, static_cast<u32>(relation.predicate)) << relation.name;
+        EXPECT_EQ(cell.d, 0u) << relation.name;
     }
     // the other cells are the same in both lists
     std::vector<Cell> state_cells, row_state_cells;
@@ -387,18 +388,32 @@ TEST(EncodingContext, TheCellsOfTheInstanceGoalHoldOnlyTheSlotsItsMasksCanSetAnd
 
 TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
 {
-    // (road a b) is static: its goal cells have constant tuples and no slot range, and row goals have no such cell
+    // (road a b) is static: its goal cells list constant literals and have no slot range; row goals have such cells
+    // only in the fixed lists, for rows with constant literals
     const auto table = rl::TaskTable::single(test::pddl_task("goals", "static_false"));
     FlatOptions options = test::encoder_options();
     options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied};
     const auto context = context_of(table, options);
     const lanes::InstanceView v = lanes::instance_view(context->view(), 0);
+    ASSERT_GT(v.goal_constants.count, 0u);
+    EXPECT_EQ(v.goal_constants.width, lanes::k_constant_objects + context->view().max_arity);
+    for (u32 k = 0; k < v.goal_constants.count; ++k)
+    {
+        EXPECT_EQ(v.goal_constants.row(k)[lanes::k_constant_layer], 0);
+        const u32 w = v.goal_constants.width;
+        if (k != 0)
+        {
+            EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + w,
+                                                     v.goal_constants.row(k), v.goal_constants.row(k) + w));
+        }
+    }
     u32 constant_cells = 0;
     for (u32 i = 0; i < v.num_cells; ++i)
     {
         if (lanes::is_goal_op(v.cells[i].op) && v.cells[i].a == v.cells[i].b)
         {
-            EXPECT_LT(v.cells[i].c, v.cells[i].d) << context->schema().relation(v.cells[i].relation).name;
+            const Relation& relation = context->schema().relation(v.cells[i].relation);
+            EXPECT_EQ(v.cells[i].c, static_cast<u32>(relation.predicate)) << relation.name;
             ++constant_cells;
         }
     }
@@ -406,10 +421,14 @@ TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
     for (u32 i = 0; i < v.num_row_cells; ++i)
     {
         if (lanes::is_goal_op(v.row_cells[i].op))
-        {
             EXPECT_LT(v.row_cells[i].a, v.row_cells[i].b);
-        }
     }
+    const lanes::CellList fixed = lanes::cell_list(v, true, false, false, false, true);
+    u32 fixed_goal_cells = 0;
+    for (u32 i = 0; i < fixed.count; ++i)
+        fixed_goal_cells += lanes::is_goal_op(fixed.cells[i].op) && fixed.cells[i].a == fixed.cells[i].b ? 1u : 0u;
+    EXPECT_GE(fixed_goal_cells, constant_cells);
+    EXPECT_TRUE(std::ranges::is_sorted(std::span(fixed.cells, fixed.count), {}, &Cell::relation));
 }
 
 /// The kind of the atom `objects` of instance predicate `ip` from the task's atom metadata, by a linear scan.

@@ -73,6 +73,8 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
                x.derived_pos == y.derived_pos && x.derived_neg == y.derived_neg &&
                x.derived_stride == y.derived_stride && x.derived_words == y.derived_words;
     };
+    const auto same_constants = [](const ConstantInput& x, const ConstantInput& y)
+    { return x.rows == y.rows && x.stride == y.stride && x.capacity == y.capacity && x.width == y.width; };
     const auto& ha = a.horizon;
     const auto& hb = b.horizon;
     return ha.nodes.data == hb.nodes.data && ha.nodes.rows == hb.nodes.rows && ha.nodes.words == hb.nodes.words &&
@@ -89,7 +91,8 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
            a.goal_pos == b.goal_pos && a.goal_neg == b.goal_neg && a.goal_stride == b.goal_stride &&
            a.goal_words == b.goal_words && a.goal_derived_pos == b.goal_derived_pos &&
            a.goal_derived_neg == b.goal_derived_neg && a.goal_derived_stride == b.goal_derived_stride &&
-           a.goal_derived_words == b.goal_derived_words && a.actions == b.actions;
+           a.goal_derived_words == b.goal_derived_words && a.actions == b.actions &&
+           same_constants(a.goal_constants, b.goal_constants) && same_constants(a.subgoal_constants, b.subgoal_constants);
 }
 
 /// What the passes of one call share.
@@ -106,7 +109,8 @@ struct Pass
     bool evaluate;  // the derived words of the rows are evaluated here, into s.derived
     u64 starts_stride;  // the words of run starts of one graph: num_schemas + 1 with expansion rows, else 0
     // the subgoal layers and history of the call, as the lanes read them
-    detail::LayerSource source = {in.subgoals, in.history, context.schema().options().history_max_steps.value_or(0)};
+    detail::LayerSource source = {in.subgoals, in.history, context.schema().options().history_max_steps.value_or(0),
+                                  in.subgoal_constants};
     // some row may have subgoal layers or history steps
     bool layered = source.layered();
     // the batch stores the Simple graph, which follows the fill of each graph with its cells' counts
@@ -144,14 +148,23 @@ struct Pass
     /// The valid history steps of graph g, and how many of the newest of them are encoded.
     [[nodiscard]] u32 history_used(u64 g) const noexcept { return detail::history_used(source, g); }
 
-    /// The cells of graph g of `v`'s instance.
+    /// Whether graph g has constant literals (of its own goal, of its subgoal layers): its cells are a fixed list.
+    template<bool Layered>
+    [[nodiscard]] bool has_constants(u64 g) const noexcept
+    {
+        return (in.goal_pos && in.goal_constants.rows && detail::constant_rows(in.goal_constants, g).count != 0) ||
+               (Layered && in.subgoals.layers != 0 && in.subgoal_constants.rows &&
+                detail::constant_rows(in.subgoal_constants, g).count != 0);
+    }
+
+    /// The cells of graph g of `v`'s instance (detail::cell_list of its row).
     template<bool Layered>
     [[nodiscard]] detail::CellList cells_of(const detail::InstanceView& v, u64 g) const noexcept
     {
         if (!Layered)
-            return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g));
+            return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g), false, false, has_constants<false>(g));
         return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g), in.subgoals.layers != 0,
-                                 history_used(g) != 0);
+                                 history_used(g) != 0, has_constants<true>(g));
     }
 
     /// Gives `row` the subgoal layers and history steps of graph g, stored in `layers`, when it has any. Out of line:
@@ -200,6 +213,8 @@ struct Pass
             row.goal_derived_pos = in.goal_derived_pos + g * in.goal_derived_stride;
             row.goal_derived_neg = in.goal_derived_neg + g * in.goal_derived_stride;
         }
+        if (in.goal_pos && in.goal_constants.rows)
+            row.goal_constants = detail::constant_rows(in.goal_constants, g);
         if (in.actions)
         {
             const rl::Expansion& x = *in.actions;
@@ -251,7 +266,7 @@ void count_range(const Pass& p, u32 t)
     Member& m = p.s.members[t];
     m.totals.assign(hi - lo, detail::GraphTotals{});
     m.entities = m.tuples = m.args = m.targets = m.history = m.numeric = 0;
-    m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
+    m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = m.bad_constants = k_none;
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
     m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
@@ -326,12 +341,14 @@ void count_range(const Pass& p, u32 t)
         totals = detail::count_graph<Layered>(v, input, cell_counts, m.virtual_scratch.data());
         if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
                             detail::k_graph_bad_action_label | detail::k_graph_bad_layers |
-                            detail::k_graph_bad_history))
+                            detail::k_graph_bad_history | detail::k_graph_bad_constants))
         {
             if (totals.flags & detail::k_graph_bad_row)
                 m.bad_bits = std::min(m.bad_bits, g);
             else if (totals.flags & detail::k_graph_bad_goal)
                 m.bad_goal_bits = std::min(m.bad_goal_bits, g);
+            else if (totals.flags & detail::k_graph_bad_constants)
+                m.bad_constants = std::min(m.bad_constants, g);
             else if (totals.flags & detail::k_graph_bad_layers)
                 m.bad_subgoal_bits = std::min(m.bad_subgoal_bits, g);
             else if (totals.flags & detail::k_graph_bad_history)
@@ -530,6 +547,21 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(TaskPtr task, const FlatO
 
 void FlatEncoder::check_layer_inputs(const EncodeInput& in) const
 {
+    const auto check_constants = [](const ConstantInput& c, const char* what, bool masks)
+    {
+        if (!c.rows)
+            return;
+        if (!masks)
+            invalid(std::string("the constant literals of the ") + what + " need the " + what + " masks");
+        if (c.width < detail::k_constant_objects)
+            invalid(std::string("the constant literals of the ") + what + " have " + std::to_string(c.width) +
+                    " columns, at least " + std::to_string(detail::k_constant_objects) + " are needed");
+        if (c.stride != 0 && c.stride < u64{c.capacity} * c.width)
+            invalid(std::string("the row stride of the constant literals of the ") + what +
+                    " is smaller than their rows");
+    };
+    check_constants(in.goal_constants, "goals", in.goal_pos != nullptr);
+    check_constants(in.subgoal_constants, "subgoal layers", in.subgoals.layers != 0);
     const auto check_layers = [](const LayerInput& l, const char* what, bool rows_share)
     {
         if (l.layers == 0)
@@ -655,7 +687,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
                 count_range<false, false>(pass, t);
         });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
-    u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
+    u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none, bad_constants = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, narrow_history = k_none, bad_history_bits = k_none,
         bad_history_count = k_none;
     for (const Member& m : s.members)
@@ -673,6 +705,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         bad_bits = std::min(bad_bits, m.bad_bits);
         narrow_goal = std::min(narrow_goal, m.narrow_goal);
         bad_goal_bits = std::min(bad_goal_bits, m.bad_goal_bits);
+        bad_constants = std::min(bad_constants, m.bad_constants);
     }
     const rl::TaskTable& table = this->table();
     if (bad_id != k_none)
@@ -715,6 +748,9 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
                 " set an atom bit its instance does not have");
     if (bad_goal_bits != k_none)
         invalid("the goal of row " + std::to_string(bad_goal_bits) + " sets an atom bit its instance does not have");
+    if (bad_constants != k_none)
+        invalid(detail::constant_input_fault(context, in, pass.instance_of(bad_constants), bad_constants,
+                                             "row " + std::to_string(bad_constants)));
     if (bad_slice != k_none)
         invalid("the offsets of the action expansion do not give state " + std::to_string(bad_slice) +
                 " a slice of its rows");
