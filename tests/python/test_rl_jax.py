@@ -702,6 +702,66 @@ def test_visited_rollouts_equal_cpu_pool(name, autoreset, threads):
     np.testing.assert_array_equal(initial.visited_count, np.ones(n, np.int32))
 
 
+VISITED_FIELDS = ("states", "task_id", "steps", "count", "at_goal", "visited", "visited_count", "visited_status")
+
+
+@pytest.mark.parametrize("capacity", [2, True])
+@pytest.mark.parametrize("autoreset", [False, True])
+@pytest.mark.parametrize("name", ["gripper__prob05", "numeric", "suite"])
+def test_cuda_visited_tables_equal_cpu(name, autoreset, capacity):
+    """A CUDA Env keeps the CPU Env's tables word for word: steps (fast and general paths, overflow at H = 2),
+    reset_where, clear_visited and jitted scans."""
+    need_gpu()
+    tasks = [text_task("gripper__prob05")]
+    if name in ("numeric", "suite"):
+        numeric = mymyr.Task.from_text(str(NUMERIC / "cs-counters.txt"))
+        tasks = [numeric] if name == "numeric" else [*tasks, numeric]
+    table = rl.TaskSuite.group(tasks) if name == "suite" else rl.TaskTable(tasks)
+    n, seed = 12, 71
+    cfg = dict(track_visited=capacity, max_steps=7, autoreset=autoreset, sampler=None)
+    envs = rj.Env(table, device="cpu", **cfg), rj.Env(table, device="cuda", **cfg)
+    ids = np.arange(n, dtype=np.int32) % len(tasks)
+    states = [env.reset(seed, ids)[0] for env in envs]
+
+    def expect_equal(a, b, where):
+        for field in VISITED_FIELDS:
+            np.testing.assert_array_equal(np.asarray(getattr(a, field)), np.asarray(getattr(b, field)),
+                                          err_msg=f"{where} {field}")
+
+    expect_equal(*states, "reset")
+    steps = [jax.jit(env.step) for env in envs]
+    for t in range(24):
+        actions = np.full(n, -1, np.int32) if t % 5 == 0 else None
+        nxt = 1 - ids if name == "suite" else ids
+        outs = [step(seed, state, actions, next_task_ids=nxt) for step, state in zip(steps, states)]
+        states = [out[0] for out in outs]
+        expect_equal(*states, t)
+        for k, field in ((2, "reward"), (3, "terminated"), (4, "truncated")):
+            np.testing.assert_array_equal(np.asarray(outs[0][k]), np.asarray(outs[1][k]), err_msg=f"{t} {field}")
+        np.testing.assert_array_equal(np.asarray(outs[0][-1]["revisited"]), np.asarray(outs[1][-1]["revisited"]))
+        ids = np.asarray(states[0].task_id).copy()
+        done = np.asarray(outs[0][3]) | np.asarray(outs[0][4])
+        if t % 4 == 0 and not autoreset:
+            states = [jax.jit(env.reset_where)(state, done, ids)[0] for env, state in zip(envs, states)]
+            expect_equal(*states, f"{t} reset_where")
+        if t % 6 == 3:
+            mask = np.arange(n) % 3 == t % 2
+            states = [jax.jit(env.clear_visited)(state, mask) for env, state in zip(envs, states)]
+            expect_equal(*states, f"{t} clear_visited")
+    if capacity == 2:
+        assert np.asarray(states[1].visited_status).any()
+
+    def rollout(env, state):
+        def body(s, _):
+            out = env.step(seed, s, next_task_ids=nxt)
+            return out[0], out[-1]["revisited"]
+        return jax.lax.scan(body, state, None, length=6)
+
+    scans = [jax.jit(lambda s, env=env: rollout(env, s))(state) for env, state in zip(envs, states)]
+    expect_equal(scans[0][0], scans[1][0], "scan")
+    np.testing.assert_array_equal(np.asarray(scans[0][1]), np.asarray(scans[1][1]))
+
+
 def test_visited_overflow_clear_reset_and_scan():
     task = text_task("gripper__prob05")
     env = rj.Env(task, device="cpu", track_visited=2, sampler=None, dead_end="none", max_steps=3)
@@ -851,14 +911,11 @@ def test_jax_visited_capacity_validation(capacity):
         rj.Env(text_task("gripper__prob05"), device="cpu", track_visited=capacity)
 
 
-def test_jax_visited_default_capacity_and_cuda_error():
+def test_jax_visited_default_capacity():
     task = text_task("gripper__prob05")
     with pytest.raises(ValueError, match="max_steps"):
         rj.Env(task, device="cpu", track_visited=True)
     assert rj.Env(task, device="cpu", track_visited=True, max_steps=7).visited_capacity == 16
-    # The native constructor checks this before creating a device context, including CPU-only builds.
-    with pytest.raises(ValueError, match="CUDA requires device visited tables.*device='cpu'"):
-        _rl_jax.Env(task, device=0, track_visited=8)
 
 
 def hash_halves(x):
