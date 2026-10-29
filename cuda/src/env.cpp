@@ -205,7 +205,7 @@ struct DeviceEnv::Impl
     // the RNG key and the control words (k_ctl_words u32, zeroed at construction; check_errors() clears them)
     DeviceBuffer seed, ctl;
     // scratch (grow())
-    DeviceBuffer pick_schema, pick_rank, pick_row, status, goal_flag, order_temp, part_ids;
+    DeviceBuffer pick_schema, pick_rank, pick_row, status, goal_flag, order_temp, part_ids, restarts;
     std::vector<u64> goal_rows;
     std::vector<i32> goal_ids;
     std::vector<u8> goal_host;
@@ -236,7 +236,7 @@ struct DeviceEnv::Impl
                                      &iota,        &starts,      &seed,        &ctl,        &pick_schema, &pick_rank,
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
                                      &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2,
-                                     &label_views, &init_hash,   &inst_numeric};
+                                     &label_views, &init_hash,   &inst_numeric, &restarts};
         for (Part& P : parts)
             for (DeviceBuffer* b : {&P.region, &P.rank, &P.rank_table, &P.sets, &P.fc_of})
                 v.push_back(b);
@@ -599,6 +599,24 @@ struct DeviceEnv::Impl
     }
 
     /// The batch's visited tables as the env kernels read them (capacity 0: none).
+    /// The finish's scratch for the autoresets of wide visited tables (envk::Finish::restarts), or null.
+    u64* restarts_for(const rl::EnvBatch& b)
+    {
+        if (b.visited_capacity < envk::k_wide_visited || !cfg.autoreset)
+            return nullptr;
+        return grow_restarts(b.rows);
+    }
+
+    /// The restart scratch of `rows` rows (envk::Finish::restarts): its counters zero when it is (re)allocated.
+    u64* grow_restarts(u64 rows)
+    {
+        const void* before = restarts.data();
+        u64* p = grow<u64>(restarts, 2 * rows + 2);
+        if (p != before)
+            check(cudaMemsetAsync(p, 0, 2 * sizeof(u64), s), "cudaMemsetAsync (restarts)");
+        return p;
+    }
+
     [[nodiscard]] static envk::VisitedRows visited_of(const rl::EnvBatch& b) noexcept
     {
         envk::VisitedRows v;
@@ -1109,6 +1127,7 @@ void DeviceEnv::reserve(u64 rows)
     DeviceGuard g(I.ctx->device());
     I.begin_call();
     (void)I.grow<u8>(I.status, rows);
+    (void)I.grow_restarts(rows);
     if (I.label)
     {
         (void)I.grow<u64>(I.label_views, std::max<u64>(1, rows * I.masks->view_words()));
@@ -1292,6 +1311,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     f.label_width = out.label_width;
     f.visited = Impl::visited_of(b);
     f.revisited = out.revisited;
+    f.restarts = I.restarts_for(b);
     if (I.fast)
     {
         // 1. choose: (schema, rank) from the cached counts (and, over several instances, check the launch order)
@@ -1482,6 +1502,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Labels lab
     f.label_width = out.label_width;
     f.visited = Impl::visited_of(b);
     f.revisited = out.revisited;
+    f.restarts = I.restarts_for(b);
     f.cache_counts = b.counts;
     check(envk::launch_finish(rl::dev::TaskView{}, f, s), "launch_finish");
 }

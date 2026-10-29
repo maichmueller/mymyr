@@ -174,22 +174,62 @@ __device__ __forceinline__ u64 row_key(const u64* row, u32 words, const u32* num
     return hash::state(row, words, row + words, nn);
 }
 
-/// Row i's visited table holds `key` only (rl::visited_clear, then rl::visited_insert).
-__device__ __forceinline__ void visited_restart(const VisitedRows& v, u64 i, u64 key)
-{
-    u64* table = v.table + i * v.capacity;
-    rl::visited_clear(table, v.capacity, v.count[i]);
-    (void)rl::visited_insert(table, v.capacity, v.count[i], key);
-}
-
-/// Inserts `key` into row i's visited table; returns whether it was there. A saturated count (overflow) sets bit 0 of
-/// the row's status word.
+/// Inserts `key` into row i's visited table; returns whether it was there. The insert that saturates the count
+/// (overflow) sets bit 0 of the row's status word; a saturated row writes no status again, so that the rows of an
+/// overflowed batch do not contend for one word on every step.
 __device__ __forceinline__ bool visited_step(const VisitedRows& v, u64 i, u64 key)
 {
+    const i32 before = v.count[i];
     const bool seen = rl::visited_insert(v.table + i * v.capacity, v.capacity, v.count[i], key);
-    if (v.count[i] == static_cast<i32>(v.capacity))
+    if (before != static_cast<i32>(v.capacity) && v.count[i] == static_cast<i32>(v.capacity))
         atomicOr(v.status + (v.status_per_row ? i : 0), 1);
     return seen;
+}
+
+/// k_finish's marker of a row that does not autoreset.
+constexpr u32 k_keep = 0xFFFFFFFFu;
+
+/// The visited tables of the autoresetting rows of a block's round (`next`: the thread's row's next instance, or
+/// k_keep) hold their initial keys only: the whole block zeroes the tables, consecutive words to consecutive threads
+/// (coalesced: a table is H words), then each row's thread inserts its key. The rows are found from one ballot per
+/// warp, so a round with few restarts visits only those. With `restarts` (wide tables) the rows and keys are listed
+/// there instead, for k_restart_tables. Called by every thread of the block (k_block threads).
+__device__ __forceinline__ void restart_tables(const VisitedRows& v, u64 b, u64 rows, u32 next, const u64* init_hash,
+                                               u64* restarts)
+{
+    if (restarts)
+    {
+        if (next != k_keep)
+        {
+            // the table after k_restart_tables: the key alone, at its first probe position
+            const u64 slot = atomicAdd(reinterpret_cast<unsigned long long*>(restarts), 1ull);
+            restarts[2 + slot] = b + threadIdx.x;
+            restarts[2 + rows + slot] = init_hash[next];
+            v.count[b + threadIdx.x] = 1;
+        }
+        return;
+    }
+    __shared__ u32 restart[k_block / 32];
+    const bool mine = next != k_keep;
+    const u32 warp = __ballot_sync(0xFFFFFFFFu, mine);
+    if ((threadIdx.x & 31u) == 0)
+        restart[threadIdx.x >> 5] = warp;
+    if (!__syncthreads_or(mine))
+        return;
+    for (u32 k = 0; k < blockDim.x / 32; ++k)
+        for (u32 bits = restart[k]; bits; bits &= bits - 1)
+        {
+            u64* table = v.table + (b + k * 32 + static_cast<u32>(__ffs(static_cast<int>(bits)) - 1)) * v.capacity;
+            for (u32 w = threadIdx.x; w < v.capacity; w += blockDim.x)
+                table[w] = 0;
+        }
+    __syncthreads();
+    if (next != k_keep)
+    {
+        const u64 i = b + threadIdx.x;
+        v.count[i] = 0;
+        (void)rl::visited_insert(v.table + i * v.capacity, v.capacity, v.count[i], init_hash[next]);
+    }
 }
 
 __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p, u64 row_id, u32 instance)
@@ -260,8 +300,95 @@ __device__ __forceinline__ u32 reset_row(const Instances& in, u32 k, u64 i, u64*
     return in.init_count[k];
 }
 
+/// Row i of k_finish; returns the instance that the row's visited table restarts with (an autoreset with visited
+/// tables), else k_keep.
+__device__ __forceinline__ u32 finish_row(rl::dev::TaskView t, const Finish& p, u64 i)
+{
+    if (i == 0 && p.order_bad)
+        *p.order_bad = 0;  // Select of the next step sets it again if the order is stale
+    const u8 st = p.status[i];
+    const i32 c2 = static_cast<i32>(row_count(p.counts, p.num_schemas, p.count_stride, p.offsets, i));
+    u32 k = instance_of(p.in, i);
+    if (k >= p.in.count)
+    {
+        // a task id outside the table (written by the caller): instance 0's tests, reported
+        if (p.error)
+            atomicOr(p.error, 4u);
+        k = 0;
+    }
+    // every row's next task id is checked, autoresetting or not (as the host checks them)
+    if (p.next_task_ids && p.error &&
+        (p.next_task_ids[i] < 0 || static_cast<u32>(p.next_task_ids[i]) >= p.in.count))
+        atomicOr(p.error, 4u);
+    bool g = st == k_goal;
+    if (st == k_ok)
+        g = goal_row(t, p, i, k);
+    const bool dead = p.dead_end && !g && ((st == k_ok && c2 == 0) || st == k_stuck);
+    const bool term = g || (dead && p.dead_end_terminal);
+    const bool absorbed = st == k_goal || (st == k_stuck && dead && p.dead_end_terminal);
+    const i32 t2 = p.steps ? p.steps[i] + (absorbed ? 0 : 1) : 0;
+    const bool trunc = !term && p.max_steps && t2 >= static_cast<i32>(p.max_steps);
+    if (p.reward)
+        p.reward[i] = absorbed ? 0.0f : p.step_reward + (g ? p.goal_reward : 0.0f) + (dead ? p.dead_end_reward : 0.0f);
+    if (p.terminated)
+        p.terminated[i] = term ? 1 : 0;
+    if (p.truncated)
+        p.truncated[i] = trunc ? 1 : 0;
+    if (p.goal)
+        p.goal[i] = g ? 1 : 0;
+    if (p.invalid)
+        p.invalid[i] = st == k_invalid ? 1 : 0;
+    if (st != k_ok)
+    {
+        if (p.schema)
+            p.schema[i] = -1;
+        if (p.binding)
+            for (u32 j = 0; j < p.label_width; ++j)
+                p.binding[i * p.label_width + j] = -1;
+    }
+    bool revisited = false;
+    // an episode over without autoreset (absorbed, or truncated before) keeps its table
+    const bool over =
+        !p.autoreset && (absorbed || (p.max_steps && p.steps && p.steps[i] >= static_cast<i32>(p.max_steps)));
+    if (p.visited.capacity && !over)
+        revisited = visited_step(p.visited, i, row_key(p.states + i * p.row_words, p.words, p.in.numeric_words, k));
+    if (p.revisited)
+        p.revisited[i] = revisited ? 1 : 0;
+    if (p.autoreset && (term || trunc))
+    {
+        u32 next = k;
+        if (p.next_task_ids)
+        {
+            const i32 x = p.next_task_ids[i];
+            if (x >= 0 && static_cast<u32>(x) < p.in.count)
+                next = static_cast<u32>(x);
+        }
+        const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
+                                 stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);
+        if (p.steps)
+            p.steps[i] = 0;
+        if (p.count)
+            p.count[i] = static_cast<i32>(n0);
+        if (p.at_goal)
+            p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                    p.goal_neg + i * p.words, p.words)
+                                             ? 1
+                                             : 0)
+                                      : p.in.init_goal[next];
+        return p.visited.capacity ? next : k_keep;
+    }
+    if (p.steps)
+        p.steps[i] = t2;
+    if (p.count)
+        p.count[i] = c2;
+    if (p.at_goal)
+        p.at_goal[i] = g ? 1 : 0;
+    return k_keep;
+}
+
 /// A block's rows per round (a thread each); with final_states, the round's rows are first copied there by the whole
-/// block, consecutive words to consecutive threads (coalesced, before any of them autoresets).
+/// block, consecutive words to consecutive threads (coalesced, before any of them autoresets). Launched with k_block
+/// threads per block.
 __global__ void k_finish(rl::dev::TaskView t, Finish p)
 {
     for (u64 b = u64{blockIdx.x} * blockDim.x; b < p.rows; b += u64{gridDim.x} * blockDim.x)
@@ -274,90 +401,35 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
             __syncthreads();
         }
         const u64 i = b + threadIdx.x;
-        if (i >= p.rows)
-            continue;
-        if (i == 0 && p.order_bad)
-            *p.order_bad = 0;  // Select of the next step sets it again if the order is stale
-        const u8 st = p.status[i];
-        const i32 c2 = static_cast<i32>(row_count(p.counts, p.num_schemas, p.count_stride, p.offsets, i));
-        u32 k = instance_of(p.in, i);
-        if (k >= p.in.count)
+        const u32 next = i < p.rows ? finish_row(t, p, i) : k_keep;
+        if (p.visited.capacity && p.autoreset)
+            restart_tables(p.visited, b, p.rows, next, p.in.init_hash, p.restarts);
+    }
+}
+
+/// The tables of the rows k_finish listed in `restarts` ([0]: the count, [1]: the blocks done, then `rows` row ids,
+/// then their keys) hold their keys only (as rl::visited_clear, then rl::visited_insert): a thread per table word over
+/// the whole grid. The last block to finish zeroes both counters for the next step.
+__global__ void k_restart_tables(VisitedRows v, u64* restarts, u64 rows)
+{
+    const u32 shift = static_cast<u32>(__popc(v.capacity - 1));  // capacity is a power of two
+    const u64 n = restarts[0] << shift;
+    for (u64 j = u64{blockIdx.x} * blockDim.x + threadIdx.x; j < n; j += u64{gridDim.x} * blockDim.x)
+    {
+        const u64 k = j >> shift;
+        const u32 w = static_cast<u32>(j) & (v.capacity - 1);
+        const u64 key = rl::visited_key(restarts[2 + rows + k]);
+        v.table[restarts[2 + k] * v.capacity + w] = w == (static_cast<u32>(key) & (v.capacity - 1)) ? key : 0;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        __threadfence();
+        auto* done = reinterpret_cast<unsigned long long*>(restarts + 1);
+        if (atomicAdd(done, 1ull) == gridDim.x - 1)
         {
-            // a task id outside the table (written by the caller): instance 0's tests, reported
-            if (p.error)
-                atomicOr(p.error, 4u);
-            k = 0;
-        }
-        // every row's next task id is checked, autoresetting or not (as the host checks them)
-        if (p.next_task_ids && p.error &&
-            (p.next_task_ids[i] < 0 || static_cast<u32>(p.next_task_ids[i]) >= p.in.count))
-            atomicOr(p.error, 4u);
-        bool g = st == k_goal;
-        if (st == k_ok)
-            g = goal_row(t, p, i, k);
-        const bool dead = p.dead_end && !g && ((st == k_ok && c2 == 0) || st == k_stuck);
-        const bool term = g || (dead && p.dead_end_terminal);
-        const bool absorbed = st == k_goal || (st == k_stuck && dead && p.dead_end_terminal);
-        const i32 t2 = p.steps ? p.steps[i] + (absorbed ? 0 : 1) : 0;
-        const bool trunc = !term && p.max_steps && t2 >= static_cast<i32>(p.max_steps);
-        if (p.reward)
-            p.reward[i] = absorbed ? 0.0f : p.step_reward + (g ? p.goal_reward : 0.0f) + (dead ? p.dead_end_reward : 0.0f);
-        if (p.terminated)
-            p.terminated[i] = term ? 1 : 0;
-        if (p.truncated)
-            p.truncated[i] = trunc ? 1 : 0;
-        if (p.goal)
-            p.goal[i] = g ? 1 : 0;
-        if (p.invalid)
-            p.invalid[i] = st == k_invalid ? 1 : 0;
-        if (st != k_ok)
-        {
-            if (p.schema)
-                p.schema[i] = -1;
-            if (p.binding)
-                for (u32 j = 0; j < p.label_width; ++j)
-                    p.binding[i * p.label_width + j] = -1;
-        }
-        bool revisited = false;
-        // an episode over without autoreset (absorbed, or truncated before) keeps its table
-        const bool over =
-            !p.autoreset && (absorbed || (p.max_steps && p.steps && p.steps[i] >= static_cast<i32>(p.max_steps)));
-        if (p.visited.capacity && !over)
-            revisited = visited_step(p.visited, i, row_key(p.states + i * p.row_words, p.words, p.in.numeric_words, k));
-        if (p.revisited)
-            p.revisited[i] = revisited ? 1 : 0;
-        if (p.autoreset && (term || trunc))
-        {
-            u32 next = k;
-            if (p.next_task_ids)
-            {
-                const i32 x = p.next_task_ids[i];
-                if (x >= 0 && static_cast<u32>(x) < p.in.count)
-                    next = static_cast<u32>(x);
-            }
-            const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
-                                     stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);
-            if (p.visited.capacity)
-                visited_restart(p.visited, i, p.in.init_hash[next]);
-            if (p.steps)
-                p.steps[i] = 0;
-            if (p.count)
-                p.count[i] = static_cast<i32>(n0);
-            if (p.at_goal)
-                p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
-                                                        p.goal_neg + i * p.words, p.words)
-                                                 ? 1
-                                                 : 0)
-                                          : p.in.init_goal[next];
-        }
-        else
-        {
-            if (p.steps)
-                p.steps[i] = t2;
-            if (p.count)
-                p.count[i] = c2;
-            if (p.at_goal)
-                p.at_goal[i] = g ? 1 : 0;
+            restarts[0] = 0;
+            restarts[1] = 0;
         }
     }
 }
@@ -551,7 +623,17 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) || !visited_ok(p.visited) ||
         (p.visited.capacity && p.autoreset && !p.in.init_hash))
         return cudaErrorInvalidValue;
-    k_finish<<<grid_for(p.rows), k_block, 0, s>>>(t, p);
+    const bool wide = p.restarts && p.visited.capacity && p.autoreset;
+    Finish f = p;
+    if (!wide)
+        f.restarts = nullptr;
+    k_finish<<<grid_for(p.rows), k_block, 0, s>>>(t, f);
+    if (wide)
+    {
+        // a fixed grid (the count is on the device): enough blocks to fill the memory bandwidth
+        constexpr unsigned k_restart_blocks = 64;
+        k_restart_tables<<<k_restart_blocks, k_block, 0, s>>>(p.visited, p.restarts, p.rows);
+    }
     return cudaGetLastError();
 }
 

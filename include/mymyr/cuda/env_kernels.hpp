@@ -204,7 +204,14 @@ struct Finish
     u64* views = nullptr;
     VisitedRows visited;          // capacity 0: no tracking (revisited, if given, is written 0)
     u8* revisited = nullptr;      // [rows] out: the reached state was in the row's table before the step
+    // scratch [2 rows + 2] for the autoresets of wide visited tables (capacity >= k_wide_visited), zero before the first
+    // step (the restart kernel leaves its two counters zero): the finish lists the restarting rows and a kernel over the
+    // whole grid rewrites their tables; null: each block restarts its rows' tables
+    u64* restarts = nullptr;
 };
+/// Visited tables of at least this many words restart in a kernel of their own after an autoreset (see
+/// Finish::restarts): the stores of the few blocks that hold the restarting rows cannot use the memory bandwidth.
+inline constexpr u32 k_wide_visited = 2048;
 cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStream_t s);
 cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, cudaStream_t s);
 

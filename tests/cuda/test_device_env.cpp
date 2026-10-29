@@ -581,7 +581,7 @@ TEST(DeviceEnvVisited, FinishInsertsEqualHost)
     SKIP_WITHOUT_GPU();
     for (const char* name : {"gripper__prob05", "pegsol-08-strips__p22", "philosophers__p03-phil4", "cs-counters"})
         for (bool autoreset : {true, false})
-            for (u32 H : {8u, 64u})
+            for (u32 H : {8u, 64u, 1024u, cuda::envk::k_wide_visited})
                 for (auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
                 {
                     SCOPED_TRACE(std::string(name) + (autoreset ? " autoreset" : " masked resets") + " H " +
@@ -666,9 +666,11 @@ TEST(DeviceEnvVisited, FinishInsertsEqualHost)
 
 // Resets, steps and clear_visited captured into a CUDA graph: every replay equals the same calls made eagerly on a
 // second batch.
-TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
+namespace
 {
-    SKIP_WITHOUT_GPU();
+/// A captured reset, steps (with autoresets) and clear_visited replay as the same eager calls, with tables of H words.
+void expect_captured_tables_equal_eager(u32 H)
+{
     const auto task = load("blocks__probBLOCKS-8-0", true);
     auto ctx = context();
     cuda::Stream capture;  // outlives the envs and batches that run on it
@@ -677,7 +679,6 @@ TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
     cuda::DeviceEnv eager(ctx, rl::TaskTable::single(task), cfg), graph(ctx, rl::TaskTable::single(task), cfg);
     ASSERT_TRUE(graph.fast());
     const u64 N = 128;
-    const u32 H = 32;
     DeviceBatch a(ctx, eager, N, 0), g(ctx, graph, N, 0);
     DeviceVisited av(ctx, a, H), gv(ctx, g, H);
     std::vector<u8> mask(N);
@@ -718,4 +719,12 @@ TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
     cuda::check(cudaGraphExecDestroy(exec), "destroy");
     cuda::check(cudaGraphDestroy(cg), "destroy");
     EXPECT_NO_THROW(graph.check_errors());
+}
+}  // namespace
+
+TEST(DeviceEnvVisited, CaptureReplaysEqualEagerCalls)
+{
+    SKIP_WITHOUT_GPU();
+    expect_captured_tables_equal_eager(32);
+    expect_captured_tables_equal_eager(cuda::envk::k_wide_visited);  // the restarts' own kernel
 }
