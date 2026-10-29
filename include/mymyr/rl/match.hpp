@@ -627,12 +627,13 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
 /// allocation. Worst-case work is exponential. The budget counts candidate tile scans (those of the domain tests
 /// included) and binding trials; a tile scan is linear in the template's literals and the indexed tuples it reads. All
 /// lanes consume equal steps, and exhaustion returns false with budget.exhausted set. For injective templates, the
-/// domain tests (domains_possible) run at the root and, from the first failure on (a rejected binding trial or a
-/// variable without candidates), at every node with more than two unbound variables (candidate filtering decides the
-/// last two directly); the nodes entered before that failure are tested when the search returns to them. A search
-/// without failures thus pays for one test. PruneDomains = false compiles the tests out of searches of at most
-/// two variables, and SkipTiles = false the jumps over tiles without candidates (a scanned tile is then followed by
-/// the next one): both make a smaller search for short ones.
+/// domain tests (domains_possible) run at the root once its variable has a candidate tile and, from the first failure
+/// on (a rejected binding trial or a variable without candidates), at every other node with more than two unbound
+/// variables (candidate filtering decides the last two directly); the nodes entered before that failure are tested when
+/// the search returns to them. A search without failures thus pays for one test, and one whose first variable has no
+/// candidates for none. PruneDomains = false compiles the tests out of searches of at most two variables, and
+/// SkipTiles = false the jumps over tiles without candidates (a scanned tile is then followed by the next one): both
+/// make a smaller search for short ones.
 template<class Group, bool PruneDomains = true, bool SkipTiles = true>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
                       i32* binding, u32* base, u32* masks, u32* need, Budget& budget)
@@ -649,8 +650,9 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         return true;
     i32 depth = 0;
     bool enter = true;
-    // Past the root, the domain tests start at the first failure; the nodes entered before it (depths below
-    // `untested`) are tested when the search returns to them.
+    // The root is tested once; below it the domain tests start at the first failure, and the nodes entered before it
+    // (depths below `untested`) are tested when the search returns to them.
+    bool root_untested = PruneDomains && t.distinct[k] && vars > 2;
     bool testing = false;
     i32 untested = 0;
     while (depth >= 0)
@@ -660,7 +662,7 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         bool test = false;
         if constexpr (PruneDomains)
             test = t.distinct[k] && vars - static_cast<u32>(depth) > 2 &&
-                   (enter ? testing || depth == 0 : depth < untested);
+                   (enter ? testing : depth > 0 && depth < untested);
         if (!enter && depth < untested)
             untested = depth;
         if (test && !domains_possible(grp, t, g, k, objects, binding, state, derived, need, budget))
@@ -698,6 +700,13 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
             masks[depth] = candidates(grp, t, g, k, variable, base[depth], objects, binding, state, derived);
             skip = true;
         }
+        if constexpr (PruneDomains)
+            if (root_untested && masks[depth])
+            {
+                root_untested = false;
+                if (!domains_possible(grp, t, g, k, objects, binding, state, derived, need, budget))
+                    return false;
+            }
         if (!masks[depth])
         {
             if (!testing)

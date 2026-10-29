@@ -892,7 +892,7 @@ def test_match_first_rejects_impossible_injective_domains(on_device, typed, firs
     literals = ([f"(pair {a} {b})" for a, b in zip(variables[::2], variables[1::2])] if typed == "binary_pairs" else
                 [f"(pair {v} {v})" for v in variables] if typed == "binary" else
                 [f"(member {v})" for v in variables] if limited_type else ["(ok)"])
-    budget = 512 if typed == "binary_pairs" else 6 if typed == "binary" else 3 if limited_type else 0
+    budget = 512 if typed == "binary_pairs" else 7 if typed == "binary" else 4 if limited_type else 0
     condition = task.condition(variables, literals,
                                equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
@@ -1008,7 +1008,7 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
     reusable = task.condition(variables, literals)
     templates = rl.GoalTemplates.from_conditions(task, [[impossible, reusable]])
     rows = np.asarray(task.encode([task.initial_state]))
-    expected = rl.match_first(rows, None, templates, first=first, max_steps=6)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=7)
     assert int(expected.status) == 0 and expected.count.tolist() == [1]
     assert expected.found.tolist() == ([True] if first else [[False, True]])
     assert expected.template.tolist() == ([1] if first else [[-1, 1]])
@@ -1016,7 +1016,7 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
     if on_device:
         torch = cuda_match_runtime()
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
-                                templates.to("cuda:0"), first=first, max_steps=6)
+                                templates.to("cuda:0"), first=first, max_steps=7)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
 
@@ -1137,7 +1137,7 @@ def test_match_first_counts_supporters_of_shared_variables(on_device, second):
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
     rows = np.asarray(task.encode([task.initial_state]))
     want = [[o.index for o in b] for b in task.bindings(condition, task.initial_state, limit=1)]
-    expected = rl.match_first(rows, None, templates, max_steps=1 if second == 2 else None)
+    expected = rl.match_first(rows, None, templates, max_steps=2 if second == 2 else None)
     assert int(expected.status) == 0
     assert bool(expected.found[0, 0]) == bool(want) == (second == 4)
     if want:
@@ -1145,6 +1145,6 @@ def test_match_first_counts_supporters_of_shared_variables(on_device, second):
     if on_device:
         torch = cuda_match_runtime()
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None, templates.to("cuda:0"),
-                                max_steps=1 if second == 2 else None)
+                                max_steps=2 if second == 2 else None)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
