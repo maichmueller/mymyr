@@ -3,6 +3,9 @@
 // positive literal candidates in 32-object tiles and checks other literals when their last variable is bound.
 // Still-free variables of a positive literal are existential filters, pruning candidates without changing order.
 // The same search serves a host thread or a device warp; lane-parallel scans keep each tile's candidate set exact.
+// A scan reads only the indexed tuples that agree with the literal's leading constant and bound arguments (a binary
+// search over the sorted tuples). Injective templates also get counting tests (domains_possible) that reject partial
+// bindings without an injective completion; like the filters, they never change which binding is found first.
 #include "mymyr/encoding/detail/literals.hpp"
 
 namespace mymyr
@@ -130,6 +133,60 @@ MYMYR_HD Tuples tuples(const MatchTemplates& t, u32 g, u32 l)
     return {rows, begin, end, stat, der};
 }
 
+MYMYR_HD i32 resolved(const MatchTemplates& t, u32 l, i32 j, const i32* binding)
+{
+    const i32 term = t.terms[u64{l} * t.max_arity + j];
+    return term < 0 ? -(term + 1) : binding[term];
+}
+
+/// The first of rows [begin, end) whose objects 0 .. depth - 1 and object `depth` are not lexicographically less than
+/// literal l's resolved arguments 0 .. depth - 1 and x (rows of one predicate are sorted lexicographically).
+MYMYR_HD u32 lower_row(const MatchTemplates& t, u32 l, const i32* rows, u32 begin, u32 end, u32 depth, i64 x,
+                        const i32* binding)
+{
+    while (begin < end)
+    {
+        const u32 mid = begin + (end - begin) / 2;
+        const i32* row = rows + u64{mid} * t.literals.max_arity;
+        i64 have = row[depth], want = x;
+        for (u32 j = 0; j < depth; ++j)
+            if (row[j] != resolved(t, l, static_cast<i32>(j), binding))
+            {
+                have = row[j];
+                want = resolved(t, l, static_cast<i32>(j), binding);
+                break;
+            }
+        if (have < want)
+            begin = mid + 1;
+        else
+            end = mid;
+    }
+    return begin;
+}
+
+/// Narrows tup to the rows that share literal l's leading constant and bound arguments and, when `position` directly
+/// follows them, have an object of base + [0, 32) at `position`: a binary search instead of a scan of every row.
+MYMYR_HD void narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, const i32* binding, Tuples& tup)
+{
+    i32 known = 0;
+    while (known < t.arity[l] && known != position && resolved(t, l, known, binding) >= 0)
+        ++known;
+    const u32 d = static_cast<u32>(known);
+    if (known == position)
+    {
+        const u32 first = lower_row(t, l, tup.rows, tup.begin, tup.end, d, base, binding);
+        tup.end = lower_row(t, l, tup.rows, first, tup.end, d, i64{base} + 32, binding);
+        tup.begin = first;
+    }
+    else if (known > 0)
+    {
+        const i64 last = resolved(t, l, known - 1, binding);
+        const u32 first = lower_row(t, l, tup.rows, tup.begin, tup.end, d - 1, last, binding);
+        tup.end = lower_row(t, l, tup.rows, first, tup.end, d - 1, last + 1, binding);
+        tup.begin = first;
+    }
+}
+
 /// Candidate objects base + [0, 32) of `variable`: those satisfying every positive literal it occurs in. With
 /// domain_literal >= 0, instead the projection of that literal's true tuples on domain_position, filtered only by its
 /// constant and bound arguments. Under distinct, bound objects are removed.
@@ -154,7 +211,8 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
                     position = j;
         if (position < 0)
             continue;
-        const Tuples tup = tuples(t, g, l);
+        Tuples tup = tuples(t, g, l);
+        narrow(t, l, position, base, binding, tup);
         u32 lane_mask = 0;
         for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
         {
@@ -194,12 +252,6 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
             if (binding[v] >= 0 && static_cast<u32>(binding[v]) >= base && static_cast<u32>(binding[v]) - base < 32)
                 mask &= ~(u32{1} << (static_cast<u32>(binding[v]) - base));
     return mask;
-}
-
-MYMYR_HD i32 resolved(const MatchTemplates& t, u32 l, i32 j, const i32* binding)
-{
-    const i32 term = t.terms[u64{l} * t.max_arity + j];
-    return term < 0 ? -(term + 1) : binding[term];
 }
 
 /// Whether positive literal `other` has the predicate of `l`, an unbound variable at `position`, and at every other
@@ -262,7 +314,8 @@ template<class Group>
 MYMYR_HD u32 supported(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 l, i32 position, i32 q, u32 base,
                         u32 objects, u32 threshold, const i32* binding, const u64* state, const u64* derived)
 {
-    const Tuples tup = tuples(t, g, l);
+    Tuples tup = tuples(t, g, l);
+    narrow(t, l, position, base, binding, tup);
     const u32 vars = static_cast<u32>(t.num_vars[k]), cap = 255 / grp.size();
     u32 counts[8] = {}, saturated = 0;
     for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
@@ -356,28 +409,125 @@ MYMYR_HD bool supporters_possible(const Group& grp, const MatchTemplates& t, u32
     return true;
 }
 
+/// Whether unbound variable v occurs at `position` of a positive literal that projected() relates to l.
+MYMYR_HD bool member(const MatchTemplates& t, u32 k, u32 l, i32 position, u32 v, const i32* binding)
+{
+    for (u32 other = static_cast<u32>(t.literal_offsets[k]); other < static_cast<u32>(t.literal_offsets[k + 1]); ++other)
+        if (t.terms[u64{other} * t.max_arity + position] == static_cast<i32>(v) &&
+            projected(t, l, other, position, binding, false))
+            return true;
+    return false;
+}
+
+/// Projections that domains_possible examines together; their state is fixed scratch of the lane.
+inline constexpr u32 k_projection_batch = 16;
+
+/// The pigeonhole test of domains_possible for a batch of projections (id = literal * max_arity + position). The
+/// tiles are the outer loop: per tile, each projection of the batch is scanned once and each variable that may still
+/// be confined in one of them once. A projection leaves the batch when its objects cover its members and every variable
+/// that may still be confined in it; a variable is no longer scanned once it lies outside every projection. Variables
+/// are taken in blocks of 64 (bit masks), so wider templates repeat the tiles per block.
+template<class Group>
+MYMYR_HD bool batch_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects, const u32* id,
+                              u32 count, const i32* binding, const u64* state, const u64* derived, Budget& budget)
+{
+    const u32 vars = static_cast<u32>(t.num_vars[k]);
+    u32 available[k_projection_batch], confined[k_projection_batch], domain[k_projection_batch];
+    u64 members[k_projection_batch], open[k_projection_batch];
+    u32 settled = 0;
+    u32 later = 0;
+    for (u32 v = 0; v < vars; ++v)
+        later += binding[v] < 0;
+    for (u32 i = 0; i < count; ++i)
+        confined[i] = 0;
+    for (u32 block = 0; block < vars; block += 64)
+    {
+        const u32 width = vars - block < 64 ? vars - block : 64;
+        u64 unbound = 0;
+        for (u32 v = 0; v < width; ++v)
+            if (binding[block + v] < 0)
+                unbound |= u64{1} << v;
+        later -= ed::popcount64(unbound);
+        u32 active = 0;
+        for (u32 i = 0; i < count; ++i)
+        {
+            if ((settled >> i) & 1)
+                continue;
+            const u32 l = id[i] / t.max_arity;
+            const i32 position = static_cast<i32>(id[i] % t.max_arity);
+            members[i] = 0;
+            for (u64 rest = unbound; rest; rest &= rest - 1)
+            {
+                const u32 v = ed::lowest_bit64(rest);
+                if (member(t, k, l, position, block + v, binding))
+                    members[i] |= u64{1} << v;
+            }
+            open[i] = unbound & ~members[i];
+            available[i] = 0;
+            active |= u32{1} << i;
+        }
+        for (u32 tile = 0; tile < objects && active; tile += 32)
+        {
+            u64 scanned = 0;
+            for (u32 rest = active; rest; rest &= rest - 1)
+            {
+                const u32 i = ed::lowest_bit64(rest);
+                if (available[i] >= confined[i] + ed::popcount64(members[i]) + ed::popcount64(open[i]) + later)
+                {
+                    settled |= u32{1} << i;
+                    active &= ~(u32{1} << i);
+                    continue;
+                }
+                if (!budget.take())
+                    return false;
+                const u32 l = id[i] / t.max_arity, position = id[i] % t.max_arity;
+                domain[i] = candidates(grp, t, g, k, t.terms[u64{l} * t.max_arity + position], tile, objects, binding,
+                                       state, derived, static_cast<i32>(l), position);
+                available[i] += ed::popcount64(domain[i]);
+                scanned |= open[i];
+            }
+            for (; scanned; scanned &= scanned - 1)
+            {
+                const u32 v = ed::lowest_bit64(scanned);
+                if (!budget.take())
+                    return false;
+                const u32 objects_of_v = candidates(grp, t, g, k, static_cast<i32>(block + v), tile, objects, binding,
+                                                    state, derived);
+                for (u32 rest = active; rest; rest &= rest - 1)
+                {
+                    const u32 i = ed::lowest_bit64(rest);
+                    if (objects_of_v & ~domain[i])
+                        open[i] &= ~(u64{1} << v);
+                }
+            }
+        }
+        // The projections still in the batch were scanned completely.
+        for (u32 rest = active; rest; rest &= rest - 1)
+        {
+            const u32 i = ed::lowest_bit64(rest);
+            confined[i] += ed::popcount64(members[i]) + ed::popcount64(open[i]);
+            if (confined[i] > available[i])
+                return false;
+        }
+    }
+    return true;
+}
+
 /// Pigeonhole test of an injective template's unbound variables (false: no injective completion exists). The
 /// projection of a positive literal on one argument position, filtered by its constant and bound arguments and without
 /// bound objects, contains the candidates of every unbound variable at that position of a positive literal of the
-/// predicate with at least those arguments (unary predicates project types). Those members, and every other unbound
-/// variable whose candidates lie inside the projection (another predicate or position over the same objects), need
-/// distinct objects of it. Projections only drop constraints, so the test never rejects a satisfiable binding.
-/// Projections with at least `remaining` objects are not examined further. A projection with one other unbound
-/// argument also gets the supporter test (supporters_possible); `need` is its scratch.
+/// predicate with at least those arguments (its members; unary predicates project types). Those members, and every
+/// other unbound variable whose candidates lie inside the projection (another predicate or position over the same
+/// objects), need distinct objects of it. Projections only drop constraints, so the test never rejects a satisfiable
+/// binding. A projection with one other unbound argument also gets the supporter test (supporters_possible; `need` is
+/// its scratch). Projections go to batch_possible in batches of k_projection_batch.
 template<class Group>
-MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects, u32 remaining,
+MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 objects,
                                 const i32* binding, const u64* state, const u64* derived, u32* need, Budget& budget)
 {
     const u32 begin = static_cast<u32>(t.literal_offsets[k]), end = static_cast<u32>(t.literal_offsets[k + 1]);
-    const u32 vars = static_cast<u32>(t.num_vars[k]);
-    const auto member = [&](u32 l, i32 position, u32 v)
-    {
-        for (u32 other = begin; other < end; ++other)
-            if (t.terms[u64{other} * t.max_arity + position] == static_cast<i32>(v) &&
-                projected(t, l, other, position, binding, false))
-                return true;
-        return false;
-    };
+    u32 id[k_projection_batch];
+    u32 count = 0;
     for (u32 l = begin; l < end; ++l)
         for (i32 position = 0; position < t.arity[l]; ++position)
         {
@@ -389,53 +539,29 @@ MYMYR_HD bool domains_possible(const Group& grp, const MatchTemplates& t, u32 g,
                 seen = projected(t, l, before, position, binding, true);
             if (seen)
                 continue;
-            u32 needed = 0;
-            for (u32 v = 0; v < vars; ++v)
-                needed += binding[v] < 0 && member(l, position, v);
-            const i32 variable = t.terms[u64{l} * t.max_arity + position];
-            u32 available = 0;
-            for (u32 tile = 0; tile < objects && available < remaining; tile += 32)
-            {
-                if (!budget.take())
-                    return false;
-                available += ed::popcount64(candidates(grp, t, g, k, variable, tile, objects, binding, state, derived,
-                                                       static_cast<i32>(l), static_cast<u32>(position)));
-            }
-            if (available < needed)
-                return false;
             const i32 q = partner_position(t, l, position, binding);
             if (q >= 0 && !supporters_possible(grp, t, g, k, l, position, q, objects, binding, state, derived, need, budget))
                 return false;
-            if (available >= remaining)
-                continue;
-            u32 confined = needed;
-            for (u32 v = 0; v < vars; ++v)
+            id[count++] = l * t.max_arity + static_cast<u32>(position);
+            if (count == k_projection_batch)
             {
-                if (binding[v] >= 0 || member(l, position, v))
-                    continue;
-                bool subset = true;
-                for (u32 tile = 0; tile < objects && subset; tile += 32)
-                {
-                    if (!budget.take() || !budget.take())
-                        return false;
-                    const u32 domain = candidates(grp, t, g, k, variable, tile, objects, binding, state, derived,
-                                                  static_cast<i32>(l), static_cast<u32>(position));
-                    subset = !(candidates(grp, t, g, k, static_cast<i32>(v), tile, objects, binding, state, derived) &
-                               ~domain);
-                }
-                if (subset && ++confined > available)
+                if (!batch_possible(grp, t, g, k, objects, id, count, binding, state, derived, budget))
                     return false;
+                count = 0;
             }
         }
-    return true;
+    return !count || batch_possible(grp, t, g, k, objects, id, count, binding, state, derived, budget);
 }
 
-/// Scratch binding, base and mask each have num_vars[k] entries, private to the lane; no recursion or allocation.
-/// Worst-case work is exponential. The budget counts candidate tile scans (pruning included) and binding trials;
-/// a tile scan is linear in the template's literals and their indexed tuples. All lanes consume equal steps, and
-/// exhaustion returns false with budget.exhausted set. The pigeonhole test runs while more than two variables are
-/// unbound (candidate filtering decides the last two directly), so PruneDomains = false compiles it out of searches
-/// of at most two variables.
+/// Scratch binding, base, masks and need each have num_vars[k] entries, private to the lane; no recursion or
+/// allocation. Worst-case work is exponential. The budget counts candidate tile scans (those of the domain tests
+/// included) and binding trials; a tile scan is linear in the template's literals and the indexed tuples it reads. All
+/// lanes consume equal steps, and exhaustion returns false with budget.exhausted set. For injective templates, the
+/// domain tests (domains_possible) run at the root and, from the first failure on (a rejected binding trial or a
+/// variable without candidates), at every node with more than two unbound variables (candidate filtering decides the
+/// last two directly); the nodes entered before that failure are tested when the search returns to them. A search
+/// without failures thus pays for one test. PruneDomains = false compiles the tests out of searches of at most
+/// two variables.
 template<class Group, bool PruneDomains = true>
 MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, const u64* state, const u64* derived,
                       i32* binding, u32* base, u32* masks, u32* need, Budget& budget)
@@ -452,23 +578,30 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         return true;
     i32 depth = 0;
     bool enter = true;
+    // Past the root, the domain tests start at the first failure; the nodes entered before it (depths below
+    // `untested`) are tested when the search returns to them.
+    bool testing = false;
+    i32 untested = 0;
     while (depth >= 0)
     {
         const i32 variable = t.order[u64{k} * t.max_vars + depth];
         binding[variable] = -1;
+        bool test = false;
+        if constexpr (PruneDomains)
+            test = t.distinct[k] && vars - static_cast<u32>(depth) > 2 &&
+                   (enter ? testing || depth == 0 : depth < untested);
+        if (!enter && depth < untested)
+            untested = depth;
+        if (test && !domains_possible(grp, t, g, k, objects, binding, state, derived, need, budget))
+        {
+            if (budget.exhausted)
+                return false;
+            --depth;
+            enter = false;
+            continue;
+        }
         if (enter)
         {
-            if constexpr (PruneDomains)
-                if (t.distinct[k] && vars - static_cast<u32>(depth) > 2 &&
-                    !domains_possible(grp, t, g, k, objects, vars - static_cast<u32>(depth), binding, state, derived, need,
-                                      budget))
-                {
-                    --depth;
-                    enter = false;
-                    if (budget.exhausted)
-                        return false;
-                    continue;
-                }
             if (!budget.take())
                 return false;
             base[depth] = 0;
@@ -484,6 +617,11 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         }
         if (!masks[depth])
         {
+            if (!testing)
+            {
+                testing = true;
+                untested = depth;
+            }
             --depth;
             continue;
         }
@@ -493,7 +631,14 @@ MYMYR_HD bool search(const Group& grp, const MatchTemplates& t, u32 g, u32 k, co
         masks[depth] &= masks[depth] - 1;
         binding[variable] = static_cast<i32>(base[depth] + pick);
         if (!ready(grp, t, g, k, binding, state, derived, variable))
+        {
+            if (!testing)
+            {
+                testing = true;
+                untested = depth + 1;
+            }
             continue;
+        }
         if (static_cast<u32>(depth + 1) == vars)
             return true;
         ++depth;

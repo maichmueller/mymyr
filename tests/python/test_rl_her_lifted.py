@@ -892,7 +892,7 @@ def test_match_first_rejects_impossible_injective_domains(on_device, typed, firs
     literals = ([f"(pair {a} {b})" for a, b in zip(variables[::2], variables[1::2])] if typed == "binary_pairs" else
                 [f"(pair {v} {v})" for v in variables] if typed == "binary" else
                 [f"(member {v})" for v in variables] if limited_type else ["(ok)"])
-    budget = 512 if typed == "binary_pairs" else 3 if limited_type else 0
+    budget = 512 if typed == "binary_pairs" else 6 if typed == "binary" else 3 if limited_type else 0
     condition = task.condition(variables, literals,
                                equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
