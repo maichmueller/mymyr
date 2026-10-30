@@ -20,7 +20,7 @@ wheels (v0.1.0 has CPU wheels only), with the local version `<version>+cu13`, e.
   toolkit is needed;
 - the XLA FFI targets of `mymyr.rl.jax` and `mymyr.encoding.jax`; JAX and torch are installed separately. The wheels
   are tested with torch 2.14 for CUDA 13.0 loaded first in the same process;
-- about 1.3 GB per wheel: the device code of the three architectures is in the extension and again in the C++ SDK's
+- about 1.7 GB per wheel: the device code of the three architectures is in the extension and again in the C++ SDK's
   static library.
 
 PyPI has no `+cu13` files: ask for the version and add the release's assets as a source of packages, with
@@ -69,11 +69,14 @@ into a toolchain directory that later builds reuse, builds the wheel with the ve
 requirements, repairs it with auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and
 runs the CPU test suite on it with torch loaded first. It needs network access; its work directory takes about 1.2 GB
 per architecture for the build tree, which it removes before the test environment (about 4.5 GB) is installed, and the
-toolchain directory about 1.7 GB. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc
-compiles. Nearly all of that time is per architecture (cicc and ptxas; the front end that the architectures share is a
-few percent), so the three architectures of the release wheels take three times as long. `--stage compile --minutes N`
-stops the build cleanly N minutes after the script started (`--deadline T` at the Unix time T instead), `--stage resume` on the same work directory and toolchain
-resumes it and stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
+toolchain directory about 1.7 GB. Nearly all of the compile time is per architecture (cicc and ptxas; the front end
+that the architectures share is a few percent). With 18 build jobs, the architectures of each nvcc compile one after
+another and one compile of the largest kernels at a time, the three architectures of the release wheels compiled in
+84 minutes: the six compiles of the largest kernels ran one after another for 78 of them, alone for about the last
+20. `--nvcc-threads` builds the architectures of a compile at once and `--heavy-jobs` runs several compiles of the
+largest kernels side by side. `--stage compile --minutes N` stops the build cleanly N minutes after the script started
+(`--deadline T` at the Unix time T instead), `--stage resume` on the same work directory and toolchain resumes it and
+stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
 the CUDA wheel workflow splits each wheel across up to three jobs this way.
 
 From the repository root, with podman (`docker run` takes the same arguments):
