@@ -66,6 +66,7 @@ def _exercise_ops(compile_ops=False):
                 "refresh_sync": refresh,
                 "step": step,
                 "step_sync": step,
+                "step_out": (*_ops._step_outputs(table.label_width, states, True), *step),
                 "random_actions": (env.handle, env.draws, env.count, 0, None),
                 "clear_visited": (env.handle, states, None, env.visited, env.visited_count,
                                   env.visited_status, None),
