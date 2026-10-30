@@ -162,25 +162,45 @@ jobs:
 
   # The CUDA backend (C++23 device code, nvcc 13.4 with GCC 16 as its host compiler) compiles without a GPU to run it
   # on. Pull requests compile PTX for sm_80 (the front end and all template instantiations); main and manual runs
-  # also assemble SASS, one job per architecture (sm_80, sm_90). The successor kernels are instantiated in generated
-  # units of at most about 2.4 GB and 7 minutes of nvcc time (cuda/lifted_units.cmake), except four kernels that need
-  # 5 to 7 GB. A hosted runner has 4 vCPUs and 16 GB, so two ordinary CUDA compiles run at a time (the pool
-  # cuda_compile) next to one of the large kernels (the pool cuda_compile_heavy); the C++ compiles stay parallel.
+  # also assemble SASS, one job per architecture (sm_80, sm_90).
+  #
+  # Time: the successor kernels are instantiated in about 70 generated units (cuda/lifted_units.cmake), most of the
+  # build: for SASS sm_90 up to 12 minutes of nvcc time and 3.5 GB each, except six kernels of up to 5 GB (sm_80 takes
+  # about 0.7 of the time). A hosted runner has 4 vCPUs and 16 GB, so three ordinary CUDA compiles run at a time (the
+  # pool cuda_compile) next to one of the large kernels (the pool cuda_compile_heavy), at most about 13 GB; the C++
+  # compiles stay parallel. A build from scratch takes about 45 minutes for PTX, 80 for SASS sm_80 and 125 for SASS
+  # sm_90.
+  #
+  # The compiles go through ccache, whose directory is cached per toolchain and architecture: a run recompiles only
+  # the units whose sources, flags or compilers changed (with the successor kernels' sources unchanged, SASS sm_90
+  # takes about 30 minutes). Runs on main and manual runs save the entries they used (about 0.6 GB per SASS job) and
+  # delete the cache they restored, so that each branch keeps one cache per job and the other caches of the repository
+  # are not evicted; pull requests restore the cache of their base branch. The build stops cleanly 225 minutes after
+  # the job starts (ci/run_until.py), before the time limit, so that a run on main or a manual run saves what it
+  # compiled: the job then fails, and running it again continues the build from the cache.
   cuda-build:
     name: Linux CUDA 13.4 compile-only, ${{ matrix.name }}
     needs: deps
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
-    timeout-minutes: 150
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      # deleting the compiler cache that a run has replaced
+      actions: write
+    env:
+      CCACHE_MAXSIZE: 3G
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '{"include":[{"name":"PTX sm_80","archs":"80-virtual"},{"name":"SASS sm_80","archs":"80"},{"name":"SASS sm_90","archs":"90"}]}' || '{"include":[{"name":"PTX sm_80","archs":"80-virtual"}]}') }}
     steps:
+      - name: Note the start of the job
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
       - name: Install build tools and the CUDA toolkit
         run: |
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends ninja-build git ca-certificates curl python3 python3-venv
+          apt-get install -y -qq --no-install-recommends ninja-build git ca-certificates curl python3 python3-venv ccache
           python3 -m venv /opt/cmake-venv
           /opt/cmake-venv/bin/pip install --quiet 'cmake>=4.4'
           echo /opt/cmake-venv/bin >> "$GITHUB_PATH"
@@ -190,6 +210,12 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends cuda-nvcc-13-4 cuda-cudart-dev-13-4 cuda-cccl-13-4 libcurand-dev-13-4
           /usr/local/cuda-13.4/bin/nvcc --version | tail -2
+          ccache --version | head -1
+          {
+            echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ci-ccache"
+            echo "NVCC_VERSION=$(/usr/local/cuda-13.4/bin/nvcc --version | sed -n 's/.*, V\([0-9.]*\)$/\1/p')"
+            echo "GCC_VERSION=$(g++ -dumpfullversion)"
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Restore the dependency prefix
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -197,16 +223,63 @@ jobs:
           path: ${{ github.workspace }}/.ci-deps/release
           key: deps-release-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
           fail-on-cache-miss: true
+      # the latest cache of this job: of this branch, or of the base or default branch
+      - name: Restore the compiler cache
+        id: ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-ccache
+          key: ccache-cuda-${{ env.NVCC_VERSION }}-gcc${{ env.GCC_VERSION }}-${{ matrix.archs }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-cuda-${{ env.NVCC_VERSION }}-gcc${{ env.GCC_VERSION }}-${{ matrix.archs }}-
       - name: Configure
         run: |
           cmake -S . -B build/cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release" \
             -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.4/bin/nvcc \
             -DCMAKE_CUDA_HOST_COMPILER="$(command -v g++)" \
-            "-DCMAKE_JOB_POOLS=cuda_compile=2;cuda_compile_heavy=1" \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_JOB_POOLS=cuda_compile=3;cuda_compile_heavy=1" \
             -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}"
       - name: Build
-        run: cmake --build build/cuda 2>&1 | tee build/cuda/build.log
+        run: |
+          ccache --zero-stats > /dev/null
+          status=0
+          python3 -I ci/run_until.py "$((JOB_START + 225 * 60))" -- cmake --build build/cuda 2>&1 |
+            tee build/cuda/build.log || status=$?
+          if [ "$status" -eq 75 ]; then
+            echo "::error::The build stopped at its time limit. Run the job again: it continues from the compiles saved in the cache."
+          fi
+          exit "$status"
+      # what this run compiled or found, without the entries it did not use
+      - name: Compiler cache statistics
+        if: ${{ !cancelled() }}
+        id: ccache-stats
+        run: |
+          ccache --show-stats
+          ccache --evict-older-than "$(($(date +%s) - JOB_START))s"
+          echo "misses=$(ccache --print-stats | sed -n 's/^cache_miss\t//p')" >> "$GITHUB_OUTPUT"
+      - name: Save the compiler cache
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.ccache-stats.outputs.misses != '0' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+      - name: Delete the replaced compiler cache
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.ccache-stats.outputs.misses != '0' && steps.ccache.outputs.cache-matched-key != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD_KEY: ${{ steps.ccache.outputs.cache-matched-key }}
+        # only a cache of this branch: one restored from the base or default branch stays
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -G \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            --data-urlencode "key=$OLD_KEY" --data-urlencode "ref=$GITHUB_REF" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches") || true
+          case "$code" in
+            200) echo "deleted the cache $OLD_KEY of $GITHUB_REF" ;;
+            404) echo "the cache $OLD_KEY is not one of $GITHUB_REF" ;;
+            *) echo "::warning::could not delete the cache $OLD_KEY (HTTP $code)" ;;
+          esac
       - name: Check for warnings
         run: ci/check_no_warnings.sh build/cuda/build.log
 
