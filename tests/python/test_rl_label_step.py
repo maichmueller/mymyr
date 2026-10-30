@@ -207,7 +207,10 @@ def test_label_zero_arity_goal_and_dead_end(autoreset, dead_end, terminal):
     env = rt.BatchedEnv(tasks[1], 2, actions="label", autoreset=False, goals=True,
                         dead_end=dead_end, dead_end_terminal=terminal, step_reward=-1.0,
                         dead_end_reward=-7.0)
-    env.goal_pos.fill_(-1)
+    # an unreachable goal: every fluent slot of the instance, but finish deletes ready when it adds done
+    slots = tasks[1].num_atoms
+    env.goal_pos.zero_()
+    env.goal_pos[:, 0] = (1 << slots) - 1
     env.refresh()
     schema = torch.zeros(2, dtype=torch.int32)
     binding = torch.empty((2, 0), dtype=torch.int32)
