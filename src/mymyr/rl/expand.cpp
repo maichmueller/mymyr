@@ -408,7 +408,7 @@ struct ScratchSink
         if (!fits)
         {
             words_needed = std::max(words_needed, exact_width(cur, nw, d, tmp));
-            std::memset(succ.data() + at, 0, static_cast<usize>(W + NN) * sizeof(u64));
+            std::fill_n(succ.data() + at, static_cast<usize>(W + NN), u64{0});
         }
         if (want_hash)
         {
@@ -753,17 +753,17 @@ void expand_impl(const Table& table, StateBatchView in, const i32* ids, Expansio
                     continue;
                 const u64 n = std::min(c.rows, out.capacity - dst);
                 if (out.succ)
-                    std::memcpy(out.succ + dst * RW, m.succ.data() + c.first_row * RW, n * RW * sizeof(u64));
+                    std::copy_n(m.succ.data() + c.first_row * RW, n * RW, out.succ + dst * RW);
                 if (out.parent)
-                    std::memcpy(out.parent + dst, m.parent.data() + c.first_row, n * sizeof(i32));
+                    std::copy_n(m.parent.data() + c.first_row, n, out.parent + dst);
                 if (out.schema)
-                    std::memcpy(out.schema + dst, m.schema.data() + c.first_row, n * sizeof(i32));
+                    std::copy_n(m.schema.data() + c.first_row, n, out.schema + dst);
                 if (out.binding)
-                    std::memcpy(out.binding + dst * L, m.binding.data() + c.first_row * L, n * L * sizeof(i32));
+                    std::copy_n(m.binding.data() + c.first_row * L, n * L, out.binding + dst * L);
                 if (out.goal)
-                    std::memcpy(out.goal + dst, m.goal.data() + c.first_row, n * sizeof(u8));
+                    std::copy_n(m.goal.data() + c.first_row, n, out.goal + dst);
                 if (out.derived)
-                    std::memcpy(out.derived + dst * DW, m.derived.data() + c.first_row * DW, n * DW * sizeof(u64));
+                    std::copy_n(m.derived.data() + c.first_row * DW, n * DW, out.derived + dst * DW);
                 if (out.succ_hash)
                     std::copy_n(m.hashes.data() + c.first_row, n, out.succ_hash + dst);
                 if (out.noop)

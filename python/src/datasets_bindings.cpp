@@ -370,7 +370,7 @@ StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stat
         a.words = L.words - NN;
         a.numeric_words = NN;
         a.state_words.resize(N * L.words);
-        for (u64 r = 0; r < N; ++r)
+        for (u64 r = 0; r < N && L.words; ++r)
             std::memcpy(a.state_words.data() + r * L.words, L.data + r * L.stride, u64{L.words} * sizeof(u64));
     }
     a.forward_targets = take_required<u32>(arrays, "forward_targets", 1, what);
@@ -518,8 +518,11 @@ nb::dict pack_tuple_graphs(std::span<const TupleGraph* const> graphs)
         at[k] = layout.add(totals[k], sizeof(u32));
     auto block = Block::make(std::max<u64>(layout.bytes, 1));
     auto* base = reinterpret_cast<unsigned char*>(block->data());
-    std::memcpy(base + at_meta, meta.data(), meta.size() * sizeof(u32));
-    std::memcpy(base + at_sizes, sizes.data(), sizes.size() * sizeof(u64));
+    if (G)  // meta and sizes are empty without graphs
+    {
+        std::memcpy(base + at_meta, meta.data(), meta.size() * sizeof(u32));
+        std::memcpy(base + at_sizes, sizes.data(), sizes.size() * sizeof(u64));
+    }
     {
         nb::gil_scoped_release release;
         std::array<u64, 11> pos{};

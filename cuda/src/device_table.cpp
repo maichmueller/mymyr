@@ -59,7 +59,8 @@ void DeviceTaskTable::upload_all()
     auto* h = static_cast<std::byte*>(staging.data());
     for (u32 i = 0; i < I; ++i)
         std::memcpy(h + at[i], m_bundles[i]->block(), m_bundles[i]->bytes());
-    std::memcpy(h + m_views_offset, m_views.data(), u64{I} * sizeof(rl::dev::TaskView));
+    if (I)
+        std::memcpy(h + m_views_offset, m_views.data(), u64{I} * sizeof(rl::dev::TaskView));
     check(cudaMemcpyAsync(block.data(), h, bytes, cudaMemcpyHostToDevice, s), "cudaMemcpyAsync (task table upload)");
     m_ready.record(s);
     check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // the staging buffer goes

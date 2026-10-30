@@ -86,7 +86,7 @@ public:
     {
         if (text.size() > k_capacity)
             throw std::length_error("ArrayBundle: the name '" + std::string(text) + "' is longer than 31 characters");
-        std::memcpy(m_text.data(), text.data(), text.size());
+        std::ranges::copy(text, m_text.begin());
         m_size = static_cast<u8>(text.size());
     }
     ArrayName(const char* text) : ArrayName(std::string_view(text)) {}

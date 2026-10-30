@@ -2219,7 +2219,8 @@ void bind_cuda(nb::module_& parent)
             }
             MemoryResource& mr = kind == MemoryKind::Managed ? c->ctx->managed_memory() : c->ctx->pinned_memory();
             void* p = mr.allocate(std::max<u64>(bytes, 1), 64);
-            std::memcpy(p, arr.data(), bytes);
+            if (bytes)
+                std::memcpy(p, arr.data(), bytes);
             PyContextPtr keep = c;
             std::shared_ptr<void> owner(p, [keep, kind](void* q) {
                 MemoryResource& r = kind == MemoryKind::Managed ? keep->ctx->managed_memory() : keep->ctx->pinned_memory();

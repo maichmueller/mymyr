@@ -2020,7 +2020,8 @@ nb::object restore_state(nb::handle task, u64 fingerprint, std::string_view kind
         throw nb::value_error("mymyr: the state was pickled from a different task (content fingerprint mismatch)");
     usize n = payload.size() / sizeof(u64);
     std::vector<u64> raw(n);
-    std::memcpy(raw.data(), payload.c_str(), n * sizeof(u64));
+    if (n)
+        std::memcpy(raw.data(), payload.c_str(), n * sizeof(u64));
     const u64 F = T.compiled().layout.fluent_count;
     const u32 slots = T.atoms().fluent_slots();
     std::vector<u64> num;

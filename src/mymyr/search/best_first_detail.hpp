@@ -478,7 +478,7 @@ public:
         }
         u64* r = m_rec.data() + static_cast<usize>(ref) * stride();
         r[0] = id;
-        std::memcpy(r + 1, s.w, n * sizeof(u64));
+        std::copy_n(s.w, n, r + 1);
         std::fill(r + 1 + n, r + 1 + m_w, u64{0});
         if (m_nn)
             std::memcpy(r + 1 + m_w, s.num, m_nn * sizeof(u64));

@@ -1596,7 +1596,8 @@ std::vector<T> bytes_array(nb::handle state, const char* name)
     if (b.size() % sizeof(T))
         throw nb::value_error("mymyr: GoalTemplates: corrupt pickle state");
     std::vector<T> out(b.size() / sizeof(T));
-    std::memcpy(out.data(), b.c_str(), b.size());
+    if (!out.empty())
+        std::memcpy(out.data(), b.c_str(), b.size());
     return out;
 }
 
