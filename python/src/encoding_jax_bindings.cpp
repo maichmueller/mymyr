@@ -593,6 +593,9 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 history, i64 tar
         if (rows != c.graphs && rows != 1)
             fail(std::string("'") + operand::names[k] + "' must have one row per state or one row for all");
         const u32 capacity = static_cast<u32>(dims[1]), width = static_cast<u32>(dims[2]);
+        if (const u32 need = encoding::detail::k_constant_objects + enc.context().max_arity(); width < need)
+            fail(std::string("'") + operand::names[k] + "' has " + std::to_string(width) + " columns, at least " +
+                 std::to_string(need) + " are needed (3 + the widest predicate's arity)");
         return {static_cast<const i32*>(b.untyped_data()), rows == 1 && c.graphs != 1 ? 0 : u64{capacity} * width,
                 capacity, width};
     };
@@ -1022,6 +1025,7 @@ void bind_encoding_jax(nb::module_& parent)
             nb::dict d;
             d["instances"] = enc.table().size();
             d["derived_words"] = enc.context().max_derived_words();
+            d["constant_width"] = encoding::detail::k_constant_objects + enc.context().max_arity();
 #if defined(MYMYR_HAS_CUDA)
             try
             {
@@ -1046,7 +1050,8 @@ void bind_encoding_jax(nb::module_& parent)
             return d;
         },
         "handle"_a,
-        "What the Python side checks at trace time: instances, derived_words (the widest instance's), device_refusal "
+        "What the Python side checks at trace time: instances, derived_words (the widest instance's), constant_width "
+        "(the columns a constant literal needs at least), device_refusal "
         "(why the device does not encode the schema, or None), needs_derived (whether the device needs the rows' "
         "derived words without goal masks, with fluent goal masks, with derived goal masks too, then the same three "
         "with derived subgoal masks; None without the CUDA backend) and cuda (whether the CUDA target exists).");

@@ -420,16 +420,18 @@ unsatisfiable when it fails, `fixed="raise"` raises `ValueError`, and `fixed="en
 literal** of its row (and marks the row unsatisfiable when it fails, as `"decide"`). The constant literals are
 `GoalMasks.constants`, int32 `[N, K, 3 + A]` (`A` the widest domain predicate's arity): per row up to `K` literals, each
 its layer (0 for a goal), its table predicate id, 1 for a negative literal (else 0) and its instance-local objects
-padded with -1; a row's literals are strictly ascending and its unused rows -1 (`[1, K, 3 + A]` is one list for every
-row). They are encoded as the instance's goal encodes its constant part: in the plain relation, and in `[sat]` or
+padded with -1; a row's literals are strictly ascending, they end at its first row with a negative predicate, and
+from that row on all of its rows are -1 (`[1, K, 3 + A]` is one list for every row). Arrays wider than `3 + A` are
+fine, narrower ones raise `ValueError`. They are encoded as the instance's goal encodes its constant part: in the plain relation, and in `[sat]` or
 `[unsat]` by their fixed truth, merged with the masked literals of their cell. `instance_constants=True` adds the constant part of each row's instance goal to the row's constant
-literals, so that the instance's own goal literals as a row goal encode as the instance's goal does. With `"decide"` a
+literals (a part that fails marks the row unsatisfiable), so that the instance's own goal literals as a row goal encode
+as the instance's goal does. With `"decide"` a
 row goal differs from the instance's goal in its constant part: the instance's goal lists its static literals as
 constant tuples, such a row goal lists the slotted literals only; both have `goal_complete` 1. `encode(goals=)` takes
 the constant literals from the masks object (`goals.constants`), on the host, the device and in JAX alike; a plain
 tuple of masks has none. A constant literal that is not ascending, has a layer other than 0, a sign other than 0 or 1,
-an id out of range or a slot (the masks hold such a literal) raises `ValueError` on the host and is invalid input on
-the device. `literal_masks(source, predicates, objects, positive, rows, num_rows, task_ids=None, fixed="decide",
+an id out of range or a slot (the masks hold such a literal), and a row that is not all -1 after the end of a row's
+literals, raise `ValueError` on the host and are invalid input on the device. `literal_masks(source, predicates, objects, positive, rows, num_rows, task_ids=None, fixed="decide",
 instance_constants=False)` builds the same from arrays: table predicate ids `[K]` (indices into
 `table.predicate_names`), instance-local object ids `[K, k]` padded with -1, the sign and the row of each literal, and
 the instance of each row. `literal_slots(source, predicates, objects, task_ids=None)` is the lookup itself: the

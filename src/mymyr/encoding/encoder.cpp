@@ -572,15 +572,17 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(TaskPtr task, const FlatO
 
 void FlatEncoder::check_layer_inputs(const EncodeInput& in) const
 {
-    const auto check_constants = [](const ConstantInput& c, const char* what, bool masks)
+    // a literal has a column for each object of the widest predicate
+    const u32 width = detail::k_constant_objects + m_context->max_arity();
+    const auto check_constants = [width](const ConstantInput& c, const char* what, bool masks)
     {
         if (!c.rows)
             return;
         if (!masks)
             invalid(std::string("the constant literals of the ") + what + " need the " + what + " masks");
-        if (c.width < detail::k_constant_objects)
+        if (c.width < width)
             invalid(std::string("the constant literals of the ") + what + " have " + std::to_string(c.width) +
-                    " columns, at least " + std::to_string(detail::k_constant_objects) + " are needed");
+                    " columns, at least " + std::to_string(width) + " are needed (3 + the widest predicate's arity)");
         if (c.stride != 0 && c.stride < u64{c.capacity} * c.width)
             invalid(std::string("the row stride of the constant literals of the ") + what +
                     " is smaller than their rows");

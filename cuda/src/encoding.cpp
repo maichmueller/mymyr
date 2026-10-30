@@ -1198,15 +1198,18 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
-    const auto check_constants = [](const encoding::ConstantInput& c, const char* what, bool masks)
+    // a literal has a column for each object of the widest predicate
+    const u32 constant_width = encoding::detail::k_constant_objects + m_encoder->context().max_arity();
+    const auto check_constants = [constant_width](const encoding::ConstantInput& c, const char* what, bool masks)
     {
         if (!c.rows)
             return;
         if (!masks)
             invalid(std::string("the constant literals of the ") + what + " need the " + what + " masks");
-        if (c.width < encoding::detail::k_constant_objects)
+        if (c.width < constant_width)
             invalid(std::string("the constant literals of the ") + what + " have " + std::to_string(c.width) +
-                    " columns, at least " + std::to_string(encoding::detail::k_constant_objects) + " are needed");
+                    " columns, at least " + std::to_string(constant_width) +
+                    " are needed (3 + the widest predicate's arity)");
         if (c.stride != 0 && c.stride < u64{c.capacity} * c.width)
             invalid(std::string("the row stride of the constant literals of the ") + what +
                     " is smaller than their literals");

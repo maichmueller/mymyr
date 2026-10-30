@@ -1779,8 +1779,10 @@ def test_constant_literals_that_cannot_be_encoded_are_invalid_input_on_the_devic
     wrong_sign[row, 0, 2] = 2
     past_levels = layers.constants.copy()
     past_levels[next(g for g in range(len(rows)) if past_levels[g, 0, 1] >= 0), 0, 0] = 1
+    # a row's literals after a row of -1: past the end of its literals
+    past_end = np.concatenate([np.full_like(goals.constants[:, :1], -1), goals.constants], axis=1)
     for key, masks, constants in (("goals", goals, wrong_layer), ("goals", goals, wrong_sign),
-                                  ("subgoals", layers, past_levels)):
+                                  ("subgoals", layers, past_levels), ("goals", goals, past_end)):
         given = {"goals": goals, "subgoals": layers}
         given[key] = with_constants(masks, constants)
         with pytest.raises(ValueError, match="constant literal"):
@@ -1790,6 +1792,42 @@ def test_constant_literals_that_cannot_be_encoded_are_invalid_input_on_the_devic
         assert flagged.sizes["invalid_input"] and not torch.count_nonzero(flagged.entity_offsets).item()
         with pytest.raises(ValueError, match="constant literal"):
             encoder.encode(device_rows, **on_device)
+
+
+def test_constant_literals_narrower_than_the_widest_predicate_are_refused_before_a_launch(tmp_path):
+    dev = gpu()
+    task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
+    encoder = encoding.FlatRelationEncoder(task, max_goal_level=1, goal_derivations=ALL_GOALS,
+                                           target_sources=("goal", "subgoal"))
+    goals = encoding.goal_masks(encoder, goal_rows, fixed="encode")
+    layers = encoding.subgoal_masks(encoder, [rows_[:1] for rows_ in layer_rows], fixed="encode")
+    caps = exact_capacities(encoder.encode(rows, goals=goals, subgoals=layers), 2)
+    width = goals.constants.shape[2]
+    message = f"have 3 columns, at least {width} are needed"
+    narrow_goals = with_constants(goals, np.ascontiguousarray(goals.constants[:, :, :3]))
+    narrow_layers = with_constants(layers, np.ascontiguousarray(layers.constants[:, :, :3]))
+    device_rows = to_device(rows, dev)
+    for given in ({"goals": narrow_goals, "subgoals": layers}, {"goals": goals, "subgoals": narrow_layers}):
+        with pytest.raises(ValueError, match=message):
+            encoder.encode(rows, **given)
+        on_device = {k: device_masks(m, dev) for k, m in given.items()}
+        for capacities in (caps, None):
+            with pytest.raises(ValueError, match=message):
+                encoder.encode(device_rows, capacities=capacities, **on_device)
+    handle = rt.register(encoder)
+    g = [to_device(x, dev) for x in goals] + [None, None]
+    sg = [to_device(x, dev) for x in layers]
+    with pytest.raises(ValueError, match=message):
+        torch.ops.mymyr.encode_flat(
+            handle, device_rows, None, None, *g, *sg, None, None, *([None] * 6),
+            caps["graphs"], caps["entities"], caps["args"], caps["targets"], 0,
+            goal_constants=to_device(narrow_goals.constants, dev))
+    rt.unregister(handle)
+    # a ring holds rows without subgoal layers
+    flat = encoding.FlatRelationEncoder(task, goal_derivations=ALL_GOALS, target_sources=("goal",))
+    ring = flat.device_stream(len(rows), goals=True, constant_literals=goals.constants.shape[1])
+    with pytest.raises(ValueError, match="constant goal literals of the appended rows"):
+        ring.append(device_rows, goals=device_masks(narrow_goals, dev))
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])

@@ -1384,3 +1384,13 @@ def test_constant_literals_of_goals_and_layers_equal_the_host(tmp_path, platform
     caps = exact_capacities(encoder.encode(rows, goals=goals), 2)
     flagged = ej.encode(encoder, put(halves(rows), platform), capacities=caps, goals=bad)
     assert flagged.sizes["invalid_input"]
+    # a row's literals after a row of -1: past the end of its literals
+    past_end = np.concatenate([np.full_like(goals.constants[:, :1], -1), goals.constants], axis=1)
+    bad = encoding.GoalMasks(*goals, None, None, goals.unsatisfiable, constants=past_end)
+    flagged = ej.encode(encoder, put(halves(rows), platform), capacities=caps, goals=bad)
+    assert flagged.sizes["invalid_input"]
+    # narrower than 3 + the widest predicate's arity: refused before the call
+    narrow = encoding.GoalMasks(*goals, None, None, goals.unsatisfiable,
+                                constants=np.ascontiguousarray(goals.constants[:, :, :3]))
+    with pytest.raises(ValueError, match=f"has 3 columns, at least {goals.constants.shape[2]} are needed"):
+        ej.encode(encoder, put(halves(rows), platform), capacities=caps, goals=narrow)

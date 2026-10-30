@@ -573,5 +573,39 @@ def test_invalid_constant_literals_are_refused():
     for message, constants in cases.items():
         with pytest.raises(ValueError, match=f"^mymyr: encoding: the goal of row 0: constant literal [01] .*{message}"):
             encoder.encode([state], goals=constant_masks(task, constants))
-    with pytest.raises(ValueError, match="at least 3 are needed"):
+    width = 3 + max(rl.as_table(task).predicate_arities)
+    with pytest.raises(ValueError, match=f"have 2 columns, at least {width} are needed"):
         encoder.encode([state], goals=constant_masks(task, [[0, heavy]]))
+    # the rows after a row's literals are padding: all -1
+    end = [-1] * len(good[0])
+    encoder.encode([state], goals=constant_masks(task, [good[0], end, end]))
+    for constants in ([good[0], end, good[1]], [good[0], [-1, -1, -1, *t1]]):
+        with pytest.raises(ValueError, match="constant literal 1 ends the literals .* not all -1"):
+            encoder.encode([state], goals=constant_masks(task, constants))
+
+
+def test_constant_literals_narrower_than_the_widest_predicate_are_refused_before_they_are_read():
+    task = goals_task("static_true")
+    table = rl.as_table(task)
+    # a binary predicate whose objects lie past a row of three columns, with variants that test its truth
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=("plain", "satisfied"))
+    narrow = constant_masks(task, [[0, table.predicate_names.index("road"), 0]])
+    message = f"have 3 columns, at least {3 + max(table.predicate_arities)} are needed"
+    state = task.initial_state
+    with pytest.raises(ValueError, match=message):
+        encoder.encode([state], goals=narrow)
+    with pytest.raises(ValueError, match=message):
+        encoder.stream().append([state], goals=narrow)
+    with pytest.raises(ValueError, match=message):
+        encoder.mutable_stream().append([0], [state], goals=narrow)
+
+
+def test_a_failing_constant_part_of_the_instance_makes_the_goals_that_keep_it_unsatisfiable():
+    task = goals_task("static_false")  # (heavy t2) is static and false
+    assert task.encoding_goal_unsatisfiable
+    for fixed in ("decide", "encode", "raise"):
+        kept = encoding.goal_masks(task, [[], ["(lit a)"]], fixed=fixed, instance_constants=True)
+        assert kept.unsatisfiable.tolist() == [True, True]
+        assert not encoding.goal_masks(task, [[], ["(lit a)"]], fixed=fixed).unsatisfiable.any()
+    holds = encoding.goal_masks(goals_task("static_true"), [[]], instance_constants=True)
+    assert len(holds.constants[0]) and not holds.unsatisfiable.any()

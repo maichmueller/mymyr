@@ -414,8 +414,9 @@ def _goals(goals: Any, graphs: int) -> tuple[Any, Any, Any, Any]:
     return masks[0], masks[1], masks[2], masks[3]
 
 
-def _constants(masks: Any, name: str, graphs: int) -> Any:
-    """The constant literals of a GoalMasks or LayerMasks as an int32 operand [N or 1, K, C], [0] without."""
+def _constants(masks: Any, name: str, graphs: int, width: int) -> Any:
+    """The constant literals of a GoalMasks or LayerMasks as an int32 operand [N or 1, K, C], [0] without; C is at
+    least ``width``."""
     constants = getattr(masks, "constants", None)
     if constants is None:
         return jnp.zeros((0,), jnp.int32)
@@ -431,6 +432,9 @@ def _constants(masks: Any, name: str, graphs: int) -> Any:
     if c.ndim != 3 or c.shape[0] not in (graphs, 1):
         raise _error(f"'{name}' must be int32 [N, K, C] with one row per state ({graphs}) or one row for all, not of "
                      f"shape {tuple(c.shape)}")
+    if c.shape[1] != 0 and c.shape[2] < width:
+        raise _error(f"'{name}' has {c.shape[2]} columns, at least {width} are needed (3 + the widest predicate's "
+                     "arity)")
     return c
 
 
@@ -733,8 +737,8 @@ def encode(
         live_count = jnp.clip(jnp.asarray(live).reshape(()), 0, graphs).astype(jnp.int32)
         live_words = jnp.stack([live_count.astype(jnp.uint32), jnp.uint32(0)])
     operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps,
-                live_words, _constants(goals, "goals.constants", graphs),
-                _constants(subgoals, "subgoals.constants", graphs))
+                live_words, _constants(goals, "goals.constants", graphs, info["constant_width"]),
+                _constants(subgoals, "subgoals.constants", graphs, info["constant_width"]))
     static = (
         tuple(n for n in _ARRAYS if reg.layout.present(n)),
         reg.layout.relations,

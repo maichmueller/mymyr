@@ -671,14 +671,20 @@ struct RowLayers
     ConstantRows constants{};
 };
 
-/// The constant literals of row g of `in`: its rows before the first one with a negative predicate.
+/// The constant literals of row g of `in`: its rows before the first one with a negative predicate, the end of its
+/// literals, from which on its rows must be all -1. A row with any other entry there keeps all of its rows, so that
+/// constant_fault refuses it (ConstantFault::PastEnd).
 MYMYR_HD ConstantRows constant_rows(const encoding::ConstantInput& in, u64 g)
 {
-    ConstantRows out{in.rows + g * in.stride, 0, in.width};
     if (!in.rows)
         return {nullptr, 0, in.width};
+    ConstantRows out{in.rows + g * in.stride, 0, in.width};
     while (out.count < in.capacity && out.row(out.count)[k_constant_predicate] >= 0)
         ++out.count;
+    for (u32 k = out.count; k < in.capacity; ++k)
+        for (u32 j = 0; j < in.width; ++j)
+            if (out.row(k)[j] != -1)
+                return {out.rows, in.capacity, in.width};
     return out;
 }
 
@@ -1719,6 +1725,7 @@ enum class ConstantFault : u8
     Sign,       // a sign column other than 0 and 1
     Invalid,    // the predicate, an object or the padding is out of range (LiteralKind::Invalid)
     Slotted,    // the atom has a fluent or derived slot: the masks hold such a literal
+    PastEnd,    // a row past the end of the literals (from the first negative predicate on) is not all -1
 };
 
 /// The first fault of the constant literals `rows` of instance `v`, whose layers must lie in [0, layers); `at` is the
@@ -1728,6 +1735,8 @@ MYMYR_HD ConstantFault constant_fault(const InstanceView& v, const ConstantRows&
     for (at = 0; at < rows.count; ++at)
     {
         const i32* row = rows.row(at);
+        if (row[k_constant_predicate] < 0)
+            return ConstantFault::PastEnd;
         if (at != 0)
         {
             const i32* before = rows.row(at - 1u);
@@ -2576,35 +2585,19 @@ MYMYR_HD u32 fill_numeric_cell(const InstanceView& v, const Cell& c, const RowIn
     return n;
 }
 
-/// Writes the arguments of the tuples of goal cell `c` in this graph to `dst` for a goal cell of K objects (K ==
-/// k_any_arity: of c.logical_arity objects), with goal targets when Target, and returns the number of tuples: the
-/// cell's mask tuples (ascending slots) merged with the constant literals it lists, in lexicographic order of their
-/// objects. With goal targets each tuple starts with its goal entity, the ids `first_target`,
-/// `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a
-/// nullary predicate ends with the entity `auxiliary` (unless k_no_entity). Writes count * c.arity entries.
-template<class I, u32 K, bool Target, bool Layered>
-MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
-                               u64 auxiliary, u64 first_target, u64 pred, I* dst)
+/// Writes the tuples of a goal cell of K objects (K == k_any_arity: of `arity` objects) to `dst`, one per call with
+/// the objects of the tuple; `n` counts them. With goal targets (Target) each tuple starts with its goal entity, the ids
+/// `first_target`, `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it;
+/// the tuple of a nullary predicate ends with the entity `auxiliary` (unless k_no_entity).
+template<class I, u32 K, bool Target>
+struct GoalTupleWriter
 {
-    const GoalWords g = goal_words(v, in);
-    const u64 A = v.max_arity;
-    const u32 arity = K == k_any_arity ? c.logical_arity : K;
-    const i32* table = goal_op_derived(c.op) ? v.derived_args : v.slot_args;
-    const ConstantRange r = constant_range<Layered>(c, g, in);
-    const ConstantRows& constants = r.rows;
-    u32 k = r.first;
-    const u32 last = r.last;
-    const bool check = !r.listed || placement_applies<Layered>(v, in);
-    // the next constant literal the cell lists (k == last: none is left)
-    auto next_constant = [&]
-    {
-        if (check)
-            while (k < last && !range_listed<Layered>(v, c, g, in, r, k))
-                ++k;
-    };
-    next_constant();
-    u32 n = 0;
-    auto emit = [&](const i32* row)
+    I* dst;
+    u32 n;
+    u32 arity;
+    u64 entity_base, auxiliary, first_target, pred;
+
+    MYMYR_HD_HOT void operator()(const i32* row)
     {
         if constexpr (Target)
             *dst++ = static_cast<I>(first_target + n);
@@ -2633,7 +2626,29 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
                 dst[k] = static_cast<I>(entity_base + static_cast<u64>(row[k]));
             dst += K;
         }
+    }
+};
+
+/// fill_goal_cell_of for a cell with constant literals to merge (`r`, its constant_range, is not empty). Kept out of
+/// line: the goal cells without constant literals are the common ones.
+template<class I, u32 K, bool Target, bool Layered>
+MYMYR_HD_COLD u32 fill_goal_cell_merged(const InstanceView& v, const Cell& c, const RowInput& in, const GoalWords& g,
+                                        const ConstantRange& r, GoalTupleWriter<I, K, Target> emit)
+{
+    const u64 A = v.max_arity;
+    const i32* table = goal_op_derived(c.op) ? v.derived_args : v.slot_args;
+    const ConstantRows& constants = r.rows;
+    u32 k = r.first;
+    const u32 last = r.last;
+    const bool check = !r.listed || placement_applies<Layered>(v, in);
+    // the next constant literal the cell lists (k == last: none is left)
+    auto next_constant = [&]
+    {
+        if (check)
+            while (k < last && !range_listed<Layered>(v, c, g, in, r, k))
+                ++k;
     };
+    next_constant();
     if (const GoalCellWords words = goal_cell_words<Layered>(c, g, in); words.mask)
         for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
         {
@@ -2643,7 +2658,7 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
                 const u64 s = static_cast<u64>(w) * 64u + lowest_bit64(bits);
                 bits &= bits - 1u;
                 const i32* row = table + s * A;
-                while (k < last && tuple_before(constants.row(k) + k_constant_objects, row, arity))
+                while (k < last && tuple_before(constants.row(k) + k_constant_objects, row, emit.arity))
                 {
                     emit(constants.row(k++) + k_constant_objects);
                     next_constant();
@@ -2653,7 +2668,32 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
         }
     for (; k < last; next_constant())
         emit(constants.row(k++) + k_constant_objects);
-    return n;
+    return emit.n;
+}
+
+/// Writes the arguments of the tuples of goal cell `c` in this graph to `dst` for a goal cell of K objects (K ==
+/// k_any_arity: of c.logical_arity objects), with goal targets when Target, and returns the number of tuples: the
+/// cell's mask tuples (ascending slots) merged with the constant literals it lists, in lexicographic order of their
+/// objects. With goal targets each tuple starts with its goal entity, the ids `first_target`,
+/// `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a
+/// nullary predicate ends with the entity `auxiliary` (unless k_no_entity). Writes count * c.arity entries.
+template<class I, u32 K, bool Target, bool Layered>
+MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
+                               u64 auxiliary, u64 first_target, u64 pred, I* dst)
+{
+    const GoalWords g = goal_words(v, in);
+    GoalTupleWriter<I, K, Target> emit{dst, 0, K == k_any_arity ? c.logical_arity : K, entity_base, auxiliary,
+                                       first_target, pred};
+    if (const ConstantRange r = constant_range<Layered>(c, g, in); r.first != r.last)
+        return fill_goal_cell_merged<I, K, Target, Layered>(v, c, in, g, r, emit);
+    // the cell's mask tuples alone
+    const u64 A = v.max_arity;
+    const i32* table = goal_op_derived(c.op) ? v.derived_args : v.slot_args;
+    if (const GoalCellWords words = goal_cell_words<Layered>(c, g, in); words.mask)
+        for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
+            for (u64 bits = words.word(w); bits; bits &= bits - 1u)
+                emit(table + (static_cast<u64>(w) * 64u + lowest_bit64(bits)) * A);
+    return emit.n;
 }
 
 template<class I, bool Target, bool Layered>

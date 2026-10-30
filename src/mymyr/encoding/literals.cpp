@@ -135,10 +135,22 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
     if (placement.instance_constants)
         for (u32 row = 0; row < out.rows; ++row)
         {
-            const detail::ConstantRows own =
-                instance_goal_constants(context, placement.instances.empty() ? 0 : static_cast<u32>(placement.instances[row]));
+            const u32 instance = placement.instances.empty() ? 0 : static_cast<u32>(placement.instances[row]);
+            const detail::ConstantRows own = instance_goal_constants(context, instance);
+            const detail::InstanceView iv = detail::instance_view(v, instance);
             for (u32 k = 0; k < own.count; ++k)
-                constants[row].emplace_back(own.row(k), own.row(k) + width);
+            {
+                const i32* literal = own.row(k);
+                constants[row].emplace_back(literal, literal + width);
+                // a constant literal of the instance's goal that fails makes the row's goal unsatisfiable
+                const u32 arity = iv.literal_ranges
+                                      ? iv.literal_ranges[static_cast<u64>(literal[detail::k_constant_predicate]) *
+                                                              detail::k_literal_columns +
+                                                          detail::k_literal_arity]
+                                      : 0u;
+                if (!detail::constant_holds(iv, literal, arity))
+                    out.unsatisfiable[u64{row} * out.layers] = 1;
+            }
         }
     for (u64 i = 0; i < n; ++i)
     {
@@ -241,6 +253,9 @@ std::string constant_fault_text(const EncodingContext& context, u32 instance, co
                std::to_string(layers) + ")";
     case detail::ConstantFault::Sign:
         return which + "has the sign " + std::to_string(row[detail::k_constant_negative]) + ", not 0 or 1";
+    case detail::ConstantFault::PastEnd:
+        return which + "ends the literals (its predicate is negative), but a row from it on is not all -1: the "
+                       "rows after a row's literals are padding";
     case detail::ConstantFault::Invalid:
         return which + "is invalid: " +
                invalid_reason(context, instance, row[detail::k_constant_predicate], objects);
