@@ -892,7 +892,7 @@ def test_match_first_rejects_impossible_injective_domains(on_device, typed, firs
     literals = ([f"(pair {a} {b})" for a, b in zip(variables[::2], variables[1::2])] if typed == "binary_pairs" else
                 [f"(pair {v} {v})" for v in variables] if typed == "binary" else
                 [f"(member {v})" for v in variables] if limited_type else ["(ok)"])
-    budget = 512 if typed == "binary_pairs" else 3 if limited_type else 0
+    budget = 512 if typed == "binary_pairs" else 7 if typed == "binary" else 4 if limited_type else 0
     condition = task.condition(variables, literals,
                                equalities=[(a, b, False) for i, a in enumerate(variables) for b in variables[i + 1:]])
     templates = rl.GoalTemplates.from_conditions(task, [[condition]])
@@ -1008,7 +1008,7 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
     reusable = task.condition(variables, literals)
     templates = rl.GoalTemplates.from_conditions(task, [[impossible, reusable]])
     rows = np.asarray(task.encode([task.initial_state]))
-    expected = rl.match_first(rows, None, templates, first=first, max_steps=6)
+    expected = rl.match_first(rows, None, templates, first=first, max_steps=7)
     assert int(expected.status) == 0 and expected.count.tolist() == [1]
     assert expected.found.tolist() == ([True] if first else [[False, True]])
     assert expected.template.tolist() == ([1] if first else [[-1, 1]])
@@ -1016,7 +1016,7 @@ def test_match_first_shared_type_across_predicates_allows_object_reuse(on_device
     if on_device:
         torch = cuda_match_runtime()
         actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None,
-                                templates.to("cuda:0"), first=first, max_steps=6)
+                                templates.to("cuda:0"), first=first, max_steps=7)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
 
@@ -1082,6 +1082,132 @@ def test_match_first_pair_budget_with_small_and_large_template_tables(on_device,
                                 templates.to("cuda:0"), capacity=1, max_steps=max_steps)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("variables, steps", [(2, 14), (3, 9)])
+def test_match_first_skips_tiles_without_candidates(on_device, variables, steps):
+    # 200 objects in 7 tiles, the candidates in the sixth: a table with more than two variables jumps over the empty
+    # tiles (a scan, a jump and a trial per variable), a table of two variables scans them.
+    domain = mymyr.Domain.from_string("""(define (domain tiles)
+        (:requirements :adl) (:predicates (ok) (member ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    objects = " ".join(f"o{i}" for i in range(200))
+    members = " ".join(f"(member o{i})" for i in range(170, 173))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem tiles) (:domain tiles)
+        (:objects {objects}) (:init (ok) {members}) (:goal (ok)))"""))
+    names = [f"?v{i}" for i in range(variables)]
+    condition = task.condition(names, [f"(member {v})" for v in names])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    short = rl.match_first(rows, None, templates, max_steps=steps - 1)
+    assert int(short.status) == 8 and not short.found.any()
+    enough = rl.match_first(rows, None, templates, max_steps=steps)
+    assert int(enough.status) == 0
+    want = [o.index for o in next(iter(task.bindings(condition, task.initial_state, limit=1)))]
+    assert enough.binding[0, 0].tolist() == want == [170] * variables
+    if on_device:
+        torch = cuda_match_runtime()
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        device = templates.to("cuda:0")
+        for budget, expected in [(steps - 1, short), (steps, enough)]:
+            actual = rl.match_first(x, None, device, max_steps=budget)
+            for host, gpu in zip(expected, actual):
+                np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("second", [2, 4])
+def test_match_first_counts_supporters_of_shared_variables(on_device, second):
+    # Two distinct locations holding four distinct packages each: with one crowded location the template is rejected
+    # before any binding is tried; with two, the first binding is that of Task.bindings.
+    domain = mymyr.Domain.from_string("""(define (domain depots)
+        (:requirements :adl) (:predicates (ok) (at ?x ?l))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    at = [f"(at p{i} l0)" for i in range(6)] + [f"(at q{i} l1)" for i in range(second)] + ["(at r0 l2)"]
+    objects = [f"p{i}" for i in range(6)] + [f"q{i}" for i in range(second)] + ["r0", "l0", "l1", "l2"]
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem depots) (:domain depots)
+        (:objects {" ".join(objects)}) (:init (ok) {" ".join(at)}) (:goal (ok)))"""))
+    names = [f"?v{i}" for i in range(10)]
+    literals = [f"(at {names[i]} ?v1)" for i in (0, 2, 3, 4)] + [f"(at {names[i]} ?v6)" for i in (5, 7, 8, 9)]
+    condition = task.condition(names, literals,
+                               equalities=[(a, b, False) for i, a in enumerate(names) for b in names[i + 1:]])
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    want = [[o.index for o in b] for b in task.bindings(condition, task.initial_state, limit=1)]
+    expected = rl.match_first(rows, None, templates, max_steps=2 if second == 2 else None)
+    assert int(expected.status) == 0
+    assert bool(expected.found[0, 0]) == bool(want) == (second == 4)
+    if want:
+        assert expected.binding[0, 0].tolist() == want[0]
+    if on_device:
+        torch = cuda_match_runtime()
+        actual = rl.match_first(torch.tensor(rows.view(np.int64), device="cuda:0"), None, templates.to("cuda:0"),
+                                max_steps=2 if second == 2 else None)
+        for host, gpu in zip(expected, actual):
+            np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+def assert_exhausts_below(task, condition, steps, on_device):
+    # The search needs exactly `steps` on the host and, bitwise equal, on the device: one step less exhausts it.
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    short = rl.match_first(rows, None, templates, max_steps=steps - 1)
+    assert int(short.status) == 8 and not short.found.any()
+    enough = rl.match_first(rows, None, templates, max_steps=steps)
+    assert int(enough.status) == 0
+    want = [[o.index for o in b] for b in task.bindings(condition, task.initial_state, limit=1)]
+    assert bool(enough.found[0, 0]) == bool(want)
+    if want:
+        assert enough.binding[0, 0].tolist() == want[0]
+    if on_device:
+        torch = cuda_match_runtime()
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        device = templates.to("cuda:0")
+        for budget, expected in [(steps - 1, short), (steps, enough)]:
+            actual = rl.match_first(x, None, device, max_steps=budget)
+            for host, gpu in zip(expected, actual):
+                np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("literals, steps", [(["(p ?a)", "(p ?b)", "(p ?c)"], 9),
+                                             (["(mark ?b)", "(conn ?a ?b)", "(mark ?c)"], 7)])
+def test_match_first_counts_tile_jumps_alike_over_short_tuple_ranges(on_device, literals, steps):
+    # 100 objects in 4 tiles and predicates of 100 tuples, of which only those of o99 (and o5 for mark) match: the
+    # look-ahead over the tiles reads the tuples the same way for one lane and for a warp.
+    domain = mymyr.Domain.from_string("""(define (domain tiles)
+        (:requirements :adl) (:predicates (ok) (p ?x) (conn ?x ?y) (mark ?y))
+        (:action grow :parameters (?x) :precondition (and) :effect (p ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    objects = " ".join(f"o{i}" for i in range(100))
+    conn = " ".join(f"(conn o{i} o0)" for i in range(100))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem tiles) (:domain tiles)
+        (:objects {objects}) (:init (ok) (p o99) {conn} (conn o99 o5) (mark o5)) (:goal (ok)))"""))
+    assert_exhausts_below(task, task.condition(["?a", "?b", "?c"], literals), steps, on_device)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("supporters, steps", [(8, 2), (9, 33)])
+def test_match_first_counts_supporters_exactly_in_every_lane(on_device, supporters, steps):
+    # Nine variables adjacent to a shared one need an object with nine supporters. With 32 objects every supporter of
+    # o20 falls into the same lane of a warp; eight are rejected at the start, nine are found.
+    domain = mymyr.Domain.from_string("""(define (domain adjacent)
+        (:requirements :adl) (:predicates (ok) (adj ?x ?y))
+        (:action link :parameters (?x ?y) :precondition (and) :effect (adj ?x ?y))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    adjacent = [f"(adj o{x} o20)" for x in range(supporters)]
+    adjacent += [f"(adj o{x} o21)" for x in range(supporters, supporters + 4)]
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem adjacent) (:domain adjacent)
+        (:objects {" ".join(f"o{i}" for i in range(32))}) (:init (ok) {" ".join(adjacent)}) (:goal (ok)))"""))
+    names = ["?v"] + [f"?w{i}" for i in range(9)]
+    condition = task.condition(names, [f"(adj {w} ?v)" for w in names[1:]],
+                               equalities=[(a, b, False) for i, a in enumerate(names) for b in names[i + 1:]])
+    assert_exhausts_below(task, condition, steps, on_device)
 
 
 # ------------------------------------------------------------------------------------------------ relabelling

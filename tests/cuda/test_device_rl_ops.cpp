@@ -633,7 +633,7 @@ TEST(DeviceRlOps, MatchFirstPigeonholeAndSearchBudgetEqualHost)
         rl::MatchBatch b;
         b.states = states.data();
         b.rows = b.row_words = b.capacity = 1;
-        b.max_steps = mode == 0 ? 0 : typed ? 3 : mode == 2 ? 7 : mode == 3 ? 8 : 128;
+        b.max_steps = mode == 0 ? 0 : typed ? 4 : mode == 2 ? 7 : mode == 3 ? 8 : 128;
         b.found = found.data();
         b.binding = binding.data();
         b.template_id = which.data();
