@@ -775,6 +775,7 @@ def digest_expansion(handle, padded, rows, drop, capacity):
     return run
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("rows", [False, True])
 @pytest.mark.parametrize("drop", [False, True])
