@@ -156,22 +156,24 @@ __global__ void k_move(Move p)
     }
 }
 
-/// Tests per-env masks in the instance's slot layout; invalid masks set the sticky error bit.
-__device__ __forceinline__ bool masks_hold(const Instances& in, u32 instance, const u64* row,
-                                          const u64* goal_pos, const u64* goal_neg, u32 words, u32* error)
+/// Tests per-env masks whose bounds were checked at reset, refresh or an explicit goal query.
+__device__ __forceinline__ bool masks_hold(const u64* row, const u64* goal_pos, const u64* goal_neg, u32 words)
 {
-    const u32 slots = in.fluent_slots[instance];
-    if (!rl::goal_masks_fit(goal_pos, goal_neg, words, slots))
-    {
-        if (error)
-            atomicOr(error, 16u);
-        return false;
-    }
-    const u32 own_words = (slots >> 6) + ((slots & 63u) != 0);
-    for (u32 word = 0; word < own_words; ++word)
+    for (u32 word = 0; word < words; ++word)
         if ((row[word] & goal_pos[word]) != goal_pos[word] || (row[word] & goal_neg[word]) != 0)
             return false;
     return true;
+}
+
+/// Invalid per-env masks set the sticky error bit.
+__device__ __forceinline__ bool check_masks(const Instances& in, u32 instance, const u64* goal_pos,
+                                           const u64* goal_neg, u32 words, u32* error)
+{
+    if (rl::goal_masks_fit(goal_pos, goal_neg, words, in.fluent_slots[instance]))
+        return true;
+    if (error)
+        atomicOr(error, 16u);
+    return false;
 }
 
 /// The instance of row i (inst null: 0).
@@ -249,8 +251,7 @@ __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p
 {
     const u64* row = p.states + row_id * p.row_words;
     if (p.goal_pos)
-        return masks_hold(p.in, instance, row, p.goal_pos + row_id * p.words, p.goal_neg + row_id * p.words,
-                          p.words, p.error);
+        return masks_hold(row, p.goal_pos + row_id * p.words, p.goal_neg + row_id * p.words, p.words);
     if (p.goal_flag)
         return p.goal_flag[row_id] != 0;
     if (p.in.goal_off)
@@ -275,7 +276,10 @@ __global__ void k_goal_rows(rl::dev::TaskView task, Finish p, u8* goal)
         const u32 instance = instance_of(p.in, row);
         if (instance >= p.in.count && p.error)
             atomicOr(p.error, 4u);
-        goal[row] = instance < p.in.count && goal_row(task, p, row, instance) ? 1 : 0;
+        const bool valid = instance < p.in.count &&
+                           (!p.goal_pos || check_masks(p.in, instance, p.goal_pos + row * p.words,
+                                                       p.goal_neg + row * p.words, p.words, p.error));
+        goal[row] = valid && goal_row(task, p, row, instance) ? 1 : 0;
     }
 }
 
@@ -384,8 +388,8 @@ __device__ __forceinline__ u32 finish_row(rl::dev::TaskView t, const Finish& p, 
         if (p.count)
             p.count[i] = static_cast<i32>(n0);
         if (p.at_goal)
-            p.at_goal[i] = p.goal_pos ? (masks_hold(p.in, next, p.states + i * p.row_words, p.goal_pos + i * p.words,
-                                                    p.goal_neg + i * p.words, p.words, p.error)
+            p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                    p.goal_neg + i * p.words, p.words)
                                              ? 1
                                              : 0)
                                       : p.in.init_goal[next];
@@ -474,9 +478,11 @@ __global__ void k_reset(Reset p)
             p.steps[i] = 0;
         if (p.count)
             p.count[i] = static_cast<i32>(n0);
+        const bool valid = !p.goal_pos || !p.keep_goals ||
+                           check_masks(p.in, k, p.goal_pos + i * p.words, p.goal_neg + i * p.words, p.words, p.error);
         if (p.at_goal)
-            p.at_goal[i] = p.goal_pos ? (masks_hold(p.in, k, p.states + i * p.row_words, p.goal_pos + i * p.words,
-                                                    p.goal_neg + i * p.words, p.words, p.error)
+            p.at_goal[i] = p.goal_pos ? (valid && masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                             p.goal_neg + i * p.words, p.words)
                                              ? 1
                                              : 0)
                                       : p.in.init_goal[k];

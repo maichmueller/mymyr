@@ -289,7 +289,6 @@ void HostEnv::check_step(const EnvBatch& b, const StepOutputs& out, Actions acti
 {
     check_env(*m_suite, b, &out);
     m_suite->check_task_ids(b.task_ids, b.rows);
-    check_goals(*m_suite, b);
     if (action.v64 && action.v32)
         throw std::invalid_argument("mymyr: env: actions given as int64 and as int32");
     if (m_config.actions == ActionSpace::Index && !action.given() && b.rows && !b.draws)

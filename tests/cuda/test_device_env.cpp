@@ -805,6 +805,11 @@ TEST(DeviceEnvGoals, DirectInstanceWritesValidateMasks)
                     EXPECT_THROW(host.reset(h.b, nullptr, h.out.count, true), std::invalid_argument);
                     env.reset(d.b, nullptr, d.out.count, true);
                     EXPECT_THROW(env.check_errors(), std::invalid_argument);
+                    const std::vector<u8> selected{1, 0};
+                    to_device(d.mask, selected, d.s);
+                    EXPECT_NO_THROW(host.reset(h.b, selected.data(), h.out.count, true));
+                    env.reset(d.b, static_cast<const u8*>(d.mask.data()), d.out.count, true);
+                    EXPECT_NO_THROW(env.check_errors());
                 }
             // Empty relabelled goals fit both instances and remain empty through refresh and absorbing steps.
             std::fill(pos.begin(), pos.end(), 0);

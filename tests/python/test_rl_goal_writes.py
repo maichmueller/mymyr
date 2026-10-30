@@ -254,6 +254,7 @@ def test_jax_reset_validates_custom_goals(suite, device, path):
     state, _ = env.reset_where(state, np.array([True, False]), goal_pos=pos, goal_neg=neg)
     jax.block_until_ready(state)
     env.check_errors()
+    before = [np.array(a, copy=True) for a in jax.tree.leaves(state)]
     if device == "cpu":
         with pytest.raises((ValueError, jax.errors.JaxRuntimeError), match="goal masks.*fluent slots"):
             jax.block_until_ready(env.reset_where(state, np.array([True, True]), goal_pos=pos, goal_neg=neg))
@@ -261,3 +262,7 @@ def test_jax_reset_validates_custom_goals(suite, device, path):
         jax.block_until_ready(env.reset_where(state, np.array([True, True]), goal_pos=pos, goal_neg=neg))
         with pytest.raises(ValueError, match="goal masks.*fluent slots"):
             env.check_errors()
+    for actual, expected in zip(jax.tree.leaves(state), before):
+        np.testing.assert_array_equal(actual, expected)
+    jax.block_until_ready(env.step(0, state))
+    env.check_errors()
