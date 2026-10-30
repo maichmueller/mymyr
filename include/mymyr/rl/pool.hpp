@@ -139,7 +139,7 @@ public:
 
     /// Resets envs `env_ids` [n] (null: every env, n ignored) into instances `task_ids` [n] (null: sampled ones with
     /// PoolOptions::sampling, else their current ones) with goal masks `goal_pos` / `goal_neg` [n, goal_words] (null:
-    /// their instances' goals; per-env goals only; each row's words past its instance's are not read); returns their
+    /// their instances' goals; per-env goals only; bits past the instance's fluent slots must be zero); returns their
     /// observations. Draw counters are kept.
     /// Throws if one of them has a step in flight.
     PoolBatch reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos = nullptr,

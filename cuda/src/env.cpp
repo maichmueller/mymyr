@@ -190,7 +190,7 @@ struct DeviceEnv::Impl
     cudaStream_t s = nullptr;     // the stream of the calls (set_stream)
     cudaStream_t home = nullptr;  // the context's stream: the env's buffers are allocated there and used on s
     // constants on the device: per instance the initial row, count, cache and view, and the goal masks
-    DeviceBuffer init_row, init_counts, init_goal, init_cache, init_view, goal_pos, goal_neg;
+    DeviceBuffer init_row, init_counts, init_goal, init_cache, init_view, goal_pos, goal_neg, inst_fluent_slots;
     // the visited tables' constants: per instance the initial state's key and the numeric words of its hashes
     DeviceBuffer init_hash, inst_numeric;
     // the fast path's per-instance view words and goal words (envk::Instances)
@@ -231,7 +231,7 @@ struct DeviceEnv::Impl
     [[nodiscard]] std::vector<DeviceBuffer*> buffers()
     {
         std::vector<DeviceBuffer*> v{&init_row,    &init_counts, &init_goal,   &init_cache, &init_view, &goal_pos,
-                                     &goal_neg,    &inst_view_words, &goal_off, &goal_word, &goal_wpos, &goal_wneg,
+                                     &goal_neg,    &inst_fluent_slots, &inst_view_words, &goal_off, &goal_word, &goal_wpos, &goal_wneg,
                                      &goal_never,  &okey,        &dom_of,      &loc_of,     &all_views, &init_ids,
                                      &iota,        &starts,      &seed,        &ctl,        &pick_schema, &pick_rank,
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
@@ -284,21 +284,24 @@ struct DeviceEnv::Impl
 
     [[nodiscard]] u32* dctl() const { return static_cast<u32*>(ctl.data()); }
 
-    /// Waits for the stream and raises the error flags of the calls before (cleared): task ids outside the suite
-    /// (std::invalid_argument) and, unless `ids_only`, stale caches and over-wide successors (std::logic_error).
-    void raise_errors(bool ids_only)
+    /// Waits for the stream and raises pending argument errors (task ids or goal masks), clearing the flags.
+    /// Unless `arguments_only`, also reports stale caches and over-wide successors (std::logic_error).
+    void raise_errors(bool arguments_only)
     {
         u32* d = dctl();
         auto* h = static_cast<u32*>(host_ctl.data());
         check(cudaMemcpyAsync(h, d, k_ctl_words * sizeof(u32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
         const u32 err = h[k_err], wide = h[k_words_needed];
-        if (ids_only ? !(err & 4u) : !(err || wide))
+        if (arguments_only ? !(err & (4u | 16u)) : !(err || wide))
             return;
         check(cudaMemsetAsync(d + k_err, 0, 2 * sizeof(u32), s), "cudaMemsetAsync");
         if (err & 4u)
             throw std::invalid_argument("mymyr: device env: a task id outside the " + std::string(suite->noun()) + "'s " +
                                         std::to_string(I) + " instances (reset, a batch's task ids or next_task_ids)");
+        if (err & 16u)
+            throw std::invalid_argument("mymyr: device env: goal masks set fluent slots their instance does not have; "
+                                        "supply goals for the written instance");
         if (err)
             throw std::logic_error("mymyr: device env: a step found a state whose cached counts do not belong to it "
                                    "(states written without refresh())");
@@ -593,6 +596,7 @@ struct DeviceEnv::Impl
         }
         in.goal_pos = static_cast<const u64*>(goal_pos.data());
         in.goal_neg = static_cast<const u64*>(goal_neg.data());
+        in.fluent_slots = static_cast<const u32*>(inst_fluent_slots.data());
         in.init_hash = static_cast<const u64*>(init_hash.data());
         in.numeric_words = NN ? static_cast<const u32*>(inst_numeric.data()) : nullptr;
         return in;
@@ -993,7 +997,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     {
         const rl::HostEnv host(I.suite, I.cfg);
         std::vector<u64> rows(u64{I.I} * (I.W + I.NN), 0), gp(u64{I.I} * I.W, 0), gn(u64{I.I} * I.W, 0), ih(I.I);
-        std::vector<u32> inn(I.I);
+        std::vector<u32> inn(I.I), slots(I.I);
         std::vector<u8> ig(I.I);
         for (u32 i = 0; i < I.I; ++i)
         {
@@ -1002,6 +1006,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
             u64* row = rows.data() + u64{i} * (I.W + I.NN);
             I.suite->initial_row(i, row, I.W, I.NN);
             inn[i] = I.suite->task(i)->numeric_words();
+            slots[i] = I.suite->task(i)->atoms().fluent_slots();
             ih[i] = hash::state(row, I.W, row + I.W, inn[i]);  // State::hash of the initial state
             std::copy_n(in.goal_pos.begin(), w, gp.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
             std::copy_n(in.goal_neg.begin(), w, gn.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
@@ -1013,6 +1018,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
         I.init_goal = upload(I.ctx, ig, I.s);
         I.goal_pos = upload(I.ctx, gp, I.s);
         I.goal_neg = upload(I.ctx, gn, I.s);
+        I.inst_fluent_slots = upload(I.ctx, slots, I.s);
         I.init_hash = upload(I.ctx, ih, I.s);
         I.inst_numeric = upload(I.ctx, inn, I.s);
         check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");  // the pageable sources

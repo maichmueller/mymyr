@@ -3,6 +3,7 @@
 #include "mymyr/rl/env.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/rl/goal_masks.hpp"
 #include "mymyr/rl/rng.hpp"
 #include "mymyr/rl/visited.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -82,6 +83,18 @@ StateView row_view(const EnvBatch& b, u64 i, const Task& task)
     const u64* row = b.states + i * b.row_words();
     const u32 nn = task.numeric_words();
     return StateView{row, bits::trimmed_size(row, std::min(b.words, task.words())), nn ? row + b.words : nullptr, nn};
+}
+
+void check_goals(const TaskSuite& suite, const EnvBatch& b, const u8* mask = nullptr)
+{
+    if (!b.goals())
+        return;
+    for (u64 i = 0; i < b.rows; ++i)
+        if ((!mask || mask[i]) &&
+            !goal_masks_fit(b.goal_pos + i * b.words, b.goal_neg + i * b.words, b.words,
+                            suite.task(b.instance(i))->atoms().fluent_slots()))
+            throw std::invalid_argument("mymyr: env: goal masks in row " + std::to_string(i) +
+                                        " set fluent slots its instance does not have; supply goals for the written instance");
 }
 }  // namespace
 
@@ -192,6 +205,8 @@ void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) co
 {
     check_env(*m_suite, b, nullptr);
     m_suite->check_task_ids(b.task_ids, b.rows);
+    if (keep_goals)
+        check_goals(*m_suite, b, mask);
     for (u64 i = 0; i < b.rows; ++i)
     {
         if (mask && !mask[i])
@@ -224,16 +239,21 @@ void HostEnv::goal(const EnvBatch& b, u8* goal) const
         throw std::invalid_argument("mymyr: env: goal query needs an output array");
     check_env(*m_suite, b, nullptr);
     m_suite->check_task_ids(b.task_ids, b.rows);
+    check_goals(*m_suite, b);
     for (u64 row = 0; row < b.rows; ++row)
         goal[row] = goal_row(b, row) ? 1 : 0;
 }
 
 void HostEnv::refresh(EnvBatch& b, i32* count, ThreadPool* pool)
 {
+    check_env(*m_suite, b, nullptr);
+    m_suite->check_task_ids(b.task_ids, b.rows);
+    check_goals(*m_suite, b);
     if (count)
         this->count(b, count, pool);
     if (b.at_goal)
-        goal(b, b.at_goal);
+        for (u64 i = 0; i < b.rows; ++i)
+            b.at_goal[i] = goal_row(b, i) ? 1 : 0;
 }
 
 u32 HostEnv::count_row(const EnvBatch& b, u64 i) const

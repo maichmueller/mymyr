@@ -160,7 +160,8 @@ public:
     void reset(rl::EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false);
     /// Recomputes the cache (fast path: counts, views, launch order), the successor counts of the current states and
     /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
-    /// per-env masks on the host).
+    /// per-env masks on the host). Per-env masks that set bits past their instance's fluent slots set a sticky
+    /// device error; supply valid masks and refresh before using the observation or stepping.
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
     /// rl::HostEnv::clear_visited on device arrays: the visited tables of the rows with mask[i] != 0 (mask [rows]
     /// device, null: all rows) hold their current states' keys only; the overflow status is kept. A task id outside the suite
@@ -181,7 +182,8 @@ public:
     /// max_actions (~u32{0}: no limit), 0 where count[i] is 0.
     void random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out);
     /// Synchronizes the stream; throws std::logic_error if a fast-path step found a state whose cache did not match it
-    /// (states written without refresh()), std::invalid_argument for task ids outside the suite (reset, next_task_ids).
+    /// (states written without refresh()), std::invalid_argument for task ids outside the suite (reset, next_task_ids)
+    /// or per-env goal masks outside their instance's fluent slots.
     /// Not during a capture (the flags of replayed graphs accumulate until the next check). The general path's step()
     /// and refresh() synchronize anyway: they raise the flagged task ids first.
     void check_errors();

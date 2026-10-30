@@ -409,23 +409,29 @@ class BatchedEnv:
         reports the reset states that are goals already (solved initial states, given goals that hold)."""
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
+        ids = self.task_ids
         if task_ids is None and self.sampler is not None:
-            new = self._sample_task_ids()
-            self.task_ids.copy_(_where(mask, new, self.task_ids))
+            ids = _where(mask, self._sample_task_ids(), ids)
         elif task_ids is not None:
             new = _task_ids(self.core, task_ids, mask, self.num_envs, self.device, "reset")
-            self.task_ids.copy_(_where(mask, new, self.task_ids))
+            ids = _where(mask, new, ids)
         keep = goal_pos is not None or goal_neg is not None
+        pos, neg = self.goal_pos, self.goal_neg
         if keep:
             if not self.goals or goal_pos is None or goal_neg is None:
                 raise ValueError("mymyr: per-env goals need goals=True and both goal_pos and goal_neg")
-            self.goal_pos.copy_(_where(mask, goal_pos.to(self.goal_pos), self.goal_pos))
-            self.goal_neg.copy_(_where(mask, goal_neg.to(self.goal_neg), self.goal_neg))
+            pos = _where(mask, goal_pos.to(pos).expand_as(pos), pos).contiguous()
+            neg = _where(mask, goal_neg.to(neg).expand_as(neg), neg).contiguous()
+        # Host reset validates every selected mask against the proposed ids before mutating any output.
         args = (
-            self.handle, self.states, self._ids(), self.steps, self.counts, self.views, self.goal_pos, self.goal_neg,
+            self.handle, self.states, ids if self.multi else None, self.steps, self.counts, self.views, pos, neg,
             self.count, self.at_goal, mask, keep, self.visited, self.visited_count, self.visited_status,
         )  # fmt: skip
         _ops.reset(*args)
+        self.task_ids.copy_(ids)
+        if keep:
+            self.goal_pos.copy_(pos)
+            self.goal_neg.copy_(neg)
         self._advance_resets(mask)
         return self.count
 
@@ -444,7 +450,8 @@ class BatchedEnv:
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
-        masks."""
+        masks. Goals stay in the written instance's slot layout; bits outside its fluent slots raise ValueError on
+        the host or set a device error reported by :meth:`check_errors`."""
         args = (
             self.handle, self.states, self._ids(), self.counts, self.views, self.goal_pos, self.goal_neg, self.count,
             self.at_goal,
@@ -568,7 +575,8 @@ class BatchedEnv:
     def check_errors(self) -> None:
         """Waits for the device work and raises if a fast-path step met states written without :meth:`refresh`, or
         met task ids outside the table (device ``task_ids`` / ``next_task_ids``; host values are checked when given;
-        the general path's step and refresh raise such ids themselves). A no-op on the CPU."""
+        the general path's step and refresh raise such ids themselves), or goal masks outside the instance's fluent
+        slots. A no-op on the CPU."""
         self.core.check_errors()
 
     def close(self) -> None:

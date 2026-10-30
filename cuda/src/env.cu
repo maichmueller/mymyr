@@ -5,6 +5,7 @@
 
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/core/hash.hpp"
+#include "mymyr/rl/goal_masks.hpp"
 #include "mymyr/rl/rng.hpp"
 #include "mymyr/rl/visited.hpp"
 
@@ -155,13 +156,24 @@ __global__ void k_move(Move p)
     }
 }
 
-/// Whether `row` holds goal_pos and none of goal_neg ([words] each).
+/// Tests per-env masks whose bounds were checked at reset, refresh or an explicit goal query.
 __device__ __forceinline__ bool masks_hold(const u64* row, const u64* goal_pos, const u64* goal_neg, u32 words)
 {
     for (u32 word = 0; word < words; ++word)
         if ((row[word] & goal_pos[word]) != goal_pos[word] || (row[word] & goal_neg[word]) != 0)
             return false;
     return true;
+}
+
+/// Invalid per-env masks set the sticky error bit.
+__device__ __forceinline__ bool check_masks(const Instances& in, u32 instance, const u64* goal_pos,
+                                           const u64* goal_neg, u32 words, u32* error)
+{
+    if (rl::goal_masks_fit(goal_pos, goal_neg, words, in.fluent_slots[instance]))
+        return true;
+    if (error)
+        atomicOr(error, 16u);
+    return false;
 }
 
 /// The instance of row i (inst null: 0).
@@ -264,7 +276,10 @@ __global__ void k_goal_rows(rl::dev::TaskView task, Finish p, u8* goal)
         const u32 instance = instance_of(p.in, row);
         if (instance >= p.in.count && p.error)
             atomicOr(p.error, 4u);
-        goal[row] = instance < p.in.count && goal_row(task, p, row, instance) ? 1 : 0;
+        const bool valid = instance < p.in.count &&
+                           (!p.goal_pos || check_masks(p.in, instance, p.goal_pos + row * p.words,
+                                                       p.goal_neg + row * p.words, p.words, p.error));
+        goal[row] = valid && goal_row(task, p, row, instance) ? 1 : 0;
     }
 }
 
@@ -463,9 +478,11 @@ __global__ void k_reset(Reset p)
             p.steps[i] = 0;
         if (p.count)
             p.count[i] = static_cast<i32>(n0);
+        const bool valid = !p.goal_pos || !p.keep_goals ||
+                           check_masks(p.in, k, p.goal_pos + i * p.words, p.goal_neg + i * p.words, p.words, p.error);
         if (p.at_goal)
-            p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
-                                                    p.goal_neg + i * p.words, p.words)
+            p.at_goal[i] = p.goal_pos ? (valid && masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                             p.goal_neg + i * p.words, p.words)
                                              ? 1
                                              : 0)
                                       : p.in.init_goal[k];
@@ -622,7 +639,8 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
     if (p.rows == 0)
         return cudaSuccess;
     if (!p.states || !p.status || (!p.counts && !p.offsets) || !p.in.init_row || !p.in.init_count ||
-        (p.goal_pos && !p.goal_neg) || (p.goal_pos && !p.in.goal_pos) || (p.cache_counts && !p.in.init_cache) ||
+        (p.goal_pos && (!p.goal_neg || !p.in.goal_pos || !p.in.fluent_slots)) ||
+        (p.cache_counts && !p.in.init_cache) ||
         (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) || !visited_ok(p.visited) ||
         (p.visited.capacity && p.autoreset && !p.in.init_hash))
         return cudaErrorInvalidValue;
@@ -642,6 +660,8 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
 
 cudaError_t launch_goal(const rl::dev::TaskView& task, const Finish& p, u8* goal, cudaStream_t stream)
 {
+    if (p.rows && p.goal_pos && (!p.goal_neg || !p.in.fluent_slots))
+        return cudaErrorInvalidValue;
     if (p.rows)
         k_goal_rows<<<grid_for(p.rows), k_block, 0, stream>>>(task, p, goal);
     return cudaGetLastError();
@@ -651,7 +671,8 @@ cudaError_t launch_reset(const Reset& p, cudaStream_t s)
 {
     if (p.rows == 0)
         return cudaSuccess;
-    if (!p.states || !p.in.init_row || !p.in.init_count || (p.goal_pos && (!p.goal_neg || !p.in.goal_pos)) ||
+    if (!p.states || !p.in.init_row || !p.in.init_count ||
+        (p.goal_pos && (!p.goal_neg || !p.in.goal_pos || !p.in.fluent_slots)) ||
         (p.cache_counts && !p.in.init_cache) || (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) ||
         !visited_ok(p.visited) || (p.visited.capacity && !p.in.init_hash))
         return cudaErrorInvalidValue;

@@ -246,7 +246,21 @@ the goals given to `reset(goal_pos=..., goal_neg=...)`. `CpuEnvPool.reset()` set
 resets set `terminated` (also for terminal dead ends); torch `BatchedEnv` and JAX `Env` keep a per-environment
 `at_goal` flag, which reset, step and `refresh()` write and observations and step results carry. A step reads the
 flag instead of testing the current state again, so the next step absorbs those rows. Writing states, instances or
-goal masks directly needs `refresh()`.
+goal masks directly needs `refresh()`. With `goals=True`, each row's masks must refer only to fluent atom slots of
+its current instance; all bits past those slots, including padding words and unused bits in the last word, must be
+zero. A direct write that changes `task_ids` keeps the supplied masks: move or replace that row's `goal_pos` and
+`goal_neg` as needed before refreshing. A kept mask that fits the new instance is interpreted in its slot layout,
+even if it came from another instance; goals are not inferred from a mask's origin. Use `reset(task_ids=...)` to
+restore the selected instances' default goals.
+
+Refresh, resets with custom or kept goals, and explicit goal queries validate mask bounds. Ordinary steps rely on
+the masks validated by reset or refresh. Invalid masks raise `ValueError` on the host (including `CpuEnvPool.reset`
+with custom goals); a rejected host reset leaves the environment unchanged. On CUDA they set a
+sticky environment error, reported as `ValueError` by `check_errors()`; the general path also reports pending errors
+at its next step or refresh. JAX uses the same checks on its CPU and CUDA backends (CPU validation errors surface
+through the FFI). After a device error,
+supply valid masks and refresh before using the observation or stepping; results produced with invalid masks are
+unusable. Refresh preserves visit histories; use `clear_visited()` when a direct write starts a new history.
 The mctx adapter reads the terminal test of the root and of each node from `at_goal` and the successor count, without
 a step; it preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero.
 Zero-successor tree nodes are terminal even when the environment disables dead-end termination.

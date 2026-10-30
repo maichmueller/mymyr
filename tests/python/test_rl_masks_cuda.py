@@ -292,7 +292,8 @@ def test_label_env_device_equals_host(name, goals):
             env.goal_pos[::4].zero_()
             env.goal_neg[::4].zero_()
             env.refresh()
-    index = rt.BatchedEnv(table, n, **{k: v for k, v in kwargs.items() if k != "actions"})
+    # follows host_env's states and instances to translate index actions; per-env goals are not needed for that
+    index = rt.BatchedEnv(table, n, **{k: v for k, v in kwargs.items() if k not in ("actions", "goals")})
     gen = torch.Generator().manual_seed(5)
     for t in range(30):
         index.states.copy_(host_env.states)
