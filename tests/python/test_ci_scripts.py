@@ -429,7 +429,7 @@ def test_the_wheel_check_refuses_another_build_of_the_same_version(tmp_path: Pat
 
 RUN_UNTIL = ROOT / "ci" / "run_until.py"
 proc = pytest.mark.skipif(not os.path.isdir("/proc/self"),
-                          reason="ci/run_until.py finds the build's Ninja processes through /proc, as on the Linux runners")
+                          reason="ci/run_until.py finds the build's Ninja processes through /proc, as on Linux")
 
 
 def fake_ninja(tmp_path: Path) -> Path:
