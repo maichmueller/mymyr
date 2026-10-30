@@ -147,7 +147,8 @@ std::vector<T> array_of(const rl::ArrayBundle& b, std::string_view name)
     if (!a)
         return {};
     std::vector<T> out(a->elements());
-    std::memcpy(out.data(), b.data(*a), out.size() * sizeof(T));
+    if (!out.empty())
+        std::memcpy(out.data(), b.data(*a), out.size() * sizeof(T));
     return out;
 }
 

@@ -177,7 +177,7 @@ public:
     void clear_derived()
     {
         const usize n = std::min<usize>(m_derived.size(), bits::words_for(m_atoms->derived_slots()));
-        std::memset(m_derived.data(), 0, n * sizeof(u64));
+        std::fill_n(m_derived.data(), n, u64{0});
     }
     /// Sets derived slot d; returns false if it was already set. Adds the atom to the view.
     bool add_derived(u32 d)

@@ -245,6 +245,8 @@ public:
         m_grow.store(approx_size() * 10 > m_cap * 6, std::memory_order_relaxed);
     }
 
+    /// Allocated bytes: the table and the blocks of every thread's arena. A thread allocates its first blocks with its
+    /// first record, so the split of the records over the threads (scheduling) changes the value.
     [[nodiscard]] u64 bytes() const noexcept
     {
         u64 b = m_cap * sizeof(u64);

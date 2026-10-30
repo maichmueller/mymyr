@@ -61,7 +61,7 @@ public:
     [[nodiscard]] u64 end(u64 i) const { return static_cast<u64>(m_offsets[i + 1]); }
     [[nodiscard]] const u64* row(u64 k) const { return m_succ.data() + k * m_words; }
     [[nodiscard]] i32 schema(u64 k) const { return m_schema[k]; }
-    void binding(u64 k, i32* dst) const { std::memcpy(dst, m_binding.data() + k * m_label_width, m_label_width * sizeof(i32)); }
+    void binding(u64 k, i32* dst) const { std::copy_n(m_binding.data() + k * m_label_width, m_label_width, dst); }
     void adopt(u64, u64) {}
 
 private:

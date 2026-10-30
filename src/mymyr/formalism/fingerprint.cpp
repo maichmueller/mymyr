@@ -21,7 +21,8 @@ u64 hash_bytes(std::string_view s, u64 seed)
         h = hash::mulfold(h ^ w[0] ^ hash::k_p1, w[1] ^ hash::k_p2);
     }
     u64 w[2] = {0, 0};
-    std::memcpy(w, s.data() + i, s.size() - i);
+    if (i < s.size())
+        std::memcpy(w, s.data() + i, s.size() - i);
     return hash::mix64(hash::mulfold(h ^ w[0] ^ hash::k_p1, w[1] ^ hash::k_p2));
 }
 }  // namespace

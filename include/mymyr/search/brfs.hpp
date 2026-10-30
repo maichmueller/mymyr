@@ -118,6 +118,8 @@ struct BrfsResult
     double search_s = 0;
     u32 words = 0;         // fluent width at the end
     u32 fluent_slots = 0;  // assigned fluent atom slots at the end
+    /// Bytes allocated by the store and the search nodes. The concurrent store allocates a thread's arena when that
+    /// thread stores its first state, so with several threads the value depends on which threads stored states.
     u64 memory_bytes = 0;
     u64 fingerprint = 0;
     u32 threads_used = 1;
