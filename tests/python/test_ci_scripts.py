@@ -350,9 +350,10 @@ IMAGE = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["cibuildwhe
 
 
 def local_wheels(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    """A dry run with podman, which need not be installed; an --engine in args replaces it."""
     return subprocess.run(["bash", str(LOCAL_WHEELS), "--toolchain", str(tmp_path / "toolchain"), "--work",
-                           str(tmp_path / "work"), "--out", str(tmp_path / "out"), "--dry-run", *args],
-                          capture_output=True, text=True, check=False)
+                           str(tmp_path / "work"), "--out", str(tmp_path / "out"), "--engine", "podman", "--dry-run",
+                           *args], capture_output=True, text=True, check=False)
 
 
 def local_commands(result: subprocess.CompletedProcess) -> tuple[str, list[list[str]]]:
@@ -370,8 +371,7 @@ def podman(tmp_path: Path, work: str, gb: int) -> list[str]:
 
 
 def test_local_wheels_derive_the_jobs_from_the_memory_and_the_cores(tmp_path: Path) -> None:
-    summary, commands = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "120",
-                                                    "--engine", "podman"))
+    summary, commands = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "120"))
 
     # 32 cores per ABI: 10 compiles of 3 architectures at once. 60 GB per ABI: 2 GB, one heavy compile of 3 * 5 GB and
     # 9 others of 3 * 1.25 GB is 50.75 GB; two heavy compiles would leave room for 7 others only
@@ -447,7 +447,7 @@ def test_local_wheels_with_apptainer_bind_the_same_directories(tmp_path: Path) -
     (["--stage", "all"], 2, "usage: ci/local_cuda_wheels.sh"),
 ])
 def test_local_wheels_refuse_bad_arguments(tmp_path: Path, args: list[str], status: int, message: str) -> None:
-    result = local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "64", "--engine", "podman", *args)
+    result = local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "64", *args)
 
     assert result.returncode == status
     assert message in result.stderr
