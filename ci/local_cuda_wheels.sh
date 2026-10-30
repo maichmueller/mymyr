@@ -120,14 +120,20 @@ if [ -z "$cpus" ]; then
     cpus=$(getconf _NPROCESSORS_ONLN)
 fi
 if [ -z "$memory_gb" ]; then
-    [ -r /proc/meminfo ] || { echo "error: no /proc/meminfo to read the available memory from; pass --memory-gb" >&2; exit 2; }
+    [ -r /proc/meminfo ] || {
+        echo "error: no /proc/meminfo to read the available memory from; pass --memory-gb" >&2
+        exit 2
+    }
     memory_gb=$(($(sed -n 's/^MemAvailable: *\([0-9]*\) kB$/\1/p' /proc/meminfo) / 1024 / 1024))
 fi
 
-# the jobs of one of P builds side by side: the largest J within its share of the cores and of the memory
+# the jobs of one of P builds side by side: the largest J within its share of the cores and of the memory, 0 when
+# the share of the memory is too small for one job
 jobs_of() {
-    local share_gb=$((memory_gb / $1)) by_memory
-    by_memory=$(((share_gb - heavy_gb - reserve_gb) / compile_gb + 1))
+    local share_gb=$((memory_gb / $1)) by_memory=0
+    if [ $share_gb -ge $((heavy_gb + reserve_gb)) ]; then
+        by_memory=$(((share_gb - heavy_gb - reserve_gb) / compile_gb + 1))
+    fi
     [ $by_memory -le $((cpus / $1)) ] || by_memory=$((cpus / $1))
     echo $by_memory
 }
@@ -142,8 +148,8 @@ share_gb=$((memory_gb / parallel))
 if [ -z "$jobs" ]; then
     jobs=$(jobs_of "$parallel")
     if [ "$jobs" -lt 1 ]; then
-        echo "error: $memory_gb GB for $parallel builds at once leaves less than the" \
-             "$((heavy_gb + reserve_gb + compile_gb)) GB that one build needs" >&2
+        echo "error: $share_gb GB per build ($memory_gb GB for $parallel at a time) is less than the" \
+             "$((heavy_gb + reserve_gb)) GB that one build needs" >&2
         exit 1
     fi
 fi
@@ -172,10 +178,14 @@ container() {
             command=("$engine" run --rm --memory "${gb}g" --volume "$repo:/src"
                 --volume "$toolchain:/opt/mymyr-toolchain" --volume "$dir:/work" --volume "$out:/out" "$image") ;;
         apptainer)
-            command=(apptainer exec --containall --bind "$repo:/src,$toolchain:/opt/mymyr-toolchain,$dir:/work,$out:/out"
-                "$image") ;;
+            command=(apptainer exec --containall
+                --bind "$repo:/src,$toolchain:/opt/mymyr-toolchain,$dir:/work,$out:/out" "$image") ;;
     esac
     command+=(bash /src/ci/cuda_wheel.sh --work /work "$@")
+}
+# the container command that builds, checks and tests the wheel of one ABI
+wheel_container() {
+    container "$work/$1" "$share_gb" --python "$1" --archs "$archs" --out /out --jobs "$jobs" --cuda-jobs "$cuda_jobs"
 }
 show() {
     printf '%q' "$1"
@@ -191,7 +201,7 @@ toolchain_command=("${command[@]}")
 if [ $dry_run -eq 1 ]; then
     show "${toolchain_command[@]}"
     for abi in "${abi_list[@]}"; do
-        container "$work/$abi" "$share_gb" --python "$abi" --archs "$archs" --out /out --jobs "$jobs" --cuda-jobs "$cuda_jobs"
+        wheel_container "$abi"
         show "${command[@]}"
     done
     exit 0
@@ -238,7 +248,7 @@ reap() {
 for abi in "${abi_list[@]}"; do
     [ $((${#pids[@]} - reaped)) -lt "$parallel" ] || reap
     mkdir -p "$work/$abi"
-    container "$work/$abi" "$share_gb" --python "$abi" --archs "$archs" --out /out --jobs "$jobs" --cuda-jobs "$cuda_jobs"
+    wheel_container "$abi"
     "${command[@]}" > "$work/$abi.log" 2>&1 &
     pids+=($!)
     starts+=("$(date +%s)")

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # Test the CUDA wheels of a release on GPU 0 and attach them to the release's GitHub Release.
 #
-# usage: ci/attach_cuda_wheels.sh [--dry-run] [--run RUN_ID | --dir DIR] --python PATH [--python PATH ...]
+# usage: ci/attach_cuda_wheels.sh [--dry-run] (--dir DIR | --run RUN_ID) --python PATH [--python PATH ...]
 #                                 [--abis LIST] [--archs LIST] TAG
 #   TAG        the release tag v<version>; the wheels must be mymyr-<version>+cu13-*.whl
-#   --run      the workflow run whose cuda-wheel-* artifacts hold the wheels (default: the latest release workflow
-#              run of TAG); a manual run of the CUDA wheel workflow has its own id. The run must have completed
-#              successfully
-#   --dir      test the wheels in DIR instead of downloading them, e.g. those of ci/cuda_wheel.sh
+#   --dir      the directory with the wheels, e.g. the --out of ci/local_cuda_wheels.sh or of ci/cuda_wheel.sh
+#   --run      instead of --dir: the run of the CUDA wheel workflow (cuda-wheels.yml) whose cuda-wheel-* artifacts
+#              hold the wheels; it must have completed successfully
 #   --python   an interpreter to test with; every wheel needs one of its ABI (cp314t: a free-threaded 3.14). Its
 #              site packages are visible in the test environment, so JAX installed there takes part
-#   --abis     the CPython ABIs there must be exactly one wheel for, space-separated (default "cp314t cp315t", the
-#              CUDA wheel workflow's)
-#   --archs    the GPU architectures every wheel must have SASS for, space-separated (default "86 89 90", the
-#              CUDA wheel workflow's)
+#   --abis     the CPython ABIs there must be exactly one wheel for, space-separated (default "cp314t cp315t", those
+#              of ci/local_cuda_wheels.sh and the CUDA wheel workflow)
+#   --archs    the GPU architectures every wheel must have SASS for, space-separated (default "86 89 90", those of
+#              ci/local_cuda_wheels.sh and the CUDA wheel workflow)
 #   --dry-run  test the wheels and do not upload them
 #
 # The set of wheels must be complete before anything is tested: one per ABI in --abis and no others. Every wheel is
@@ -60,6 +59,10 @@ if [ -n "$run_id" ] && [ -n "$wheel_dir" ]; then
     echo "error: --run and --dir exclude each other" >&2
     exit 2
 fi
+if [ -z "$run_id" ] && [ -z "$wheel_dir" ]; then
+    echo "error: pass the wheels' directory (--dir) or the CUDA wheel workflow run that built them (--run)" >&2
+    exit 2
+fi
 case "$tag" in
     v[0-9]*) version=${tag#v}+cu13 ;;
     *) echo "error: expected a tag v<version>, got '$tag'" >&2; exit 2 ;;
@@ -81,11 +84,6 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/mymyr-cuda-wheels.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 if [ -z "$wheel_dir" ]; then
-    if [ -z "$run_id" ]; then
-        run_id=$(cd "$repo" && gh run list --workflow release.yml --branch "$tag" --limit 1 --json databaseId \
-            --jq '.[0].databaseId')
-        [ -n "$run_id" ] || { echo "error: no release workflow run for $tag" >&2; exit 1; }
-    fi
     # a run that is still going or that failed may have the artifacts of some ABIs only
     state=$(cd "$repo" && gh run view "$run_id" --json status,conclusion --jq '"\(.status) \(.conclusion)"')
     if [ "$state" != "completed success" ]; then

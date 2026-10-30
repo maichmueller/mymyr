@@ -4,8 +4,9 @@ name: CUDA wheels
 # capabilities 8.6, 8.9 and 9.0. ci/cuda_wheel.sh builds each in the manylinux image of the CPU wheels and tests it
 # with the CPU suite; hosted runners have no GPU, so the wheels stay workflow artifacts named cuda-wheel-<abi> (never
 # dist-*: the PyPI jobs do not see them) until ci/attach_cuda_wheels.sh tests them on a GPU and attaches them to the
-# GitHub Release. The release workflow calls this workflow for every v* tag; a manual run builds a tag or the branch
-# it is started on.
+# GitHub Release. A release's CUDA wheels are built by ci/local_cuda_wheels.sh on a large Linux host, in hours instead
+# of a chain of jobs; this workflow builds the same wheels where no such host is at hand. A manual run builds a tag
+# (the tag input) or the branch it is started on.
 #
 # Time: every architecture compiles the device code once more. One SASS architecture compiles in 1 to 1.5 hours on
 # these runners (the CUDA compile-only jobs of ci.yml), nearly all of it per architecture, so three take about 3 to 4
@@ -26,11 +27,11 @@ name: CUDA wheels
 # has the room, and the wheel job removes the build tree before it installs the test environment (about 4.5 GB). Each
 # job checks early that / has the room it needs, about 16 GB of the 40 GB a runner has once its unused SDKs are gone.
 #
-# The toolchain (GCC 16, the dependency superbuild and the CUDA compiler) is cached. A tag can restore only the
-# caches of its own ref and of the default branch, so the cache is saved on main only: by the toolchain job, on a
-# push to main that changes the toolchain's inputs, on a manual run on main and once a week. The weekly run restores
-# the cache, which keeps GitHub from evicting it after 7 days unused before the next release. Tag runs restore it by
-# key and never save it; without it they build the toolchain in the compile job.
+# The toolchain (GCC 16, the dependency superbuild and the CUDA compiler) is cached. A run can restore only the caches
+# of its own ref and of the default branch, so the cache is saved on main only: by the toolchain job, on a push to
+# main that changes the toolchain's inputs, on a manual run on main and once a week. The weekly run restores the
+# cache, which keeps GitHub from evicting it after 7 days unused before a manual run needs it. Manual runs on other
+# refs restore it by key and never save it; without it they build the toolchain in the compile job.
 on:
   push:
     branches: [main]
@@ -48,20 +49,6 @@ on:
         description: Release tag to build (empty for the branch of the run)
         type: string
         default: ""
-      python:
-        description: CPython ABIs, space-separated
-        type: string
-        default: cp314t cp315t
-      archs:
-        description: CUDA architectures (CMAKE_CUDA_ARCHITECTURES)
-        type: string
-        default: 86-real;89-real;90-real
-  workflow_call:
-    inputs:
-      tag:
-        description: Release tag to build
-        type: string
-        required: true
       python:
         description: CPython ABIs, space-separated
         type: string
@@ -107,8 +94,8 @@ jobs:
 
   check-inputs:
     name: ABIs and disk space
-    # tags (through the release workflow) and manual runs
-    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
+    # manual runs
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import runpy
+import shlex
 import shutil
 import signal
 import subprocess
@@ -310,18 +311,136 @@ def test_attach_takes_the_abis_it_is_given(tmp_path: Path) -> None:
     assert "is for cp315t, which is not in --abis" in result.stderr
 
 
+def test_attach_needs_a_directory_or_a_run(tmp_path: Path) -> None:
+    result = subprocess.run(["bash", str(ATTACH), "--dry-run", "--python", sys.executable, "v1.2.3"],
+                            capture_output=True, text=True, check=False)
+
+    assert result.returncode == 2
+    assert "pass the wheels' directory (--dir) or the CUDA wheel workflow run that built them (--run)" in result.stderr
+
+
 def test_cuda_wheel_defaults_agree() -> None:
     workflow = (ROOT / ".github" / "workflows" / "cuda-wheels.yml").read_text()
     attach = ATTACH.read_text()
     build = (ROOT / "ci" / "cuda_wheel.sh").read_text()
+    local = LOCAL_WHEELS.read_text()
     archs = re.findall(r"^ +default: ([0-9a-z;-]+-real)$", workflow, re.MULTILINE)
     abis = re.findall(r"^ +default: (cp3[0-9 cpt]+)$", workflow, re.MULTILINE)
 
-    assert archs == ["86-real;89-real;90-real"] * 2
-    assert abis == ["cp314t cp315t"] * 2
+    assert archs == ["86-real;89-real;90-real"]
+    assert abis == ["cp314t cp315t"]
     assert f'archs="{archs[0]}"' in build
+    assert f'archs="{archs[0]}"' in local
     assert 'archs="{}"'.format(archs[0].replace("-real", "").replace(";", " ")) in attach
     assert f'abis="{abis[0]}"' in attach
+    assert f'abis="{abis[0]}"' in local
+
+
+def test_releases_do_not_build_the_cuda_wheels_on_github() -> None:
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "cuda-wheels.yml").read_text()
+
+    assert "cuda-wheels.yml" not in re.sub(r"^ *#.*$", "", release, flags=re.MULTILINE)
+    assert "workflow_call" not in workflow
+    assert "workflow_dispatch" in workflow
+
+
+LOCAL_WHEELS = ROOT / "ci" / "local_cuda_wheels.sh"
+IMAGE = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"]
+
+
+def local_wheels(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(LOCAL_WHEELS), "--toolchain", str(tmp_path / "toolchain"), "--work",
+                           str(tmp_path / "work"), "--out", str(tmp_path / "out"), "--dry-run", *args],
+                          capture_output=True, text=True, check=False)
+
+
+def local_commands(result: subprocess.CompletedProcess) -> tuple[str, list[list[str]]]:
+    """The summary line and the container commands of a dry run, the toolchain's first."""
+    assert result.returncode == 0, result.stderr
+    summary, *commands = result.stdout.splitlines()
+    return summary, [shlex.split(command) for command in commands]
+
+
+def podman(tmp_path: Path, work: str, gb: int) -> list[str]:
+    return ["podman", "run", "--rm", "--memory", f"{gb}g", "--volume", f"{ROOT}:/src",
+            "--volume", f"{tmp_path / 'toolchain'}:/opt/mymyr-toolchain",
+            "--volume", f"{tmp_path / 'work' / work}:/work", "--volume", f"{tmp_path / 'out'}:/out", IMAGE, "bash", "/src/ci/cuda_wheel.sh", "--work", "/work"]
+
+
+def test_local_wheels_derive_the_jobs_from_the_memory_and_the_cores(tmp_path: Path) -> None:
+    summary, commands = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "120",
+                                                    "--engine", "podman"))
+
+    # 7 GB for the largest kernels, 3 per other compile and 2 for the rest: 7 + 3 * 17 + 2 = 60 GB per ABI
+    assert summary == ("== 64 cores and 120 GB: 2 of 2 ABIs at a time, each with --jobs 18 --cuda-jobs 17 in 60 GB;"
+                       " the toolchain with --jobs 39")
+    assert commands == [
+        [*podman(tmp_path, "toolchain", 120), "--stage", "toolchain", "--jobs", "39"],
+        *([*podman(tmp_path, abi, 60), "--python", abi, "--archs", "86-real;89-real;90-real", "--out", "/out",
+           "--jobs", "18", "--cuda-jobs", "17"] for abi in ["cp314t", "cp315t"]),
+    ]
+
+
+def test_local_wheels_build_one_abi_at_a_time_when_two_would_get_fewer_than_8_jobs(tmp_path: Path) -> None:
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "16", "--memory-gb", "500"))
+    assert "2 of 2 ABIs at a time, each with --jobs 8 --cuda-jobs 7 in 250 GB" in summary
+
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "12", "--memory-gb", "500"))
+    assert "1 of 2 ABIs at a time, each with --jobs 12 --cuda-jobs 11 in 500 GB" in summary
+
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "30"))
+    assert "1 of 2 ABIs at a time, each with --jobs 8 --cuda-jobs 7 in 30 GB" in summary
+
+
+def test_local_wheels_take_the_numbers_they_are_given(tmp_path: Path) -> None:
+    summary, commands = local_commands(local_wheels(
+        tmp_path, "--cpus", "64", "--memory-gb", "120", "--parallel", "1", "--jobs", "5", "--cuda-jobs", "2",
+        "--python", "cp314", "--archs", "80-real", "--image", "example.org/image:1", "--engine", "docker"))
+
+    assert "1 of 1 ABIs at a time, each with --jobs 5 --cuda-jobs 2 in 120 GB" in summary
+    expected = podman(tmp_path, "cp314", 120)
+    expected[0] = "docker"
+    expected[expected.index(IMAGE)] = "example.org/image:1"
+    assert commands[1] == [*expected, "--python", "cp314", "--archs", "80-real", "--out", "/out", "--jobs", "5",
+                           "--cuda-jobs", "2"]
+
+
+def test_local_wheels_with_apptainer_bind_the_same_directories(tmp_path: Path) -> None:
+    _, commands = local_commands(local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "16", "--engine", "apptainer",
+                                              "--python", "cp315t"))
+
+    binds = (f"{ROOT}:/src,{tmp_path / 'toolchain'}:/opt/mymyr-toolchain,{tmp_path / 'work' / 'cp315t'}:/work,"
+             f"{tmp_path / 'out'}:/out")
+    assert commands[1][:6] == ["apptainer", "exec", "--containall", "--bind", binds, f"docker://{IMAGE}"]
+    assert "--memory" not in commands[1]
+
+
+@pytest.mark.parametrize(("args", "status", "message"), [
+    (["--memory-gb", "8"], 1, "8 GB per build (8 GB for 1 at a time) is less than the 9 GB that one build needs"),
+    (["--memory-gb", "16", "--parallel", "2"], 1, "8 GB per build (16 GB for 2 at a time) is less than the 9 GB"),
+    (["--python", "cp314t py3"], 2, "expected CPython ABIs such as cp314t, got 'py3'"),
+    (["--python", " "], 2, "--python names no ABI"),
+    (["--jobs", "0"], 2, "must be positive integers"),
+    (["--cpus", "many"], 2, "must be positive integers"),
+    (["--engine", "lxc"], 2, "--engine takes podman, docker or apptainer, not 'lxc'"),
+    (["--archs"], 2, "usage: ci/local_cuda_wheels.sh"),
+    (["--stage", "all"], 2, "usage: ci/local_cuda_wheels.sh"),
+])
+def test_local_wheels_refuse_bad_arguments(tmp_path: Path, args: list[str], status: int, message: str) -> None:
+    result = local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "64", "--engine", "podman", *args)
+
+    assert result.returncode == status
+    assert message in result.stderr
+    assert result.stdout == ""
+
+
+def test_local_wheels_need_a_toolchain_and_a_work_directory(tmp_path: Path) -> None:
+    result = subprocess.run(["bash", str(LOCAL_WHEELS), "--work", str(tmp_path), "--dry-run"],
+                            capture_output=True, text=True, check=False)
+
+    assert result.returncode == 2
+    assert "usage: ci/local_cuda_wheels.sh --toolchain DIR --work DIR" in result.stderr
 
 
 def pins(path: Path) -> dict[str, list[tuple[str, str]]]:
