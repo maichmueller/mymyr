@@ -141,6 +141,9 @@ enum class DerivedWords : u8
 /// widest row of an instance (state or derived words), `cells` the longest cell list of a graph (with its subgoal and
 /// history cells). The history steps of a row add per step: one entity, the tuples of the history cells and their
 /// arguments, and one entity and target per history-target tuple (the `step_` bounds, which are zero without history).
+/// The constant literals of a row's goal and subgoal layers add per literal at most `constant_tuples` tuples with
+/// `constant_args` arguments and `constant_targets` targets (an entity each), and a row with any of them may have the
+/// auxiliary entity (`constant_auxiliary`).
 /// `state_words` and `derived_words` are the widest state and derived rows, `levels` the subgoal levels of the schema.
 struct GraphBounds
 {
@@ -148,6 +151,8 @@ struct GraphBounds
     u64 state_words = 0, derived_words = 0, numeric = 0;
     u32 numeric_words = 0;
     u64 step_entities = 0, step_tuples = 0, step_args = 0, step_targets = 0;
+    u64 constant_tuples = 0, constant_args = 0, constant_targets = 0;
+    bool constant_auxiliary = false;
     u32 levels = 0;
     bool history = false;
     bool variable_inputs = false;  // expansion rows and horizon nodes have no per-graph schema bound
@@ -284,14 +289,15 @@ public:
     /// The capacities that hold any batch of `graphs` rows. With history, `history_steps` is the most steps one row's
     /// history has (the width of the history input); at most history_max_steps are encoded, which is also the number of
     /// steps when `history_steps` is 0. A schema that encodes every step needs `history_steps`
-    /// (std::invalid_argument without it).
-    [[nodiscard]] BatchShape worst_case(u64 graphs, u64 history_steps = 0) const;
+    /// (std::invalid_argument without it). `constant_literals` is the most constant literals one row carries, those of
+    /// its goal and of its subgoal layers together.
+    [[nodiscard]] BatchShape worst_case(u64 graphs, u64 history_steps = 0, u64 constant_literals = 0) const;
     /// The arrays a batch of this schema stores, and their layout in a block.
     /// The shared-static capacities cover the whole table; the free output_layout accepts explicit static capacities.
     [[nodiscard]] OutputLayout output_layout(const BatchShape& shape) const;
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
-    [[nodiscard]] u64 bytes_needed(u64 graphs, u64 history_steps = 0) const;
+    [[nodiscard]] u64 bytes_needed(u64 graphs, u64 history_steps = 0, u64 constant_literals = 0) const;
     /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes. With
     /// DerivedWords::Supplied, the scratch of encodes that pass their derived words: smaller where a graph reads derived
     /// atoms (no room for their evaluation), equal otherwise.
@@ -406,13 +412,16 @@ private:
 /// advances the head and empties the ring on that stream. The overflow flag is sticky until clear(), and every flush
 /// while it is set reports k_overflow_capacity (nothing of the batch is written): a batch never silently lacks the rows
 /// of an append that did not fit. The rows carry no subgoal layers or history steps (check_stream_schema).
+/// With `constant_literals`, each row of the ring holds up to that many constant literals of its goal
+/// (DeviceEncodeInput::goal_constants), which the appended rows may give (as wide as the encoder's: at most that many).
 /// Construct outside capture and keep the ring, encoder and stream alive through the final replay. All operations
 /// on one ring are ordered on its stream; independent rings may run concurrently. The mutable stream is host-only.
 class DeviceRowStream
 {
 public:
     DeviceRowStream(ContextPtr context, std::shared_ptr<const encoding::FlatEncoder> encoder, u64 capacity,
-                    cudaStream_t stream = nullptr, bool goals = false, bool derived = false, bool derived_goals = false);
+                    cudaStream_t stream = nullptr, bool goals = false, bool derived = false, bool derived_goals = false,
+                    u32 constant_literals = 0);
     ~DeviceRowStream();
     DeviceRowStream(const DeviceRowStream&) = delete;
     DeviceRowStream& operator=(const DeviceRowStream&) = delete;

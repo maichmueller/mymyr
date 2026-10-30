@@ -167,7 +167,7 @@ def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: An
         width = as_table(encoder.table).label_width
     size = 6 * graphs + 8 * nodes.shape[0] + 5 * edges
     scratch = torch.empty(max(1, size), dtype=torch.int32, device=device)
-    rows.fields[d._ROW_HORIZON:d._ROW_FIELDS] = [no.data_ptr(), eo.data_ptr(),
+    rows.fields[d._ROW_HORIZON:d._ROW_CONSTANTS] = [no.data_ptr(), eo.data_ptr(),
                           *(0 if a is None else a.data_ptr() for a in edge_arrays),
                           nodes.shape[0], edges, width, scratch.data_ptr(), scratch.numel(),
                           0 if status is None else status.data_ptr()]

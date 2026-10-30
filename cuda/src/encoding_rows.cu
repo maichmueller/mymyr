@@ -25,6 +25,18 @@ __device__ void copy_column(const u64* src, u64 stride, u32 width, const u64* ds
         output[at * dst_stride + word] = src[row * stride + word];
 }
 
+/// Row `row` of the constant literals `src` (none: rows null) into ring row `at` of `dst`, padded with -1 rows to the
+/// ring's capacity of literals (the append checked that `src` is as wide and holds at most as many).
+__device__ void copy_constants(const encoding::ConstantInput& src, const encoding::ConstantInput& dst, u64 row, u64 at,
+                               u32 lane)
+{
+    i32* output = const_cast<i32*>(dst.rows) + at * dst.stride;
+    const u64 given = src.rows ? u64{src.capacity} * src.width : 0;
+    const u64 entries = u64{dst.capacity} * dst.width;
+    for (u64 i = lane; i < entries; i += 32)
+        output[i] = i < given ? src.rows[row * src.stride + i] : -1;
+}
+
 /// The copy of an append that fits: a warp per row, its lanes over the row's words, the warps striding over the rows.
 /// The tail stays as it is (append_commit_kernel advances it after the copy).
 __global__ void __launch_bounds__(k_append_threads) append_copy_kernel(DeviceEncodeInput in, DeviceEncodeInput ring,
@@ -58,6 +70,8 @@ __global__ void __launch_bounds__(k_append_threads) append_copy_kernel(DeviceEnc
             copy_column(in.goal_derived_neg, in.goal_derived_stride, ring.goal_derived_words, ring.goal_derived_neg,
                         ring.goal_derived_stride, row, at, lane);
         }
+        if (ring.goal_constants.rows)
+            copy_constants(in.goal_constants, ring.goal_constants, row, at, lane);
         if (lane == 0)
             const_cast<i32*>(ring.task_ids)[at] = in.task_ids ? in.task_ids[row] : 0;
     }

@@ -273,6 +273,8 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
     {
         r.in.goal_pos = p.goal_pos + source * p.goal_stride;
         r.in.goal_neg = p.goal_neg + source * p.goal_stride;
+        if (p.goal_constants.rows)
+            r.in.goal_constants = ed::constant_rows(p.goal_constants, source);
     }
     if (p.goal_derived_pos)
     {
@@ -396,7 +398,8 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
             u32* counts = p.cell_counts + g * p.cell_stride;
             t = ed::count_graph_group<Layered>(grp, r.v, r.in, counts, virtual_scratch);
         }
-        ok = (t.flags & (ed::k_graph_bad_row | ed::k_graph_bad_goal | ed::k_graph_bad_layers | ed::k_graph_bad_history)) == 0;
+        ok = (t.flags & (ed::k_graph_bad_row | ed::k_graph_bad_goal | ed::k_graph_bad_layers | ed::k_graph_bad_history |
+                         ed::k_graph_bad_constants)) == 0;
     }
     if (grp.lane() != 0)
         return;

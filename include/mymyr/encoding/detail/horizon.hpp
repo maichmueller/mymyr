@@ -11,7 +11,7 @@
 //   - minus: the deleting variant of a delta cell, the falsifying variant of an added-satisfaction cell;
 //   - low: the flat op that says where the tuple's atoms come from: a CellOp for the cells of facts and delta, the goal
 //     op (goal_op, lanes.hpp) for the cells of goal literals.
-// Cell::a and b are the slot range (or static rows) as in the flat cells, c and d the rows of the constant goal tuples.
+// Cell::a and b are the slot range (or static rows) as in the flat cells, c the table predicate of a goal cell.
 //
 // The per-graph rules are written once for the host and for device kernels, like those of lanes.hpp, and this header is
 // part of the same device-code subset: a graph is a HorizonGraph (POD views of the nodes, the edges and the graph's
@@ -918,7 +918,14 @@ MYMYR_HD u32 horizon_cell_count(const Cell& c, const HorizonGraph& h)
         return (nodes.last - nodes.first) * (c.b - c.a);
     if (horizon_cell_empty(c, h))
         return 0;
-    const u32 constants = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d - c.c : 0u;
+    // the constant literals are the same at every node: their truth is fixed
+    u32 constants = 0;
+    if (kind == HorizonKind::Goal || kind == HorizonKind::Sat)
+    {
+        Cell flat = c;
+        flat.op = horizon_low(c.op);
+        constants = constant_count<true>(*h.v, flat, h.goal, h.row);
+    }
     u32 n = 0;
     for (u32 node = nodes.first; node < nodes.last; ++node)
     {
@@ -931,7 +938,7 @@ MYMYR_HD u32 horizon_cell_count(const Cell& c, const HorizonGraph& h)
 }
 
 /// Calls out.put(node, objects) for the tuples of a slot based cell at `node`, in the order of the cell: the cell's
-/// slots in ascending order, with the constant goal tuples merged in.
+/// slots in ascending order, with the constant literals the cell lists merged in.
 template<class Out>
 MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, Out& out)
 {
@@ -943,8 +950,23 @@ MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, 
                              : goal_op_derived(low);
     const i32* rows = derived ? v.derived_args : v.slot_args;
     const u32 stride = v.max_arity;
-    u32 k = c.c;
-    const u32 end = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d : c.c;
+    Cell flat = c;
+    flat.op = low;
+    ConstantRange r{};
+    if (kind == HorizonKind::Goal || kind == HorizonKind::Sat)
+        r = constant_range<true>(flat, h.goal, h.row);
+    const ConstantRows& constants = r.rows;
+    u32 k = r.first;
+    const u32 end = r.last;
+    const bool check = !r.listed || placement_applies<true>(v, h.row);
+    // the next constant literal the cell lists (k == end: none is left)
+    auto next_constant = [&]
+    {
+        if (check)
+            while (k < end && !range_listed<true>(v, flat, h.goal, h.row, r, k))
+                ++k;
+    };
+    next_constant();
     if (c.a < c.b)
         for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
         {
@@ -954,13 +976,16 @@ MYMYR_HD void horizon_emit_node(const Cell& c, const HorizonGraph& h, u32 node, 
                 const u32 slot = w * 64u + lowest_bit64(bits);
                 bits &= bits - 1;
                 const i32* objects = rows + u64{slot} * stride;
-                while (k < end && tuple_before(v.goal_args + u64{k} * stride, objects, c.logical_arity))
-                    out.put(node, v.goal_args + u64{k++} * stride);
+                while (k < end && tuple_before(constants.row(k) + k_constant_objects, objects, c.logical_arity))
+                {
+                    out.put(node, constants.row(k++) + k_constant_objects);
+                    next_constant();
+                }
                 out.put(node, objects);
             }
         }
-    while (k < end)
-        out.put(node, v.goal_args + u64{k++} * stride);
+    for (; k < end; next_constant())
+        out.put(node, constants.row(k++) + k_constant_objects);
 }
 
 /// Calls out.put(node, objects) / out.put_pair(src, dst) for the tuples of cell `c`, in order.

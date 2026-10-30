@@ -12,8 +12,15 @@ the positive or negative mask of its row (and layer or step); an atom of a stati
 or in none (``STATIC_TRUE``, ``STATIC_FALSE``); or an atom of a fluent or derived predicate without a slot, which holds
 in no state (``UNREACHABLE``). The last three are literals of fixed truth: no state changes them, and the masks have no
 bit for them. ``fixed`` says what to do with them: ``'decide'`` leaves out one that holds and marks its row (or layer)
-unsatisfiable when it fails, ``'raise'`` raises ValueError. A literal with variables or an id out of range raises
-ValueError, an unknown name KeyError (as ``Task.literal``).
+unsatisfiable when it fails, ``'raise'`` raises ValueError, and ``'encode'`` keeps it as a constant literal of its row
+(or layer) in the masks' ``constants`` (and still marks a row whose literal fails unsatisfiable): the encoding lists it
+in its goal (subgoal) relations as the instance's goal lists its own constant literals, so a row goal is as expressive
+as an instance goal. A literal with variables or an id out of range raises ValueError, an unknown name KeyError (as
+``Task.literal``).
+
+Constant literals are int32 rows ``[N, K, 3 + A]`` (``A`` the widest predicate's arity): per row up to ``K`` literals,
+each its layer (0 in a goal), its table predicate id, 1 for a negative literal (else 0) and its objects padded with -1;
+unused rows are -1. A row's literals are strictly ascending, as the helpers make them.
 
 The source of every helper is an encoder (its table), a ``mymyr.rl.TaskTable`` or a Task: a table or task uses an
 encoding context of the default options, made once per table or task (the slots do not depend on the options).
@@ -27,11 +34,12 @@ from mymyr._core._encoding import LiteralKind, _literal_masks, _literal_slots, _
 
 
 class _Masks(tuple):
-    def __new__(cls, pos, neg, derived_pos, derived_neg, unsatisfiable, status=None):
+    def __new__(cls, pos, neg, derived_pos, derived_neg, unsatisfiable, status=None, constants=None):
         masks = (pos, neg) if derived_pos is None else (pos, neg, derived_pos, derived_neg)
         result = super().__new__(cls, masks)
         result._unsatisfiable = unsatisfiable.view(np.bool_) if isinstance(unsatisfiable, np.ndarray) else unsatisfiable
         result._status = status
+        result._constants = constants
         return result
 
     @property
@@ -59,26 +67,33 @@ class _Masks(tuple):
         """CUDA int64 scalar: value 4 flags invalid input; None for host masks."""
         return self._status
 
+    @property
+    def constants(self):
+        """int32 ``[N, K, 3 + A]``: the constant literals of each row (see the module); None without."""
+        return self._constants
+
     def __getnewargs__(self):
-        return self.pos, self.neg, self.derived_pos, self.derived_neg, self.unsatisfiable, self.status
+        return self.pos, self.neg, self.derived_pos, self.derived_neg, self.unsatisfiable, self.status, self.constants
 
     def tree_flatten(self):
-        return (*self, self.unsatisfiable, *((self.status,) if self.status is not None else ())), self.status is not None
+        extra = tuple(x for x in (self.status, self.constants) if x is not None)
+        return (*self, self.unsatisfiable, *extra), (self.status is not None, self.constants is not None, len(self))
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        if aux:
-            children, status = children[:-1], children[-1]
-        else:
-            status = None
-        pos, neg, *derived, unsatisfiable = children
-        return cls(pos, neg, *(derived or (None, None)), unsatisfiable, status)
+        has_status, has_constants, masks = aux
+        children = list(children)
+        constants = children.pop() if has_constants else None
+        status = children.pop() if has_status else None
+        pos, neg, *derived = children[:masks]
+        return cls(pos, neg, *(derived or (None, None)), children[masks], status, constants)
 
     def __repr__(self):
         derived = "" if self.derived_pos is None else f", derived {self.derived_pos.shape}"
+        constants = "" if self.constants is None else f", constants {tuple(self.constants.shape)}"
         if self.status is not None:
-            return f"{type(self).__name__}(pos {self.pos.shape}{derived}, status {self.status.shape})"
-        return (f"{type(self).__name__}(pos {self.pos.shape}{derived}, "
+            return f"{type(self).__name__}(pos {self.pos.shape}{derived}{constants}, status {self.status.shape})"
+        return (f"{type(self).__name__}(pos {self.pos.shape}{derived}{constants}, "
                 f"{int(self.unsatisfiable.sum())} unsatisfiable)")
 
 
@@ -92,9 +107,9 @@ class GoalMasks(_Masks):
     CUDA ``literal_masks`` returns int64 torch words (or uint32 halves) and a ``status`` int64 scalar: value 4 flags
     invalid entries, which were skipped. Host masks have ``status=None``.
 
-    A row goal has no constant part: a literal of fixed truth is in none of the masks, and ``goal_complete`` of a row
-    goal is 1, as for the instance's goal, whose static literals are fixed too. The goal relations of such a row list
-    its slotted literals only, where the instance's goal also lists its static literals as constant tuples."""
+    ``constants`` (int32 ``[N, K, 3 + A]``, None without) are the constant literals of the rows (``fixed='encode'``,
+    ``instance_constants``): the goal relations list them as the instance's goal lists its own literals of fixed truth.
+    Without them a literal of fixed truth is in no relation of the row. ``goal_complete`` of a row goal is 1."""
 
 
 class LayerMasks(_Masks):
@@ -103,7 +118,8 @@ class LayerMasks(_Masks):
     ``unsatisfiable`` bool ``[N, L]``: the layers with a literal of fixed truth that fails (``fixed='decide'``). It is
     a tuple ``(pos, neg)`` or ``(pos, neg, derived_pos, derived_neg)`` with read-only attributes. Importing
     ``mymyr.encoding.jax`` registers it as a JAX pytree, including ``unsatisfiable``. CUDA masks carry torch words
-    and a ``status`` scalar, as in ``GoalMasks``."""
+    and a ``status`` scalar, as in ``GoalMasks``. ``constants`` are the constant literals of the layers (column 0 the
+    layer), as in ``GoalMasks``."""
 
 
 def _check_sequence(value, what):
@@ -144,18 +160,26 @@ def _rows(rows, what, layered):
 
 
 def _fixed(fixed):
-    if fixed not in ("decide", "raise"):
-        raise ValueError(f"mymyr: encoding: fixed must be 'decide' or 'raise', not {fixed!r}")
+    if fixed not in ("decide", "raise", "encode"):
+        raise ValueError(f"mymyr: encoding: fixed must be 'decide', 'raise' or 'encode', not {fixed!r}")
     return fixed
 
 
-def goal_masks(source, goals, task_ids=None, *, fixed="decide"):
+def _masks(cls, arrays):
+    pos, neg, derived_pos, derived_neg, unsatisfiable, constants = arrays
+    return cls(pos, neg, derived_pos, derived_neg, unsatisfiable, constants=constants)
+
+
+def goal_masks(source, goals, task_ids=None, *, fixed="decide", instance_constants=False):
     """The goals of the rows ``goals`` (per row, a sequence of literals) as ``GoalMasks``, for ``encode(goals=...)``.
     ``task_ids`` [N] is the instance of each row (required for a table of several instances). ``fixed``: ``'decide'``
     leaves out a literal of fixed truth that holds and sets ``unsatisfiable`` of its row for one that fails, ``'raise'``
-    raises ValueError for any (see the module)."""
+    raises ValueError for any, ``'encode'`` keeps them as constant literals (see the module). ``instance_constants``
+    adds the constant part of each row's instance goal (its literals of fixed truth) to the row's constant literals, so
+    that a row goal of the instance's own literals encodes as the instance goal does."""
     rows = _rows(goals, "goals", False)
-    return GoalMasks(*_named_literal_masks(source, rows, _task_ids(task_ids), False, _fixed(fixed)))
+    return _masks(GoalMasks, _named_literal_masks(source, rows, _task_ids(task_ids), False, _fixed(fixed),
+                                                  bool(instance_constants)))
 
 
 def subgoal_masks(source, subgoals, task_ids=None, *, fixed="raise"):
@@ -164,7 +188,7 @@ def subgoal_masks(source, subgoals, task_ids=None, *, fixed="raise"):
     longest row has. ``fixed`` as in ``goal_masks``; ``'raise'`` by default, since a subgoal that no state can change
     is most likely a mistake. Raises ValueError for task ids outside the table."""
     rows = _rows(subgoals, "subgoals", True)
-    return LayerMasks(*_named_literal_masks(source, rows, _task_ids(task_ids), True, _fixed(fixed)))
+    return _masks(LayerMasks, _named_literal_masks(source, rows, _task_ids(task_ids), True, _fixed(fixed)))
 
 
 def history_masks(source, history, task_ids=None):
@@ -191,7 +215,7 @@ def history_masks(source, history, task_ids=None):
             dt[r, step] = delta
             layers.append(list(literals))
         rows.append(layers)
-    pos, neg, derived_pos, derived_neg, _ = _named_literal_masks(source, rows, _task_ids(task_ids), True, "raise")
+    pos, neg, derived_pos, derived_neg, _, _ = _named_literal_masks(source, rows, _task_ids(task_ids), True, "raise")
     if derived_pos is not None:
         return pos, neg, dt, count, derived_pos, derived_neg
     return pos, neg, dt, count
@@ -225,22 +249,24 @@ def literal_slots(source, predicates, objects, task_ids=None):
 
 
 def literal_masks(source, predicates, objects, positive, rows, num_rows, task_ids=None, *, layers=None,
-                  num_layers=None, fixed="decide", word_dtype=None):
+                  num_layers=None, fixed="decide", instance_constants=False, word_dtype=None):
     """The masks of N literals given as arrays (``predicates`` and ``objects`` as in ``literal_slots``): literal ``i``
     has the sign ``positive[i]`` and goes to the row ``rows[i]`` of ``num_rows``, whose instance is ``task_ids[row]``
     (``task_ids`` [num_rows], required for a table of several instances). Returns ``GoalMasks``; with ``layers`` [N]
     (the layer of each literal, of ``num_layers``, by default one more than the largest) ``LayerMasks`` for
-    ``encode(subgoals=...)``. ``fixed`` as in ``goal_masks``. Raises ValueError for an invalid literal, row or layer.
+    ``encode(subgoals=...)``. ``fixed`` and ``instance_constants`` (goals only) as in ``goal_masks``. Raises ValueError
+    for an invalid literal, row or layer.
 
     CUDA torch arrays require an encoder, contiguous int32 ids, bool signs, explicit ``num_layers`` with layers,
-    and ``fixed='decide'``. Results are torch tensors, int64 words (or ``word_dtype=torch.uint32`` for low/high
-    halves), bool unsatisfiable, and ``status`` an int64 scalar (value 4 for invalid input, which is skipped).
+    ``fixed='decide'`` and no instance constants (constant literals are made on the host). Results are torch tensors,
+    int64 words (or ``word_dtype=torch.uint32`` for low/high halves), bool unsatisfiable, and ``status`` an int64
+    scalar (value 4 for invalid input, which is skipped).
     Warm on the capture stream and retain the encoder and buffers through the last replay. No host read occurs."""
     if getattr(predicates, "is_cuda", False):
         import torch
         from ._device_literals import masks
-        if _fixed(fixed) != "decide":
-            raise ValueError("mymyr: encoding: CUDA literal masks require fixed='decide'")
+        if _fixed(fixed) != "decide" or instance_constants:
+            raise ValueError("mymyr: encoding: CUDA literal masks require fixed='decide' and no instance constants")
         if (layers is None) != (num_layers is None):
             raise ValueError("mymyr: encoding: CUDA layers require explicit num_layers, and num_layers requires layers")
         if word_dtype not in (None, torch.int64, torch.uint32):
@@ -273,6 +299,8 @@ def literal_masks(source, predicates, objects, positive, rows, num_rows, task_id
         raise ValueError("mymyr: encoding: num_layers goes with layers")
     if num_rows < 0 or (num_layers is not None and num_layers < 0):
         raise ValueError("mymyr: encoding: num_rows and num_layers must not be negative")
+    if instance_constants and layers is not None:
+        raise ValueError("mymyr: encoding: instance_constants go with goals, not with layers")
     arrays = _literal_masks(source, predicates, objects, positive, rows, int(num_rows), _task_ids(task_ids), layers,
-                            int(num_layers or 0), _fixed(fixed))
-    return (GoalMasks if layers is None else LayerMasks)(*arrays)
+                            int(num_layers or 0), _fixed(fixed), bool(instance_constants))
+    return _masks(GoalMasks if layers is None else LayerMasks, arrays)

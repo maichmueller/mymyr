@@ -11,7 +11,7 @@ import pytest
 from mymyr import encoding, rl
 from conftest import text_task
 from test_encoding_device_actions import gpu, tensor, toggle_tasks
-from test_encoding_suites import literal_mask_inputs
+from test_encoding_suites import constant_mask_inputs, literal_mask_inputs
 from test_rl_table import sets  # noqa: F401
 from test_rl_task_suite import suite_batch, suite_of
 from test_rl_torch_obs import assert_same
@@ -183,6 +183,23 @@ def test_device_suite_accepts_literal_mask_objects(name, layout, shared, capacit
     def upload(masks):
         arrays = (masks.pos, masks.neg, masks.derived_pos, masks.derived_neg)
         return type(masks)(*(None if x is None else tensor(x, device) for x in arrays), masks.unsatisfiable)
+
+    actual = encoder.encode(tensor(states, device), tensor(ids, device), goals=upload(goals), subgoals=upload(layers),
+                            capacities=capacities(encoder, len(ids)) if capacity else None)
+    compare(actual, expected, len(ids))
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_device_suite_keeps_the_constant_literals_of_mask_objects(shared, capacity):
+    device = gpu()
+    encoder, states, ids, goals, layers = constant_mask_inputs(shared)
+    expected = encoder.encode(states, ids, goals=goals, subgoals=layers)
+
+    def upload(masks):
+        arrays = (masks.pos, masks.neg, masks.derived_pos, masks.derived_neg)
+        return type(masks)(*(None if x is None else tensor(x, device) for x in arrays), masks.unsatisfiable,
+                           constants=tensor(masks.constants, device))
 
     actual = encoder.encode(tensor(states, device), tensor(ids, device), goals=upload(goals), subgoals=upload(layers),
                             capacities=capacities(encoder, len(ids)) if capacity else None)

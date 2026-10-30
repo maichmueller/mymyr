@@ -60,9 +60,13 @@ struct HPass
     {
         return static_cast<u32>(in.horizon.edge_offsets[g + 1] - in.horizon.edge_offsets[g]);
     }
-    [[nodiscard]] CellList cells_of(const InstanceView& v) const noexcept
+    /// The cells of graph g of `v`'s instance: a fixed list for a graph with constant literals.
+    [[nodiscard]] CellList cells_of(const InstanceView& v, u64 g) const noexcept
     {
-        return in.goal_pos ? CellList{v.row_cells, v.num_row_cells} : CellList{v.cells, v.num_cells};
+        const bool fixed =
+            (in.goal_pos && in.goal_constants.rows && constant_rows(in.goal_constants, g).count != 0) ||
+            (in.subgoals.layers != 0 && in.subgoal_constants.rows && constant_rows(in.subgoal_constants, g).count != 0);
+        return cell_list(v, in.goal_pos != nullptr, true, false, false, fixed);
     }
 
     /// The graph's derived words, as the lanes read them (null if the instance does not read them).
@@ -88,12 +92,15 @@ struct HPass
                                l.layers,
                                l.words,
                                l.derived_words};
+            layers.constants = constant_rows(in.subgoal_constants, g);
             row.layers = &layers;
         }
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
             row.goal_neg = in.goal_neg + g * in.goal_stride;
+            if (in.goal_constants.rows)
+                row.goal_constants = constant_rows(in.goal_constants, g);
         }
         if (in.goal_derived_pos)
         {
@@ -205,7 +212,7 @@ void count_range(const HPass& p, u32 t)
     Member& m = p.s.members[t];
     m.totals.assign(hi - lo, GraphTotals{});
     m.entities = m.tuples = m.args = m.targets = m.history = 0;
-    m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
+    m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = m.bad_constants = k_none;
     m.narrow_subgoals = m.bad_subgoal_bits = m.bad_edge = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
     if (p.kin)
@@ -316,7 +323,12 @@ void count_range(const HPass& p, u32 t)
             m.bad_subgoal_bits = std::min(m.bad_subgoal_bits, g);
             continue;
         }
-        const CellList list = p.cells_of(v);
+        if (has_row_constants<true>(row) && has_bad_constants<true>(v, row))
+        {
+            m.bad_constants = std::min(m.bad_constants, g);
+            continue;
+        }
+        const CellList list = p.cells_of(v, g);
         u32* cell_counts = nullptr;
         if (keep_counts)
         {
@@ -396,7 +408,7 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         const HorizonEntities entities = horizon_entities(v, h, totals, entity);
         entity_offsets[g] = static_cast<I>(entity);
         fill_horizon_entities<I>(v, h, entities, g, target, out);
-        const CellList list = p.cells_of(v);
+        const CellList list = p.cells_of(v, g);
         // the virtual entities: the predicates that have a tuple, in the order of their names
         u32* rank = m.virtual_scratch.empty() ? nullptr : m.virtual_scratch.data();
         if (rank)
@@ -470,7 +482,7 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         arg += totals.args;
         target += totals.targets;
     };
-    const auto cells_of = [&](u64 g) { return p.cells_of(instance_view(p.view, p.instance_of(g))); };
+    const auto cells_of = [&](u64 g) { return p.cells_of(instance_view(p.view, p.instance_of(g)), g); };
     fill_member<I>(m, {p.graphs, p.R, p.relation_major, p.s.arity.data()}, lo, hi, out.relation_offsets,
                    out.relation_arg_offsets, fill_one, cells_of);
 }
@@ -628,7 +640,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     const HPass pass = make_pass(in, s, context, graphs, members, evaluate);
     run(pool, members, [&pass](u32 t) { count_range(pass, t); });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
-    u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, bad_edge = k_none, too_big = k_none;
+    u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, bad_edge = k_none, too_big = k_none,
+        bad_constants = k_none;
     for (const Member& m : s.members)
     {
         if (m.kin)
@@ -641,6 +654,7 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         narrow_subgoals = std::min(narrow_subgoals, m.narrow_subgoals);
         bad_subgoal_bits = std::min(bad_subgoal_bits, m.bad_subgoal_bits);
         bad_edge = std::min(bad_edge, m.bad_edge);
+        bad_constants = std::min(bad_constants, m.bad_constants);
     }
     auto of_graph = [&](u64 g) { return "graph " + std::to_string(g) + " of the horizon"; };
     if (bad_id != k_none)
@@ -685,6 +699,9 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         invalid("the subgoal layers of " + of_graph(bad_subgoal_bits) + " set an atom bit its instance does not have");
     if (bad_goal_bits != k_none)
         invalid("the goal of " + of_graph(bad_goal_bits) + " sets an atom bit its instance does not have");
+    if (bad_constants != k_none)
+        invalid(constant_input_fault(context, in, pass.instance_of(bad_constants), bad_constants,
+                                     of_graph(bad_constants)));
 
     // 3. scan the members
     const FlatSizes sizes = scan_members(s, *m_schema, graphs);

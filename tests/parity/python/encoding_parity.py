@@ -164,8 +164,8 @@ class Mismatch:
 class Context:
     """What the allowed differences may look at: the fixture, its task, the state record of the graph, the config and
     the goal literals (``None``: the task's goal), the actions (``None``: none), the subgoal layers and the history
-    steps (``None``: none) the record was encoded with, and ``dropped``: the subgoal and history literals that have no
-    slot in the task and so are not given to the native encoder."""
+    steps (``None``: none) the record was encoded with, and ``dropped``: the history literals that have no slot in the
+    task and so are not given to the native encoder (those of subgoal layers are given as constant literals)."""
 
     fixture: dict
     task: object
@@ -543,9 +543,6 @@ def horizon_nullary_tuples(name, context, nodes):
     literals = [goal_literals(context)] + [set(map(parse_literal, layer)) for layer in context.layers or ()]
     if level >= len(literals) or (positive, predicate, ()) not in literals[level]:
         return []
-    if any(kind == "subgoal" and where == level and parse_literal(text) == (positive, predicate, ())
-           for kind, where, text in context.dropped):
-        return []
     if not rest:
         return [lead[0]]
     satisfied = [h == positive for h in holds]
@@ -613,15 +610,13 @@ def _repeated_literal_horizon(expected, actual, context):
             continue
         sign = "+" if positive else "-"
         high = f"[{_level_suffix(max(listed))}]"
-        dropped = {level for kind, level, literal in context.dropped
-                   if kind == "subgoal" and parse_literal(literal) == (positive, predicate, arguments)}
         for name in [n for n in tuples if n.startswith(f"[{sign}]{predicate}{high}")]:
             moved = [t for t in tuples[name] if t[len(t) - len(arguments) :] == arguments]
             by_tuple = Counter(moved)
             if not moved or any(count != len(listed) for count in by_tuple.values()):
                 continue
             tuples[name] = [t for t in tuples[name] if t not in by_tuple]
-            for level in sorted(listed - dropped):
+            for level in sorted(listed):
                 target = f"[{sign}]{predicate}[{_level_suffix(level)}]" + name[len(f"[{sign}]{predicate}{high}") :]
                 tuples.setdefault(target, [])
                 tuples[target] += [t for t in by_tuple if t not in tuples[target]]
@@ -796,8 +791,8 @@ def _level_suffix(level):
 def _repeated_literal(expected, actual, context):
     """A literal that is in two levels (the goal and a layer, or two layers) is in mifrost's graph at the highest of
     them, once for each level it is listed in (as one subgoal entity with equal tuples, and in the satisfaction
-    relations of that level) and nowhere else. The native encoder has it once at every listing level that its masks
-    can hold, and in the goal when listed there. The expectation distributes the entity and tuples to those levels
+    relations of that level) and nowhere else. The native encoder has it once at every listing level (a literal
+    without a slot as a constant literal of its level), and in the goal when listed there. The expectation distributes the entity and tuples to those levels
     only when the reference's equal tuple count matches the number of listing levels."""
     if not context.layers:
         return expected, actual
@@ -832,9 +827,7 @@ def _repeated_literal(expected, actual, context):
             for kind, row in derived.items():
                 tuples[relation + kind] = [t for t in tuples[relation + kind] if t != row]
             entities.remove(("subgoal", entity))
-            dropped = {level for kind, level, literal in context.dropped
-                       if kind == "subgoal" and parse_literal(literal) == (positive, predicate, arguments)}
-            for level in sorted(listed - dropped):
+            for level in sorted(listed):
                 suffix = f"[{_level_suffix(level)}]"
                 target = f"{text}{suffix}"
                 target_relation = f"[{sign}]{predicate}{suffix}"
@@ -851,54 +844,25 @@ def _repeated_literal(expected, actual, context):
     return replace(expected, entities=entities, tuples={n: ts for n, ts in tuples.items() if ts}), actual
 
 
-def _literal_without_slot(expected, actual, context):
-    """mifrost takes a literal over a static predicate, or over an atom that no state can make true, in a subgoal layer
-    or a history step. The native encoder takes masks over the atoms that have slots, so such a literal cannot be
-    given to it (the harness leaves it out, and ``Context.dropped`` lists it). The expectation drops what mifrost made
-    of exactly those literals: their entity, their tuples (the argument rows of their relations when the graph has no
-    target entities) and their satisfaction tuples. A literal that is also a goal literal is in the goal of the native
-    graph; ``repeated_literal`` places its reference copy in the goal and excludes its unrepresentable layer copies."""
+def _history_literal_without_slot(expected, actual, context):
+    """mifrost takes a literal over a static predicate, or over an atom that no state can make true, in a history
+    step. The native history steps are masks over the atoms that have slots, so such a literal cannot be given to them
+    (the harness leaves it out, and ``Context.dropped`` lists it). The expectation drops what mifrost made of exactly
+    those literals: their history target entity and its tuples, or their tuples in the step."""
     if not context.dropped or context.dag is not None:
         return expected, actual
-    goal = goal_literals(context)
-    graphs = {"expected": (list(expected.entities), {n: list(ts) for n, ts in expected.tuples.items()}),
-              "actual": (list(actual.entities), {n: list(ts) for n, ts in actual.tuples.items()})}
-
-    def drop(which, role, entity, relation):
-        entities, tuples = graphs[which]
-        if (role, entity) in entities:
-            entities.remove((role, entity))
-            tuples[relation] = [t for t in tuples.get(relation, []) if t[0] != entity]
-
-    def drop_satisfaction(which, names, arguments):
-        tuples = graphs[which][1]
-        for name in names:
-            tuples[name] = [t for t in tuples.get(name, []) if t[len(t) - len(arguments) :] != arguments]
-
+    entities, tuples = list(expected.entities), {n: list(ts) for n, ts in expected.tuples.items()}
     for kind, where, literal in context.dropped:
         positive, predicate, arguments = parse_literal(literal)
         sign = "+" if positive else "-"
-        text = literal_text(positive, predicate, arguments)
-        if kind == "subgoal":
-            if (positive, predicate, arguments) in goal:
-                continue  # repeated_literal keeps the goal copy and excludes the unrepresentable layer copies
-            suffix = _level_suffix(where)
-            relation = f"[{sign}]{predicate}[{suffix}]"
-            satisfaction = [relation + "[sat]", relation + "[unsat]"]
-            drop("expected", "subgoal", f"{text}[{suffix}]", relation)
-            drop_satisfaction("expected", satisfaction, arguments)
+        relation, entity = f"[{sign}]{predicate}[hist]", f"{where}:{literal_text(positive, predicate, arguments)}"
+        if ("history_target", entity) in entities:
+            entities.remove(("history_target", entity))
+            tuples[relation] = [t for t in tuples.get(relation, []) if t[0] != entity]
         else:
-            relation, entity = f"[{sign}]{predicate}[hist]", f"{where}:{text}"
-            entities, tuples = graphs["expected"]
-            if ("history_target", entity) in entities:
-                entities.remove(("history_target", entity))
-                tuples[relation] = [t for t in tuples.get(relation, []) if t[0] != entity]
-            else:
-                tuples[relation] = [t for t in tuples.get(relation, [])
-                                    if not (t[0] == where and t[len(t) - len(arguments) :] == arguments)]
-    (e_entities, e_tuples), (a_entities, a_tuples) = graphs["expected"], graphs["actual"]
-    return (replace(expected, entities=e_entities, tuples={n: ts for n, ts in e_tuples.items() if ts}),
-            replace(actual, entities=a_entities, tuples={n: ts for n, ts in a_tuples.items() if ts}))
+            tuples[relation] = [t for t in tuples.get(relation, [])
+                                if not (t[0] == where and t[len(t) - len(arguments) :] == arguments)]
+    return replace(expected, entities=entities, tuples={n: ts for n, ts in tuples.items() if ts}), actual
 
 
 def recorded_successor(context):
@@ -1051,13 +1015,12 @@ REGISTRY = (
         _nullary_layers_over_auxiliary,
     ),
     Difference(
-        "literal_without_slot",
+        "history_literal_without_slot",
         "A literal over a static predicate, or over an atom that no state can make true, has no slot, so the "
-        "native subgoal and history inputs cannot hold it; mifrost encodes it.",
-        "the entities and tuples that mifrost made of the literals the harness left out of the native inputs, except "
-        "those of a literal that is also a goal literal",
-        (("f08", "C3S"), ("f08", "C5A"), ("f08", "C5BN")),
-        _literal_without_slot,
+        "native history steps cannot hold it; mifrost encodes it.",
+        "the entities and tuples that mifrost made of the history literals the harness left out of the native inputs",
+        (("f08", "C5A"), ("f08", "C5BN")),
+        _history_literal_without_slot,
     ),
     Difference(
         "repeated_literal",
@@ -1319,17 +1282,13 @@ def split_by_slot(encoder, literals):
 
 def layer_inputs(encoder, inputs):
     """The ``subgoals`` and ``history`` arguments of the native encoder for the layers and steps of a record's inputs
-    (literals without a slot left out), and the literals left out."""
+    (literals without a slot left out of the history steps), and the literals left out."""
     from mymyr import encoding
 
     arguments, dropped = {}, []
     if "subgoal_layers" in inputs:
-        layers = []
-        for level, layer in enumerate(inputs["subgoal_layers"], 1):
-            kept, lost = split_by_slot(encoder, layer)
-            layers.append(kept)
-            dropped += [("subgoal", level, literal) for literal in lost]
-        arguments["subgoals"] = encoding.subgoal_masks(encoder, [layers])
+        # literals without a slot are the constant literals of their layer
+        arguments["subgoals"] = encoding.subgoal_masks(encoder, [inputs["subgoal_layers"]], fixed="encode")
     if "history_subgoals" in inputs:
         steps = []
         given = inputs["history_subgoals"]

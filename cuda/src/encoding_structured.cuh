@@ -79,7 +79,13 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
     if (ed::has_foreign_goal_bits(r.v, r.in) ||
         (r.in.layers && ed::has_foreign_layer_bits(r.v, r.in.layers->subgoals)))
         return false;
-    return true;
+    return !(ed::has_row_constants<true>(r.in) && ed::has_bad_constants<true>(r.v, r.in));
+}
+
+/// The cells of a horizon graph: a fixed list for a graph with constant literals.
+__device__ ed::CellList horizon_cells(const RowView& r)
+{
+    return ed::cell_list(r.v, r.in.goal_pos != nullptr, true, false, false, ed::has_row_constants<true>(r.in));
 }
 
 __global__ void structured_count_kernel(const EncodeParams params)
@@ -121,8 +127,7 @@ __global__ void structured_count_kernel(const EncodeParams params)
                 prepared.use_cousins = false;  // Cousin rows are gathered into linear scratch on demand.
                 ed::horizon_kin_prepare(prepared);
             }
-            const ed::CellList list = r.in.goal_pos ? ed::CellList{r.v.row_cells, r.v.num_row_cells}
-                                                   : ed::CellList{r.v.cells, r.v.num_cells};
+            const ed::CellList list = horizon_cells(r);
             auto sink = [&](u32 i, const ed::Cell& c, u32 n)
             {
                 counts[i] = n;
@@ -257,8 +262,7 @@ __global__ void structured_fill_kernel(const EncodeParams params)
         }
         return;
     }
-    const ed::CellList list = r.in.goal_pos ? ed::CellList{r.v.row_cells, r.v.num_row_cells}
-                                          : ed::CellList{r.v.cells, r.v.num_cells};
+    const ed::CellList list = horizon_cells(r);
     auto sink = [](u32, const ed::Cell&, u32) {};
     const ed::GraphTotals t = ed::horizon_count_graph(r.v, h, list, rank, sink);
     const ed::HorizonEntities entities = ed::horizon_entities(r.v, h, t, entity);

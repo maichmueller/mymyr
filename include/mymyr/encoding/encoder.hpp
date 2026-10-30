@@ -194,6 +194,8 @@ struct EncodeInput
     // neither, likewise the derived pair. A row of a mask array is `*_words` wide, at least as wide as the words (derived
     // words) of every instance in the batch; `*_stride` is the distance between consecutive rows, 0 for one row that
     // every graph shares. Bits of slots an instance does not have are an error. The goal of such a row is complete.
+    // `goal_constants` are its constant literals (of layer 0), the literals of fixed truth that the masks cannot hold;
+    // they need the masks.
     const u64* goal_pos = nullptr;
     const u64* goal_neg = nullptr;
     u64 goal_stride = 0;
@@ -202,6 +204,7 @@ struct EncodeInput
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    ConstantInput goal_constants{};
     // The successors of each row, as rl::expand returns them (null: no action tuples). The graph of row g has one action
     // entity per distinct ground action among the expansion rows [offsets[g], offsets[g + 1]), which must be the rows of
     // the same state g: canonical order (by schema, then lexicographically by binding), the labels of the row's instance,
@@ -213,8 +216,10 @@ struct EncodeInput
     const rl::Expansion* actions = nullptr;
     // The subgoal layers of each row: layer l fills the subgoal relations of level l + 1 (at most max_goal_level
     // layers). repeated_literals places literals listed at several levels; each cell contains unique tuples.
-    // Needs subgoal relations in the schema.
+    // Needs subgoal relations in the schema. `subgoal_constants` are the constant literals of the layers (layer l of
+    // a literal: layer l of the masks); they need the masks.
     LayerInput subgoals{};
+    ConstantInput subgoal_constants{};
     // The history steps of each row. Needs the history lane in the options.
     HistoryInput history{};
     // The graphs of a horizon schema.
@@ -272,7 +277,8 @@ public:
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
     /// not have, a goal mask narrower than its instance, goal masks without their pair, subgoal layers or history steps
-    /// that the schema has no relations for, that are narrower than their instance or set a bit it does not have, a
+    /// that the schema has no relations for, that are narrower than their instance or set a bit it does not have,
+    /// constant literals without their masks or that detail::constant_fault refuses, a
     /// history count beyond its row's steps, a number of numeric words other than the table's, expansion rows that are not the canonical rows of their
     /// state) and
     /// std::overflow_error when a count exceeds the index type.

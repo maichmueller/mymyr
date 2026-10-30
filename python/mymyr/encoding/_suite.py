@@ -10,6 +10,7 @@ import numpy as np
 from mymyr._core import _encoding as _core
 from mymyr._core._rl import TaskSuite, TaskTable
 from mymyr._suite import _Split, _take
+from mymyr.encoding._literals import _Masks
 
 if TYPE_CHECKING:
     from mymyr._typing import SupportsDLPack
@@ -105,9 +106,14 @@ def _shared(array: Any, rows: int) -> bool:
 
 
 def _take_input(value: Any, idx: np.ndarray, rows: int) -> Any:
-    """The rows `idx` of a per-row input: an array, or a tuple of arrays (goal masks, subgoal layers, history)."""
+    """The rows `idx` of a per-row input: an array, or a tuple of arrays (goal masks, subgoal layers, history); a
+    GoalMasks or LayerMasks stays one, with the rows of its constant literals."""
     if value is None:
         return None
+    if isinstance(value, _Masks):
+        pos, neg, *derived = (_take_input(item, idx, rows) for item in value)
+        return type(value)(pos, neg, *(derived or (None, None)), _take_input(value.unsatisfiable, idx, rows),
+                           value.status, _take_input(value.constants, idx, rows))
     if isinstance(value, (tuple, list)):
         return tuple(_take_input(item, idx, rows) for item in value)
     return value if _shared(value, rows) else _take(value, idx, None)

@@ -160,12 +160,17 @@ struct InstanceRows
                                                      // steps, and of both: index (e - 1) * 4 + k for e (1: layers,
                                                      // 2: history, 3: both) and the list k of {cells, row_cells,
                                                      // plain_cells, plain_row_cells}
+    std::array<std::vector<Cell>, 16> fixed;         // the 16 lists for rows with constant literals: index e * 4 + k,
+                                                     // the list k (e 0) or the extended list, with the goal cells of
+                                                     // the predicates without slots (detail::cell_list)
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
     std::vector<i32> numeric_args;                          // the same for the numeric slots
     std::vector<Cell> numeric_cells;                        // one per numeric function that has slots
     u64 numeric_tuples = 0;
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
-    std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
+    std::vector<i32> goal_constants;  // the constant goal literals, rows of detail::k_constant_objects + max_arity,
+                                      // then the rows of the goal cells (InstanceView::goal_constants)
+    u64 goal_constant_count = 0;      // the constant goal literals
     std::vector<u32> literal_ranges;                        // [domain predicates, detail::k_literal_columns]
     u64 num_objects = 0, words = 0, fluent_slots = 0, derived_words = 0, derived_slots = 0;
     u64 fingerprint = 0;
@@ -478,12 +483,52 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                                [](const ConstantLiteral& x, const ConstantLiteral& y) { return x.objects == y.objects; }),
                    rows.end());
     }
+    {
+        // the constant part as constant literals of layer 0, sorted by table predicate, sign and objects
+        std::vector<std::vector<i32>> literals;
+        for (const auto& [key, rows] : constants)
+            for (const ConstantLiteral& row : rows)
+            {
+                std::vector<i32> literal{0, static_cast<i32>(instance.pred_map[key.first]), static_cast<i32>(key.second)};
+                for (u32 k = 0; k < max_arity; ++k)
+                    literal.push_back(k < row.objects.size() ? row.objects[k] : -1);
+                literals.push_back(std::move(literal));
+            }
+        std::sort(literals.begin(), literals.end());
+        for (const std::vector<i32>& literal : literals)
+            out.goal_constants.insert(out.goal_constants.end(), literal.begin(), literal.end());
+        out.goal_constant_count = literals.size();
+    }
+    // Gives the goal cell `cell` of level 0 of the instance's lists the rows [c, d) of the constant literals of
+    // (ip, sign) of the instance's goal that its variant (0 plain, 1 satisfied, 2 unsatisfied) lists, appended to the
+    // instance's goal_constants; returns whether it lists one.
+    const u32 constant_width = detail::k_constant_objects + max_arity;
+    auto list_constants = [&](Cell& cell, u32 ip, u32 sign, u32 variant)
+    {
+        cell.c = cell.d = static_cast<u32>(out.goal_constants.size() / constant_width);
+        const auto found = constants.find({ip, sign});
+        if (found == constants.end())
+            return false;
+        for (const ConstantLiteral& row : found->second)
+        {
+            if (variant != 0 && (variant == 1) != row.holds)
+                continue;
+            out.goal_constants.insert(out.goal_constants.end(),
+                                      {0, static_cast<i32>(instance.pred_map[ip]), static_cast<i32>(sign)});
+            for (u32 k = 0; k < max_arity; ++k)
+                out.goal_constants.push_back(k < row.objects.size() ? row.objects[k] : -1);
+            ++cell.d;
+        }
+        return cell.c != cell.d;
+    };
     if (horizon)
     {
         // The cells of a horizon graph. The instance's own goal narrows the slot range of a goal cell of level 0 to the
         // literals of its mask and adds the cell's constant tuples; the cells of row goals and of the subgoal levels
         // span the predicate's slots.
-        u32 goal_rows = 0;
+        // the goal and satisfaction cells of the predicates without slots: of level 0 (row goals) and of the subgoal
+        // levels, for the fixed lists
+        std::vector<Cell> fixed_goal, fixed_levels;
         for (u32 ip = 0; ip < predicates; ++ip)
         {
             const u32 tp = instance.pred_map[ip];
@@ -532,25 +577,12 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 default:
                 {
                     // Goal, Sat, Added
-                    const bool constant_part = d.level == 0 && d.kind != detail::HorizonKind::Added;
                     if (!fixed)
                     {
                         cell.a = slot_begin;
                         cell.b = slot_end;
                     }
-                    cell.c = goal_rows;
-                    const auto found = constant_part ? constants.find({ip, sign}) : constants.end();
-                    if (found != constants.end())
-                        for (const ConstantLiteral& row : found->second)
-                        {
-                            if ((d.mode == detail::GoalMode::Satisfied && !row.holds) ||
-                                (d.mode == detail::GoalMode::Unsatisfied && row.holds))
-                                continue;
-                            for (u32 k = 0; k < max_arity; ++k)
-                                out.goal_args.push_back(k < logical ? row.objects[k] : -1);
-                            ++goal_rows;
-                        }
-                    cell.d = goal_rows;
+                    cell.c = tp;
                     cell.op = detail::horizon_op(d.kind, d.scope, d.lead, d.minus,
                                                  detail::goal_op(derived, d.negative, d.mode, d.level));
                     if (derived && cell.a != cell.b && d.kind != detail::HorizonKind::Goal)
@@ -569,15 +601,25 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                     }
                     continue;
                 }
+                // a constant literal holds or fails at every node: an added-satisfaction cell never lists one
+                const bool constant_part = d.kind != detail::HorizonKind::Added;
+                const u32 variant = d.mode == detail::GoalMode::Satisfied ? 1 : d.mode == detail::GoalMode::Unsatisfied ? 2 : 0;
                 if (cell.a != cell.b)
                 {
-                    Cell row_cell = cell;
-                    row_cell.c = row_cell.d = 0;
-                    out.row_cells.push_back(row_cell);
+                    out.row_cells.push_back(cell);
                     if (d.level == 0)
                         narrow_to_set_bits(masks[derived ? 1 : 0][sign], cell.a, cell.b);
                 }
-                if (cell.a == cell.b && cell.c == cell.d)
+                else if (constant_part)
+                    (d.level == 0 ? fixed_goal : fixed_levels).push_back(cell);
+                bool listed = false;
+                if (d.level == 0)
+                {
+                    listed = constant_part && list_constants(cell, ip, sign, variant);
+                    if (!constant_part)
+                        cell.c = cell.d = 0;
+                }
+                if (cell.a == cell.b && !listed)
                     continue;  // the instance's goal has no tuple here
                 out.cells.push_back(cell);
             }
@@ -595,6 +637,15 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                                                                    &out.plain_row_cells};
             for (usize k = 0; k < out.extended.size(); ++k)
                 out.extended[k] = *bases[k % 4];
+            for (usize k = 0; k < out.fixed.size(); ++k)
+            {
+                std::vector<Cell>& list = out.fixed[k];
+                list = *bases[k % 4];
+                if (k % 2 == 1)
+                    list.insert(list.end(), fixed_goal.begin(), fixed_goal.end());
+                list.insert(list.end(), fixed_levels.begin(), fixed_levels.end());
+                std::sort(list.begin(), list.end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+            }
         }
         append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
         append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
@@ -602,7 +653,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         return out;
     }
     out.row_cells = out.cells;
-    u32 goal_rows = 0;
+    std::vector<Cell> fixed_goal;  // the goal cells of the predicates without slots, for the fixed lists of row goals
     for (u32 ip = 0; ip < predicates; ++ip)
     {
         const u32 tp = instance.pred_map[ip];
@@ -612,7 +663,6 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         const u32 logical = static_cast<u32>(arity[ip]);
         for (u32 sign = 0; sign < 2; ++sign)
         {
-            const auto found = constants.find({ip, sign});
             for (u32 variant = 0; variant < 3; ++variant)
             {
                 const i32 id = goal_relations.at(tp, sign, variant);
@@ -625,17 +675,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                     cell.a = static_cast<u32>(derived ? derived_offsets[ip] : fluent_offsets[ip]);
                     cell.b = static_cast<u32>(derived ? derived_offsets[ip + 1] : fluent_offsets[ip + 1]);
                 }
-                cell.c = goal_rows;
-                if (found != constants.end())
-                    for (const ConstantLiteral& row : found->second)
-                    {
-                        if ((variant == 1 && !row.holds) || (variant == 2 && row.holds))
-                            continue;
-                        for (u32 k = 0; k < max_arity; ++k)
-                            out.goal_args.push_back(k < logical ? row.objects[k] : -1);
-                        ++goal_rows;
-                    }
-                cell.d = goal_rows;
+                cell.c = tp;
                 const detail::GoalMode mode =
                     variant == 0 ? (goal_relations.target[static_cast<u32>(id)] ? detail::GoalMode::PlainTarget
                                                                                 : detail::GoalMode::Plain)
@@ -644,15 +684,15 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 cell.op = detail::goal_op(derived, sign == 1, mode);
                 if (cell.a != cell.b)
                 {
-                    // the goals of a row have masks over the predicate's whole slot range and no constant part
-                    Cell row_cell = cell;
-                    row_cell.c = row_cell.d = 0;
-                    out.row_cells.push_back(row_cell);
+                    // the goals of a row have masks over the predicate's whole slot range
+                    out.row_cells.push_back(cell);
                     if (derived && variant > 0)
                         out.needs |= k_needs_row_goal;
                     narrow_to_set_bits(masks[derived ? 1 : 0][sign], cell.a, cell.b);
                 }
-                if (cell.a == cell.b && cell.c == cell.d)
+                else
+                    fixed_goal.push_back(cell);
+                if (!list_constants(cell, ip, sign, variant) && cell.a == cell.b)
                     continue;  // the instance's goal has no tuple here
                 out.cells.push_back(cell);
             }
@@ -672,18 +712,37 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                              [](const Cell& c) { return !detail::is_action_op(c.op); });
     // The cells of subgoal layers and history steps: one per relation of a predicate that has slots, over all of its
     // slots; they come from the rows, so every graph that has such rows uses them whichever goal it has.
-    std::vector<Cell> layer_cells, history_cells;
+    // The fixed lists also have the cells of the subgoal levels of the predicates without slots (fixed_levels).
+    std::vector<Cell> layer_cells, history_cells, fixed_levels;
     for (u32 ip = 0; ip < predicates; ++ip)
     {
         const u32 tp = instance.pred_map[ip];
-        if (tp >= table.num_domain_predicates() || kind[ip] == rl::k_pred_static)
+        if (tp >= table.num_domain_predicates())
             continue;
         const bool derived = kind[ip] == rl::k_pred_derived;
-        const u32 a = static_cast<u32>(derived ? derived_offsets[ip] : fluent_offsets[ip]);
-        const u32 b = static_cast<u32>(derived ? derived_offsets[ip + 1] : fluent_offsets[ip + 1]);
-        if (a == b)
-            continue;
+        const bool slotted = kind[ip] != rl::k_pred_static;
+        const u32 a = slotted ? static_cast<u32>(derived ? derived_offsets[ip] : fluent_offsets[ip]) : 0;
+        const u32 b = slotted ? static_cast<u32>(derived ? derived_offsets[ip + 1] : fluent_offsets[ip + 1]) : 0;
         const u32 logical = static_cast<u32>(arity[ip]);
+        if (a == b)
+        {
+            for (u32 level = 1; level <= schema.options().max_goal_level; ++level)
+                for (u32 sign = 0; sign < 2; ++sign)
+                    for (u32 variant = 0; variant < 3; ++variant)
+                    {
+                        const i32 id = layer_relations.subgoal_at(level, tp, sign, variant);
+                        if (id < 0)
+                            continue;
+                        const detail::GoalMode mode =
+                            variant == 0 ? (layer_relations.target[static_cast<u32>(id)] ? detail::GoalMode::PlainTarget
+                                                                                         : detail::GoalMode::Plain)
+                            : variant == 1 ? detail::GoalMode::Satisfied
+                                           : detail::GoalMode::Unsatisfied;
+                        fixed_levels.push_back({static_cast<u32>(id), detail::goal_op(derived, sign == 1, mode, level),
+                                                0, 0, schema.relation(static_cast<u32>(id)).arity, logical, tp});
+                    }
+            continue;
+        }
         for (u32 level = 1; level <= schema.options().max_goal_level; ++level)
             for (u32 sign = 0; sign < 2; ++sign)
                 for (u32 variant = 0; variant < 3; ++variant)
@@ -697,7 +756,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                         : variant == 1 ? detail::GoalMode::Satisfied
                                        : detail::GoalMode::Unsatisfied;
                     layer_cells.push_back({static_cast<u32>(id), detail::goal_op(derived, sign == 1, mode, level), a, b,
-                                           schema.relation(static_cast<u32>(id)).arity, logical});
+                                           schema.relation(static_cast<u32>(id)).arity, logical, tp});
                     if (derived && variant > 0)
                         out.needs |= k_needs_row_goal;
                 }
@@ -727,6 +786,18 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                     list.insert(list.end(), layer_cells.begin(), layer_cells.end());
                 if (extension & 2u)
                     list.insert(list.end(), history_cells.begin(), history_cells.end());
+                std::sort(list.begin(), list.end(),
+                          [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+            }
+        for (u32 extension = 0; extension <= 3; ++extension)
+            for (u32 k = 0; k < 4; ++k)
+            {
+                std::vector<Cell>& list = out.fixed[extension * 4 + k];
+                list = extension == 0 ? *bases[k] : out.extended[(extension - 1) * 4 + k];
+                if (k % 2 == 1)
+                    list.insert(list.end(), fixed_goal.begin(), fixed_goal.end());
+                if (extension & 1u)
+                    list.insert(list.end(), fixed_levels.begin(), fixed_levels.end());
                 std::sort(list.begin(), list.end(),
                           [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
             }
@@ -900,7 +971,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     context->m_max_arity = max_arity;
     std::vector<u64> inst;
     std::vector<u32> cells;
-    std::vector<i32> slot_args, derived_args, static_args, goal_args, numeric_args;
+    std::vector<i32> slot_args, derived_args, static_args, goal_constants, numeric_args;
     std::vector<u32> literal_ranges;
     std::vector<u64> goal_words;
     for (u32 i = 0; i < instances.size(); ++i)
@@ -914,16 +985,18 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_derived_slots] = rows.derived_slots;
         // each list of cells is stored once: a list equal to an earlier one of the instance shares its rows
         const auto same_cell = [](const Cell& x, const Cell& y) { return std::memcmp(&x, &y, sizeof(Cell)) == 0; };
-        std::array<const std::vector<Cell>*, 16> lists = {&rows.cells, &rows.row_cells, &rows.plain_cells,
+        std::array<const std::vector<Cell>*, 32> lists = {&rows.cells, &rows.row_cells, &rows.plain_cells,
                                                           &rows.plain_row_cells};
         for (usize k = 0; k < rows.extended.size(); ++k)
             lists[4 + k] = &rows.extended[k];
+        for (usize k = 0; k < rows.fixed.size(); ++k)
+            lists[16 + k] = &rows.fixed[k];
         constexpr std::array<std::pair<detail::InstanceColumn, detail::InstanceColumn>, 4> list_columns = {
             std::pair{detail::k_num_cells, detail::k_cell_offset},
             std::pair{detail::k_num_row_cells, detail::k_row_cell_offset},
             std::pair{detail::k_num_plain_cells, detail::k_plain_cell_offset},
             std::pair{detail::k_num_plain_row_cells, detail::k_plain_row_cell_offset}};
-        std::array<u64, 16> list_offset{};
+        std::array<u64, 32> list_offset{};
         u64 next_offset = cells.size() / 8;
         for (usize k = 0; k < lists.size(); ++k)
         {
@@ -947,10 +1020,15 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
                 columns[list_columns[k].first] = lists[k]->size();
                 columns[list_columns[k].second] = list_offset[k];
             }
-            else
+            else if (k < 16)
             {
                 columns[detail::k_ext_lists + 2 * (k - 4)] = lists[k]->size();
                 columns[detail::k_ext_lists + 2 * (k - 4) + 1] = list_offset[k];
+            }
+            else
+            {
+                columns[detail::k_fixed_lists + 2 * (k - 16)] = lists[k]->size();
+                columns[detail::k_fixed_lists + 2 * (k - 16) + 1] = list_offset[k];
             }
         }
         columns[detail::k_slot_args_offset] = slot_args.size() / max_arity;
@@ -960,7 +1038,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_numeric_tuples] = rows.numeric_tuples;
         columns[detail::k_encoding_fingerprint] = rows.fingerprint;
         columns[detail::k_goal_offset] = goal_words.size();
-        columns[detail::k_goal_args_offset] = goal_args.size() / max_arity;
+        columns[detail::k_goal_constants_offset] = goal_constants.size() / (detail::k_constant_objects + max_arity);
+        columns[detail::k_goal_constant_count] = rows.goal_constant_count;
         columns[detail::k_goal_complete] = rows.goal_complete;
         columns[detail::k_needs_derived] = rows.needs;
         inst.insert(inst.end(), std::begin(columns), std::end(columns));
@@ -971,7 +1050,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         static_args.insert(static_args.end(), rows.static_args.begin(), rows.static_args.end());
         numeric_args.insert(numeric_args.end(), rows.numeric_args.begin(), rows.numeric_args.end());
         goal_words.insert(goal_words.end(), rows.goal_words.begin(), rows.goal_words.end());
-        goal_args.insert(goal_args.end(), rows.goal_args.begin(), rows.goal_args.end());
+        goal_constants.insert(goal_constants.end(), rows.goal_constants.begin(), rows.goal_constants.end());
         literal_ranges.insert(literal_ranges.end(), rows.literal_ranges.begin(), rows.literal_ranges.end());
     }
     auto shape = [&](const std::vector<i32>& rows) { return std::vector<i64>{static_cast<i64>(rows.size() / max_arity), max_arity}; };
@@ -982,7 +1061,10 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     builder.add("derived_args", rl::DType::I32, shape(derived_args), derived_args);
     builder.add("static_args", rl::DType::I32, shape(static_args), static_args);
     builder.add("goal_words", rl::DType::U64, {static_cast<i64>(goal_words.size())}, goal_words);
-    builder.add("goal_args", rl::DType::I32, shape(goal_args), goal_args);
+    builder.add("goal_constants", rl::DType::I32,
+                {static_cast<i64>(goal_constants.size() / (detail::k_constant_objects + max_arity)),
+                 static_cast<i64>(detail::k_constant_objects + max_arity)},
+                goal_constants);
     builder.add("action_schemas", rl::DType::U32, {static_cast<i64>(action_schemas.size())}, action_schemas);
     builder.add("schema_arity", rl::DType::U32, {static_cast<i64>(schema_arity.size())}, schema_arity);
     builder.add("relation_virtual", rl::DType::U32, {static_cast<i64>(relation_virtual.size())}, relation_virtual);
@@ -1009,7 +1091,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations,
+    // goal_constants, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations,
     // numeric_args, literal_ranges
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
@@ -1021,7 +1103,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     v.derived_args = reinterpret_cast<const i32*>(at(3));
     v.static_args = reinterpret_cast<const i32*>(at(4));
     v.goal_words = reinterpret_cast<const u64*>(at(5));
-    v.goal_args = reinterpret_cast<const i32*>(at(6));
+    v.goal_constants = reinterpret_cast<const i32*>(at(6));
     v.action_schemas = reinterpret_cast<const u32*>(at(7));
     v.schema_arity = reinterpret_cast<const u32*>(at(8));
     v.num_schemas = m_table->num_schemas();
