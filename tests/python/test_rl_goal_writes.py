@@ -173,6 +173,41 @@ def test_direct_instance_write(suite, backend, tracked, mode, request):
 
 @pytest.mark.parametrize("negative", [False, True])
 @pytest.mark.parametrize("padding", [False, True])
+@pytest.mark.parametrize("selection", [None, [True, True, False], [False, True, False], [True, False, False]])
+def test_torch_rejected_reset_preserves_environment(suite, negative, padding, selection):
+    torch = pytest.importorskip("torch")
+    from mymyr.rl.torch import BatchedEnv
+
+    ids = np.array([0, 1, 0], np.int32)
+    env = BatchedEnv(suite, 3, task_ids=1 - ids, goals=True, sampler="uniform", max_steps=4, track_visited=8)
+    try:
+        env.step()
+        before = [t.clone() for t in env._tensors()]
+        pos, neg = masks(suite, ids, "new")
+        slot = suite.tasks[1].words * 64 if padding else suite.tasks[1].num_atoms
+        assert slot < 64 * suite.words
+        (neg if negative else pos)[1, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+        mask = None if selection is None else torch.tensor(selection)
+        kwargs = dict(task_ids=torch.from_numpy(ids), goal_pos=torch.from_numpy(pos.view(np.int64)),
+                      goal_neg=torch.from_numpy(neg.view(np.int64)))
+        if selection is None or selection[1]:
+            with pytest.raises(ValueError, match="goal masks.*fluent slots"):
+                env.reset(mask, **kwargs)
+            for actual, expected in zip(env._tensors(), before):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        else:
+            env.reset(mask, **kwargs)
+            for actual, expected in zip(env._tensors(), before):
+                if actual.shape[0] == env.num_envs:
+                    torch.testing.assert_close(actual[~mask], expected[~mask], rtol=0, atol=0)
+        env.step()
+        env.check_errors()
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("padding", [False, True])
 def test_pool_rejects_goal_bits_outside_instance(suite, negative, padding):
     ids = np.array([0, 1], np.int32)
     pos, neg = masks(suite, ids, "new")
