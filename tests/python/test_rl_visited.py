@@ -228,6 +228,7 @@ def test_lookup_checks_indices_and_capacity():
         rl.visited_mask(table[:, :3].copy(), count, hashes, np.array([0], np.int32))
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_torch_compile_keeps_visit_mutations():
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import BatchedEnv
@@ -601,6 +602,7 @@ def test_captured_rollout_replays_tables_and_action_visited():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_compiled_device_steps_keep_tables():
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import BatchedEnv
@@ -653,6 +655,7 @@ def test_compiled_device_steps_keep_tables():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_compiled_observations_carry_action_visited():
     torch = pytest.importorskip("torch")
     from mymyr import encoding

@@ -165,6 +165,7 @@ def test_label_numeric_effect_applicability():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_label_step_compiles_on_cpu():
     task = text_task("blocks__probBLOCKS-8-0")
     eager = rt.BatchedEnv(task, 4, actions="label", max_steps=3)

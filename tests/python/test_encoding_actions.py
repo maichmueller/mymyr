@@ -567,6 +567,7 @@ def test_captured_label_steps_carry_action_rows(drop):
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("successors", [None, 1 << 16])
 @pytest.mark.parametrize("drop", [False, True])
+@pytest.mark.torch_compile
 def test_traced_observations_drop_noop_actions(drop, successors):
     """A compiled step with action rows equals the host, and its graph has no node that keeps it out of CUDA graphs
     (inductor's check on the traced forward graph, which needs no triton)."""

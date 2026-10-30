@@ -1,6 +1,9 @@
 """Shared test setup. JAX and torch (when installed) stay on the CPU unless the caller sets CUDA_VISIBLE_DEVICES (and
 JAX_PLATFORMS) explicitly: only test_cuda.py uses a GPU, and it skips otherwise."""
 
+import functools
+import importlib.util
+import inspect
 import json
 import os
 import pathlib
@@ -113,6 +116,10 @@ def pytest_configure(config):
         "markers", "jax_on_cpu: holds a CUDA graph capture while it waits; runs in a child process whose JAX uses only "
         "the CPU; per_case=True isolates each case (tests/python/conftest.py)"
     )
+    config.addinivalue_line(
+        "markers", "torch_compile: calls torch.compile or torch._dynamo; skips where this torch cannot compile on this "
+        "interpreter (tests/python/conftest.py)"
+    )
 
 
 def _isolated_marker(item):
@@ -211,6 +218,46 @@ def _gil_stays_disabled():
     yield
     if sys._is_gil_enabled():
         pytest.fail("this test enabled the GIL (it loaded a module that needs it); mark it @pytest.mark.needs_gil")
+
+
+# Tests that call torch.compile or torch._dynamo are marked ``torch_compile``: they skip where torch cannot compile on
+# this interpreter (a torch release refuses the interpreters newer than it supports). The probe compiles a trivial
+# function once per process. Compiling loads torch._dynamo, which enables the GIL, so a free-threaded process that still
+# runs without the GIL probes in a child process; the tests in a ``needs_gil`` child are probed there.
+def _torch_compile_error():
+    import torch
+
+    try:
+        torch.compile(lambda x: x + 1, fullgraph=True, backend="eager")(torch.zeros(1))
+    except RuntimeError as e:
+        return str(e)
+    finally:
+        torch.compiler.reset()
+    return None
+
+
+@functools.cache
+def torch_compile_refusal():
+    """Why torch.compile cannot compile on this interpreter (its error message), or None where it can or where torch
+    is not installed (the tests then skip on the missing torch)."""
+    if importlib.util.find_spec("torch") is None:
+        return None
+    if not FREE_THREADED or sys._is_gil_enabled():
+        return _torch_compile_error()
+    from python_children import run_code
+
+    code = inspect.getsource(_torch_compile_error) + "print(_torch_compile_error() or '')\n"
+    return run_code(code, env={**os.environ, "PYTHON_GIL": "1"}, capture_output=True).stdout.strip() or None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    if not item.get_closest_marker("torch_compile"):
+        return
+    if ISOLATED_REPORT not in os.environ and _isolated_marker(item):
+        return  # the child process that runs the test probes
+    if reason := torch_compile_refusal():
+        pytest.skip(reason)
 
 
 def wide_task(tmp_path, objects=80, atoms="dense", initial_atoms=1, extra_effects=False):

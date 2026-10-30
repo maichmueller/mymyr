@@ -201,6 +201,7 @@ def test_device_masks_errors_and_status():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_mask_ops_compile_and_capture():
     dev = gpu()
     task = text_task("gripper__prob05")

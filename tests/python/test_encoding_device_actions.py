@@ -180,6 +180,7 @@ def test_self_loop_has_no_delta_and_deeper_device_views_match_host():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_torch_op_actions_compile_and_capture():
     device = gpu()
     import mymyr.rl.torch as rt
@@ -263,6 +264,7 @@ def test_action_rows_combine_with_row_goals_subgoals_and_history(layout):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.torch_compile
 def test_torch_horizon_op_compiles_and_captures_without_a_host_wait(layout):
     device = gpu()
     import mymyr.rl.torch as rt
@@ -379,6 +381,7 @@ def test_horizon_derived_evaluation_ignores_unused_node_capacity(index):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_transition_op_builds_from_successors_under_compilation_and_capture():
     device = gpu()
     import mymyr.rl.torch as rt

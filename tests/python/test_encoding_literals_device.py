@@ -125,6 +125,7 @@ def test_invalid_placements_and_unreferenced_task_ids_set_status(case):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("layered", [False, True])
+@pytest.mark.torch_compile
 def test_custom_ops_fake_compile_and_cuda_graph_replay(case, layered):
     _, encoder, p, o, signs, rows, task_ids, layers = case
     handle = rt.register(encoder)

@@ -333,11 +333,13 @@ def check_compile(task, dev):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_torch_compile_without_graph_breaks(blocks):
     check_compile(blocks, torch.device("cpu"))
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_random_actions_compile_without_graph_breaks(blocks):
     """PlanningEnv.rand_action's op (mymyr::random_actions) in one graph with steps: no graph break, same choices."""
     a = rt.BatchedEnv(blocks, 16, seed=3, max_steps=4)
@@ -466,10 +468,9 @@ def test_device_env_batches_streams_and_resets(blocks):
 
 
 @pytest.mark.needs_gil
-def test_device_ops_and_compile(blocks):
+def test_device_ops(blocks):
     dev = gpu()
     check_ops(rt.BatchedEnv(blocks, 12, device=dev, max_steps=4), blocks, dev)
-    check_compile(blocks, dev)
     env = rt.BatchedEnv(blocks, 10, device=dev)
     for _ in range(4):
         env.step()
@@ -484,6 +485,12 @@ def test_device_ops_and_compile(blocks):
         c = torch.ops.mymyr.expand_flat(h, s.cpu(), None, cap, False)
         rows = min(int(c[5][-1]), cap or 1 << 30)
         assert all(torch.equal(x.cpu()[:rows], y[:rows]) for x, y in zip(d[:5], c[:5])) and torch.equal(d[5].cpu(), c[5])
+
+
+@pytest.mark.needs_gil
+@pytest.mark.torch_compile
+def test_device_compile_without_graph_breaks(blocks):
+    check_compile(blocks, gpu())
 
 
 @pytest.mark.needs_gil
@@ -736,6 +743,7 @@ def test_static_marking_equals_torch_dynamo():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_compiled_expansion_takes_handles_as_arguments():
     """Handles passed to a compiled function name different objects: each one specializes the graph."""
     from test_rl_noops import pddl_task
@@ -755,7 +763,18 @@ def test_compiled_expansion_takes_handles_as_arguments():
             rt.unregister(h)
 
 
-@pytest.mark.needs_gil
+def digest_expansion(handle, padded, rows, drop, capacity):
+    """The expansion op (padded to 4 successors per state, or flat) with the successor digests and no-op flags."""
+    options = dict(rows=rows, derived=rows, hashes=True, noops=True, drop_noops=drop)
+
+    def run(s):
+        if padded:
+            return torch.ops.mymyr.expand(handle, s, None, 4, capacity=capacity, **options)
+        return torch.ops.mymyr.expand_flat(handle, s, None, capacity, **options)
+
+    return run
+
+
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("rows", [False, True])
 @pytest.mark.parametrize("drop", [False, True])
@@ -766,12 +785,7 @@ def test_expand_ops_successor_digest_options(padded, rows, drop, capacity):
     source = torch.from_numpy(np.asarray(task.encode([task.initial_state] * 2)).view(np.int64))
     expected = rl.expand(task, source, hashes=True, noops=True, drop_noops=drop)
     handle = rt.register(task)
-    options = dict(rows=rows, derived=rows, hashes=True, noops=True, drop_noops=drop)
-    def run(s):
-        if padded:
-            return torch.ops.mymyr.expand(handle, s, None, 4, capacity=capacity, **options)
-        return torch.ops.mymyr.expand_flat(handle, s, None, capacity, **options)
-    actual = run(source)
+    actual = digest_expansion(handle, padded, rows, drop, capacity)(source)
     assert len(actual) == 11 and not actual[-1].any()
     count = expected.total if capacity is None else capacity
     assert actual[1].shape == ((source.shape[0], 4) if padded else (count,))
@@ -787,7 +801,22 @@ def test_expand_ops_successor_digest_options(padded, rows, drop, capacity):
         assert torch.equal(actual[8][:expected.total], expected.noop)
         if drop:
             assert torch.equal(actual[9][:expected.total], expected.index)
-    if capacity is not None:
-        compiled = torch.compile(run, backend="eager", fullgraph=True)(source)
-        assert all(torch.equal(a, b) for a, b in zip(compiled, actual))
     rt.unregister(handle)
+
+
+@pytest.mark.needs_gil
+@pytest.mark.torch_compile
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("rows", [False, True])
+@pytest.mark.parametrize("drop", [False, True])
+def test_expand_ops_with_a_capacity_compile(padded, rows, drop):
+    from test_rl_noops import pddl_task
+    task = pddl_task(atoms="dense")
+    source = torch.from_numpy(np.asarray(task.encode([task.initial_state] * 2)).view(np.int64))
+    handle = rt.register(task)
+    try:
+        run = digest_expansion(handle, padded, rows, drop, 16)
+        compiled = torch.compile(run, backend="eager", fullgraph=True)(source)
+        assert all(torch.equal(a, b) for a, b in zip(compiled, run(source)))
+    finally:
+        rt.unregister(handle)

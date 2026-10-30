@@ -300,13 +300,15 @@ def test_torch_function_mode_intercepts_custom_op(state_pair):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("registration", ["kernel", "autograd", "vmap"])
-def test_later_registrations_match_dispatcher_and_compilation(registration):
+@pytest.mark.parametrize("compiled", [False, pytest.param(True, marks=pytest.mark.torch_compile)],
+                         ids=["dispatcher", "compiled"])
+def test_later_registrations_match_dispatcher_and_compilation(registration, compiled):
     torch = pytest.importorskip("torch")
     from torch import Tensor
 
     from mymyr.rl.torch._ops import _op
 
-    @_op(f"mymyr_test::registered_{registration}", mutates_args=())
+    @_op(f"mymyr_test::registered_{registration}_{'compiled' if compiled else 'eager'}", mutates_args=())
     def op(x: Tensor) -> Tensor:
         return x * 2
 
@@ -326,12 +328,12 @@ def test_later_registrations_match_dispatcher_and_compilation(registration):
         def vmap(info, in_dims, x):
             return x + 6, in_dims[0]
 
-    compiled = torch.compile(op, fullgraph=True, backend="aot_eager")
-    for call in (op, op._opoverload, compiled):
+    calls = [torch.compile(op, fullgraph=True, backend="aot_eager")] if compiled else [op, op._opoverload]
+    for call in calls:
         x = torch.ones(2, requires_grad=registration == "autograd")
         if registration == "vmap":
             # Trace the transform so the compiled graph contains the registered batching behavior.
-            mapped = torch.compile(torch.vmap(op), fullgraph=True, backend="aot_eager") if call is compiled else (
+            mapped = torch.compile(torch.vmap(op), fullgraph=True, backend="aot_eager") if compiled else (
                 torch.vmap(call))
             assert mapped(x).tolist() == [7, 7]
         else:

@@ -239,6 +239,7 @@ def k_steps(K):
 @pytest.mark.needs_gil
 @pytest.mark.filterwarnings("ignore:The CUDA Graph is empty:UserWarning")
 @pytest.mark.parametrize("path", ["auto", "general"])
+@pytest.mark.torch_compile
 def test_reduce_overhead_rollout_equals_eager(path):
     """torch.compile(mode="reduce-overhead") of K steps: one graph, no break; on the fast path it runs as CUDA graphs
     (no cudagraph skip); on the general path the step_sync ops stay out of them; eager results either way. Without
