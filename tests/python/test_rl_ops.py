@@ -233,9 +233,21 @@ def test_tensors_off_host_and_cuda_take_the_dlpack_path():
 
     assert tensor_view(meta(4, 8)).device.type == "meta"
     args = meta(4, 8), meta(4, dtype=torch.int32), meta(6), meta(6, dtype=torch.int32)
-    for call in (rl.visited_mask, visited_mask_impl):
-        with pytest.raises(ValueError, match="meta"):
-            call(*args)
+    with pytest.raises(ValueError, match="meta"):
+        visited_mask_impl(*args)
+
+
+@pytest.mark.needs_gil
+def test_visited_mask_supports_meta_tensors():
+    torch = pytest.importorskip("torch")
+    args = (torch.empty((4, 8), dtype=torch.int64, device="meta"),
+            torch.empty(4, dtype=torch.int32, device="meta"),
+            torch.empty(6, dtype=torch.int64, device="meta"),
+            torch.empty(6, dtype=torch.int32, device="meta"))
+    result = rl.visited_mask(*args)
+    assert result.shape == (6,)
+    assert result.device.type == "meta"
+    assert result.dtype == torch.bool
 
 
 # ------------------------------------------------------------------------------------------------ torch

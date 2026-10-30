@@ -399,3 +399,103 @@ TEST(HerOps, RelabelsDoNotDependOnTheBatch)
     EXPECT_NE(relabel(w, T, N, c).goal, whole.goal);
 }
 }  // namespace
+
+#include "../support/her_lifted.hpp"
+#include "mymyr/rl/goal_templates.hpp"
+#include "mymyr/core/thread_pool.hpp"
+
+TEST(RlOps, LiftedHindsightMatchesGroundedGoalsAndPool)
+{
+    const auto task = load("gripper__prob05");
+    const auto templates = rl::lifted_goal_templates(rl::TaskSuite::of(rl::TaskTable::single(task)));
+    constexpr u32 T = 23, N = 3, S = 23;
+    const auto window = rollout(task, N, T, 13);
+    LiftedRelabels out(T, N, window.W, window.RW, 0, S, templates.max_vars());
+    out.batch.states = window.states.data();
+    out.batch.prev_states = window.prev.data();
+    out.batch.done = window.done.data();
+    rl::HerLiftedConfig c;
+    c.max_segments = S;
+    c.step_reward = -0.25f;
+    c.goal_reward = 2.0f;
+    rl::her_relabel_lifted(templates.view(), out.batch, c);
+    ASSERT_EQ(out.status[0], 0);
+    const auto expected_segment = out.segment;
+    const auto expected_goals = out.pos;
+    ThreadPool pool(2);
+    rl::her_relabel_lifted(templates.view(), out.batch, c, &pool);
+    EXPECT_EQ(out.segment, expected_segment);
+    EXPECT_EQ(out.pos, expected_goals);
+    for (u32 i = 0; i < N; ++i)
+    {
+        ASSERT_GT(out.count[i], 0);
+        for (i32 j = 0; j < out.count[i]; ++j)
+        {
+            const u32 at = i*S + j;
+            const auto condition = templates.condition(out.which[at]);
+            std::vector<ObjectId> binding;
+            for (u32 v = 0; v < condition.arity(); ++v)
+                binding.push_back(ObjectId{static_cast<u32>(out.binding[at*templates.max_vars() + v])});
+            const auto goal = condition.ground(binding);
+            for (i32 q = out.start[at]; q <= out.end[at]; ++q)
+            {
+                const u64 row = u64(q)*N+i;
+                StateView before{window.prev.data() + row*window.RW, window.W};
+                StateView reached{window.states.data() + row*window.RW, window.W};
+                EXPECT_FALSE(holds(*task, before, goal));
+                EXPECT_EQ(holds(*task, reached, goal), q == out.end[at]);
+                EXPECT_EQ(out.segment[row], j);
+                EXPECT_EQ(out.reward[row], q == out.end[at] ? 2.0f : -0.25f);
+            }
+        }
+    }
+    c.max_generated = 1;
+    rl::her_relabel_lifted(templates.view(), out.batch, c);
+    EXPECT_EQ(out.count, (std::vector<i32>{1, 0, 0}));
+    c.max_steps = 0;
+    rl::her_relabel_lifted(templates.view(), out.batch, c);
+    EXPECT_EQ(out.status[0], 8);
+    EXPECT_EQ(out.count, (std::vector<i32>{0, 0, 0}));
+}
+
+TEST(RlOps, LiftedHindsightComparesRowsAfterHashHits)
+{
+    // Equal hashes do not make distinct rows a loop, and the numeric tail participates in equality.
+    LiftedRelabels out(2, 1, 1, 2, 0, 1, 0);
+    const std::vector<u64> states{0, 1, 1, 2}, prev{0, 0, 0, 1};
+    const std::vector<u8> done{0, 0};
+    out.batch.states = states.data();
+    out.batch.prev_states = prev.data();
+    out.batch.done = done.data();
+    out.hashes = {7, 7};
+    out.prev_hashes = {7, 7};
+    out.batch.hashes = out.hashes.data();
+    out.batch.prev_hashes = out.prev_hashes.data();
+    out.match_template = {-1, 0};
+    out.batch.matches.template_id = out.match_template.data();
+    // A nullary fluent literal resolved to slot zero.
+    const std::vector<i32> offsets{0, 1}, predicate{0}, arity{0}, num_vars{0};
+    const std::vector<u8> polarity{1};
+    std::vector<u64> inst(encoding::detail::k_instance_columns, 0);
+    std::vector<u32> ranges(encoding::detail::k_literal_columns, 0);
+    ranges[encoding::detail::k_literal_predicate_kind] = encoding::detail::k_literal_fluent_predicate;
+    ranges[encoding::detail::k_literal_fluent_end] = 1;
+    const std::vector<i32> slots{0};
+    rl::MatchTemplates t;
+    t.literal_offsets = offsets.data();
+    t.predicate = predicate.data();
+    t.arity = arity.data();
+    t.num_vars = num_vars.data();
+    t.polarity = polarity.data();
+    t.literals.inst = inst.data();
+    t.literals.literal_ranges = ranges.data();
+    t.literals.slot_args = slots.data();
+    t.terms = slots.data();
+    t.literals.num_instances = 1;
+    t.literals.num_predicates = 1;
+    t.literals.max_arity = 1;
+    rl::HerLiftedConfig c;
+    rl::her_lifted_detail::scan(rl::her_lifted_detail::Solo{}, t, out.batch, c, 0);
+    EXPECT_EQ(out.start[0], 0);
+    EXPECT_EQ(out.end[0], 1);
+}

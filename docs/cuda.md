@@ -139,6 +139,14 @@ leaves that template unmatched. Warm on the capture stream and keep templates an
 caller-owned buffers without allocation or synchronization; `mymyr::match_first` has a torch fake. See
 [Lifted hindsight relabelling](rl.md#lifted-hindsight-relabelling) for shapes, status bits and examples.
 
+`rl.her_relabel_lifted` extracts hindsight segments from reached and starting state windows using uploaded goal
+templates. It hashes full rows, matches canonical first bindings, scans backwards within each episode and applies
+a global generation cap in environment order. Padded metadata, fluent/derived goals, per-transition rewards and
+status remain on the device. The matcher budget flag propagates as status bit 3; segment overflow uses bit 0.
+Warm on the capture stream before capture. `cuda::launch_her_relabel_lifted` uses caller-owned fixed scratch and
+outputs without allocation or synchronization; the torch op has fixed output shapes for compilation. See
+[the lifted hindsight examples](rl.md#lifted-hindsight-relabelling).
+
 CUDA upload, expansion, BrFS, multi-IW, rollouts, state spaces, RL environments and A*/GBFS support numeric fluent
 values, preconditions, effects, goals and metric costs. Public state rows preserve CPU I32/F64 encoding; internal
 numeric rows hold one canonical double per fluent slot. TaskTable/TaskSuite numeric batches use per-instance kernels

@@ -571,6 +571,106 @@ assert binding.cpu().tolist() == matched.binding.tolist()
 assert status.item() == 0
 ```
 
+`rl.her_relabel_lifted(states, done, task_ids, templates, *, prev_states, max_segments,
+max_generated=None, step_reward=0.0, goal_reward=1.0, words=None, derived=None, prev_derived=None,
+status=None, max_steps=100_000_000, pool=None)` extracts disjoint hindsight segments. `states` is a contiguous
+`[T,N,RW]` window of reached states **before autoreset**; `prev_states` has the same shape and holds the states the
+transitions started from. `done` bool `[T,N]` splits each environment column into episodes. Partial episodes at
+window edges are processed as given. Task ids are contiguous int32 `[N]` or `[T,N]` for changing assignments at
+resets; an instance stays constant within each episode. Use `None` for a single instance.
+
+Within each episode, begin at its last transition, ground the first matching template using its canonical first
+binding, and scan backwards. Stop before the first transition whose starting state already satisfies the goal or
+equals a reached state visited during this scan. Row equality includes numeric words, with hashes used only to
+prefilter comparisons. Emit the nonempty suffix, then continue before the excluded transition. With no match, try
+the preceding endpoint. Episodes are processed in window order, environments in ascending order; segments within
+an episode are generated backwards. There are no random draws.
+
+The returned `HerLiftedBatch` has fixed padded shapes:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `segment` | int32 `[T,N]` | segment slot, or -1 outside retained segments |
+| `reward`, `achieved` | float32/bool `[T,N]` | `goal_reward` and True at a segment's last transition; `step_reward` and False elsewhere inside; zero/False outside |
+| `seg_start`, `seg_end` | int32 `[N,S]` | inclusive window indices |
+| `seg_valid`, `seg_template` | bool/int32 `[N,S]` | live segment and global packed template id |
+| `seg_binding` | int32 `[N,S,V]` | objects indexed by variable id, padded with -1 |
+| `goal_pos`, `goal_neg` | word `[N,S,W]` | grounded fluent goal masks |
+| `goal_pos_derived`, `goal_neg_derived` | word `[N,S,DW]` | grounded derived masks, zero width without derived inputs |
+| `count` | int32 `[N]` | retained segments |
+| `status` | int64 scalar | flags cleared at the start of each call |
+
+`S=max_segments` is the capacity per environment, `V=templates.max_vars`, and `W` defaults to `templates.words`, the
+normalized table/suite's fluent width (at least one). State rows must include this padding even for static-only
+tasks whose `Task.encode` rows have zero fluent words. An explicit `words` must cover the normalized width and fit
+the row width. Supply matching `derived` and `prev_derived` windows `[T,N,DW]` whenever templates use derived
+literals; `DW` follows the supplied window's width in 64-bit words, or is zero without derived inputs. Satisfied
+static literals are dropped from the goals. Masks are uint64 for NumPy and int64 bit patterns for torch. Invalid
+segment metadata and bindings are -1; padding masks and rewards are zero.
+
+An environment exceeding S keeps its first S generated segments and sets status bit 0. `max_generated` caps total
+generation in environment, episode, then backward scan order; it includes segments lost to capacity overflow.
+Zero retains no segments. `count` counts retained segments. Status bits 1 and 2 report the device variable limit
+and invalid instance ids, as in the matcher. Bit 3 reports an exhausted `max_steps` matcher budget per reached row
+and template: that template is skipped, later ones may match, and the segments then describe only completed
+searches. Retry with a larger budget to resolve an incomplete search. A supplied status scalar is reused.
+
+```python
+# A goal that is first achieved by a pickup, then achieved again in the next episode.
+s0 = match_task.initial_state
+s1 = next(s for s in match_task.successor_states(s0)
+          if any(a.predicate.name == "carry" for a in s.atoms()))
+carry = match_task.condition(["?ball", "?grip"], ["(carry ?ball ?grip)"])
+carry_templates = rl.GoalTemplates.from_conditions(match_task, [[carry]])
+her_prev = np.asarray(match_task.encode([s0, s1, s0]))[:, None, :]
+her_states = np.asarray(match_task.encode([s1, s0, s1]))[:, None, :]
+her_done = np.array([[False], [True], [False]])
+h = rl.her_relabel_lifted(her_states, her_done, None, carry_templates,
+                          prev_states=her_prev, max_segments=2)
+assert h.count.tolist() == [2] and h.segment[:, 0].tolist() == [0, -1, 1]
+assert h.seg_start.tolist() == [[0, 2]] and h.seg_end.tolist() == [[0, 2]]
+assert h.achieved[:, 0].tolist() == [True, False, True] and int(h.status) == 0
+```
+
+CUDA uses uploaded templates and fixed scratch determined by T, N, S, V and the word widths. Upload before capture,
+warm relabelling on the capture stream, and retain templates and graph buffers through the last replay. All counts
+and flags stay on the device. Host calls can partition matching and scans with `pool=rl.ThreadPool(...)`.
+`rl::her_relabel_lifted(MatchTemplates, HerLiftedBatch, HerLiftedConfig, ThreadPool*)` and
+`cuda::launch_her_relabel_lifted` accept caller-owned outputs and scratch. There is no JAX form.
+
+For torch compilation, register templates once and call `mymyr.rl.torch.her_relabel_lifted(handle, states, done,
+task_ids, prev_states, max_segments, ...)`. Eager calls run the implementation directly; compilation uses
+`mymyr::her_relabel_lifted` and its fake implementation. The returned list follows `HerLiftedBatch`'s field order.
+A caller can gather segment goals per transition and scatter into its own replay storage with fixed shapes,
+retaining a validity mask for unused entries:
+
+```python needs-torch skip-if-no-cuda
+from mymyr.rl.torch import her_relabel_lifted, register, unregister
+
+device_carry = carry_templates.to("cuda:0")
+carry_handle = register(device_carry)
+x = torch.tensor(her_states.view(np.int64), device="cuda:0")
+p = torch.tensor(her_prev.view(np.int64), device="cuda:0")
+d = torch.tensor(her_done, device="cuda:0")
+result = rl.HerLiftedBatch(*her_relabel_lifted(carry_handle, x, d, None, p, 2))
+T, N = result.segment.shape
+envs = torch.arange(N, device="cuda:0").expand(T, N)
+live = result.segment >= 0
+slot = result.segment.clamp_min(0)
+goals = result.goal_pos[envs, slot]
+goals = torch.where(live[..., None], goals, 0)
+# Each transition has a fixed destination; validity decides which entries the caller samples.
+positions = torch.arange(T * N, device="cuda:0")
+replay_goals = torch.empty((T * N, goals.shape[-1]), dtype=torch.int64, device="cuda:0")
+replay_rewards = torch.empty(T * N, device="cuda:0")
+replay_valid = torch.empty(T * N, dtype=torch.bool, device="cuda:0")
+replay_goals.index_copy_(0, positions, goals.reshape(T * N, -1))
+replay_rewards.index_copy_(0, positions, result.reward.reshape(-1))
+replay_valid.index_copy_(0, positions, live.reshape(-1))
+assert replay_valid.cpu().tolist() == [True, False, True]
+unregister(carry_handle)
+```
+
 ## Instance sampling and curricula
 
 Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at

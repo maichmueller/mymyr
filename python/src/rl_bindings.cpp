@@ -2662,6 +2662,8 @@ void bind_rl(nb::module_& parent)
             "source"_a, "options"_a.none(), "state"_a)
         .def_prop_ro("source", [](const PyGoalTemplates& t) { return SuiteArg(t.source); },
                      "The TaskSuite, TaskTable, Task or TaskHandle the templates are over.")
+        .def_prop_ro("words", [](const PyGoalTemplates& t) { return t.t->suite()->words(); },
+                     "Padded fluent words per goal mask (at least one).")
         .def_prop_ro("num_instances", [](const PyGoalTemplates& t) { return t.t->num_instances(); }, "Instances (I).")
         .def_prop_ro("num_templates", [](const PyGoalTemplates& t) { return t.t->num_templates(); },
                      "Templates of every instance (K).")
