@@ -86,9 +86,11 @@ TEST(BrfsPddl, ConcurrentStoreGrowsInsideAnExpansion)
 TEST(BrfsPddl, ConcurrentStoreDoesNotGrowAfterTheStateLimit)
 {
     // the initial table of 2^18 entries wants to grow once the states counted in batches of 64 per thread exceed 60%
-    // of it. With one mode, one thread inserts the whole wide layer: a single thread reaches that point with exactly
-    // `grow` states, 8 threads with grow, grow + 1 or grow + 2 states (the thread expanding layer 1 inserted 0 to 2 of
-    // the states before it). A search stopped by max_states keeps its table; one that gets there earlier grows it.
+    // of it; with one thread that is exactly `grow` states. A search stopped by max_states keeps its table; one that
+    // gets there earlier grows it, which adds the 2^18 entries to memory_bytes.
+    // memory_bytes is compared with one thread only: it also counts the arena of every thread that stored a state,
+    // allocated at that thread's first state, so with several threads it depends on which threads took the states of
+    // the first layers. With 8 threads the same limits only have to stop the search at exactly max_states.
     constexpr u64 cap = u64{1} << 18;
     u64 grow = 64;
     while (grow * 10 <= cap * 6)
@@ -106,15 +108,11 @@ TEST(BrfsPddl, ConcurrentStoreDoesNotGrowAfterTheStateLimit)
         EXPECT_EQ(r.states, max_states);
         return r.memory_bytes;
     };
-    for (const u32 T : {1u, 8u})
-    {
-        bo.threads = T;
-        const u64 below = bytes_at(grow - 1);
-        EXPECT_EQ(bytes_at(grow), below) << "T=" << T;
-        EXPECT_GT(bytes_at(grow + 3), below) << "T=" << T;
-        if (T == 1)
-        {
-            EXPECT_GT(bytes_at(grow + 1), below);
-        }
-    }
+    bo.threads = 1;
+    const u64 below = bytes_at(grow - 1);
+    EXPECT_EQ(bytes_at(grow), below);
+    EXPECT_EQ(bytes_at(grow + 1), below + cap * sizeof(u64));
+    bo.threads = 8;
+    for (const u64 limit : {grow - 1, grow, grow + 1, grow + 3})
+        (void)bytes_at(limit);
 }
