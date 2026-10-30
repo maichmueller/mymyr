@@ -540,15 +540,17 @@ failure, at every partial binding with more than two unbound variables. They onl
 completion, so the first binding stays that of the binding order. Satisfiable templates can still need exponential work.
 `max_steps` bounds it for each row and template, on the host and the device alike: a step is a binding trial or a scan
 of a 32-object candidate tile over the template's literals and their tuples, the tests' scans included (`None`: no
-bound; otherwise an integer in `[0, 2**63)`). A scan reads only the tuples that agree with a literal's leading constant
-and bound arguments. When a template of the table has more than two variables, a tile without candidates also looks up,
-within its step, the next tile that every positive literal of the variable reaches, and the search moves there. The host
-and the device count the same steps. The default leaves room for the templates that `lifted_goal_templates` makes for
-the IPC benchmarks in `tests/data/ipc`, matched in the states of random walks. An exhausted search leaves its template
-unmatched and sets status value 8; the other templates are still searched with their own budgets, so counts include only
-completed matches, and with `first=True` an exhausted earlier template can precede the returned match. Retry with a
-larger budget when value 8 is set. The torch custom op takes the same `max_steps=`; in C++, set `MatchBatch::max_steps`
-and supply the `MatchBatch::status` scalar, which is required.
+bound; otherwise an integer in `[0, 2**63)`). A scan of a predicate with more than 256 tuples reads only those that
+agree with the literal's leading constant and bound arguments. When a template of the table has more than two variables,
+a tile without candidates also looks up, within its step, the next tile that every positive literal of the variable may
+reach, and the search moves there: exactly for a predicate of at most 256 tuples, and otherwise from the next sorted
+tuple of the literal when the variable follows its leading constant and bound arguments. The host and the device count
+the same steps. The default leaves room for the templates that `lifted_goal_templates` makes for the IPC benchmarks in
+`tests/data/ipc`, matched in the states of random walks. An exhausted search leaves its template unmatched and sets
+status value 8; the other templates are still searched with their own budgets, so counts include only completed matches,
+and with `first=True` an exhausted earlier template can precede the returned match. Retry with a larger budget when
+value 8 is set. The torch custom op takes the same `max_steps=`; in C++, set `MatchBatch::max_steps` and supply the
+`MatchBatch::status` scalar, which is required.
 
 For CUDA, upload once with `templates.to("cuda:0")` or `templates.upload(torch.cuda.current_stream())`. Uploads include
 the sorted literal index and reject templates above the variable limit. Warm matching on the capture stream before

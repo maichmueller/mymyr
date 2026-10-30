@@ -14,10 +14,10 @@ struct MatchWarp
             value |= __shfl_xor_sync(0xffffffffu, value, offset);
         return value;
     }
-    __device__ u32 sum(u32 value) const
+    __device__ u32 byte_sum(u32 value) const
     {
         for (int offset = 16; offset; offset /= 2)
-            value += __shfl_xor_sync(0xffffffffu, value, offset);
+            value = __vaddus4(value, __shfl_xor_sync(0xffffffffu, value, offset));
         return value;
     }
 };

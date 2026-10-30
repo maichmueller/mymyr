@@ -3,8 +3,8 @@
 // positive literal candidates in 32-object tiles and checks other literals when their last variable is bound.
 // Still-free variables of a positive literal are existential filters, pruning candidates without changing order.
 // The same search serves a host thread or a device warp; lane-parallel scans keep each tile's candidate set exact.
-// A scan reads only the indexed tuples that agree with the literal's leading constant and bound arguments (a binary
-// search over the sorted tuples). Injective templates also get counting tests (domains_possible) that reject partial
+// A scan of a literal with more than k_scan_rows tuples reads only those that agree with its leading constant and
+// bound arguments (a binary search over the sorted tuples). Injective templates also get counting tests (domains_possible) that reject partial
 // bindings without an injective completion; like the filters, they never change which binding is found first.
 #include "mymyr/encoding/detail/literals.hpp"
 
@@ -68,6 +68,16 @@ struct Objects
     const i32* terms;
     const i32* binding;
     MYMYR_HD i32 operator[](u32 j) const { return terms[j] < 0 ? -(terms[j] + 1) : binding[terms[j]]; }
+};
+
+/// The lanes that search one (row, template) together: a host thread is a group of one. A group provides lane(),
+/// size(), bit_or (the union over its lanes) and byte_sum (the per-byte sums over its lanes, each saturating at 255).
+struct HostLane
+{
+    MYMYR_HD u32 lane() const { return 0; }
+    MYMYR_HD u32 size() const { return 1; }
+    MYMYR_HD u32 bit_or(u32 x) const { return x; }
+    MYMYR_HD u32 byte_sum(u32 x) const { return x; }
 };
 
 MYMYR_HD bool bit(const u64* words, u32 slot) { return (words[slot / 64] >> (slot % 64)) & 1; }
@@ -167,11 +177,13 @@ MYMYR_HD u32 lower_row(const MatchTemplates& t, u32 l, const i32* rows, u32 begi
 /// Narrows tup to the rows that share literal l's leading constant and bound arguments and, when `position` directly
 /// follows them, have an object of base + [0, 32) at `position`: a binary search instead of a scan of every row. In
 /// that case it returns true and sets `after` so that rows [tup.end, after) share the leading arguments and have larger
-/// objects at `position`. Ranges of at most 8 rows per lane are scanned as they are, which is cheaper than searching.
-MYMYR_HD bool narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, const i32* binding, u32 lanes, Tuples& tup,
+/// objects at `position`. Predicates of at most k_scan_rows tuples are scanned as they are, which is cheaper than
+/// searching; the bound is the same for every group size, so host and device read the same way.
+inline constexpr u32 k_scan_rows = 256;
+MYMYR_HD bool narrow(const MatchTemplates& t, u32 l, i32 position, u32 base, const i32* binding, Tuples& tup,
                      u32& after)
 {
-    if (tup.end - tup.begin <= 8 * lanes)
+    if (tup.end - tup.begin <= k_scan_rows)
         return false;
     i32 known = 0;
     while (known < t.arity[l] && known != position && resolved(t, l, known, binding) >= 0)
@@ -256,7 +268,7 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
             continue;
         Tuples tup = tuples(t, g, l);
         u32 after = 0;
-        narrow(t, l, position, base, binding, grp.size(), tup, after);
+        narrow(t, l, position, base, binding, tup, after);
         u32 lane_mask = 0;
         for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
         {
@@ -279,9 +291,10 @@ MYMYR_HD u32 candidates(const Group& grp, const MatchTemplates& t, u32 g, u32 k,
 }
 
 /// Which of the 32 tiles after base + [0, 32) may hold candidates of `variable` (bit j: objects base + 32 * (j + 1) +
-/// [0, 32)): those where every positive literal of the variable has a matching tuple. A literal whose leading
-/// constant and bound arguments are followed by the variable reads only rows up to the first one past the tile (its
-/// rows are sorted by the variable's object there), whose tile bounds the later ones from below.
+/// [0, 32)): those where every positive literal of the variable has a matching tuple. A literal of more than
+/// k_scan_rows tuples whose leading constant and bound arguments are followed by the variable reads only rows up to
+/// the first one past the tile (its rows are sorted by the variable's object there), whose tile bounds the later ones
+/// from below.
 template<class Group>
 MYMYR_HD u32 later_tiles(const Group& grp, const MatchTemplates& t, u32 g, u32 k, i32 variable, u32 base, u32 objects,
                           const i32* binding, const u64* state, const u64* derived)
@@ -295,7 +308,7 @@ MYMYR_HD u32 later_tiles(const Group& grp, const MatchTemplates& t, u32 g, u32 k
             continue;
         Tuples tup = tuples(t, g, l);
         u32 after = 0;
-        const bool tiled = narrow(t, l, position, base, binding, grp.size(), tup, after);
+        const bool tiled = narrow(t, l, position, base, binding, tup, after);
         u32 seen = 0;
         if (tiled)
         {
@@ -376,18 +389,18 @@ MYMYR_HD bool sibling(const MatchTemplates& t, u32 l, u32 other, i32 position, i
 
 /// Objects c of base + [0, 32), bound to no variable, with at least `threshold` supporters: true tuples of l's predicate
 /// with c at `position`, l's objects at its other positions but q, and at q an object other than c that no variable is
-/// bound to (the tuples differ only at q, so their supporters are distinct objects). Lane counts are 8-bit fields that
-/// saturate at 255 / lanes, so that their sum over the lanes fits; an object saturated in a lane is kept (more
-/// supporters than counted only weaken the test).
+/// bound to (the tuples differ only at q, so their supporters are distinct objects). Counts are 8-bit fields that
+/// saturate at 255 in each lane and in their sum over the lanes, so every group size counts min(supporters, 255); a
+/// threshold above 255 is met by 255.
 template<class Group>
 MYMYR_HD u32 supported(const Group& grp, const MatchTemplates& t, u32 g, u32 k, u32 l, i32 position, i32 q, u32 base,
                         u32 objects, u32 threshold, const i32* binding, const u64* state, const u64* derived)
 {
     Tuples tup = tuples(t, g, l);
     u32 after = 0;
-    narrow(t, l, position, base, binding, grp.size(), tup, after);
-    const u32 vars = static_cast<u32>(t.num_vars[k]), cap = 255 / grp.size();
-    u32 counts[8] = {}, saturated = 0;
+    narrow(t, l, position, base, binding, tup, after);
+    const u32 vars = static_cast<u32>(t.num_vars[k]), least = threshold < 255 ? threshold : 255;
+    u32 counts[8] = {};
     for (u32 n = tup.begin + grp.lane(); n < tup.end; n += grp.size())
     {
         const i32* row = tup.rows + u64{n} * t.literals.max_arity;
@@ -405,20 +418,15 @@ MYMYR_HD u32 supported(const Group& grp, const MatchTemplates& t, u32 g, u32 k, 
         const u32 at = object - base, shift = at % 4 * 8;
         // A select over the eight words keeps the counters in registers on a device.
         for (u32 w = 0; w < 8; ++w)
-            if (w == at / 4)
-            {
-                if (((counts[w] >> shift) & 255) < cap)
-                    counts[w] += u32{1} << shift;
-                else
-                    saturated |= u32{1} << at;
-            }
+            if (w == at / 4 && ((counts[w] >> shift) & 255) < 255)
+                counts[w] += u32{1} << shift;
     }
-    u32 mask = grp.bit_or(saturated);
+    u32 mask = 0;
     for (u32 w = 0; w < 8 && 4 * w < objects - base; ++w)
     {
-        const u32 total = grp.sum(counts[w]);
+        const u32 total = grp.byte_sum(counts[w]);
         for (u32 b = 0; b < 4; ++b)
-            if (((total >> (8 * b)) & 255) >= threshold)
+            if (((total >> (8 * b)) & 255) >= least)
                 mask |= u32{1} << (4 * w + b);
     }
     for (u32 v = 0; v < vars; ++v)

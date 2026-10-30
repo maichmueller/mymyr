@@ -1148,3 +1148,63 @@ def test_match_first_counts_supporters_of_shared_variables(on_device, second):
                                 max_steps=2 if second == 2 else None)
         for host, gpu in zip(expected, actual):
             np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+def assert_exhausts_below(task, condition, steps, on_device):
+    # The search needs exactly `steps` on the host and, bitwise equal, on the device: one step less exhausts it.
+    templates = rl.GoalTemplates.from_conditions(task, [[condition]])
+    rows = np.asarray(task.encode([task.initial_state]))
+    short = rl.match_first(rows, None, templates, max_steps=steps - 1)
+    assert int(short.status) == 8 and not short.found.any()
+    enough = rl.match_first(rows, None, templates, max_steps=steps)
+    assert int(enough.status) == 0
+    want = [[o.index for o in b] for b in task.bindings(condition, task.initial_state, limit=1)]
+    assert bool(enough.found[0, 0]) == bool(want)
+    if want:
+        assert enough.binding[0, 0].tolist() == want[0]
+    if on_device:
+        torch = cuda_match_runtime()
+        x = torch.tensor(rows.view(np.int64), device="cuda:0")
+        device = templates.to("cuda:0")
+        for budget, expected in [(steps - 1, short), (steps, enough)]:
+            actual = rl.match_first(x, None, device, max_steps=budget)
+            for host, gpu in zip(expected, actual):
+                np.testing.assert_array_equal(host, gpu.cpu().numpy())
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("literals, steps", [(["(p ?a)", "(p ?b)", "(p ?c)"], 9),
+                                             (["(mark ?b)", "(conn ?a ?b)", "(mark ?c)"], 7)])
+def test_match_first_counts_tile_jumps_alike_over_short_tuple_ranges(on_device, literals, steps):
+    # 100 objects in 4 tiles and predicates of 100 tuples, of which only those of o99 (and o5 for mark) match: the
+    # look-ahead over the tiles reads the tuples the same way for one lane and for a warp.
+    domain = mymyr.Domain.from_string("""(define (domain tiles)
+        (:requirements :adl) (:predicates (ok) (p ?x) (conn ?x ?y) (mark ?y))
+        (:action grow :parameters (?x) :precondition (and) :effect (p ?x))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    objects = " ".join(f"o{i}" for i in range(100))
+    conn = " ".join(f"(conn o{i} o0)" for i in range(100))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem tiles) (:domain tiles)
+        (:objects {objects}) (:init (ok) (p o99) {conn} (conn o99 o5) (mark o5)) (:goal (ok)))"""))
+    assert_exhausts_below(task, task.condition(["?a", "?b", "?c"], literals), steps, on_device)
+
+
+@needs_frontend
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("supporters, steps", [(8, 2), (9, 33)])
+def test_match_first_counts_supporters_exactly_in_every_lane(on_device, supporters, steps):
+    # Nine variables adjacent to a shared one need an object with nine supporters. With 32 objects every supporter of
+    # o20 falls into the same lane of a warp; eight are rejected at the start, nine are found.
+    domain = mymyr.Domain.from_string("""(define (domain adjacent)
+        (:requirements :adl) (:predicates (ok) (adj ?x ?y))
+        (:action link :parameters (?x ?y) :precondition (and) :effect (adj ?x ?y))
+        (:action set :parameters () :precondition (and) :effect (ok)))""")
+    adjacent = [f"(adj o{x} o20)" for x in range(supporters)]
+    adjacent += [f"(adj o{x} o21)" for x in range(supporters, supporters + 4)]
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem adjacent) (:domain adjacent)
+        (:objects {" ".join(f"o{i}" for i in range(32))}) (:init (ok) {" ".join(adjacent)}) (:goal (ok)))"""))
+    names = ["?v"] + [f"?w{i}" for i in range(9)]
+    condition = task.condition(names, [f"(adj {w} ?v)" for w in names[1:]],
+                               equalities=[(a, b, False) for i, a in enumerate(names) for b in names[i + 1:]])
+    assert_exhausts_below(task, condition, steps, on_device)

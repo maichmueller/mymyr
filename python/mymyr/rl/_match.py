@@ -161,6 +161,9 @@ def match_first(rows: Any, task_ids: Any, templates: Any, *, first: bool = False
 
     Search is exponential in the worst case. max_steps bounds the work per row and template in steps, each a
     32-object candidate tile scan over the template's literals and their tuples or a binding trial (None: no bound).
+    The scans of the counting tests that prune distinct templates count too, and when a template of the table has
+    more than two variables, a tile without candidates also looks up the next reachable tile within its step; the
+    host and the device count the same steps (docs/rl.md describes them in full).
     Exhaustion sets status bit 3 (value 8) and leaves that template unmatched; other templates are still searched,
     so counts and first=True then describe only completed searches. Retry with a larger budget to resolve them.
     """
