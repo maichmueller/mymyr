@@ -1047,6 +1047,7 @@ def test_the_fake_implementation_gives_the_shapes_of_the_capacities(cases):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_the_op_compiles_without_graph_breaks(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
@@ -1246,6 +1247,7 @@ def test_device_threads_are_validated_as_on_the_host(cases, threads):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_a_compiled_function_specializes_each_encoder_handle(cases):
     dev = gpu()
     case = cases["gripper"]
@@ -1404,6 +1406,7 @@ def test_the_fake_implementation_gives_the_history_arrays(cases):
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.needs_gil
 @pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
+@pytest.mark.torch_compile
 def test_the_op_with_layers_compiles_and_replays_in_a_cuda_graph(cases, layout):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]

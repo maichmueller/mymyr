@@ -265,6 +265,7 @@ def test_mixed_width_env_observations_and_dataset_rows_stay_on_device(wide_table
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_shared_static_torch_op_fake_compile_and_capture(cases, layout, index):
     device = gpu()
     from mymyr.rl import torch as rt

@@ -209,6 +209,7 @@ def test_device_hash_rows_matches_host_and_captures(words, numeric_words):
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("rows", [False, True])
+@pytest.mark.torch_compile
 def test_consolidated_torch_ops_fullgraph_and_capture(padded, rows):
     from mymyr.rl.torch import register
     task = pddl_task(atoms="dense")

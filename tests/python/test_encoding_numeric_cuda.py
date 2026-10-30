@@ -153,6 +153,7 @@ def test_numeric_stream_collation_and_capture(numeric_cases, name, layout, index
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_numeric_rounding_undefined_values_and_torch_op(numeric_cases, layout, index, dtype):
     torch = cuda()
     from mymyr.rl.torch import _ops as rt

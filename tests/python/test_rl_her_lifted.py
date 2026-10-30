@@ -6,6 +6,7 @@ fixtures and large goals, and for their bounds, determinism, independence from o
 the condition round trip and pickling.
 """
 
+import contextlib
 import math
 import pickle
 import random
@@ -706,30 +707,51 @@ def test_match_first_device_literal_kinds(first):
                                   small.count.cpu().numpy())
 
 
+@contextlib.contextmanager
+def match_first_op_case():
+    """The match_first op, a handle of gripper's lifted goal templates, the templates and the rows of a short walk."""
+    torch = pytest.importorskip("torch", exc_type=ImportError)
+    from mymyr.rl.torch._ops import match_first as op, register, unregister
+
+    task = text_task("gripper__prob05")
+    goal_templates = rl.lifted_goal_templates(task)
+    rows = torch.tensor(np.asarray(task.encode(walk(task, steps=3, walks=1))).view(np.int64))
+    handle = register(goal_templates)
+    try:
+        yield op, handle, goal_templates, rows
+    finally:
+        unregister(handle)
+
+
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("first", [False, True])
 @pytest.mark.parametrize("max_steps", [0, 1_000_000])
-def test_match_first_torch_op_fake_and_compile(first, max_steps):
-    torch = pytest.importorskip("torch", exc_type=ImportError)
-    from mymyr.rl.torch._ops import match_first as op, register, unregister
-    from torch._subclasses.fake_tensor import FakeTensorMode
+def test_match_first_torch_op_and_its_fake(first, max_steps):
+    with match_first_op_case() as (op, handle, goal_templates, rows):
+        from torch._subclasses.fake_tensor import FakeTensorMode
 
-    task = text_task("gripper__prob05")
-    templates = rl.lifted_goal_templates(task)
-    rows = torch.tensor(np.asarray(task.encode(walk(task, steps=3, walks=1))).view(np.int64))
-    handle = register(templates)
-    try:
-        expected = rl.match_first(rows.numpy(), None, templates, first=first, max_steps=max_steps)
+        expected = rl.match_first(rows.numpy(), None, goal_templates, first=first, max_steps=max_steps)
         eager = op(handle, rows, first=first, max_steps=max_steps)
+        for host, eager_tensor in zip(expected, eager):
+            np.testing.assert_array_equal(host, eager_tensor.numpy())
         with FakeTensorMode() as mode:
             fake = op(handle, mode.from_tensor(rows), first=first, max_steps=max_steps)
             assert [(v.shape, v.dtype) for v in fake] == [(v.shape, v.dtype) for v in eager]
-        compiled = torch.compile(lambda x: op(handle, x, first=first, max_steps=max_steps), backend="eager", fullgraph=True)(rows)
-        for host, eager_tensor, compiled_tensor in zip(expected, eager, compiled):
-            np.testing.assert_array_equal(host, eager_tensor.numpy())
+
+
+@pytest.mark.needs_gil
+@pytest.mark.torch_compile
+@pytest.mark.parametrize("first", [False, True])
+@pytest.mark.parametrize("max_steps", [0, 1_000_000])
+def test_match_first_torch_op_compiles(first, max_steps):
+    with match_first_op_case() as (op, handle, _, rows):
+        import torch
+
+        eager = op(handle, rows, first=first, max_steps=max_steps)
+        compiled = torch.compile(lambda x: op(handle, x, first=first, max_steps=max_steps), backend="eager",
+                                 fullgraph=True)(rows)
+        for eager_tensor, compiled_tensor in zip(eager, compiled):
             assert torch.equal(eager_tensor, compiled_tensor)
-    finally:
-        unregister(handle)
 
 
 @needs_frontend
@@ -1529,9 +1551,10 @@ def test_relabel_lifted_device_does_not_wait_for_its_stream():
     assert result.count.sum().item() > 0 and result.status.item() == 0
 
 
-@pytest.mark.needs_gil
-@pytest.mark.parametrize("static_only", [False, True])
-def test_relabel_lifted_compile_and_opcheck(static_only):
+@contextlib.contextmanager
+def relabel_lifted_case(static_only):
+    """The her_relabel_lifted op, a handle of the lifted goal templates and the op's tensor arguments (reached
+    states, done flags, previous states)."""
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import register, unregister, her_relabel_lifted as op
     if static_only:
@@ -1543,17 +1566,33 @@ def test_relabel_lifted_compile_and_opcheck(static_only):
     else:
         task, t, prev, reached, done, _, _ = toggle_window()
     handle = register(t)
-    x, p, d = torch.tensor(reached.view(np.int64)), torch.tensor(prev.view(np.int64)), torch.tensor(done)
     try:
-        args = (handle, x, d, None, p, 3)
-        checked = torch.library.opcheck(op, args)
+        yield op, handle, torch.tensor(reached.view(np.int64)), torch.tensor(done), torch.tensor(prev.view(np.int64))
+    finally:
+        unregister(handle)
+
+
+@pytest.mark.needs_gil
+@pytest.mark.parametrize("static_only", [False, True])
+def test_relabel_lifted_opcheck(static_only):
+    with relabel_lifted_case(static_only) as (op, handle, x, d, p):
+        import torch
+
+        checked = torch.library.opcheck(op, (handle, x, d, None, p, 3))
         assert set(checked.values()) == {"SUCCESS"}, checked
-        expected = op(*args)
+
+
+@pytest.mark.needs_gil
+@pytest.mark.torch_compile
+@pytest.mark.parametrize("static_only", [False, True])
+def test_relabel_lifted_compiles(static_only):
+    with relabel_lifted_case(static_only) as (op, handle, x, d, p):
+        import torch
+
+        expected = op(handle, x, d, None, p, 3)
         actual = torch.compile(lambda a, b, c: op(handle, a, b, None, c, 3), backend="eager", fullgraph=True)(x, d, p)
         for a, b in zip(expected, actual):
             torch.testing.assert_close(a, b)
-    finally:
-        unregister(handle)
 
 
 def suite_lifted_window():

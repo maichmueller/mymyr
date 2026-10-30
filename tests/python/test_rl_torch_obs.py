@@ -242,7 +242,8 @@ def test_observer_registrations_have_independent_ownership(gripper):
     assert reference() is None
 
 
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
+@pytest.mark.parametrize("compiled", [False, pytest.param(True, marks=pytest.mark.torch_compile)],
+                         ids=["eager", "compiled"])
 @pytest.mark.parametrize("external", [False, True], ids=["env_owned", "caller_registered"])
 @pytest.mark.parametrize("close", [False, True], ids=["destroy", "close"])
 @pytest.mark.needs_gil
@@ -374,6 +375,7 @@ def test_obs_under_torch_cuda_graph(gripper):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_obs_under_torch_compile(gripper):
     device = gpu_device()
     encoder = encoding.FlatRelationEncoder(gripper)
@@ -578,6 +580,7 @@ def test_numeric_and_simple_obs_are_the_host_encoding(dev, capacities, form):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("form", FORMS)
+@pytest.mark.torch_compile
 def test_numeric_and_simple_obs_under_torch_compile(form):
     device = gpu_device()
     task, encoder = form_task(form)
@@ -712,6 +715,7 @@ def test_capacity_action_observations_return_before_the_device(gripper):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_capacity_action_observations_under_torch_compile(gripper):
     device = gpu_device()
     encoder = encoding.FlatRelationEncoder(gripper)
@@ -757,7 +761,7 @@ def test_captured_action_observations_follow_changing_suite_domains(suite):
 
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("single", [False, True])
-@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("compiled", [False, pytest.param(True, marks=pytest.mark.torch_compile)])
 def test_captured_actions_survive_other_stream_steps_expansions_and_captures(gripper, single, compiled):
     device = gpu_device()
     table = rl.as_table(gripper[0]) if single else gripper

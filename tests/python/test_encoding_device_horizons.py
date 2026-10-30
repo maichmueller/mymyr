@@ -269,6 +269,7 @@ def test_device_space_builder_releases_completed_calls(space):
 @pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.torch_compile
 def test_deep_torch_op_compiles_and_replays_with_cousins(layout, index):
     import mymyr.rl.torch as rt
 

@@ -49,6 +49,7 @@ def test_numpy_sampler_distribution_and_streams():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_torch_numpy_sampling_and_compile():
     torch = pytest.importorskip("torch")
     for sampler in [rl.InstanceSampler(5), rl.InstanceSampler(5, [0, 1, 0, 3, 2])]:
@@ -146,6 +147,7 @@ def test_pool_instances_are_the_numpy_samplers_draws(table, weights):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_batched_sampler_compiled_autoreset_and_fixed_ids(table):
     torch = pytest.importorskip("torch")
     rt = pytest.importorskip("mymyr.rl.torch")

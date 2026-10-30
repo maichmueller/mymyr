@@ -345,6 +345,7 @@ def test_device_zero_width_destination():
 
 
 @pytest.mark.needs_gil
+@pytest.mark.torch_compile
 def test_torch_ops_on_cuda():
     torch = torch_cuda()
     rt = pytest.importorskip("mymyr.rl.torch")

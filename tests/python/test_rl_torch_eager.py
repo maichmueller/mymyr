@@ -4,13 +4,13 @@ import inspect
 
 import pytest
 
+from conftest import TASKS
 from python_children import run_code
 
 
-def _exercise_ops(compile_ops=False):
+def _exercise_ops(task_path, traced=None):
     import sys
     import sysconfig
-    from pathlib import Path
 
     import numpy as np
     import torch
@@ -21,7 +21,7 @@ def _exercise_ops(compile_ops=False):
     from mymyr.rl.torch import _masks, _ops
 
     def check_imports():
-        if compile_ops:
+        if traced is not None:
             return
         assert not {"torch._dynamo", "torch._inductor", "triton"}.intersection(sys.modules)
         if sysconfig.get_config_var("Py_GIL_DISABLED"):
@@ -30,7 +30,7 @@ def _exercise_ops(compile_ops=False):
     check_imports()
     registered = {name.split("::")[1] for name in torch._C._dispatch_get_all_op_names()
                   if name.startswith("mymyr::")}
-    task = mymyr.Task.from_text(str(Path("tests/data/tasks/gripper__prob05.txt")))
+    task = mymyr.Task.from_text(task_path)
     table = rl.TaskTable([task])
     encoder = encoding.FlatRelationEncoder(table, target_sources=("action", "goal"))
     templates = rl.lifted_goal_templates(task)
@@ -95,12 +95,14 @@ def _exercise_ops(compile_ops=False):
                     continue
                 op = getattr(rt, name, None) or getattr(_ops, name, None) or getattr(_masks, name)
                 assert isinstance(op, torch.library.CustomOpDef), name
-                if compile_ops:
+                if traced is None:
+                    result = op(*inputs)
+                else:
                     from torch._subclasses.fake_tensor import FakeTensorMode
 
-                    torch.compiler.reset()
-                    with FakeTensorMode() as mode:
-                        fake_inputs = tuple(mode.from_tensor(x) if isinstance(x, torch.Tensor) else x for x in inputs)
+                    with FakeTensorMode() as fake_mode:
+                        fake_inputs = tuple(fake_mode.from_tensor(x) if isinstance(x, torch.Tensor) else x
+                                            for x in inputs)
                         fake = op(*fake_inputs)
                     op(*fake_inputs)
                     if name == "applicable_schemas":
@@ -108,10 +110,14 @@ def _exercise_ops(compile_ops=False):
                     meta_inputs = tuple(torch.empty_like(x, device="meta") if isinstance(x, torch.Tensor) else x
                                         for x in inputs)
                     meta = op(*meta_inputs)
-                    result = torch.compile(op, fullgraph=True, backend="aot_eager")(*inputs)
-                    if name in {"applicable_schemas", "her_relabel_lifted"}:
-                        checked = torch.library.opcheck(op, inputs)
-                        assert set(checked.values()) == {"SUCCESS"}, checked
+                    if traced == "compile":
+                        torch.compiler.reset()
+                        result = torch.compile(op, fullgraph=True, backend="aot_eager")(*inputs)
+                    else:
+                        result = op(*inputs)
+                        if name in {"applicable_schemas", "her_relabel_lifted"}:
+                            checked = torch.library.opcheck(op, inputs)
+                            assert set(checked.values()) == {"SUCCESS"}, checked
                     fake = () if fake is None else (fake,) if isinstance(fake, torch.Tensor) else fake
                     meta = () if meta is None else (meta,) if isinstance(meta, torch.Tensor) else meta
                     actual = () if result is None else (result,) if isinstance(result, torch.Tensor) else result
@@ -119,8 +125,6 @@ def _exercise_ops(compile_ops=False):
                         (x.shape, x.dtype, x.device) for x in actual
                     ], name
                     assert [(x.shape, x.dtype) for x in meta] == [(x.shape, x.dtype) for x in actual], name
-                else:
-                    result = op(*inputs)
                 assert result is None or isinstance(result, (torch.Tensor, tuple, list)), name
                 check_imports()
             # Exercise the environment and framework-level entry points as well as the registered ops.
@@ -142,10 +146,12 @@ def _exercise_ops(compile_ops=False):
     check_imports()
 
 
-def _run_ops(*, compile_ops=False):
+def _run_ops(traced=None):
+    """Runs _exercise_ops in a fresh interpreter: eagerly (None), on fake and meta tensors and under opcheck ("fake"),
+    or compiled into one graph ("compile")."""
     pytest.importorskip("torch", exc_type=ImportError)
-    source = inspect.getsource(_exercise_ops) + f"\n_exercise_ops(compile_ops={compile_ops!r})\n"
-    result = run_code(source, timeout=None, capture_output=True, check=False)
+    call = f"\n_exercise_ops({str(TASKS / 'gripper__prob05.txt')!r}, traced={traced!r})\n"
+    result = run_code(inspect.getsource(_exercise_ops) + call, timeout=None, capture_output=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -154,5 +160,11 @@ def test_eager_ops_leave_compiler_modules_unloaded():
 
 
 @pytest.mark.needs_gil
-def test_op_entry_points_support_fake_tensors_and_fullgraph_compile():
-    _run_ops(compile_ops=True)
+def test_op_entry_points_support_fake_and_meta_tensors():
+    _run_ops("fake")
+
+
+@pytest.mark.needs_gil
+@pytest.mark.torch_compile
+def test_op_entry_points_compile_into_one_graph():
+    _run_ops("compile")

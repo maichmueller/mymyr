@@ -249,6 +249,7 @@ def test_pool_initial_dead_end(dead_end, terminal, expected):
 @pytest.mark.needs_gil
 def test_torchrl_solved_reset(solved_task, device_path):
     torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
     device, path = device_path
     planning = pytest.importorskip("mymyr.rl.torch").PlanningEnv(solved_task, 2, device=device, path=path)
     try:
