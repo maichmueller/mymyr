@@ -281,6 +281,15 @@ def test_attach_refuses_an_incomplete_set_of_wheels(tmp_path: Path) -> None:
     assert "== mymyr-" not in result.stdout
 
 
+def test_attach_refuses_a_directory_without_wheels(tmp_path: Path) -> None:
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    result = attach_dry_run(wheels)
+
+    assert result.returncode == 1
+    assert f"no mymyr-*.whl in {wheels}; nothing tested or attached" in result.stderr
+
+
 def test_attach_refuses_wheels_of_other_abis_and_versions(tmp_path: Path) -> None:
     wheels = fake_wheels(tmp_path / "wheels", "1.2.3+cu13", ["cp314t", "cp315t", "cp313t"])
     fake_wheels(wheels, "1.2.2+cu13", ["cp314t"])
@@ -419,6 +428,8 @@ def test_the_wheel_check_refuses_another_build_of_the_same_version(tmp_path: Pat
 
 
 RUN_UNTIL = ROOT / "ci" / "run_until.py"
+proc = pytest.mark.skipif(not os.path.isdir("/proc/self"),
+                          reason="ci/run_until.py finds the build's Ninja processes through /proc, as on Linux")
 
 
 def fake_ninja(tmp_path: Path) -> Path:
@@ -447,6 +458,7 @@ def run_until(deadline: float, *command: str) -> subprocess.CompletedProcess:
 
 # A background job of a non-interactive shell starts with SIGINT ignored, and so would the build without run_until
 # resetting it: an ignored signal stays ignored across exec, and bash cannot trap a signal ignored on entry.
+@proc
 @pytest.mark.parametrize("sigint", ["inherited", "ignored"])
 def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkeypatch, capsys, sigint: str) -> None:
     ninja = fake_ninja(tmp_path)
@@ -472,11 +484,23 @@ def test_run_until_stops_the_builds_ninja_at_the_deadline(tmp_path: Path, monkey
     assert "stopping the build at the deadline" in capsys.readouterr().err
 
 
+@proc
 def test_run_until_passes_on_the_status_of_a_build_that_ends_in_time(tmp_path: Path) -> None:
     assert run_until(time.time() + 60, "bash", "-c", "exit 0").returncode == 0
     assert run_until(time.time() + 60, "bash", "-c", "exit 4").returncode == 4
 
 
+def test_run_until_refuses_to_start_without_proc(tmp_path: Path, capsys) -> None:
+    marker = tmp_path / "build"
+    main = runpy.run_path(str(RUN_UNTIL))["main"]
+    main.__globals__["PROC"] = str(tmp_path / "proc")
+
+    assert main([str(RUN_UNTIL), "0", "--", "touch", str(marker)]) == 2
+    assert not marker.exists()
+    assert f"through {tmp_path / 'proc'}, which this system does not have" in capsys.readouterr().err
+
+
+@proc
 def test_run_until_leaves_other_ninjas_alone(tmp_path: Path) -> None:
     ninja = fake_ninja(tmp_path)
     other = tmp_path / "other"
