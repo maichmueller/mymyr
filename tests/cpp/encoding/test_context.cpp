@@ -369,7 +369,8 @@ TEST(EncodingContext, TheCellsOfTheInstanceGoalHoldOnlyTheSlotsItsMasksCanSetAnd
         const Cell& state = *std::ranges::find(state_cells_of_instance, state_relation, &Cell::relation);
         EXPECT_EQ(cell.a, state.a) << relation.name;
         EXPECT_EQ(cell.b, state.b) << relation.name;
-        EXPECT_EQ(cell.c, cell.d) << relation.name;
+        EXPECT_EQ(cell.c, static_cast<u32>(relation.predicate)) << relation.name;
+        EXPECT_EQ(cell.d, 0u) << relation.name;
     }
     // the other cells are the same in both lists
     std::vector<Cell> state_cells, row_state_cells;
@@ -387,20 +388,56 @@ TEST(EncodingContext, TheCellsOfTheInstanceGoalHoldOnlyTheSlotsItsMasksCanSetAnd
 
 TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
 {
-    // (road a b) is static: its goal cells have constant tuples and no slot range, and row goals have no such cell
+    // (road a b) is static: its goal cells list constant literals and have no slot range; row goals have such cells
+    // only in the fixed lists, for rows with constant literals
     const auto table = rl::TaskTable::single(test::pddl_task("goals", "static_false"));
     FlatOptions options = test::encoder_options();
     options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied};
     const auto context = context_of(table, options);
     const lanes::InstanceView v = lanes::instance_view(context->view(), 0);
+    ASSERT_GT(v.goal_constants.count, 0u);
+    EXPECT_EQ(v.goal_constants.width, lanes::k_constant_objects + context->view().max_arity);
+    for (u32 k = 0; k < v.goal_constants.count; ++k)
+    {
+        EXPECT_EQ(v.goal_constants.row(k)[lanes::k_constant_layer], 0);
+        const u32 width = v.goal_constants.width;
+        if (k != 0)
+        {
+            EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + width,
+                                                     v.goal_constants.row(k), v.goal_constants.row(k) + width));
+        }
+    }
+    // each goal cell of the instance's goal lists the rows [c, d) past the constant part: literals of its predicate
+    // and sign, ascending, each one of the constant part
     u32 constant_cells = 0;
+    const u32 w = v.goal_constants.width;
     for (u32 i = 0; i < v.num_cells; ++i)
     {
-        if (lanes::is_goal_op(v.cells[i].op) && v.cells[i].a == v.cells[i].b)
+        const Cell& cell = v.cells[i];
+        if (!lanes::is_goal_op(cell.op))
+            continue;
+        const Relation& relation = context->schema().relation(cell.relation);
+        EXPECT_LE(cell.c, cell.d) << relation.name;
+        if (cell.c == cell.d)
+            continue;
+        EXPECT_GE(cell.c, v.goal_constants.count) << relation.name;
+        for (u32 k = cell.c; k < cell.d; ++k)
         {
-            EXPECT_LT(v.cells[i].c, v.cells[i].d) << context->schema().relation(v.cells[i].relation).name;
-            ++constant_cells;
+            const i32* row = v.goal_constants.row(k);
+            EXPECT_EQ(row[lanes::k_constant_predicate], static_cast<i32>(relation.predicate)) << relation.name;
+            EXPECT_EQ(row[lanes::k_constant_negative], lanes::goal_op_negative(cell.op) ? 1 : 0) << relation.name;
+            if (k != cell.c)
+            {
+                EXPECT_TRUE(std::lexicographical_compare(v.goal_constants.row(k - 1), v.goal_constants.row(k - 1) + w,
+                                                         row, row + w));
+            }
+            bool found = false;
+            for (u32 j = 0; j < v.goal_constants.count; ++j)
+                found = found || std::equal(row, row + w, v.goal_constants.row(j));
+            EXPECT_TRUE(found) << relation.name;
         }
+        if (cell.a == cell.b)
+            ++constant_cells;
     }
     EXPECT_GT(constant_cells, 0u);
     for (u32 i = 0; i < v.num_row_cells; ++i)
@@ -410,6 +447,12 @@ TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
             EXPECT_LT(v.row_cells[i].a, v.row_cells[i].b);
         }
     }
+    const lanes::CellList fixed = lanes::cell_list(v, true, false, false, false, true);
+    u32 fixed_goal_cells = 0;
+    for (u32 i = 0; i < fixed.count; ++i)
+        fixed_goal_cells += lanes::is_goal_op(fixed.cells[i].op) && fixed.cells[i].a == fixed.cells[i].b ? 1u : 0u;
+    EXPECT_GE(fixed_goal_cells, constant_cells);
+    EXPECT_TRUE(std::ranges::is_sorted(std::span(fixed.cells, fixed.count), {}, &Cell::relation));
 }
 
 /// The kind of the atom `objects` of instance predicate `ip` from the task's atom metadata, by a linear scan.

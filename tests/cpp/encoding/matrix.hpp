@@ -3,7 +3,9 @@
 #include "support.hpp"
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/literals.hpp"
 #include "mymyr/task/workspace.hpp"
+#include <algorithm>
 #include <array>
 #include <random>
 
@@ -61,6 +63,10 @@ struct Batch
     std::vector<u64> step_pos, step_neg, step_derived_pos, step_derived_neg;
     std::vector<i32> step_dt;     // [count, steps]
     std::vector<i32> step_count;  // [count]
+    // Constant literals (add_constant_rows): [count, constant_capacity, constant_width] for the goal of each row and for
+    // its subgoal layers, as encoding::ConstantInput lays them out. Empty vectors: the batch has none.
+    u32 constant_capacity = 0, constant_width = 0;
+    std::vector<i32> goal_constants, layer_constants;
 };
 
 inline void set_bit(u64* row, u32 slot) { row[slot >> 6] |= u64{1} << (slot & 63); }
@@ -300,7 +306,117 @@ struct Inputs
     u32 layers = 0;              // the subgoal layers given (at most the batch's)
     bool history = false;        // the history steps given
     bool history_count = false;  // with the valid steps of each row (else every step is valid)
+    bool constants = false;      // the batch's constant literals with the row goals and the subgoal layers given
 };
+
+/// The constant literals of a batch at `rows` (host or device), the batch's layout.
+inline encoding::ConstantInput constant_view(const Batch& b, const i32* rows)
+{
+    return {rows, u64{b.constant_capacity} * b.constant_width, b.constant_capacity, b.constant_width};
+}
+
+/// The atoms of fixed truth of each instance of a context as literal rows without their layer and sign (the
+/// predicate, then its objects -1 padded to the context's max_arity): [0] static atoms that hold (up to 48 of each
+/// static predicate), [1] atoms that static ones decide as false or that have no slot (from random tuples).
+inline std::vector<std::array<std::vector<std::vector<i32>>, 2>> fixed_atoms(const encoding::EncodingContext& context,
+                                                                              u64 seed)
+{
+    namespace ed = encoding::detail;
+    const ed::ContextView c = context.view();
+    const u32 width = context.max_arity();
+    std::mt19937_64 rng(seed);
+    std::vector<std::array<std::vector<std::vector<i32>>, 2>> out(c.num_instances);
+    for (u32 i = 0; i < c.num_instances; ++i)
+    {
+        const u64* inst = c.inst + u64{i} * ed::k_instance_columns;
+        const u64 objects = inst[ed::k_num_objects];
+        std::vector<i32> predicates, args;
+        for (u32 p = 0; p < c.num_predicates; ++p)
+        {
+            const u32* r = c.literal_ranges + (u64{i} * c.num_predicates + p) * ed::k_literal_columns;
+            const u32 arity = r[ed::k_literal_arity];
+            if (r[ed::k_literal_predicate_kind] == ed::k_literal_absent_predicate || arity > width ||
+                (arity && !objects))
+                continue;
+            const u32 begin = r[ed::k_literal_static_begin], end = r[ed::k_literal_static_end];
+            for (u32 k = begin; k < end; k += std::max(1u, (end - begin) / 48))
+            {
+                const i32* row = c.static_args + (inst[ed::k_static_args_offset] + k) * c.max_arity;
+                std::vector<i32> atom{static_cast<i32>(p)};
+                for (u32 a = 0; a < width; ++a)
+                    atom.push_back(a < arity ? row[a] : -1);
+                out[i][0].push_back(std::move(atom));
+            }
+            for (u32 k = 0; k < (arity ? 24u : 1u); ++k)
+            {
+                predicates.push_back(static_cast<i32>(p));
+                for (u32 a = 0; a < width; ++a)
+                    args.push_back(a < arity ? static_cast<i32>(rng() % objects) : -1);
+            }
+        }
+        const std::vector<i32> instances(predicates.size(), static_cast<i32>(i));
+        std::vector<ed::LiteralKind> kinds(predicates.size());
+        std::vector<i32> slots(predicates.size());
+        encoding::resolve_literals(context, {predicates, args, width}, instances, kinds, slots);
+        for (u64 k = 0; k < predicates.size(); ++k)
+            if (kinds[k] == ed::LiteralKind::StaticFalse || kinds[k] == ed::LiteralKind::Unreachable)
+            {
+                std::vector<i32> atom{predicates[k]};
+                atom.insert(atom.end(), args.begin() + static_cast<i64>(k * width),
+                            args.begin() + static_cast<i64>((k + 1) * width));
+                out[i][1].push_back(std::move(atom));
+            }
+    }
+    return out;
+}
+
+/// Gives the rows of a batch constant literals of their goal and of `layers` subgoal layers (none without layers): up
+/// to `capacity` literals each, some rows none, mostly static atoms that hold, some of them negated, and atoms that
+/// fail or have no slot, a literal of the layers on several of them at times. Sorted and without duplicates.
+inline void add_constant_rows(Batch& b, const encoding::EncodingContext& context, u32 layers, u32 capacity, u64 seed)
+{
+    const auto atoms = fixed_atoms(context, seed);
+    std::mt19937_64 rng(seed + 1);
+    const u32 width = encoding::detail::k_constant_objects + context.max_arity();
+    b.constant_capacity = capacity;
+    b.constant_width = width;
+    auto fill = [&](std::vector<i32>& out, u32 levels)
+    {
+        out.assign(b.count * capacity * width, -1);
+        if (!levels)
+            return;
+        for (u64 g = 0; g < b.count; ++g)
+        {
+            const auto& pools = atoms[static_cast<u32>(b.task_ids[g])];
+            const u32 count = rng() % 3 == 0 ? 0u : static_cast<u32>(1 + rng() % capacity);
+            std::vector<std::vector<i32>> literals;
+            for (u32 k = 0; k < count; ++k)
+            {
+                const bool holds = !pools[0].empty() && (pools[1].empty() || rng() % 4 != 0);
+                const auto& pool = pools[holds ? 0 : 1];
+                if (pool.empty())
+                    continue;
+                const std::vector<i32>& atom = pool[rng() % pool.size()];
+                std::vector<i32> literal{static_cast<i32>(rng() % levels), atom[0], rng() % 5 == 0 ? 1 : 0};
+                literal.insert(literal.end(), atom.begin() + 1, atom.end());
+                literals.push_back(std::move(literal));
+                if (levels > 1 && rng() % 4 == 0)
+                {
+                    literal = literals.back();
+                    literal[0] = static_cast<i32>(rng() % levels);
+                    literals.push_back(std::move(literal));
+                }
+            }
+            std::sort(literals.begin(), literals.end());
+            literals.erase(std::unique(literals.begin(), literals.end()), literals.end());
+            literals.resize(std::min<u64>(literals.size(), capacity));
+            for (u64 k = 0; k < literals.size(); ++k)
+                std::copy(literals[k].begin(), literals[k].end(), out.begin() + static_cast<i64>((g * capacity + k) * width));
+        }
+    };
+    fill(b.goal_constants, 1);
+    fill(b.layer_constants, layers);
+}
 
 /// The first `layers` subgoal layers of a batch over the arrays `pos`, `neg` (and the derived ones, which the batch may
 /// not have) in the batch's layout; host or device pointers.
@@ -375,6 +491,10 @@ inline encoding::EncodeInput host_input(const Batch& b, u64 n, const Inputs& inp
     if (inputs.history)
         in.history = history_view(b, inputs, b.step_pos.data(), b.step_neg.data(), b.step_derived_pos.data(),
                                   b.step_derived_neg.data(), b.step_dt.data(), b.step_count.data());
+    if (inputs.constants && inputs.row_goals && !b.goal_constants.empty())
+        in.goal_constants = constant_view(b, b.goal_constants.data());
+    if (inputs.constants && inputs.layers && !b.layer_constants.empty())
+        in.subgoal_constants = constant_view(b, b.layer_constants.data());
     return in;
 }
 

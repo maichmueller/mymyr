@@ -52,7 +52,8 @@ the states again; required on a device).
   stream first; no scratch reservation is needed) and traces under ``torch.compile``. The expansion rows and horizon
   views follow as keyword tensors: ``action_schema``, ``action_binding``, ``action_offsets``, ``action_parent``,
   ``node_offsets``, ``edge_offsets``, ``edge_src``, ``edge_dst``, ``edge_schema``, ``edge_binding`` and
-  ``action_succ``.
+  ``action_succ``, and so do the constant literals of the goals and subgoal layers (``goal_constants``,
+  ``subgoal_constants``: int32 [N or 1, K, C], ``GoalMasks.constants``).
 - ``mymyr::visited_mask(table, count, succ_hash, parent, rows)``: membership of successor hashes in visited tables
   (bool [M]); ``mymyr::clear_visited(env, ...)``: restarts the visited tables of rows.
 - ``mymyr::target_visited(target, role, ref, entity_offsets, live, row_offsets, row_index, succ_hash, status, table,
@@ -65,6 +66,7 @@ eleven fields: succ, parent, schema, binding, goal, offsets, derived, succ_hash,
 are empty tensors; a capacity keeps counts and status on the device.
 """
 
+import functools
 import itertools
 import threading
 from typing import Any, Optional
@@ -82,6 +84,7 @@ __all__ = [
     "literal_masks",
     "literal_slots",
     "match_first",
+    "her_relabel_lifted",
     "expand",
     "expand_flat",
     "lookup",
@@ -97,14 +100,88 @@ __all__ = [
 
 _unsafe = (torch.Tag.cudagraph_unsafe,)
 
+_key = torch._C.DispatchKey
+_keyset = torch._C.DispatchKeySet
+_eager_tls_keys = (_keyset(_key.BackendSelect) | _keyset(_key.ADInplaceOrView)).raw_repr()
+_eager_tensor_keys = (
+    _keyset(_key.CPU) | _keyset(_key.CUDA) | _keyset(_key.ADInplaceOrView)
+    | _keyset(_key.AutogradCPU) | _keyset(_key.AutogradCUDA)
+    | _keyset(_key.AutocastCPU) | _keyset(_key.AutocastCUDA)
+).raw_repr()
+_eager_excluded_keys = (_keyset(_key.AutogradOther) | _keyset(_key.AutogradNestedTensor)).raw_repr()
+# The default autocast exclusions include keys that the Python enum does not expose.
+for _backend in ("CPU", "MTIA", "MAIA", "XPU", "IPU", "HPU", "XLA", "MPS", "CUDA", "PrivateUse1"):
+    _eager_excluded_keys |= _keyset(torch._C._parse_dispatch_key(f"Autocast{_backend}")).raw_repr()
+
+
+class _EagerOp(torch.library.CustomOpDef):
+    """A custom op with direct execution for plain CPU/CUDA tensors in ordinary dispatch state."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if (
+            torch.compiler.is_compiling()
+            or self._eager_disabled
+            # Modes, transforms and functionalization add keys to the thread's dispatch state.
+            or torch._C._dispatch_tls_local_include_set().raw_repr() & ~_eager_tls_keys
+            or torch._C._dispatch_tls_local_exclude_set().raw_repr() & ~_eager_excluded_keys
+            or torch._C._len_torch_dispatch_stack()
+            or torch._C._are_functorch_transforms_active()
+            or torch._C._is_torch_function_mode_enabled()
+            or torch.jit.is_tracing()
+        ):
+            return super().__call__(*args, **kwargs)
+        for index, name, default in self._eager_tensors:
+            tensor = args[index] if index < len(args) else kwargs.get(name, default)
+            if tensor is not None and (
+                type(tensor) is not Tensor
+                or torch._C._dispatch_keys(tensor).raw_repr() & ~_eager_tensor_keys
+                or tensor.requires_grad
+                or (tensor.is_inference() and not torch.is_inference_mode_enabled())
+            ):
+                return super().__call__(*args, **kwargs)
+        if self._eager_mutations:
+            # Invalidate saved tensors before the implementation can write and then raise.
+            torch.autograd.graph.increment_version([
+                tensor for index, name, default in self._eager_mutations
+                if (tensor := args[index] if index < len(args) else kwargs.get(name, default)) is not None
+            ])
+        return self._init_fn(*args, **kwargs)
+
+    def register_kernel(self, device_types: Any, fn: Any = None, /) -> Any:
+        self._eager_disabled = True
+        return super().register_kernel(device_types, fn)
+
+    def register_autograd(self, backward: Any, /, *, setup_context: Any = None) -> None:
+        self._eager_disabled = True
+        return super().register_autograd(backward, setup_context=setup_context)
+
+    def register_vmap(self, func: Any = None) -> Any:
+        self._eager_disabled = True
+        return super().register_vmap(func)
+
+    def register_autocast(self, device_type: str, cast_inputs: torch.dtype) -> None:
+        self._eager_disabled = True
+        return super().register_autocast(device_type, cast_inputs)
+
 
 def _op(name: str, **kwargs: Any) -> Any:
-    """torch.library.custom_op that keeps the function's docstring on the op."""
+    """Register a traceable op with a direct eager entry point and the implementation's signature and docstring.
+
+    Ordinary eager calls avoid the dispatcher and its compiler imports. Subclasses, non-data tensors, tracing,
+    transforms, gradient inputs and ops with additional registrations use the registered op.
+    """
 
     def wrap(fn: Any) -> Any:
         op = torch.library.custom_op(name, **kwargs)(fn)
-        op.__doc__ = fn.__doc__
-        return op
+        arguments = op._opoverload._schema.arguments
+        op._eager_tensors = tuple((i, arg.name, arg.default_value) for i, arg in enumerate(arguments)
+                                  if "Tensor" in str(arg.type))
+        op._eager_mutations = tuple((i, arg.name, arg.default_value) for i, arg in enumerate(arguments)
+                                    if arg.alias_info is not None and arg.alias_info.is_write)
+        op._eager_disabled = False
+        # Keep the registered object and its registration methods, including CustomOpDef's opcheck support.
+        op.__class__ = _EagerOp
+        return functools.update_wrapper(op, fn)
 
     return wrap
 
@@ -165,7 +242,7 @@ def _stream(t: Tensor | torch.device) -> Optional[int]:
 # ------------------------------------------------------------------------------------------------ environments
 # The ops check the tensors here (dtype, shape, device, contiguity) and pass their data pointers to the native Env
 # (Env._step_ptrs, ...), which runs on torch's current stream: a DLPack import costs about 10 us per torch tensor, a
-# check about 1 us. The *_impl functions are the eager entry points of BatchedEnv (no dispatcher round trip).
+# check about 1 us. The *_impl functions also support calls into preallocated environment buffers.
 
 _info: dict[int, tuple] = {}  # handle -> (env, (device, row_words, words, S, V, L))
 
@@ -375,8 +452,7 @@ def step_impl(
 
 def visited_mask_impl(table: Tensor, count: Tensor, succ_hash: Tensor, parent: Tensor,
                       rows: Optional[Tensor] = None) -> Tensor:
-    """The eager body of ``mymyr::visited_mask`` (no dispatcher: an eager call of a custom op imports
-    torch._dynamo)."""
+    """The body of ``mymyr::visited_mask``."""
     from mymyr._core import _rl_ops
 
     out = torch.empty(succ_hash.shape, dtype=torch.bool, device=table.device)
@@ -890,6 +966,8 @@ def encode_flat(
     expand_actions: bool = False,
     action_index: Optional[Tensor] = None,
     action_status: Optional[Tensor] = None,
+    goal_constants: Optional[Tensor] = None,
+    subgoal_constants: Optional[Tensor] = None,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -911,12 +989,15 @@ def encode_flat(
     ``action_parent``) may carry ``action_index``, each row's position in its state's full canonical successor order
     (``mymyr::expand_flat``'s ``index`` with ``drop_noops``: the ``entity_ref`` of its action entity), and
     ``action_status``, the expansion's int32 or int64 device status word [1] (bit 0 overflow, bit 1 invalid input),
-    which the batch's overflow flags then report (capacity, invalid row): such a batch is all zero. The arguments after ``numeric`` are passed by
-    keyword."""
+    which the batch's overflow flags then report (capacity, invalid row): such a batch is all zero. ``goal_constants``
+    and ``subgoal_constants`` (int32 [N or 1, K, C]) are the constant literals of the goals and the subgoal layers
+    (``GoalMasks.constants``, ``LayerMasks.constants``). The arguments after ``numeric`` are passed by keyword."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
         raise ValueError("mymyr: encoding: goals are (goal_pos, goal_neg) or all four masks")
+    if goal_constants is not None and not given:
+        raise ValueError("mymyr: encoding: goal_constants need the goal masks")
     enc = lookup(encoder)
     caps = _device._capacities(
         {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history, "numeric": numeric,
@@ -926,6 +1007,9 @@ def encode_flat(
     subgoals = _layer_tuple(
         "subgoals", (subgoal_pos, subgoal_neg), (subgoal_derived_pos, subgoal_derived_neg), ()
     )
+    if subgoal_constants is not None and subgoals is None:
+        raise ValueError("mymyr: encoding: subgoal_constants need the subgoal masks")
+    subgoals = _with_constants(subgoals, subgoal_constants)
     steps = _layer_tuple(
         "history", (history_pos, history_neg), (history_derived_pos, history_derived_neg), (history_dt, history_count)
     )
@@ -959,10 +1043,19 @@ def encode_flat(
         horizon = build_horizon(enc, states, task_ids, actions, merge=False)
         actions = None
     arrays = _device.encode_arrays(
-        enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps,
-        actions=actions, horizon=horizon
+        enc, states, task_ids, derived, _with_constants(tuple(given) or None, goal_constants), caps,
+        subgoals=subgoals, history=steps, actions=actions, horizon=horizon
     )
     return [arrays[name] for name in _device.DeviceFlatBatch.array_names]
+
+
+def _with_constants(masks: Optional[tuple], constants: Optional[Tensor]) -> Optional[tuple]:
+    """The masks of the op's goals or subgoal layers with their constant literals (None: without)."""
+    if masks is None or constants is None:
+        return masks
+    out = _device._ConstantMasks(masks)
+    out.constants = constants
+    return out
 
 
 def _layer_tuple(name: str, masks: tuple, derived: tuple, rest: tuple) -> Optional[tuple]:
@@ -991,6 +1084,8 @@ def _(
     expand_actions=False,
     action_index=None,
     action_status=None,
+    goal_constants=None,
+    subgoal_constants=None,
 ):  # fmt: skip
     if node_offsets is not None:
         states = states[:node_offsets.shape[0] - 1]
@@ -998,7 +1093,7 @@ def _(
                                 static_args)
 
 
-@torch.library.custom_op("mymyr::literal_slots", mutates_args=())
+@_op("mymyr::literal_slots", mutates_args=())
 def literal_slots(encoder: int, predicates: Tensor, objects: Tensor,
                   task_ids: Optional[Tensor] = None) -> list[Tensor]:
     """CUDA literal lookup on a registered encoder: kinds uint8 [N], slots int32 [N], status int64 scalar.
@@ -1018,7 +1113,7 @@ def _(encoder, predicates, objects, task_ids=None):
             predicates.new_empty((), dtype=torch.int64)]
 
 
-@torch.library.custom_op("mymyr::literal_masks", mutates_args=())
+@_op("mymyr::literal_masks", mutates_args=())
 def literal_masks(encoder: int, predicates: Tensor, objects: Tensor, positive: Tensor, rows: Tensor,
                   num_rows: int, task_ids: Optional[Tensor] = None, layers: Optional[Tensor] = None,
                   num_layers: int = 1) -> list[Tensor]:
@@ -1043,7 +1138,7 @@ def _(encoder, predicates, objects, positive, rows, num_rows, task_ids=None, lay
             predicates.new_empty(shape, dtype=torch.bool), predicates.new_empty((), dtype=torch.int64)]
 
 
-@torch.library.custom_op("mymyr::match_first", mutates_args=())
+@_op("mymyr::match_first", mutates_args=())
 def match_first(templates: int, rows: Tensor, task_ids: Optional[Tensor] = None, first: bool = False,
                 derived: Optional[Tensor] = None, capacity: Optional[int] = None,
                 max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
@@ -1065,3 +1160,46 @@ def _(templates, rows, task_ids=None, first=False, derived=None, capacity=None, 
             rows.new_empty((*shape, t.max_vars), dtype=torch.int32),
             rows.new_empty(shape, dtype=torch.int32), rows.new_empty((rows.shape[0],), dtype=torch.int32),
             rows.new_empty((), dtype=torch.int64)]
+
+
+def her_relabel_lifted_impl(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
+                            prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
+                            step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
+                            derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
+                            max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    from mymyr.rl._her_lifted import _relabel
+    return list(_relabel(states, done, task_ids, lookup(templates), prev_states, max_segments, max_generated,
+                         step_reward, goal_reward, words, derived, prev_derived, max_steps=max_steps))
+
+
+@_op("mymyr::her_relabel_lifted", mutates_args=())
+def _her_relabel_lifted_op(templates: int, states: Tensor, done: Tensor, task_ids: Optional[Tensor],
+                        prev_states: Tensor, max_segments: int, max_generated: Optional[int] = None,
+                        step_reward: float = 0.0, goal_reward: float = 1.0, words: Optional[int] = None,
+                        derived: Optional[Tensor] = None, prev_derived: Optional[Tensor] = None,
+                        max_steps: Optional[int] = 100_000_000) -> list[Tensor]:
+    """Lifted hindsight segments; the output field order and shapes are those of mymyr.rl.HerLiftedBatch.
+
+    Register and, on CUDA, upload templates before compiling or capturing. Fixed padded output shapes support
+    torch.compile and CUDA capture after warm-up. Ordinary eager calls run the native implementation directly.
+    """
+    return her_relabel_lifted_impl(templates, states, done, task_ids, prev_states, max_segments, max_generated,
+                                  step_reward, goal_reward, words, derived, prev_derived, max_steps)
+
+
+@_her_relabel_lifted_op.register_fake
+def _(templates, states, done, task_ids, prev_states, max_segments, max_generated=None, step_reward=0.0,
+      goal_reward=1.0, words=None, derived=None, prev_derived=None, max_steps=100_000_000):
+    t = lookup(int(templates))
+    T, N, _ = states.shape
+    W = t.words if words is None else words
+    D = 0 if derived is None else derived.shape[-1] // (2 if derived.dtype.itemsize == 4 else 1)
+    S = max_segments
+    specs = [((T, N), torch.int32), ((T, N), torch.float32), ((T, N), torch.bool),
+             ((N, S), torch.int32), ((N, S), torch.int32), ((N, S), torch.bool), ((N, S), torch.int32),
+             ((N, S, t.max_vars), torch.int32), *(( (N, S, w), torch.int64) for w in (W, W, D, D)),
+             ((N,), torch.int32), ((), torch.int64)]
+    return [states.new_empty(shape, dtype=dtype) for shape, dtype in specs]
+
+
+her_relabel_lifted = _her_relabel_lifted_op

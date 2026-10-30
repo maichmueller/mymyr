@@ -1,7 +1,8 @@
 #pragma once
 
-// The per-row subgoal layers and history steps of an encoding call, as the host encoder (encoder.hpp) and the device
-// encoder (cuda/encoding.hpp, with device pointers) take them. Plain structs, so that device code can use them.
+// The per-row subgoal layers, history steps and constant literals of an encoding call, as the host encoder
+// (encoder.hpp) and the device encoder (cuda/encoding.hpp, with device pointers) take them. Plain structs, so that
+// device code can use them.
 
 #include "mymyr/core/types.hpp"
 
@@ -35,5 +36,20 @@ struct HistoryInput
     LayerInput masks;
     const i32* dt = nullptr;
     const i32* count = nullptr;
+};
+
+/// The constant literals of each row: the literals of fixed truth (over a static predicate, or an atom without a slot)
+/// of its goal or of its subgoal layers, which no mask can hold. Row g has up to `capacity` literals, the rows
+/// rows[g * stride + k * width ...] for k < capacity, each `width` i32: the layer (0 for a goal; the subgoal layer
+/// otherwise, which fills level layer + 1), the table domain predicate, 1 for a negative literal (else 0), and the
+/// instance-local ids of the predicate's objects, padded with -1. The literals of a row are the rows before its first
+/// row with a negative predicate (unused rows are -1), strictly ascending in lexicographic order (so no literal is
+/// given twice). A stride of 0 is one list that every row shares. `rows` null: no row has constant literals.
+struct ConstantInput
+{
+    const i32* rows = nullptr;
+    u64 stride = 0;
+    u32 capacity = 0;
+    u32 width = 0;
 };
 }  // namespace mymyr::encoding

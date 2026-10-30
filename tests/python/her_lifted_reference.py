@@ -135,3 +135,35 @@ def templates(task, instance, *, distinct=True, **options):
     tuples = subgoals(task, instance, **options)
     add = distinct is True or (distinct == "equality" and declares_equality(task))
     return tuples, [task.ground_condition([lits[i] for i in sg]).lift(add) for sg in tuples]
+
+
+def refine(task, transitions, conditions):
+    """One episode's (start, inclusive end, local template, binding, grounded goal), in generation order.
+
+    transitions holds (starting State, reached State) pairs. A partial episode is treated as given.
+    The closed set uses States; grounding and satisfaction use the task's public condition operations.
+    """
+    result = []
+    end = len(transitions) - 1
+    while end >= 0:
+        for k, condition in enumerate(conditions):
+            bindings = list(task.bindings(condition, transitions[end][1], limit=1))
+            if not bindings:
+                continue
+            binding = tuple(o.index for o in bindings[0])
+            goal = condition.ground(transitions[end][1], limit=1)[0]
+            goal = task.ground_condition(goal.literals)
+            closed = set()
+            start = end
+            while start >= 0:
+                current, reached = transitions[start]
+                closed.add(reached)
+                if current in closed or goal.holds(current):
+                    break
+                start -= 1
+            if start < end:
+                result.append((start + 1, end, k, binding, goal))
+            end = start
+            break
+        end -= 1
+    return result

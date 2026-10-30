@@ -124,6 +124,33 @@ def test_suite_accepts_literal_mask_objects(name, layout, shared):
     assert np.array_equal(actual.rows[0], np.arange(len(ids)))
 
 
+def constant_mask_inputs(shared):
+    """A suite encoder of two gripper instances, three rows and their goals and subgoal layers with constant literals
+    (static literals that hold and fail), one row of masks for all with ``shared``."""
+    tasks = [text_task("gripper__prob05"), text_task("gripper__prob05")]
+    table = rl.TaskTable(tasks)
+    encoder = encoding.SuiteEncoder(table, max_goal_level=1, target_sources=("goal", "subgoal"))
+    ids = np.array([1, 0, 1], np.int32)
+    states = np.asarray(table.initial_states())[ids]
+    statics = [str(a) for a in tasks[0].formalism.static_init if a.predicate.name in ("ball", "room")]
+    atoms = [str(a) for a in tasks[0].initial_state.atoms()]
+    rows = [[atoms[0], statics[0]], [f"(not {statics[1]})"], []]
+    subgoals = [[[statics[2]]], [[atoms[1]]], [[atoms[2], f"(not {statics[0]})"]]]
+    mask_ids = ids[:1] if shared else ids
+    goals = encoding.goal_masks(table, rows[:len(mask_ids)], mask_ids, fixed="encode")
+    layers = encoding.subgoal_masks(table, subgoals[:len(mask_ids)], mask_ids, fixed="encode")
+    return encoder, states, ids, goals, layers
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_suite_keeps_the_constant_literals_of_mask_objects(shared):
+    encoder, states, ids, goals, layers = constant_mask_inputs(shared)
+    actual = encoder.encode(states, ids, goals=goals, subgoals=layers)
+    arrays_equal(actual[0], encoder.encoders[0].encode(states, ids, goals=goals, subgoals=layers))
+    without = encoder.encoders[0].encode(states, ids, goals=tuple(goals), subgoals=tuple(layers))
+    assert len(actual[0].relation_args) > len(without.relation_args)
+
+
 def test_expansions_that_are_given_are_used(sets):  # noqa: F811
     suite = suite_of(sets, "gripper+blocks")
     states, ids = suite_batch(suite)

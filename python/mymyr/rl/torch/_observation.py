@@ -319,20 +319,22 @@ class Observer:
 
     def _encode_op(self, k: int, states: Tensor, task_ids: Tensor, goals: Optional[tuple],
                    caps: Optional[dict]) -> tuple[Any, Any]:
+        from . import _ops
+
         if caps is None:
             raise ValueError("mymyr: observations under torch.compile need obs_capacities (static shapes)")
         gp, gn = (None, None) if goals is None else goals
         rows, given = None, {}
         if self.actions:
-            out = torch.ops.mymyr.bounded_actions(self.handles[k], states, task_ids, self._op_capacities[k][1],
-                                                  self.successors[k], self.drop_noops)
+            out = _ops.bounded_actions(self.handles[k], states, task_ids, self._op_capacities[k][1],
+                                       self.successors[k], self.drop_noops)
             labels, binding, offsets, succ_hash, noop, status = out
             parent, schema = labels[0], labels[1]
             index = labels[2] if self.drop_noops else None
             rows = ActionRows(parent, schema, binding, offsets, succ_hash, noop, index, status)
             given = dict(action_schema=schema, action_binding=binding, action_offsets=offsets, action_parent=parent,
                          action_index=index, action_status=status)
-        outs = torch.ops.mymyr.encode_flat(
+        outs = _ops.encode_flat(
             self.handles[k], states, task_ids, None, gp, gn, None, None, None, None, None, None, None, None, None,
             None, None, None, *self._op_capacities[k], **given,
         )  # fmt: skip
@@ -482,9 +484,7 @@ def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tenso
         env_rows = env_rows[:entity_offsets.shape[0] - 1]  # the batch's graphs
     args =(target, role, ref, entity_offsets, live, rows.offsets, rows.index, rows.succ_hash, rows.status, visited,
             count, env_rows)
-    if torch.compiler.is_compiling():
-        return torch.ops.mymyr.target_visited(*args)
-    return _ops.target_visited_impl(*args)
+    return _ops.target_visited(*args)
 
 
 def _table_of(table: Any) -> Any:

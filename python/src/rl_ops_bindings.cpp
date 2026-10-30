@@ -351,6 +351,111 @@ void match_first(ArrayArg states, ArrayArg task_ids, Arg<ann::GoalTemplates> tem
     rl::match_first(t->view(), b, workers ? workers->pool.get() : nullptr);
 }
 
+void her_relabel_lifted(ArrayArg states, ArrayArg done, ArrayArg task_ids, Arg<ann::GoalTemplates> templates,
+                        ArrayArg block, ArrayArg prev_states, nb::typed<nb::tuple, ann::ArrayOrView, nb::ellipsis> outputs,
+                        nb::typed<nb::tuple, ann::ArrayOrView, nb::ellipsis> scratch,
+                        ArrayArg derived, ArrayArg prev_derived, u64 max_generated, u64 max_steps,
+                        f32 step_reward, f32 goal_reward, StreamArg stream, Arg<PyPool> pool)
+{
+    const auto t = goal_templates_of(templates);
+    PyPool* workers = pool_arg(pool);
+    const Place pl = place_of(states, stream);
+    Imports in(pl.device, pl.stream, false);
+    if (outputs.size() != 14 || scratch.size() != 8)
+        throw nb::value_error("mymyr: her_relabel_lifted: expected 14 outputs and 8 scratch arrays");
+    for (nb::handle x : outputs)
+        if (x.is_none())
+            throw nb::value_error("mymyr: her_relabel_lifted: every output is required");
+    for (nb::handle x : scratch)
+        if (x.is_none())
+            throw nb::value_error("mymyr: her_relabel_lifted: every scratch array is required");
+    if (states.is_none() || prev_states.is_none() || done.is_none())
+        throw nb::value_error("mymyr: her_relabel_lifted: states, prev_states and done are required");
+    rl::HerLiftedBatch b;
+    rl::HerLiftedConfig c;
+    c.max_generated = max_generated;
+    c.max_steps = max_steps;
+    c.step_reward = step_reward;
+    c.goal_reward = goal_reward;
+    std::vector<i64> lead, ext;
+    b.states = in.words_nd(states, "states", {-1, -1}, false, lead, b.row_words);
+    const i64 T = lead.at(0), N = lead.at(1);
+    if (T >= i64{1} << 31 || N >= i64{1} << 31)
+        throw nb::value_error("mymyr: her_relabel_lifted: T and N must be below 2^31");
+    b.steps = static_cast<u64>(T);
+    b.envs = static_cast<u64>(N);
+    u32 PW = 0, PD = 0;
+    b.prev_states = in.words_nd(prev_states, "prev_states", {T, N}, false, lead, PW);
+    b.done = in.get<const u8>(done, "done", {boolt, u8t}, {T, N}, false);
+    if (PW != b.row_words || b.row_words < t->suite()->words() + t->suite()->numeric_words())
+        throw nb::value_error("mymyr: her_relabel_lifted: prev_states must match states, covering the template source");
+    if (!task_ids.is_none())
+    {
+        const nb::object shape = is_tensor_view(task_ids)
+            ? nb::borrow<nb::object>(view_item(task_ids, k_view_shape)) : nb::getattr(task_ids, "shape");
+        if (nb::len(shape) == 1)
+            b.task_ids = in.get<const i32>(task_ids, "task_ids", {i32t}, {N}, false);
+        else
+        {
+            b.task_ids = in.get<const i32>(task_ids, "task_ids", {i32t}, {T, N}, false);
+            b.task_stride = static_cast<u32>(N);
+        }
+    }
+    else if (t->num_instances() != 1)
+        throw nb::value_error("mymyr: her_relabel_lifted: task_ids are required for several instances");
+    b.derived = in.words_nd(derived, "derived", {T, N}, false, lead, b.derived_words);
+    b.prev_derived = in.words_nd(prev_derived, "prev_derived", {T, N}, false, lead, PD);
+    if ((derived.is_none() != prev_derived.is_none()) || PD != b.derived_words ||
+        (t->needs_derived() && (derived.is_none() || b.derived_words < t->suite()->derived_words())))
+        throw nb::value_error("mymyr: her_relabel_lifted: derived and prev_derived must have matching widths covering the source");
+    b.segment = in.get<i32>(outputs[0], "segment", {i32t}, {T, N}, true);
+    b.reward = in.get<f32>(outputs[1], "reward", {f32t}, {T, N}, true);
+    b.achieved = in.get<u8>(outputs[2], "achieved", {boolt, u8t}, {T, N}, true);
+    b.seg_start = in.get<i32>(outputs[3], "seg_start", {i32t}, {N, -1}, true, &ext);
+    const i64 S = ext.at(1);
+    if (S >= i64{1} << 31)
+        throw nb::value_error("mymyr: her_relabel_lifted: max_segments must be below 2^31");
+    c.max_segments = static_cast<u32>(S);
+    b.seg_end = in.get<i32>(outputs[4], "seg_end", {i32t}, {N, S}, true);
+    b.seg_valid = in.get<u8>(outputs[5], "seg_valid", {boolt, u8t}, {N, S}, true);
+    b.seg_template = in.get<i32>(outputs[6], "seg_template", {i32t}, {N, S}, true);
+    b.seg_binding = in.get<i32>(outputs[7], "seg_binding", {i32t}, {N, S, t->max_vars()}, true);
+    b.goal_pos = in.words_nd(outputs[8], "goal_pos", {N, S}, true, lead, b.words);
+    u32 W = 0, D = 0;
+    b.goal_neg = in.words_nd(outputs[9], "goal_neg", {N, S}, true, lead, W);
+    b.goal_pos_derived = in.words_nd(outputs[10], "goal_pos_derived", {N, S}, true, lead, D);
+    b.goal_neg_derived = in.words_nd(outputs[11], "goal_neg_derived", {N, S}, true, lead, PD);
+    if (W != b.words || W < t->suite()->words() || W > b.row_words || D != b.derived_words || PD != D)
+        throw nb::value_error("mymyr: her_relabel_lifted: goal masks must have matching widths covering the template source");
+    b.count = in.get<i32>(outputs[12], "count", {i32t}, {N}, true);
+    b.status = in.get<u64>(outputs[13], "status", {i64t, u64t}, {}, true);
+    const i64 rows = T * N;
+    b.hashes = in.get<u64>(scratch[0], "hashes", {i64t, u64t}, {rows}, true);
+    b.prev_hashes = in.get<u64>(scratch[1], "prev_hashes", {i64t, u64t}, {rows}, true);
+    b.ids = in.get<i32>(scratch[2], "ids", {i32t}, {rows}, true);
+    b.matches.found = in.get<u8>(scratch[3], "found", {boolt, u8t}, {rows}, true);
+    b.matches.binding = in.get<i32>(scratch[4], "binding", {i32t}, {rows, t->max_vars()}, true);
+    b.matches.template_id = in.get<i32>(scratch[5], "template", {i32t}, {rows}, true);
+    b.matches.count = in.get<i32>(scratch[6], "match_count", {i32t}, {rows}, true);
+    b.work_goals = in.get<u64>(scratch[7], "work_goals", {i64t, u64t}, {N, 2 * (W + D)}, true);
+    [[maybe_unused]] const auto* packed = in.get<const u8>(block, "block", {u8t}, {static_cast<i64>(t->arrays().bytes())}, false);
+#if defined(MYMYR_HAS_CUDA)
+    if (pl.device >= 0)
+    {
+        if (workers || block.is_none())
+            throw nb::value_error("mymyr: her_relabel_lifted: CUDA requires uploaded templates and no host pool");
+        return launch(pl, "her_relabel_lifted", [&](cudaStream_t cs)
+        {
+            return cuda::launch_her_relabel_lifted(t->view(reinterpret_cast<const std::byte*>(packed)), b, c, cs);
+        });
+    }
+#endif
+    if (!block.is_none())
+        throw nb::value_error("mymyr: her_relabel_lifted: CPU rows require host templates");
+    nb::gil_scoped_release release;
+    rl::her_relabel_lifted(t->view(), b, c, workers ? workers->pool.get() : nullptr);
+}
+
 rl::HerStrategy her_strategy(const std::string& s)
 {
     if (s == "future")
@@ -434,6 +539,14 @@ void bind_rl_ops(nb::module_& parent)
                                  "The type of TENSOR_VIEW, the first item of a tensor view (mymyr._typing.TensorView)");
     view_marker() = nb::cast(TensorViewMarker{}).release();
     m.attr("TENSOR_VIEW") = view_marker();
+    m.def("her_relabel_lifted", &her_relabel_lifted, "states"_a, "done"_a, "task_ids"_a.none(), "templates"_a,
+          "block"_a.none(), "prev_states"_a, "outputs"_a, "scratch"_a, nb::kw_only(),
+          "derived"_a = nb::none(), "prev_derived"_a = nb::none(), "max_generated"_a, "max_steps"_a,
+          "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "stream"_a = nb::none(), "pool"_a = nb::none(),
+          "Destination-passing lifted hindsight relabelling with fixed outputs and scratch. Window [T,N,RW], "
+          "task_ids int32 [N] or [T,N]. Outputs follow mymyr.rl.HerLiftedBatch's field order; scratch holds hashes, "
+          "previous hashes, expanded ids, match found/binding/template/count, and working goal masks. "
+          "Status bits: 0 segment overflow, 1 variable limit, 2 invalid instance, 3 matcher budget exhaustion.");
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
           "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
           "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(), "max_steps"_a,

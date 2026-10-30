@@ -963,9 +963,36 @@ Capacities capacities_of(const nb::dict& value, const encoding::EncodingSchema& 
     return {out, shared ? std::optional(static_out) : std::nullopt};
 }
 
+/// The constant literals of the rows from the `constants` attribute of `masks` (a GoalMasks or LayerMasks; none: no
+/// attribute, or None): an int32 array [N, K, C] or [1, K, C] (the literals of every row), K literals per row of C
+/// entries each (encoding::ConstantInput), converted into `copy` when it holds another integer type.
+void import_constants(rlimp::Imports& imports, nb::handle masks, const char* name, u64 rows, std::vector<i32>& copy,
+                      encoding::ConstantInput& out)
+{
+    if (!PyObject_HasAttrString(masks.ptr(), "constants"))
+        return;
+    nb::object value = masks.attr("constants");
+    if (value.is_none())
+        return;
+    std::vector<i64> shape;
+    const i32* data = imports.ints32(value, name, {-1, -1, -1}, copy, &shape);
+    if (static_cast<u64>(shape[0]) != rows && shape[0] != 1)
+        throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(shape[0]) +
+                               " rows: one per state (" + std::to_string(rows) + ") or a single shared row")
+                                  .c_str());
+    if (shape[1] == 0)
+        return;
+    out.rows = data;
+    out.capacity = static_cast<u32>(shape[1]);
+    out.width = static_cast<u32>(shape[2]);
+    out.stride = shape[0] == 1 && rows != 1 ? 0 : u64{out.capacity} * out.width;
+}
+
 /// The goal masks of the rows from `goals`, a pair (goal_pos, goal_neg) or a quadruple that adds the masks over the
-/// derived slots: arrays [N, W] or [1, W] (one goal for every row) of 64-bit words or 32-bit halves.
-void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding::EncodeInput& input)
+/// derived slots: arrays [N, W] or [1, W] (one goal for every row) of 64-bit words or 32-bit halves; a GoalMasks with
+/// constant literals also gives those.
+void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding::EncodeInput& input,
+                  std::vector<i32>& constants_copy)
 {
     constexpr const char* k_shape = "mymyr: encoding: goals must be (goal_pos, goal_neg) or (goal_pos, goal_neg, "
                                     "goal_derived_pos, goal_derived_neg)";
@@ -1010,6 +1037,7 @@ void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding:
         input.goal_derived_words = widths[1];
         input.goal_derived_stride = strides[1];
     }
+    import_constants(imports, goals, "goals.constants", rows, constants_copy, input.goal_constants);
 }
 
 /// One mask array [N or 1, L, W] of the layers of a call: its extents and word width.
@@ -1078,8 +1106,10 @@ usize layer_tuple_size(nb::handle value, const char* shape_message, std::initial
 }
 
 /// The subgoal layers of the rows from `subgoals`, a pair (pos, neg) or a quadruple that adds the masks over the
-/// derived slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves.
-void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, encoding::EncodeInput& input)
+/// derived slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves; a LayerMasks
+/// with constant literals also gives those.
+void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, encoding::EncodeInput& input,
+                     std::vector<i32>& constants_copy)
 {
     constexpr const char* k_shape =
         "mymyr: encoding: subgoals must be (pos, neg) or (pos, neg, derived_pos, derived_neg)";
@@ -1089,6 +1119,7 @@ void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, enc
     import_layer_pair(imports, subgoals, 0, names, rows, true, false, input.subgoals);
     if (size == 4)
         import_layer_pair(imports, subgoals, 2, names, rows, true, true, input.subgoals);
+    import_constants(imports, subgoals, "subgoals.constants", rows, constants_copy, input.subgoal_constants);
 }
 
 /// The history of the rows from `history`, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, dt, count, derived_pos,
@@ -1122,7 +1153,7 @@ struct ImportedRows
     std::unordered_map<const SlotMap*, std::shared_ptr<const std::vector<u32>>> map_snapshots;
     std::vector<SlotMapView> slot_maps;
     std::unordered_map<const std::vector<u32>*, std::vector<u32>> missing_slots;
-    std::vector<i32> ids_copy, dt_copy, count_copy, edge_binding_copy;
+    std::vector<i32> ids_copy, dt_copy, count_copy, edge_binding_copy, goal_constants_copy, subgoal_constants_copy;
     std::vector<std::vector<i32>> horizon_copies;  // the converted offset and edge arrays of a horizon
     std::shared_ptr<void> ids_keep;
     rlimp::Imports imports{-1, dl::k_stream_default, false};
@@ -1205,9 +1236,9 @@ void import_rows(ImportedRows& rows, const encoding::FlatEncoder& encoder, State
                                           derived_words);
     input.derived_stride = derived_words;
     if (!goals_arg.is_none())
-        import_goals(rows.imports, goals_arg, states.view.rows, input);
+        import_goals(rows.imports, goals_arg, states.view.rows, input, rows.goal_constants_copy);
     if (!subgoals_arg.is_none())
-        import_subgoals(rows.imports, subgoals_arg, states.view.rows, input);
+        import_subgoals(rows.imports, subgoals_arg, states.view.rows, input, rows.subgoal_constants_copy);
     if (!history_arg.is_none())
         import_history(rows.imports, rows.dt_copy, rows.count_copy, history_arg, states.view.rows, input.history);
 
@@ -1567,9 +1598,9 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
                                           derived_words);
     input.derived_stride = derived_words;
     if (!goals_arg.is_none())
-        import_goals(rows.imports, goals_arg, horizon.graphs, input);
+        import_goals(rows.imports, goals_arg, horizon.graphs, input, rows.goal_constants_copy);
     if (!subgoals_arg.is_none())
-        import_subgoals(rows.imports, subgoals_arg, horizon.graphs, input);
+        import_subgoals(rows.imports, subgoals_arg, horizon.graphs, input, rows.subgoal_constants_copy);
 }
 
 Arg<ann::EncodingBatch> encode_horizon(PyFlatHorizonEncoder& self, Arg<ann::EncodingHorizonView> view, DerivedArg derived_arg,
@@ -2680,12 +2711,15 @@ encoding::FixedLiterals fixed_of(const std::string& fixed)
         return encoding::FixedLiterals::Decide;
     if (fixed == "raise")
         return encoding::FixedLiterals::Raise;
-    throw nb::value_error(("mymyr: encoding: fixed must be 'decide' or 'raise', not '" + fixed + "'").c_str());
+    if (fixed == "encode")
+        return encoding::FixedLiterals::Encode;
+    throw nb::value_error(("mymyr: encoding: fixed must be 'decide', 'raise' or 'encode', not '" + fixed + "'").c_str());
 }
 
-/// The masks as (pos, neg, derived_pos, derived_neg, unsatisfiable) NumPy arrays: [rows, words] (with `layered`, [rows,
-/// layers, words]), the derived pair None for a table without derived words, unsatisfiable uint8 [rows] ([rows, layers]).
-using MasksTuple = nb::typed<nb::tuple, ann::Any, ann::Any, ann::Any, ann::Any, ann::Any>;
+/// The masks as (pos, neg, derived_pos, derived_neg, unsatisfiable, constants) NumPy arrays: [rows, words] (with
+/// `layered`, [rows, layers, words]), the derived pair None for a table without derived words, unsatisfiable uint8 [rows]
+/// ([rows, layers]), constants int32 [rows, K, C] (None unless the literals of fixed truth are encoded).
+using MasksTuple = nb::typed<nb::tuple, ann::Any, ann::Any, ann::Any, ann::Any, ann::Any, ann::Any>;
 using LiteralSourceArg = Arg<ann::EncodingLiteralSource>;
 
 MasksTuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
@@ -2704,7 +2738,10 @@ MasksTuple masks_tuple(encoding::LiteralMasks&& m, bool layered)
     }
     nb::object unsatisfiable = layered ? numpy_array(std::move(m.unsatisfiable), {rows, layers})
                                        : numpy_array(std::move(m.unsatisfiable), {rows});
-    return MasksTuple(nb::make_tuple(pos, neg, derived_pos, derived_neg, unsatisfiable));
+    nb::object constants = nb::none();
+    if (m.constant_width)
+        constants = numpy_array(std::move(m.constants), {rows, usize{m.constant_capacity}, usize{m.constant_width}});
+    return MasksTuple(nb::make_tuple(pos, neg, derived_pos, derived_neg, unsatisfiable, constants));
 }
 
 nb::typed<nb::tuple, ann::Any, ann::Any> literal_slots(LiteralSourceArg source, I32Vector predicates, I32Matrix objects,
@@ -2729,7 +2766,8 @@ nb::typed<nb::tuple, ann::Any, ann::Any> literal_slots(LiteralSourceArg source, 
 
 MasksTuple literal_masks(LiteralSourceArg source, I32Vector predicates, I32Matrix objects, U8Vector positive,
                          I32Vector rows, u32 num_rows, std::optional<I32Vector> task_ids,
-                         std::optional<I32Vector> layers, u32 num_layers, const std::string& fixed)
+                         std::optional<I32Vector> layers, u32 num_layers, const std::string& fixed,
+                         bool instance_constants)
 {
     const LiteralSource s = literal_source(source);
     const usize n = predicates.shape(0);
@@ -2738,14 +2776,16 @@ MasksTuple literal_masks(LiteralSourceArg source, I32Vector predicates, I32Matri
     const encoding::LiteralArrays literals{span_of(predicates), {objects.data(), n * objects.shape(1)},
                                            static_cast<u32>(objects.shape(1))};
     const encoding::LiteralPlacement placement{{positive.data(), positive.shape(0)}, span_of(rows), num_rows,
-                                               span_of(layers), layers ? num_layers : 1, span_of(task_ids)};
+                                               span_of(layers), layers ? num_layers : 1, span_of(task_ids),
+                                               instance_constants};
     return masks_tuple(encoding::literal_masks(*s.context, literals, placement, fixed_of(fixed)), layers.has_value());
 }
 
 /// The masks of rows of literals given as Task.literal takes them: `rows[r]` is a list of literals, or with `layered`
 /// a list of layers, each a list of literals. Names are parsed in the task of each row's instance.
 MasksTuple named_literal_masks(LiteralSourceArg source, nb::typed<nb::list, ann::Any> rows,
-                               std::optional<I32Vector> task_ids, bool layered, const std::string& fixed_name)
+                               std::optional<I32Vector> task_ids, bool layered, const std::string& fixed_name,
+                               bool instance_constants)
 {
     const encoding::FixedLiterals fixed = fixed_of(fixed_name);
     const LiteralSource s = literal_source(source);
@@ -2799,7 +2839,8 @@ MasksTuple named_literal_masks(LiteralSourceArg source, nb::typed<nb::list, ann:
         num_layers = std::max(num_layers, layer);
     }
     const encoding::LiteralArrays literals{predicates, objects, width};
-    const encoding::LiteralPlacement placement{positive, row_of, num_rows, layer_of, num_layers, instances};
+    const encoding::LiteralPlacement placement{positive, row_of, num_rows, layer_of, num_layers, instances,
+                                               instance_constants};
     return masks_tuple(encoding::literal_masks(*s.context, literals, placement, fixed), layered);
 }
 }  // namespace
@@ -2820,16 +2861,22 @@ void bind_encoding(nb::module_& parent)
                "The atom is over a fluent or derived predicate but has no slot: it holds in no state.")
         .value("INVALID", encoding::LiteralKind::Invalid,
                "The task id, the predicate, an object or the -1 padding is out of range.");
+    module.def(
+        "_constant_width",
+        [](LiteralSourceArg source)
+        { return encoding::detail::k_constant_objects + literal_source(source).context->max_arity(); },
+        "source"_a, "The columns of a constant literal of the source's encodings (3 + the context's max_arity).");
     module.def("_literal_slots", &literal_slots, "source"_a, "predicates"_a, "objects"_a, "task_ids"_a.none(),
                "(kind uint8 [N], slot int32 [N]) of N literals given as arrays (mymyr.encoding.literal_slots).");
     module.def("_literal_masks", &literal_masks, "source"_a, "predicates"_a, "objects"_a, "positive"_a, "rows"_a,
                "num_rows"_a, "task_ids"_a.none(), "layers"_a.none(), "num_layers"_a, "fixed"_a,
-               "(pos, neg, derived_pos, derived_neg, unsatisfiable) of literals given as arrays "
+               "instance_constants"_a = false,
+               "(pos, neg, derived_pos, derived_neg, unsatisfiable, constants) of literals given as arrays "
                "(mymyr.encoding.literal_masks).");
     module.def("_named_literal_masks", &named_literal_masks, "source"_a, "rows"_a, "task_ids"_a.none(), "layered"_a,
-               "fixed"_a,
-               "(pos, neg, derived_pos, derived_neg, unsatisfiable) of rows of literals as Task.literal takes them "
-               "(mymyr.encoding.goal_masks, subgoal_masks, history_masks).");
+               "fixed"_a, "instance_constants"_a = false,
+               "(pos, neg, derived_pos, derived_neg, unsatisfiable, constants) of rows of literals as Task.literal "
+               "takes them (mymyr.encoding.goal_masks, subgoal_masks, history_masks).");
     module.def("_collate", [](const std::vector<PyFlatBatch>& batches)
     {
         if (batches.empty())
@@ -3059,15 +3106,17 @@ void bind_encoding(nb::module_& parent)
             "flushes return (default NumPy).")
         .def(
             "device_stream",
-            [](nb::handle self, IntArg capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
+            [](nb::handle self, IntArg capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals,
+               IntArg constant_literals)
             {
                 return Arg<ann::EncodingDeviceStream>(nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
                     self, capacity, "device"_a = device, "goals"_a = goals, "derived"_a = derived,
-                    "derived_goals"_a = derived_goals));
+                    "derived_goals"_a = derived_goals, "constant_literals"_a = constant_literals));
             },
             "capacity"_a, nb::kw_only(), "device"_a = nb::none(), "goals"_a = false, "derived"_a = false,
-            "derived_goals"_a = false,
-            "A ring of CUDA rows bound to the current torch stream, with capturable append and capacity flush.")
+            "derived_goals"_a = false, "constant_literals"_a = 0,
+            "A ring of CUDA rows bound to the current torch stream, with capturable append and capacity flush. "
+            "constant_literals: the constant literals of its goal each row can hold (needs goals).")
         .def(
             "mutable_stream",
             [](PyFlatEncoder& self, Arg<ann::Framework> framework)

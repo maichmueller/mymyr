@@ -179,11 +179,16 @@ struct DeviceEncodeInput
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // The constant literals of each row's goal (device memory), with the layout and rules of encoding::EncodeInput. A
+    // row whose constant literals cannot be encoded for its instance (encoding::detail::constant_fault) is invalid.
+    encoding::ConstantInput goal_constants{};
     // The subgoal layers and the history steps of each row, with the layouts and rules of encoding::EncodeInput (device
     // pointers). The schema needs subgoal levels (at least as many as layers) or history; `history.dt` [graphs, layers]
     // is required with the masks. A row whose history count lies outside [0, layers], or whose layers or steps are
-    // narrower than its instance or set a bit it does not have, is invalid.
+    // narrower than its instance or set a bit it does not have, is invalid. `subgoal_constants` are the constant
+    // literals of the layers, as `goal_constants`.
     encoding::LayerInput subgoals{};
+    encoding::ConstantInput subgoal_constants{};
     encoding::HistoryInput history{};
     DeviceActionInput actions{};
     DeviceHorizonInput horizon{};

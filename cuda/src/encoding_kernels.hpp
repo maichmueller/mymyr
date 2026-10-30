@@ -55,7 +55,9 @@ struct EncodeParams
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
-    // the subgoal layers and history of the rows, and the scratch their levels are computed into
+    encoding::ConstantInput goal_constants{};  // the constant literals of the row goals (rows null: none)
+    // the subgoal layers and history of the rows (with the constant literals of the layers), and the scratch their
+    // levels are computed into
     encoding::detail::LayerSource layers;
     u64* level_storage = nullptr;  // [graphs, level_stride] words
     u64 level_stride = 0;

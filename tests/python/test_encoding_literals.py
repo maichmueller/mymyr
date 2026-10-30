@@ -130,7 +130,7 @@ def test_invalid_literals_are_a_kind_of_the_lookup_and_an_error_of_the_masks():
     with pytest.raises(ValueError, match="task_ids"):
         encoding.literal_masks(task, [at], [[0, 1, -1]], [True], [0], 1, task_ids=[1])
     with pytest.raises(ValueError, match="fixed"):
-        encoding.goal_masks(task, [["(lit a)"]], fixed="encode")
+        encoding.goal_masks(task, [["(lit a)"]], fixed="keep")
     with pytest.raises(ValueError, match="variables"):
         encoding.goal_masks(task, [["(lit ?p)"]])
     with pytest.raises(KeyError, match="nowhere"):
@@ -165,6 +165,42 @@ def test_decide_leaves_out_what_holds_and_flags_what_fails_where_raise_refuses()
     assert isinstance(layers, encoding.LayerMasks)
     assert layers.unsatisfiable.tolist() == [[True, False], [False, False]]
     assert layers.pos.shape == (2, 2, table.words) and layers.pos[0, 1].any() and not layers.pos[0, 0].any()
+    assert masks.constants is None and layers.constants is None
+
+
+def test_encode_keeps_the_literals_of_fixed_truth_as_sorted_constant_literals():
+    task = goals_task("static_true")
+    width = 3 + max(rl.as_table(task).predicate_arities)
+    rows = [["(lit a)", "(road b a)", "(not (heavy t2))", "(heavy t1)", "(lit t1)"], [], ["(heavy t2)", "(heavy t2)"]]
+    masks = encoding.goal_masks(task, rows, fixed="encode")
+    decided = encoding.goal_masks(task, rows)
+    assert np.array_equal(masks.pos, decided.pos) and np.array_equal(masks.unsatisfiable, decided.unsatisfiable)
+    assert masks.constants.dtype == np.int32 and masks.constants.shape == (3, 4, width)
+
+    def literal(text, layer=0):
+        ground = task.literal(text)
+        predicate, objects = ids(task, str(ground.atom), width - 3)
+        return [layer, predicate, int(not ground.positive), *objects]
+
+    first = sorted(literal(x) for x in rows[0][1:])
+    assert masks.constants[0].tolist() == first
+    assert masks.constants[1].tolist() == [[-1] * width] * 4
+    assert masks.constants[2].tolist() == [literal("(heavy t2)")] + [[-1] * width] * 3  # duplicates are merged
+    assert not encoding.goal_masks(task, [[]], fixed="encode").constants.size
+    # the instance's constant part: (heavy t1) and (not (heavy t2))
+    own = encoding.goal_masks(task, [["(lit a)"], ["(heavy t1)"]], fixed="encode", instance_constants=True)
+    part = sorted([literal("(heavy t1)"), literal("(not (heavy t2))")])
+    assert own.constants.tolist() == [part, part]
+    assert encoding.goal_masks(task, [[]], instance_constants=True).constants.tolist() == [part]
+    layers = encoding.subgoal_masks(task, [[["(heavy t1)"], ["(lit a)", "(road a b)", "(heavy t1)"]]], fixed="encode")
+    assert layers.constants.tolist() == [sorted([literal("(heavy t1)", 0), literal("(heavy t1)", 1),
+                                                 literal("(road a b)", 1)])]
+    predicates, objects = zip(*(ids(task, x, width - 3) for x in ("(heavy t1)", "(road a b)", "(lit a)")))
+    arrays = encoding.literal_masks(task, predicates, objects, [True, False, True], [1, 0, 0], 2, fixed="encode")
+    assert arrays.constants.tolist() == [[literal("(not (road a b))")], [literal("(heavy t1)")]]
+    with pytest.raises(ValueError, match="instance_constants go with goals"):
+        encoding.literal_masks(task, predicates, objects, [True] * 3, [0] * 3, 1, layers=[0] * 3,
+                               instance_constants=True)
 
 
 def test_derived_literals_set_the_derived_masks():
@@ -208,10 +244,18 @@ def test_mask_tuples_preserve_their_arrays_and_flags_when_pickled(name, layered,
     assert type(restored) is type(masks)
     for got, want in zip((*restored, restored.unsatisfiable), (*masks, masks.unsatisfiable), strict=True):
         np.testing.assert_array_equal(got, want)
-    assert restored.unsatisfiable.dtype == np.bool_
-    for name in ("pos", "neg", "derived_pos", "derived_neg", "unsatisfiable"):
+    assert restored.unsatisfiable.dtype == np.bool_ and restored.constants is None
+    for name in ("pos", "neg", "derived_pos", "derived_neg", "unsatisfiable", "constants"):
         with pytest.raises(AttributeError):
             setattr(masks, name, None)
+    static = next((str(a) for a in task.formalism.static_init), None)
+    if static is not None:
+        kept = (encoding.subgoal_masks(task, [[[literal, static]], []], fixed="encode") if layered else
+                encoding.goal_masks(task, [[literal, static], []], fixed="encode"))
+        restored = pickle.loads(pickle.dumps(kept, protocol=protocol))
+        assert restored.constants.shape[:2] == (2, 1)
+        np.testing.assert_array_equal(restored.constants, kept.constants)
+        assert "constants (2, 1, " in repr(restored)
 
 
 def test_goal_masks_equal_the_first_subgoal_layer_and_the_slots_of_task_literal():

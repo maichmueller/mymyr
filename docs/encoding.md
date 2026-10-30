@@ -400,14 +400,15 @@ index](#entities), and the batch lists the goal entities as targets of group 0.
 **`goals=`** gives every row a goal of its own instead of its instance's: `(goal_pos, goal_neg)` or `(goal_pos,
 goal_neg, goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns
 them. The arrays are `[N, W]` (`[N, D]` for the derived pair), u64 words or u32 halves, or `[1, W]` for one goal that
-every row shares. These masks define the row's whole goal, with no constant part, and its `goal_complete` is 1.
+every row shares. These masks and the row's constant literals (below) define the row's whole goal, and its
+`goal_complete` is 1.
 With subgoal layers, `repeated_literals` decides which [levels](#subgoals) hold these literals. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
 that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
 pair a row's derived goal part is empty. The masks of `rl.goal_masks` (`table.goal_masks()`) are the instance's goal
 over fluent slots only: they give no derived masks, and a goal with such a part keeps only its fluent literals. A call
 with these masks gives the same batch as a call without `goals` only for an instance whose goal is complete and has no
 literal over a static predicate, over a derived predicate or over an atom without a slot (the constant part, the
-derived part), so that the masks are the whole goal.
+derived part), so that the masks are the whole goal; `goal_masks` below gives any goal its constant part.
 
 **Goals from literals.** `mymyr.encoding.goal_masks(source, goals, task_ids=None, fixed="decide")` builds the goals of
 rows from lists of literals (anything `Task.literal` takes, read in the task of the row's instance) as a `GoalMasks`:
@@ -415,10 +416,23 @@ rows from lists of literals (anything `Task.literal` takes, read in the task of 
 `unsatisfiable` bool `[N]`; it is the sequence `(pos, neg[, derived_pos, derived_neg])` that `goals=` takes. The source
 is an encoder, a `TaskTable` or a `Task`. A literal over a static predicate, or over a fluent or derived atom without a
 slot, has a fixed truth and no bit in the masks: `fixed="decide"` leaves it out when it holds and marks its row
-unsatisfiable when it fails, `fixed="raise"` raises `ValueError`. Such a row goal differs from the instance's goal in
-its constant part: the instance's goal lists its static literals as constant tuples, a row goal has none (its relations
-list the slotted literals only), and both have `goal_complete` 1. `literal_masks(source, predicates, objects, positive,
-rows, num_rows, task_ids=None)` builds the same from arrays: table predicate ids `[K]` (indices into
+unsatisfiable when it fails, `fixed="raise"` raises `ValueError`, and `fixed="encode"` keeps it as a **constant
+literal** of its row (and marks the row unsatisfiable when it fails, as `"decide"`). The constant literals are
+`GoalMasks.constants`, int32 `[N, K, 3 + A]` (`A` the widest domain predicate's arity): per row up to `K` literals, each
+its layer (0 for a goal), its table predicate id, 1 for a negative literal (else 0) and its instance-local objects
+padded with -1; a row's literals are strictly ascending, they end at its first row with a negative predicate, and
+from that row on all of its rows are -1 (`[1, K, 3 + A]` is one list for every row). Arrays wider than `3 + A` are
+fine, narrower ones raise `ValueError`. They are encoded as the instance's goal encodes its constant part: in the plain relation, and in `[sat]` or
+`[unsat]` by their fixed truth, merged with the masked literals of their cell. `instance_constants=True` adds the constant part of each row's instance goal to the row's constant
+literals (a part that fails marks the row unsatisfiable), so that the instance's own goal literals as a row goal encode
+as the instance's goal does. With `"decide"` a
+row goal differs from the instance's goal in its constant part: the instance's goal lists its static literals as
+constant tuples, such a row goal lists the slotted literals only; both have `goal_complete` 1. `encode(goals=)` takes
+the constant literals from the masks object (`goals.constants`), on the host, the device and in JAX alike; a plain
+tuple of masks has none. A constant literal that is not ascending, has a layer other than 0, a sign other than 0 or 1,
+an id out of range or a slot (the masks hold such a literal), and a row that is not all -1 after the end of a row's
+literals, raise `ValueError` on the host and are invalid input on the device. `literal_masks(source, predicates, objects, positive, rows, num_rows, task_ids=None, fixed="decide",
+instance_constants=False)` builds the same from arrays: table predicate ids `[K]` (indices into
 `table.predicate_names`), instance-local object ids `[K, k]` padded with -1, the sign and the row of each literal, and
 the instance of each row. `literal_slots(source, predicates, objects, task_ids=None)` is the lookup itself: the
 `LiteralKind` of each literal (`FLUENT`, `DERIVED`, `STATIC_TRUE`, `STATIC_FALSE`, `UNREACHABLE` for an atom without a
@@ -434,6 +448,20 @@ lit = rl.as_table(goal_task).predicate_names.index("lit")  # a table predicate i
 a = goal_task.atom("(lit a)")
 kind, slot = encoding.literal_slots(goal_task, [lit], [list(a.object_indices)])
 assert kind.tolist() == [encoding.LiteralKind.FLUENT] and slot.tolist() == [a.slot]
+
+# the instance's goal literals as a row goal, the static ones kept as constant literals: the instance's encoding
+own_goal = encoding.goal_masks(goal_task, [["(lit a)", "(heavy t1)", "(not (heavy t2))"]], fixed="encode")
+heavy = rl.as_table(goal_task).predicate_names.index("heavy")
+t1, t2 = goal_task.atom("(heavy t1)").object_indices[0], goal_task.atom("(heavy t2)").object_indices[0]
+assert own_goal.constants.tolist() == [[[0, heavy, 0, t1, -1], [0, heavy, 1, t2, -1]]]
+goal_encoder = encoding.FlatRelationEncoder(goal_task)
+as_instance = goal_encoder.encode([goal_task.initial_state])
+as_rows = goal_encoder.encode([goal_task.initial_state], goals=own_goal)
+expected = as_instance.as_dict()
+assert all(np.array_equal(expected[k], array) for k, array in as_rows.as_dict().items())
+# another fluent goal, with the instance's constant part
+other_goal = encoding.goal_masks(goal_task, [["(lit b)"]], instance_constants=True)
+assert np.array_equal(other_goal.constants, own_goal.constants)
 ```
 
 ### Actions
@@ -545,8 +573,18 @@ not have, raise `ValueError`, as for `goals`. `mymyr.encoding.subgoal_masks(sour
 fixed="raise")` builds them from lists of literals (per row, per layer) as a `LayerMasks`: `pos`, `neg` `[N, L', W]`,
 the derived pair and `unsatisfiable` bool `[N, L']`, the sequence `subgoals=` takes. A subgoal of fixed truth (static,
 or an atom without a slot) raises `ValueError` by default; `fixed="decide"` leaves it out or marks its layer
-unsatisfiable, as `goal_masks` does for a row. `literal_masks(..., layers=, num_layers=)` builds the layers from
-arrays.
+unsatisfiable, as `goal_masks` does for a row, and `fixed="encode"` keeps it as a constant literal of its layer
+(`LayerMasks.constants`, the form of `GoalMasks.constants` with the layer `l` of each literal; it fills level `l + 1`).
+`literal_masks(..., layers=, num_layers=)` builds the layers from arrays.
+
+```python
+layer_encoder = encoding.FlatRelationEncoder(goal_task, max_goal_level=1)
+layers = encoding.subgoal_masks(layer_encoder, [[["(lit b)", "(heavy t1)"]]], fixed="encode")
+assert layers.constants.tolist() == [[[0, heavy, 0, t1, -1]]] and not layers.unsatisfiable.any()
+layered = layer_encoder.encode([goal_task.initial_state], subgoals=layers)
+heavy_sg = layer_encoder.schema.relation_names.index("[+]heavy[sg]")
+assert layered.relation_counts[0, heavy_sg] == 1  # (heavy t1) at level 1, from the constant literal
+```
 
 `repeated_literals` decides where a literal listed at several levels is encoded. The goal is level 0, below all
 subgoal layers; the sign is part of the literal, so positive and negative literals are placed independently.
@@ -558,8 +596,8 @@ subgoal layers; the sign is part of the literal, so positive and negative litera
 | `"highest"` | once, at the highest level that lists it; lower levels lose it | level 3 |
 
 For a literal in layers 0 and 2 only, `"every"` puts it at levels 1 and 3, `"lowest"` at level 1, and `"highest"`
-at level 3. The policy applies to fluent and derived literals, using a row's own `goals` when given. The instance's
-constant goal literals have no slots in a layer and are unaffected. `goal_complete` is unchanged by placement:
+at level 3. The policy applies to every literal, the constant literals of the goal and of the layers included, using
+a row's own `goals` when given. `goal_complete` is unchanged by placement:
 a goal literal moved to a subgoal level is still represented in the graph. With no subgoal layers the option has
 no effect. History steps are independent of goal levels.
 
@@ -1189,7 +1227,9 @@ model):
 | `numeric` | iff the batch stores `numeric_values` | `numeric_values` |
 | `static_instances`, `static_args` | iff `statics='shared'` (refused otherwise) | the static blocks (`I_b`) and `static_args` (`A_s`) |
 
-The offset arrays keep their sizes (`G + 1`, `G * R + 1`, `G` the rows of the call). Exceeding the graph capacity raises
+Constant literals count as the masked literals do (a tuple, its arguments and, with goal or subgoal targets, an
+entity and a target each). The offset arrays keep their sizes (`G + 1`, `G * R + 1`, `G` the rows of the call).
+Exceeding the graph capacity raises
 before encoding; tuple counts have no separate capacity: a tuple has an argument, or is the one tuple of a cell of a
 relation without argument slots. The batch fills the first entries of each array and the rest is zero (`static_offsets`
 and `static_arg_offsets` repeat their last value). `batch.sizes` holds the true sizes: `entities`, `tuples`, `args`,
@@ -1499,7 +1539,7 @@ torch.ops.mymyr.encode_flat(
     action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
     node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None,
     edge_schema=None, edge_binding=None, action_succ=None, expand_actions=False,
-    action_index=None, action_status=None)
+    action_index=None, action_status=None, goal_constants=None, subgoal_constants=None)
 ```
 
 Absent input tensors are `None`. The capacities are `graphs, entities, args, targets, history`, with optional
@@ -1508,7 +1548,8 @@ Absent input tensors are `None`. The capacities are `graphs, entities, args, tar
 for transitions. `action_index` gives each expansion row's canonical successor index (a no-op-dropping expansion's
 `index`) and `action_status` the expansion's device status word, whose overflow and invalid-row bits the batch then
 reports. `expand_actions=True` requests bounded observation actions and takes no explicit action/horizon
-arrays. Its fake implementation derives shapes from metadata, so `torch.compile(fullgraph=True)` can trace it.
+arrays. `goal_constants` and `subgoal_constants` are the constant literals of the goals and subgoal layers
+(`GoalMasks.constants`, `LayerMasks.constants`: int32 `[N or 1, K, C]` on the rows' device), each with its masks. Its fake implementation derives shapes from metadata, so `torch.compile(fullgraph=True)` can trace it.
 
 The result list is ordered by `DeviceFlatBatch.array_names`: output arrays, `static_sizes`, then `sizes`.
 Absent arrays are empty tensors. Wrap it with `DeviceFlatBatch.from_arrays`. The handle registry owns the encoder
@@ -1550,9 +1591,11 @@ contiguous and zero past `offsets[N]`. Pass the rows to `encode_flat` as `action
 
 ### Device row streams and collation
 
-`encoder.device_stream(capacity, device=..., goals=False, derived=False, derived_goals=False)` makes a
-`DeviceFlatStream` ring on the current stream. Choose optional columns at construction; every append supplies those
-columns. The ring copies rows, task ids and optional masks. It accepts shared statics and Simple output, but no
+`encoder.device_stream(capacity, device=..., goals=False, derived=False, derived_goals=False, constant_literals=0)`
+makes a `DeviceFlatStream` ring on the current stream. Choose optional columns at construction; every append supplies
+those columns. The ring copies rows, task ids and optional masks. With `constant_literals=K` (it needs `goals`) each row
+of the ring holds up to `K` constant literals of its goal: an append gives them with its masks (`goals.constants`, at
+most `K` per row), or none. It accepts shared statics and Simple output, but no
 subgoal layers or history. Mutable streams are host-only.
 
 ```python needs-torch skip-if-no-cuda
@@ -1656,6 +1699,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   dt, count)` or all six, masks `[N, H, ...]`, `dt` `int32` `[N, H]` and `count` `int32` `[N]`) are the subgoal layers
   and history steps of `encoder.encode`, on both platforms. A wider integer `dt` or `count` is taken where int32 holds
   its values: a concrete value outside int32 raises `ValueError`, a traced one marks its row invalid.
+  The constant literals of a `GoalMasks` or `LayerMasks` (`constants`, int32 `[N or 1, K, C]`) are two more operands,
+  taken as `encoder.encode` takes them.
   With `live=`, subgoal layers and history steps are read only for the live prefix on both platforms; their unused
   per-graph entries and variable output tails are zero.
 - **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
@@ -1838,7 +1883,11 @@ Literals resolve through the context: `detail::resolve_literal(context.view(), i
 table domain predicate id and instance-local objects, by binary search in the context's literal section (every domain
 predicate's slot ranges and static rows, whatever the options leave out). `mymyr/encoding/literals.hpp` has the host
 loops: `resolve_literals` over arrays of literals and `literal_masks`, the goal or layer masks of rows of literals
-(`LiteralMasks` with `unsatisfiable`), with `FixedLiterals::Decide` or `Raise` for the literals of fixed truth.
+(`LiteralMasks` with `unsatisfiable`), with `FixedLiterals::Decide`, `Raise` or `Encode` for the literals of fixed
+truth; `Encode` and `LiteralPlacement::instance_constants` fill `LiteralMasks::constants`, the rows that
+`EncodeInput::goal_constants` and `subgoal_constants` take as a `ConstantInput` (`mymyr/encoding/layers.hpp`).
+`cuda::DeviceEncoder::worst_case(graphs, history_steps, constant_literals)` and `bytes_needed` bound a batch whose
+rows carry up to `constant_literals` constant literals each (of the goal and the layers together).
 
 With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the calls take the capacity
 `StaticShape{instances, args}` and report `ExtraSizes::statics` (`StaticSizes{instances, tuples, args}`) after the

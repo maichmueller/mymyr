@@ -427,10 +427,7 @@ class BatchedEnv:
             self.handle, self.states, ids if self.multi else None, self.steps, self.counts, self.views, pos, neg,
             self.count, self.at_goal, mask, keep, self.visited, self.visited_count, self.visited_status,
         )  # fmt: skip
-        if torch.compiler.is_compiling():
-            torch.ops.mymyr.reset(*args)
-        else:
-            _ops.reset_impl(*args)  # eager: without the dispatcher's round trip
+        _ops.reset(*args)
         self.task_ids.copy_(ids)
         if keep:
             self.goal_pos.copy_(pos)
@@ -449,10 +446,7 @@ class BatchedEnv:
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
         args = (self.handle, self.states, self._ids(), self.visited, self.visited_count, self.visited_status, mask)
-        if torch.compiler.is_compiling():
-            torch.ops.mymyr.clear_visited(*args)
-        else:
-            _ops.clear_visited_impl(*args)
+        _ops.clear_visited(*args)
 
     def refresh(self) -> Tensor:
         """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
@@ -462,10 +456,7 @@ class BatchedEnv:
             self.handle, self.states, self._ids(), self.counts, self.views, self.goal_pos, self.goal_neg, self.count,
             self.at_goal,
         )  # fmt: skip
-        if torch.compiler.is_compiling():
-            (torch.ops.mymyr.refresh if self.capturable else torch.ops.mymyr.refresh_sync)(*args)
-        else:
-            _ops.refresh_impl(*args)
+        (_ops.refresh if self.capturable else _ops.refresh_sync)(*args)
         return self.count
 
     def step(
@@ -479,10 +470,7 @@ class BatchedEnv:
         ``copy=True`` owns the next observation. ``copy=False`` explicitly borrows live observation buffers."""
         args = self._step_args(action, next_task_ids, final)
         before = self._before_step(final)
-        if torch.compiler.is_compiling():
-            r = (torch.ops.mymyr.step if self.capturable else torch.ops.mymyr.step_sync)(*args)
-        else:
-            r = _ops.step_impl(*args)
+        r = (_ops.step if self.capturable else _ops.step_sync)(*args)
         if self._autoreset:
             self._advance_resets(r[1] | r[2])
         observation = self.observation(copy=copy)
@@ -552,9 +540,7 @@ class BatchedEnv:
         if max_actions is not None and int(max_actions) < 1:
             raise ValueError("mymyr: max_actions must be None or positive")
         args = (self.handle, self.draws, self.count, self.first_env, None if max_actions is None else int(max_actions))
-        if torch.compiler.is_compiling():
-            return torch.ops.mymyr.random_actions(*args)
-        return _ops.random_actions_impl(*args)
+        return _ops.random_actions(*args)
 
     def set_seed(self, seed: int) -> None:
         """New action and sampling RNG keys; action draw and instance reset counters restart at 0. On a device,

@@ -1,4 +1,5 @@
 #include "mymyr/cuda/encoding.hpp"
+#include "mymyr/encoding/detail/lanes.hpp"
 #include "encoding_rows.hpp"
 
 #include <limits>
@@ -28,6 +29,18 @@ void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64
         (in.goal_derived_pos && (in.goal_derived_words != ring.goal_derived_words ||
                                (in.goal_derived_stride && in.goal_derived_stride < in.goal_derived_words))))
         invalid();
+    if (const encoding::ConstantInput& c = in.goal_constants; c.rows)
+    {
+        if (!ring.goal_constants.rows || !in.goal_pos)
+            throw std::invalid_argument("mymyr: encoding: the device ring holds no constant goal literals: construct it "
+                                        "with room for them");
+        if (c.width != ring.goal_constants.width || c.capacity > ring.goal_constants.capacity ||
+            (c.stride != 0 && c.stride < u64{c.capacity} * c.width))
+            throw std::invalid_argument(
+                "mymyr: encoding: the constant goal literals of the appended rows are " + std::to_string(c.capacity) +
+                " rows of " + std::to_string(c.width) + " columns, the device ring holds at most " +
+                std::to_string(ring.goal_constants.capacity) + " of " + std::to_string(ring.goal_constants.width));
+    }
     check(launch_append_rows(in, ring, status, stream), "append encoding rows");
 }
 
@@ -72,11 +85,13 @@ struct DeviceRowStream::Impl
     std::optional<EncodingWorkspace> workspace;
 
     Impl(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> host, u64 capacity, cudaStream_t s,
-         bool goals, bool derived, bool derived_goals)
+         bool goals, bool derived, bool derived_goals, u32 constant_literals)
         : context(std::move(ctx)), encoder(checked(context, host), host), stream(s ? s : context->stream())
     {
         if (!capacity || (derived_goals && !goals))
             throw std::invalid_argument("mymyr: encoding: a device stream needs positive capacity and derived goals need fluent goals");
+        if (constant_literals && !goals)
+            throw std::invalid_argument("mymyr: encoding: constant goal literals need goal masks");
         DeviceGuard guard(context->device());
         ring.graphs = capacity;
         ring.row_capacity = capacity;
@@ -88,7 +103,7 @@ struct DeviceRowStream::Impl
         ring.goal_stride = ring.state_words;
         ring.goal_derived_words = host->table().derived_words();
         ring.goal_derived_stride = ring.goal_derived_words;
-        columns.reserve(9);
+        columns.reserve(10);
         auto allocate = [&](u64 count, u64 width) -> void*
         {
             if (width && count > std::numeric_limits<u64>::max() / width)
@@ -115,14 +130,25 @@ struct DeviceRowStream::Impl
             ring.goal_derived_pos = static_cast<u64*>(allocate(capacity, ring.goal_derived_words * sizeof(u64)));
             ring.goal_derived_neg = static_cast<u64*>(allocate(capacity, ring.goal_derived_words * sizeof(u64)));
         }
+        if (constant_literals)
+        {
+            const u32 width = encoding::detail::k_constant_objects + host->context().max_arity();
+            const u64 stride = u64{constant_literals} * width;
+            ring.goal_constants = {static_cast<i32*>(allocate(capacity, stride * sizeof(i32))), stride,
+                                   constant_literals, width};
+        }
         encoder.reserve(BatchShape{capacity, 0, 0, 0}, stream);
         workspace.emplace(encoder.acquire(stream));
     }
 };
 
 DeviceRowStream::DeviceRowStream(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder, u64 capacity,
-                                 cudaStream_t stream, bool goals, bool derived, bool derived_goals)
-    : m_impl(std::make_unique<Impl>(std::move(ctx), std::move(encoder), capacity, stream, goals, derived, derived_goals)) {}
+                                 cudaStream_t stream, bool goals, bool derived, bool derived_goals,
+                                 u32 constant_literals)
+    : m_impl(std::make_unique<Impl>(std::move(ctx), std::move(encoder), capacity, stream, goals, derived, derived_goals,
+                                    constant_literals))
+{
+}
 DeviceRowStream::~DeviceRowStream() = default;
 u64 DeviceRowStream::capacity() const noexcept { return m_impl->ring.graphs; }
 cudaStream_t DeviceRowStream::stream() const noexcept { return m_impl->stream; }

@@ -64,6 +64,7 @@ struct DeviceRows
     cuda::DeviceBuffer states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
     cuda::DeviceBuffer layer_pos, layer_neg, layer_derived_pos, layer_derived_neg;
     cuda::DeviceBuffer step_pos, step_neg, step_derived_pos, step_derived_neg, step_dt, step_count;
+    cuda::DeviceBuffer goal_constants, layer_constants;
 
     DeviceRows(const cuda::ContextPtr& ctx, cudaStream_t stream, const Batch& b)
     {
@@ -91,6 +92,8 @@ struct DeviceRows
         upload(step_derived_neg, b.step_derived_neg);
         upload(step_dt, b.step_dt);
         upload(step_count, b.step_count);
+        upload(goal_constants, b.goal_constants);
+        upload(layer_constants, b.layer_constants);
         cuda::check(cudaStreamSynchronize(stream), "upload rows");
     }
 
@@ -129,6 +132,10 @@ struct DeviceRows
             in.history = history_view(b, inputs, words(step_pos), words(step_neg), words(step_derived_pos),
                                       words(step_derived_neg), static_cast<const i32*>(step_dt.data()),
                                       static_cast<const i32*>(step_count.data()));
+        if (inputs.constants && inputs.row_goals && !b.goal_constants.empty())
+            in.goal_constants = constant_view(b, static_cast<const i32*>(goal_constants.data()));
+        if (inputs.constants && inputs.layers && !b.layer_constants.empty())
+            in.subgoal_constants = constant_view(b, static_cast<const i32*>(layer_constants.data()));
         return in;
     }
 };
@@ -3480,3 +3487,351 @@ TEST(DeviceEncode, AutomaticSharedMemoryFloorsEqualTheHostForFlatAndLayeredRows)
     }
 }
 }
+
+// ------------------------------------------------------------------------------------------------ constant literals
+
+namespace
+{
+/// The subgoal layers whose constant literals a configuration encodes: the layers given, at most the schema's levels.
+u32 constant_layers(const Config& config) { return std::min<u32>(config.inputs.layers, config.options.max_goal_level); }
+
+/// The configurations with row goals or subgoal layers, each with the constant literals of both.
+std::vector<Config> constant_configs()
+{
+    std::vector<Config> out;
+    for (Config& config : all_configs())
+        if (config.inputs.row_goals || config.inputs.layers)
+        {
+            config.inputs.constants = true;
+            out.push_back(std::move(config));
+        }
+    return out;
+}
+
+/// The literal row `at` of row g in `constants`, laid out as the constant literals of `b`.
+i32* constant_row(const Batch& b, std::vector<i32>& constants, u64 g, u32 at)
+{
+    return constants.data() + (g * b.constant_capacity + at) * b.constant_width;
+}
+
+TEST(DeviceEncode, ConstantLiteralsEqualTheHostBitForBit)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    u64 compared = 0, changed = 0;
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        Batch batch = layered_batch(c.table, 257, c.walk, 211);
+        for (const Config& config : constant_configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                {
+                    SCOPED_TRACE(std::string(layout == encoding::Layout::Graph ? "graph-major " : "relation-major ") +
+                                 (index == encoding::IndexType::I32 ? "int32" : "int64"));
+                    const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+                    add_constant_rows(batch, encoder->context(), constant_layers(config), 5, 223 + compared);
+                    const DeviceRows rows(ctx, stream, batch);
+                    cuda::DeviceEncoder device(ctx, encoder);
+                    device.reserve(cuda::BatchShape{257, 0, 0, 0}, stream);
+                    for (const u64 n : {u64{1}, u64{33}, u64{257}})
+                    {
+                        SCOPED_TRACE("N = " + std::to_string(n));
+                        const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+                        ASSERT_FALSE(host.sizes.overflowed());
+                        const DeviceResult result =
+                            run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape_of(n, host.sizes));
+                        expect_sizes(host.sizes, result.sizes);
+                        expect_same_arrays(*host.bundle, result);
+                        ++compared;
+                        Inputs without = config.inputs;
+                        without.constants = false;
+                        const Reference plain = host_reference(*encoder, host_input(batch, n, without));
+                        changed += plain.sizes.tuples != host.sizes.tuples || plain.sizes.args != host.sizes.args;
+                        if (::testing::Test::HasFailure())
+                            return;
+                    }
+                }
+        }
+    }
+    EXPECT_GT(compared, 0u);
+    EXPECT_GT(changed, compared / 4);
+    std::printf("[ batches  ] %llu compared, %llu of them with constant tuples\n",
+                static_cast<unsigned long long>(compared), static_cast<unsigned long long>(changed));
+}
+
+TEST(DeviceEncode, OneSharedListOfConstantLiteralsEqualsTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[2];  // goals: static goal literals
+    for (const Config& config : constant_configs())
+    {
+        if (config.inputs.layers)
+            continue;
+        SCOPED_TRACE(config.name);
+        const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+        cuda::DeviceEncoder device(ctx, encoder);
+        for (i32 id = 0; id < static_cast<i32>(c.table->size()); ++id)
+        {
+            SCOPED_TRACE(id);
+            Batch batch = rows_of(make_batch(c.table, 120, true, 227), id);
+            add_constant_rows(batch, encoder->context(), 0, 4, 229 + static_cast<u64>(id));
+            const u64 n = batch.count;
+            const DeviceRows rows(ctx, stream, batch);
+            // the list of the first row with constant literals, for every row
+            u64 first = 0;
+            while (first + 1 < n && *constant_row(batch, batch.goal_constants, first, 0) < 0)
+                ++first;
+            auto host_in = host_input(batch, n, config.inputs);
+            host_in.goal_constants.rows = constant_row(batch, batch.goal_constants, first, 0);
+            host_in.goal_constants.stride = 0;
+            auto device_in = rows.input(batch, n, config.inputs);
+            device_in.goal_constants.rows = static_cast<const i32*>(rows.goal_constants.data()) +
+                                            first * batch.constant_capacity * batch.constant_width;
+            device_in.goal_constants.stride = 0;
+            device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+            const Reference host = host_reference(*encoder, host_in);
+            const DeviceResult result = run_device(device, ctx, stream, device_in, shape_of(n, host.sizes));
+            expect_sizes(host.sizes, result.sizes);
+            expect_same_arrays(*host.bundle, result);
+        }
+    }
+}
+
+TEST(DeviceEncode, ConstantLiteralCapacitiesReportAsTheHostDoes)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const u64 n = 257;
+    for (const u32 corpus_entry : {1u, 2u})  // features (derived atoms), goals (static goal literals)
+    {
+        const Corpus c = corpus()[corpus_entry];
+        SCOPED_TRACE(c.name);
+        Batch batch = layered_batch(c.table, n, true, 233);
+        Config config = rich_layered_config();
+        config.inputs.constants = true;
+        for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+            {
+                SCOPED_TRACE(layout == encoding::Layout::Graph ? "graph-major" : "relation-major");
+                const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+                add_constant_rows(batch, encoder->context(), constant_layers(config), 6, 239);
+                const DeviceRows rows(ctx, stream, batch);
+                cuda::DeviceEncoder device(ctx, encoder);
+                device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+                const auto host_in = host_input(batch, n, config.inputs);
+                const auto device_in = rows.input(batch, n, config.inputs);
+                ThreadPool pool(1);
+                encoding::EncodeScratch scratch;
+                const encoding::FlatSizes exact = encoder->count(host_in, pool, scratch);
+                const encoding::BatchShape worst = device.worst_case(n, batch.steps, 2 * batch.constant_capacity);
+                const encoding::BatchShape without = device.worst_case(n, batch.steps);
+                EXPECT_GE(worst.entities, exact.entities);
+                EXPECT_GE(worst.args, exact.args);
+                EXPECT_GE(worst.targets, exact.targets);
+                EXPECT_GE(worst.history, exact.history);
+                EXPECT_GT(worst.args, without.args);
+                EXPECT_GE(worst.entities, without.entities);
+                EXPECT_GT(device.bytes_needed(n, batch.steps, 2 * batch.constant_capacity),
+                          device.bytes_needed(n, batch.steps));
+                struct Case
+                {
+                    const char* name;
+                    encoding::BatchShape caps;
+                };
+                const Case cases[] = {
+                    {"exact", {n, exact.entities, exact.args, exact.targets, exact.history}},
+                    {"roomy", {n, exact.entities + 7, exact.args + 5, exact.targets + 9, exact.history + 3}},
+                    {"worst case", worst},
+                    {"short entities", {n, exact.entities - 1, exact.args, exact.targets, exact.history}},
+                    {"short args", {n, exact.entities, exact.args - 1, exact.targets, exact.history}},
+                    {"short targets", {n, exact.entities, exact.args, exact.targets - 1, exact.history}},
+                };
+                for (const Case& k : cases)
+                {
+                    SCOPED_TRACE(k.name);
+                    encoding::FlatSizes host_sizes;
+                    const auto host = encoder->encode_capacity(host_in, k.caps, pool, scratch, host_sizes);
+                    const DeviceResult result =
+                        run_device(device, ctx, stream, device_in, k.caps, &k.caps, {}, host_sizes.overflow ? 0xa5 : 0);
+                    expect_sizes(host_sizes, result.sizes);
+                    if (host_sizes.overflow)
+                    {
+                        for (u64 b = 0; b < result.layout.sizes; ++b)
+                            ASSERT_EQ(result.block[b], std::byte{0xa5}) << b;
+                    }
+                    else
+                        expect_same_arrays(*host, result);
+                    EXPECT_EQ(result.sizes.overflow != 0, std::string(k.name).find("short") != std::string::npos);
+                }
+            }
+    }
+}
+
+TEST(DeviceEncode, ConstantLiteralsThatCannotBeEncodedAreFlaggedAndNothingIsWritten)
+{
+    SKIP_WITHOUT_GPU();
+    namespace ed = encoding::detail;
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];  // blocks
+    const u64 n = 40;
+    Batch batch = layered_batch(c.table, n, true, 241);
+    Config config = rich_layered_config();
+    config.inputs.constants = true;
+    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+    add_constant_rows(batch, encoder->context(), constant_layers(config), 4, 251);
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+    const auto fixed = fixed_atoms(encoder->context(), 257);
+    const u64 g = 6;
+    const u32 instance = static_cast<u32>(batch.task_ids[g]);
+    ASSERT_FALSE(fixed[instance][0].empty());
+    // a static atom that holds, and a fluent atom with a slot
+    const std::vector<i32>& atom = fixed[instance][0].front();
+    const ed::ContextView view = encoder->context().view();
+    std::vector<i32> slotted;
+    for (u32 p = 0; p < view.num_predicates && slotted.empty(); ++p)
+    {
+        const u32* r = view.literal_ranges + (u64{instance} * view.num_predicates + p) * ed::k_literal_columns;
+        if (r[ed::k_literal_fluent_begin] == r[ed::k_literal_fluent_end])
+            continue;
+        const u64* inst = view.inst + u64{instance} * ed::k_instance_columns;
+        const i32* row = view.slot_args + (inst[ed::k_slot_args_offset] + r[ed::k_literal_fluent_begin]) * view.max_arity;
+        slotted.push_back(static_cast<i32>(p));
+        for (u32 a = 0; a < encoder->context().max_arity(); ++a)
+            slotted.push_back(a < r[ed::k_literal_arity] ? row[a] : -1);
+    }
+    ASSERT_FALSE(slotted.empty());
+    std::vector<i32> invalid = atom;
+    invalid[0] = static_cast<i32>(view.num_predicates);
+    std::vector<i32> past_objects = atom;
+    past_objects[1] = static_cast<i32>(c.table->instance(instance).num_objects);
+    struct Literal
+    {
+        u32 at;
+        i32 layer;
+        const std::vector<i32>* atom;
+        i32 sign;
+    };
+    struct Case
+    {
+        const char* name;
+        bool layers;
+        std::vector<Literal> literals;
+    };
+    const i32 levels = static_cast<i32>(constant_layers(config));
+    const Case cases[] = {
+        {"a literal given twice", false, {{0, 0, &atom, 0}, {1, 0, &atom, 0}}},
+        {"literals out of order", false, {{0, 0, &atom, 1}, {1, 0, &atom, 0}}},
+        {"a goal literal of layer 1", false, {{0, 1, &atom, 0}}},
+        {"a sign of 2", false, {{0, 0, &atom, 2}}},
+        {"a predicate outside the domain", false, {{0, 0, &invalid, 0}}},
+        {"an object outside the instance", false, {{0, 0, &past_objects, 0}}},
+        {"a literal with a slot", false, {{0, 0, &slotted, 0}}},
+        {"a layer past the levels", true, {{0, levels, &atom, 0}}},
+        {"a negative layer", true, {{0, -2, &atom, 0}}},
+        {"a slotted literal of a layer", true, {{0, 0, &slotted, 1}}},
+    };
+    for (const Case& k : cases)
+    {
+        SCOPED_TRACE(k.name);
+        Batch bad = batch;
+        std::vector<i32>& constants = k.layers ? bad.layer_constants : bad.goal_constants;
+        std::fill(constant_row(bad, constants, g, 0), constant_row(bad, constants, g + 1, 0), -1);
+        for (const Literal& literal : k.literals)
+        {
+            i32* row = constant_row(bad, constants, g, literal.at);
+            row[0] = literal.layer;
+            row[1] = (*literal.atom)[0];
+            row[2] = literal.sign;
+            std::copy(literal.atom->begin() + 1, literal.atom->end(), row + ed::k_constant_objects);
+        }
+        const DeviceRows rows(ctx, stream, bad);
+        expect_refused(device, *encoder, ctx, stream, host_input(bad, n, config.inputs), rows.input(bad, n, config.inputs));
+    }
+    // the batch itself is fine
+    const DeviceRows rows(ctx, stream, batch);
+    const auto host = host_reference(*encoder, host_input(batch, n, config.inputs));
+    const DeviceResult result =
+        run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape_of(n, host.sizes));
+    expect_same_arrays(*host.bundle, result);
+}
+
+/// The rows of `b` twice, the second time without constant literals.
+Batch twice_without_constants(const Batch& b)
+{
+    Batch out = b;
+    auto again = [](auto& v) { v.insert(v.end(), v.begin(), v.end()); };
+    again(out.states);
+    again(out.task_ids);
+    again(out.derived);
+    again(out.goal_pos);
+    again(out.goal_neg);
+    again(out.goal_derived_pos);
+    again(out.goal_derived_neg);
+    out.goal_constants.resize(2 * b.goal_constants.size(), -1);
+    out.count = 2 * b.count;
+    return out;
+}
+
+TEST(DeviceRowStream, RowsWithAndWithoutConstantLiteralsFlushAsOneEncode)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const u32 corpus_entry : {1u, 2u})  // features (derived atoms), goals (static goal literals)
+    {
+        const Corpus c = corpus()[corpus_entry];
+        SCOPED_TRACE(c.name);
+        Batch batch = make_batch(c.table, 33, true, 263);
+        for (Config config : {configs()[8], configs().back()})
+        {
+            SCOPED_TRACE(config.name);
+            config.inputs.constants = true;
+            const bool derived = batch.derived_words != 0, derived_goals = derived && config.inputs.derived_goals;
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            {
+                config.options.layout = layout;
+                const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+                add_constant_rows(batch, encoder->context(), 0, 3, 269);
+                const Batch both = twice_without_constants(batch);
+                const DeviceRows rows(ctx, stream, batch);
+                const auto reference = host_reference(*encoder, host_input(both, 66, config.inputs));
+                const cuda::BatchShape shape{70, reference.sizes.entities, reference.sizes.args, reference.sizes.targets};
+                const auto out_layout = cuda::output_layout(shape, config.options.index,
+                                                            encoder->schema().num_relations(),
+                                                            cuda::output_arrays(encoder->schema()));
+                cuda::DeviceBuffer block(ctx, out_layout.bytes, stream);
+                const auto output = cuda::output_of(out_layout, shape, block.data());
+                // a ring row holds more literals than the rows give
+                cuda::DeviceRowStream ring(ctx, encoder, 70, stream, true, derived, derived_goals, 5);
+                Inputs plain = config.inputs;
+                plain.constants = false;
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    ring.append(rows.input(batch, 33, config.inputs));
+                    ring.append(rows.input(batch, 33, plain));
+                    ring.flush(output);
+                    expect_same_arrays(*reference.bundle, download_encoding(ctx, stream, out_layout, block));
+                }
+                // constant literals wider than the ring's rows, and a ring without constant literals
+                Batch wide = batch;
+                add_constant_rows(wide, encoder->context(), 0, 6, 271);
+                const DeviceRows wide_rows(ctx, stream, wide);
+                EXPECT_THROW(ring.append(wide_rows.input(wide, 33, config.inputs)), std::invalid_argument);
+                cuda::DeviceRowStream plain_ring(ctx, encoder, 70, stream, true, derived, derived_goals);
+                EXPECT_THROW(plain_ring.append(rows.input(batch, 33, config.inputs)), std::invalid_argument);
+                EXPECT_THROW({ cuda::DeviceRowStream goalless(ctx, encoder, 70, stream, false, derived, false, 4); },
+                             std::invalid_argument);
+            }
+        }
+    }
+}
+}  // namespace

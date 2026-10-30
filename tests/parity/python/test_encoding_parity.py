@@ -17,7 +17,7 @@ from encoding_hgraph_parity import HGRAPH_CONFIGS
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    goal_literals, is_horizon, layer_inputs, literal_text, needed_differences,
+    goal_literals, is_horizon, layer_inputs, literal_text, needed_differences, _level_suffix,
     lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
     sources_of, is_transition, recorded_successor, recorded_config, VARIANTS,
 )
@@ -464,7 +464,7 @@ def test_highest_placement_matches_the_reference_with_duplicate_tuples_collapsed
     assert any(m.kind == "tuple" and m.where == duplicate for m in compare(collapsed, twice, context, allowed))
 
 
-def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
+def test_a_history_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
     fixture, task = load(prefix_path("f08"))
     found = 0
     for state in ("s0", "s1", "s2", "s3", "s4"):
@@ -476,7 +476,7 @@ def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that
             assert atom.kind == "static" or (atom.slot if atom.kind == "fluent" else atom.derived_slot) is None
             assert kind == "history" and where.startswith("history:")
         if context.dropped:
-            assert "literal_without_slot" in needed_differences(expected, actual, context)
+            assert "history_literal_without_slot" in needed_differences(expected, actual, context)
             extra = copy(actual)
             relation = next(n for n, ts in actual.tuples.items() if ts and n.endswith("[hist]"))
             extra.tuples[relation] = actual.tuples[relation] + actual.tuples[relation][:1]
@@ -484,27 +484,34 @@ def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that
     assert found
 
 
-def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
-    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+def test_a_layer_literal_without_a_slot_is_compared_as_a_constant_literal_of_its_level():
+    found = 0
+    for prefix, config, state in (("f08", "C3S", "s0"), ("f08", "C3S", "s2"), ("f08", "C4_L1", "s3"),
+                                  ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
         expected, actual, context = goal_case(config, state, prefix)
         assert compare(expected, actual, context) == []
+        assert not context.dropped
         goal = goal_literals(context)
-        slotless = [parse_literal(text) for kind, _, text in context.dropped
-                    if kind == "subgoal" and parse_literal(text) in goal]
-        assert slotless
-        for literal in slotless:
-            entity = literal_text(*literal) + "[g]"
-            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
-            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
-            missing = copy(actual)
-            missing.entities.remove(("goal", entity))
-            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
-            twice = copy(actual)
-            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
-            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
-            fewer = copy(actual)
-            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
-            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
+        for level, layer in enumerate(context.layers, 1):
+            for text in layer:
+                atom = context.task.literal(text).atom
+                if atom.kind != "static" and (atom.slot if atom.kind == "fluent" else atom.derived_slot) is not None:
+                    continue
+                literal = parse_literal(text)
+                for at in ([0, level] if literal in goal else [level]):
+                    found += 1
+                    role = "goal" if at == 0 else "subgoal"
+                    entity = f"{literal_text(*literal)}[{_level_suffix(at)}]"
+                    relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[{_level_suffix(at)}]"
+                    assert (role, entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+                    missing = copy(actual)
+                    missing.entities.remove((role, entity))
+                    assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+                    twice = copy(actual)
+                    twice.tuples[relation] = (actual.tuples[relation]
+                                              + [t for t in actual.tuples[relation] if t[0] == entity])
+                    assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+    assert found
 
 
 def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():

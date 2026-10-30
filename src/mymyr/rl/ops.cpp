@@ -2,6 +2,7 @@
 // relabels (rl/her.hpp). Each runs the element function its device kernel runs (cuda/rl_ops.hpp).
 
 #include "mymyr/rl/her.hpp"
+#include "mymyr/core/thread_pool.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
 
@@ -66,5 +67,45 @@ void her_relabel(const HerBatch& b, const HerConfig& c)
         for (u64 i = 0; i < b.envs; ++i)
             for (u32 j = 0; j < c.k; ++j)
                 her_one(b, c, t, i, j);
+}
+}  // namespace mymyr::rl
+
+
+namespace mymyr::rl
+{
+void her_relabel_lifted(const MatchTemplates& t, const HerLiftedBatch& b, const HerLiftedConfig& c, ThreadPool* pool)
+{
+    if (!b.status || (!b.count && b.envs) || b.row_words < b.words || b.steps >= u64{1} << 31 || c.max_segments >= u32{1} << 31)
+        throw std::invalid_argument("mymyr: her_relabel_lifted: invalid shapes or missing count/status");
+    if (b.steps && b.envs && (!b.states || !b.prev_states || !b.done || !b.hashes || !b.prev_hashes || !b.ids ||
+        !b.segment || !b.achieved || !b.reward || (b.words + b.derived_words && !b.work_goals)))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: missing window, outputs or scratch");
+    if (b.steps && b.envs && (!b.matches.found || !b.matches.template_id || !b.matches.count ||
+        (t.max_vars && !b.matches.binding)))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: missing matcher scratch");
+    if (b.envs && c.max_segments && (!b.seg_start || !b.seg_end || !b.seg_valid || !b.seg_template ||
+        (t.max_vars && !b.seg_binding) || (b.words && (!b.goal_pos || !b.goal_neg)) ||
+        (b.derived_words && (!b.goal_pos_derived || !b.goal_neg_derived))))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: missing segment outputs");
+    if (b.derived_words && b.steps && b.envs && (!b.derived || !b.prev_derived))
+        throw std::invalid_argument("mymyr: her_relabel_lifted: derived and prev_derived are required");
+    auto run = [&](u64 size, auto function)
+    {
+        auto work = [&](u32 worker)
+        {
+            const auto [begin, end] = ThreadPool::slice(size, worker, pool ? pool->size() : 1);
+            for (u64 i = begin; i < end; ++i)
+                function(i);
+        };
+        if (pool)
+            pool->run(work);
+        else
+            work(0);
+    };
+    run(b.steps * b.envs, [&](u64 row) { her_lifted_detail::prepare(b, row); });
+    match_first(t, her_lifted_detail::matches(b, c), pool);
+    run(b.envs, [&](u64 i) { her_lifted_detail::scan(her_lifted_detail::Solo{}, t, b, c, i); });
+    *b.status |= her_lifted_detail::cap_counts(b, c);
+    run(b.envs, [&](u64 i) { her_lifted_detail::trim(her_lifted_detail::Solo{}, t, b, c, i); });
 }
 }  // namespace mymyr::rl
