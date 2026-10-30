@@ -93,6 +93,38 @@ def test_refresh_invalidates_saved_goal_mask(keywords):
 
 
 @pytest.mark.needs_gil
+@pytest.mark.parametrize("entry", ["eager", "dispatcher"])
+@pytest.mark.parametrize("keywords", [False, True])
+def test_failed_mutation_invalidates_saved_tensor(entry, keywords):
+    import ctypes
+
+    torch = pytest.importorskip("torch")
+    from torch import Tensor
+
+    from mymyr.rl.torch._ops import _op
+
+    versions = []
+
+    @_op("mymyr_test::failing_mutation", mutates_args=("x",))
+    def mutate(x: Tensor) -> None:
+        versions.append(x._version)
+        ctypes.c_bool.from_address(x.data_ptr()).value = False
+        raise ValueError("failure after pointer write")
+
+    mask = torch.ones(1, dtype=torch.bool, device="cpu")
+    loss = torch.ones(1, requires_grad=True).masked_fill(mask, 0).sum()
+    version = mask._version
+    call = mutate if entry == "eager" else mutate._opoverload
+    with pytest.raises(ValueError, match="failure after pointer write"):
+        call(x=mask) if keywords else call(mask)
+    assert not mask.item()
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+    assert versions == [version + 1]
+    assert mask._version == version + 1
+
+
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("optional", [False, True])
 def test_declared_optional_and_keyword_mutations_increment_versions(optional):
     import ctypes

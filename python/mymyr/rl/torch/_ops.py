@@ -138,14 +138,13 @@ class _EagerOp(torch.library.CustomOpDef):
                 or (tensor.is_inference() and not torch.is_inference_mode_enabled())
             ):
                 return super().__call__(*args, **kwargs)
-        result = self._init_fn(*args, **kwargs)
         if self._eager_mutations:
-            # Native pointer writes need the same saved-tensor invalidation as dispatcher mutations.
+            # Invalidate saved tensors before the implementation can write and then raise.
             torch.autograd.graph.increment_version([
                 tensor for index, name, default in self._eager_mutations
                 if (tensor := args[index] if index < len(args) else kwargs.get(name, default)) is not None
             ])
-        return result
+        return self._init_fn(*args, **kwargs)
 
     def register_kernel(self, device_types: Any, fn: Any = None, /) -> Any:
         self._eager_disabled = True
