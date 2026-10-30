@@ -915,3 +915,121 @@ TEST(DeviceRlOps, TargetVisitedDeviceEqualsHost)
             check_target_visited<i64>(ctx, drop, mapped, -1, 1);
         }
 }
+
+#include "../cpp/support/her_lifted.hpp"
+
+TEST(DeviceRlOps, LiftedHindsightDeviceEqualsHostAndCapturedReplay)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto stream = ctx->stream();
+    constexpr u32 T = 23, N = 3;
+    for (const auto& name : std::vector<std::string>{"gripper__prob05", "blocks__probBLOCKS-8-0"})
+    {
+        const auto task = load(name);
+        const auto templates = rl::lifted_goal_templates(rl::TaskSuite::of(rl::TaskTable::single(task)));
+        const auto window = rollout(task, N, T, 13);
+        std::vector<std::byte> packed(templates.arrays().bytes());
+        std::memcpy(packed.data(), templates.arrays().block(), packed.size());
+        auto block = upload(ctx, packed, stream);
+        auto states = upload(ctx, window.states, stream), prev = upload(ctx, window.prev, stream);
+        auto done = upload(ctx, window.done, stream);
+        auto task_ids = upload(ctx, std::vector<i32>(N, 0), stream);
+        for (u32 S : {0u, 1u, T})
+            for (u64 limit : {u64{0}, u64{4}, ~u64{0}})
+            {
+                LiftedRelabels out(T, N, window.W, window.RW, 0, S, templates.max_vars());
+                out.batch.states = window.states.data();
+                out.batch.prev_states = window.prev.data();
+                out.batch.done = window.done.data();
+                rl::HerLiftedConfig c;
+                c.max_segments = S;
+                c.max_generated = limit;
+                rl::her_relabel_lifted(templates.view(), out.batch, c);
+                auto b = out.batch;
+                b.states = ptr<const u64>(states);
+                b.prev_states = ptr<const u64>(prev);
+                b.done = ptr<const u8>(done);
+                b.task_ids = ptr<const i32>(task_ids);
+                std::vector<cuda::DeviceBuffer> buffers;
+                auto copy = [&]<class Value>(const std::vector<Value>& values, Value*& pointer)
+                {
+                    buffers.push_back(upload(ctx, values, stream));
+                    pointer = ptr<Value>(buffers.back());
+                };
+                copy(out.segment, b.segment);
+                copy(out.start, b.seg_start);
+                copy(out.end, b.seg_end);
+                copy(out.which, b.seg_template);
+                copy(out.binding, b.seg_binding);
+                copy(out.count, b.count);
+                copy(out.achieved, b.achieved);
+                copy(out.valid, b.seg_valid);
+                copy(out.reward, b.reward);
+                copy(out.pos, b.goal_pos);
+                copy(out.neg, b.goal_neg);
+                copy(out.dpos, b.goal_pos_derived);
+                copy(out.dneg, b.goal_neg_derived);
+                copy(out.hashes, b.hashes);
+                copy(out.prev_hashes, b.prev_hashes);
+                copy(out.work, b.work_goals);
+                copy(out.ids, b.ids);
+                copy(out.status, b.status);
+                copy(out.found, b.matches.found);
+                copy(out.match_binding, b.matches.binding);
+                copy(out.match_template, b.matches.template_id);
+                copy(out.match_count, b.matches.count);
+                const auto view = templates.view(static_cast<const std::byte*>(block.data()));
+                auto run = [&] { cuda::check(cuda::launch_her_relabel_lifted(view, b, c, stream), "lifted relabel"); };
+                run();
+                cuda::check(cudaStreamSynchronize(stream), "sync");
+                cudaGraph_t graph{};
+                cudaGraphExec_t executable{};
+                if (cuda::GraphExec::enabled())
+                {
+                    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+                    run();
+                    cuda::check(cudaStreamEndCapture(stream, &graph), "end capture");
+                    cuda::check(cudaGraphInstantiate(&executable, graph, 0), "instantiate");
+                    cuda::check(cudaGraphLaunch(executable, stream), "replay");
+                }
+                auto compare = [&]<class Value>(const std::vector<Value>& values, const Value* pointer)
+                {
+                    std::vector<Value> host(values.size());
+                    if (!values.empty())
+                        cuda::check(cudaMemcpyAsync(host.data(), pointer, values.size()*sizeof(Value),
+                                                   cudaMemcpyDeviceToHost, stream), "D2H");
+                    cuda::check(cudaStreamSynchronize(stream), "sync");
+                    EXPECT_EQ(host, values);
+                };
+                compare(out.segment, b.segment);
+                compare(out.start, b.seg_start);
+                compare(out.end, b.seg_end);
+                compare(out.which, b.seg_template);
+                compare(out.binding, b.seg_binding);
+                compare(out.count, b.count);
+                compare(out.achieved, b.achieved);
+                compare(out.valid, b.seg_valid);
+                compare(out.reward, b.reward);
+                compare(out.pos, b.goal_pos);
+                compare(out.neg, b.goal_neg);
+                compare(out.status, b.status);
+                cuda::check(cudaMemsetAsync(task_ids.data(), 0xff, N*sizeof(i32), stream), "invalid ids");
+                if (executable)
+                    cuda::check(cudaGraphLaunch(executable, stream), "replay invalid ids");
+                else
+                    run();
+                compare(std::vector<u64>{4}, b.status);
+                compare(std::vector<i32>(N, 0), b.count);
+                if (executable)
+                    cuda::check(cudaGraphExecDestroy(executable), "destroy executable");
+                if (graph)
+                    cuda::check(cudaGraphDestroy(graph), "destroy graph");
+                cuda::check(cudaMemsetAsync(task_ids.data(), 0, N*sizeof(i32), stream), "restore ids");
+                c.max_steps = 0;
+                run();
+                compare(std::vector<u64>{8}, b.status);
+                compare(std::vector<i32>(N, 0), b.count);
+            }
+    }
+}

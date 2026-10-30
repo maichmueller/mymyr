@@ -158,6 +158,7 @@ from mymyr._core._rl import (
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks, visited_mask
 from mymyr.rl._sampling import InstanceSampler
+from mymyr.rl._her_lifted import HerLiftedBatch, her_relabel_lifted
 from mymyr.rl._match import DeviceGoalTemplates, MatchResult, match_first
 
 __all__ = [
@@ -185,6 +186,8 @@ __all__ = [
     "goal_masks",
     "goal_test",
     "her_relabel",
+    "her_relabel_lifted",
+    "HerLiftedBatch",
     "is_goal",
     "lifted_goal_templates",
     "novelty_update",

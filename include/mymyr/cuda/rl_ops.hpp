@@ -64,6 +64,10 @@ cudaError_t launch_target_visited(const rl::TargetRows<i64>& x, const u64* table
 /// Lifted goal matching on caller-owned arrays; no allocation or host synchronization.
 cudaError_t launch_match_first(const rl::MatchTemplates& templates, const rl::MatchBatch& batch, cudaStream_t s);
 
+/// Lifted hindsight relabelling with fixed caller-owned scratch; no allocation or host synchronization.
+cudaError_t launch_her_relabel_lifted(const rl::MatchTemplates& templates, const rl::HerLiftedBatch& batch,
+                                      const rl::HerLiftedConfig& config, cudaStream_t s);
+
 /// rl::novelty_update on device arrays: seen [rows, words] (in place), states [rows, state_stride], reward [rows].
 cudaError_t launch_novelty_update(u64* seen, const u64* states, u64 rows, u32 words, u32 state_stride, i32* reward,
                                   cudaStream_t s);

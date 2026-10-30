@@ -13,7 +13,7 @@ import numpy as np
 
 from mymyr._core import _rl_ops
 
-__all__ = ["match_first", "HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
+__all__ = ["her_relabel_lifted", "match_first", "HerBatch", "her_relabel", "novelty_update", "prefix_masks", "schema_masks", "visited_mask"]
 
 
 class HerBatch(NamedTuple):
@@ -123,13 +123,9 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
 
         return jnp_mask(table, count, succ_hash, parent, rows=rows)
     if fw == "torch":
-        import torch
-
         from mymyr.rl.torch import _ops as torch_ops
 
-        if torch.compiler.is_compiling():
-            return torch.ops.mymyr.visited_mask(table, count, succ_hash, parent, rows)
-        return torch_ops.visited_mask_impl(table, count, succ_hash, parent, rows)
+        return torch_ops.visited_mask(table, count, succ_hash, parent, rows)
     out = np.empty(succ_hash.shape, dtype=np.bool_)
     _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
     return out
@@ -294,3 +290,9 @@ def match_first(rows, task_ids, templates, *, first=False, derived=None, status=
     from ._match import match_first as match
     return match(rows, task_ids, templates, first=first, derived=derived, status=status, capacity=capacity,
                  pool=pool, max_steps=max_steps)
+
+
+def her_relabel_lifted(states, done, task_ids, templates, **kwargs):
+    """Lifted hindsight segments; see mymyr.rl.her_relabel_lifted for the window contract."""
+    from ._her_lifted import her_relabel_lifted as relabel
+    return relabel(states, done, task_ids, templates, **kwargs)

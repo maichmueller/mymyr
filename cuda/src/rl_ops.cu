@@ -361,3 +361,84 @@ cudaError_t launch_her_relabel(const rl::HerBatch& b, const rl::HerConfig& c, cu
     return cudaGetLastError();
 }
 }  // namespace mymyr::cuda
+
+
+namespace mymyr::cuda
+{
+namespace
+{
+// Four warps cache at most 32 KiB; longer windows query the global hash scratch.
+constexpr u32 k_lifted_cached_steps = 1024;
+
+struct HerWarp
+{
+    __device__ u32 lane() const { return threadIdx.x % 32; }
+    __device__ u32 size() const { return 32; }
+    __device__ void sync() const { __syncwarp(); }
+    __device__ u32 bit_or(u32 x) const
+    {
+        for (int offset = 16; offset; offset /= 2)
+            x |= __shfl_xor_sync(0xffffffffu, x, offset);
+        return x;
+    }
+};
+__global__ void k_lifted_prepare(rl::HerLiftedBatch b)
+{
+    for (u64 row = u64{blockIdx.x} * blockDim.x + threadIdx.x; row < b.steps * b.envs;
+         row += u64{gridDim.x} * blockDim.x)
+        rl::her_lifted_detail::prepare(b, row);
+}
+template<bool Trim>
+__global__ void k_lifted_scan(rl::MatchTemplates t, rl::HerLiftedBatch b, rl::HerLiftedConfig c)
+{
+    extern __shared__ u64 window_hashes[];
+    for (u64 i = (u64{blockIdx.x} * blockDim.x + threadIdx.x) / 32; i < b.envs;
+         i += u64{gridDim.x} * blockDim.x / 32)
+        if constexpr (Trim)
+            rl::her_lifted_detail::trim(HerWarp{}, t, b, c, i);
+        else
+        {
+            u64* closed = b.steps <= k_lifted_cached_steps ? window_hashes + (threadIdx.x / 32) * b.steps : nullptr;
+            if (closed)
+            {
+                for (u64 q = threadIdx.x % 32; q < b.steps; q += 32)
+                    closed[q] = b.hashes[q * b.envs + i];
+                __syncwarp();
+            }
+            rl::her_lifted_detail::scan(HerWarp{}, t, b, c, i, closed);
+        }
+}
+__global__ void k_lifted_cap(rl::HerLiftedBatch b, rl::HerLiftedConfig c)
+{
+    *b.status |= rl::her_lifted_detail::cap_counts(b, c);
+}
+}
+cudaError_t launch_her_relabel_lifted(const rl::MatchTemplates& t, const rl::HerLiftedBatch& b,
+                                     const rl::HerLiftedConfig& c, cudaStream_t s)
+{
+    if (!b.status || (!b.count && b.envs) || b.row_words < b.words || b.steps >= u64{1} << 31 || c.max_segments >= u32{1} << 31)
+        return cudaErrorInvalidValue;
+    if (b.steps && b.envs)
+    {
+        k_lifted_prepare<<<grid_for(b.steps * b.envs), k_block, 0, s>>>(b);
+        const auto err = cudaGetLastError();
+        if (err != cudaSuccess)
+            return err;
+    }
+    auto err = launch_match_first(t, rl::her_lifted_detail::matches(b, c), s);
+    if (err != cudaSuccess || !b.envs)
+        return err;
+    const u32 blocks = static_cast<u32>((b.envs + 3) / 4 > 65535 ? 65535 : (b.envs + 3) / 4);
+    const u64 shared = b.steps <= k_lifted_cached_steps ? 4 * b.steps * sizeof(u64) : 0;
+    k_lifted_scan<false><<<blocks, 128, shared, s>>>(t, b, c);
+    err = cudaGetLastError();
+    if (err != cudaSuccess)
+        return err;
+    k_lifted_cap<<<1, 1, 0, s>>>(b, c);
+    err = cudaGetLastError();
+    if (err != cudaSuccess)
+        return err;
+    k_lifted_scan<true><<<blocks, 128, 0, s>>>(t, b, c);
+    return cudaGetLastError();
+}
+}  // namespace mymyr::cuda
