@@ -222,13 +222,13 @@ class Env:
     device expansion, which synchronizes on the successor count every step). ``labels=False`` skips the binding labels
     and ``final_state=False`` the final states (both are written every step otherwise).
 
-    ``track_visited=H`` enables per-episode visited hashes on the CPU (H a power of two in [2, 2^20]); True chooses
+    ``track_visited=H`` enables per-episode visited hashes (H a power of two in [2, 2^20]); True chooses
     the next power of two at least 2 * (max_steps + 1), requiring bounded max_steps. The state carries ``visited``,
     ``visited_count`` and sticky ``visited_status``; ``info["revisited"]`` tests the reached state before insertion
     and autoreset. Reset clears histories and inserts initial states; refresh preserves them. Overflow sets status
     bit 0 and saturates a row's count to H; subsequent lookups can miss visits. Equal 64-bit hashes share an entry,
-    including zero and the reserved key 0x9E3779B97F4A7C15. CUDA tracking requires device visited tables and raises
-    at construction. Status is per row, so vmap batches tracked calls like untracked ones. Successor hashes for
+    including zero and the reserved key 0x9E3779B97F4A7C15. On a CUDA device the tables are kept by the device
+    kernels and hold the same words as the CPU's. Status is per row, so vmap batches tracked calls like untracked ones. Successor hashes for
     :func:`mymyr.rl.jax.visited_mask` come from ``expand_flat(..., hashes=True).succ_hash`` (or ``expand``).
 
     Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over

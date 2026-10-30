@@ -42,6 +42,13 @@ def _framework(x: Any) -> str:
     raise TypeError(f"mymyr: expected a NumPy array, a torch tensor or a JAX array, not {type(x).__name__}")
 
 
+def _arrays(**arrays: Any) -> None:
+    """TypeError for an argument that is neither None nor an array (an object that speaks DLPack)."""
+    for name, x in arrays.items():
+        if x is not None and not hasattr(x, "__dlpack__"):
+            raise TypeError(f"mymyr: '{name}' must be an array that speaks DLPack, not {type(x).__name__}")
+
+
 _NP = {"int32": np.int32, "bool": np.bool_, "float32": np.float32, "uint64": np.uint64, "uint32": np.uint32}
 
 
@@ -53,6 +60,37 @@ def _zeros(fw: str, like: Any, shape: tuple, dtype: str) -> Any:
                "uint32": torch.int32}[dtype]
         return torch.zeros(shape, dtype=tdt, device=like.device)
     return np.zeros(shape, _NP[dtype])
+
+
+_TORCH_DTYPES: dict[Any, tuple[int, int]] = {}
+_VIEW = _rl_ops.TENSOR_VIEW
+
+
+def tensor_view(x: Any) -> Any:
+    """A torch tensor in host or CUDA memory as a ``mymyr._typing.TensorView`` for the native helpers (everything else
+    as it is, for the DLPack import, which reports what it does not support): its data pointer, DLPack dtype, device
+    (-1: host), shape and strides, without a DLPack export (which costs about 10 us per tensor). The native side checks
+    dtype, shape, contiguity and device as for DLPack arrays; the caller keeps the tensor alive for the call and runs
+    the call on torch's current stream."""
+    torch = sys.modules.get("torch")
+    if torch is None or not isinstance(x, torch.Tensor):
+        return x
+    if x.is_cuda:
+        device = x.get_device()
+    elif x.is_cpu:
+        device = -1
+    else:
+        return x
+    if not _TORCH_DTYPES:
+        _TORCH_DTYPES.update({
+            torch.bool: (6, 8), torch.uint8: (1, 8), torch.int8: (0, 8), torch.int16: (0, 16), torch.int32: (0, 32),
+            torch.int64: (0, 64), torch.uint16: (1, 16), torch.uint32: (1, 32), torch.uint64: (1, 64),
+            torch.float16: (2, 16), torch.float32: (2, 32), torch.float64: (2, 64),
+        })
+    code = _TORCH_DTYPES.get(x.dtype)
+    if code is None or x.layout != torch.strided:
+        return x  # the DLPack import reports what it does not support
+    return (_VIEW, x.data_ptr(), code[0], code[1], device, x.shape, x.stride())
 
 
 def _stream(fw: str, like: Any) -> Optional[int]:
@@ -75,7 +113,9 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
     (u)int64 [M] contains State hashes and ``parent`` int32 [M] the environment of each successor (-1: padding).
     With ``rows`` int32 [P], parent indexes this mapping to environment rows; mapped -1 is padding too.
     Equal hashes share an entry, including zero and the reserved key 0x9E3779B97F4A7C15. Overflow can cause
-    false negatives. NumPy, torch CPU and JAX arrays are supported (JAX hashes use uint32 low/high halves).
+    false negatives. NumPy, torch (CPU and CUDA: on torch's current stream, without a host synchronization) and JAX
+    arrays are supported (JAX hashes use uint32 low/high halves). A parent or mapped row outside the table raises
+    ValueError on the host; on a CUDA device it reads as not visited.
     """
     fw = _framework(table)
     if fw == "jax":
@@ -90,12 +130,8 @@ def visited_mask(table: Any, count: Any, succ_hash: Any, parent: Any, *, rows: A
         if torch.compiler.is_compiling():
             return torch.ops.mymyr.visited_mask(table, count, succ_hash, parent, rows)
         return torch_ops.visited_mask_impl(table, count, succ_hash, parent, rows)
-    if fw != "numpy":
-        raise ValueError("mymyr: visited_mask requires NumPy, torch CPU or JAX arrays")
-    from mymyr._core import _rl
-
     out = np.empty(succ_hash.shape, dtype=np.bool_)
-    _rl.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
+    _rl_ops.visited_mask(table, count, succ_hash, parent, rows=rows, out=out)
     return out
 
 
@@ -112,7 +148,8 @@ def novelty_update(seen: Any, states: Any, width: int = 1) -> tuple[Any, Any]:
 
         return jnp_update(seen, states)
     reward = _zeros(fw, seen, (seen.shape[0],), "int32")
-    _rl_ops.novelty_update(seen, states, reward, stream=_stream(fw, seen))
+    v = tensor_view
+    _rl_ops.novelty_update(v(seen), v(states), v(reward), stream=_stream(fw, seen))
     return reward, seen
 
 
@@ -162,7 +199,9 @@ def prefix_masks(
         view = types.SimpleNamespace(parent=parent, schema=sch, binding=binding)
         return jnp_masks(view, schema, prefix, d, int(num_objects))
     mask = _zeros(fw, sch, (int(schema.shape[0]), int(num_objects)), "bool")
-    _rl_ops.prefix_masks(parent, sch, binding, schema, prefix if d > 0 else None, d, mask, stream=_stream(fw, sch))
+    v = tensor_view
+    _rl_ops.prefix_masks(v(parent), v(sch), v(binding), v(schema), v(prefix) if d > 0 else None, d, v(mask),
+                         stream=_stream(fw, sch))
     return mask
 
 
@@ -181,7 +220,7 @@ def schema_masks(exp: Any, *, num_schemas: Optional[int] = None) -> Any:
         view = types.SimpleNamespace(parent=parent, schema=sch, binding=None)
         return jnp_masks(view, n, int(num_schemas))
     mask = _zeros(fw, sch, (n, int(num_schemas)), "bool")
-    _rl_ops.schema_masks(parent, sch, mask, stream=_stream(fw, sch))
+    _rl_ops.schema_masks(tensor_view(parent), tensor_view(sch), tensor_view(mask), stream=_stream(fw, sch))
     return mask
 
 
@@ -219,6 +258,7 @@ def her_relabel(
 
     NumPy / torch (CPU or CUDA) run the native helper; JAX arrays the jnp version (``seed`` may then be a JAX key)."""
     fw = _framework(states)
+    _arrays(done=done, prev_states=prev_states, goal_atoms=goal_atoms, env_ids=env_ids)
     kk = int(k)
     m = 0 if subset is None else int(subset)
     if kk < 1 or m < 0:
@@ -238,10 +278,12 @@ def her_relabel(
     achieved = _zeros(fw, states, (t_len, n, kk), "bool")
     reward = _zeros(fw, states, (t_len, n, kk), "float32")
     valid = _zeros(fw, states, (t_len, n, kk), "bool")
+    v = tensor_view
     _rl_ops.her_relabel(
-        states, done, goal, source, achieved, reward, valid, prev_states=prev_states, strategy=strategy, subset=m,
-        seed=int(seed), first_env=int(first_env), env_ids=env_ids, goal_atoms=goal_atoms,
-        step_reward=float(step_reward), goal_reward=float(goal_reward), stream=_stream(fw, states),
+        v(states), v(done), v(goal), v(source), v(achieved), v(reward), v(valid), prev_states=v(prev_states),
+        strategy=strategy, subset=m, seed=int(seed), first_env=int(first_env), env_ids=v(env_ids),
+        goal_atoms=v(goal_atoms), step_reward=float(step_reward), goal_reward=float(goal_reward),
+        stream=_stream(fw, states),
     )
     return HerBatch(goal, source, achieved, reward, valid)
 

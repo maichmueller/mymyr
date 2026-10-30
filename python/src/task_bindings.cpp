@@ -32,6 +32,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -2097,7 +2098,21 @@ GroundLiteral ground_literal_of(PyTaskCore& core, nb::handle literal)
     return GroundLiteral{ground_atom(l), l.positive};
 }
 
-nb::object frozen_task(nb::handle source, std::string_view atoms)
+namespace
+{
+struct FrozenCacheProbe
+{
+    std::atomic<bool> entering{false};
+
+    void wait()
+    {
+        nb::gil_scoped_release release;
+        entering.wait(false, std::memory_order_acquire);
+    }
+};
+
+nb::object frozen_task_impl(nb::handle source, std::string_view atoms, FrozenCacheProbe* probe = nullptr,
+                            nb::handle locked = {})
 {
     const TaskOptions::Atoms mode = atoms == "auto" ? TaskOptions::Atoms::Auto :
                                     atoms == "reachable" ? TaskOptions::Atoms::Reachable :
@@ -2113,7 +2128,15 @@ nb::object frozen_task(nb::handle source, std::string_view atoms)
     if (twin.get() == owner.core->task.get())
         return nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
     nb::object original = nb::isinstance<PyHandle>(source) ? nb::inst_ptr<PyHandle>(source)->task : nb::borrow(source);
+    if (probe && !locked.is_valid())
+    {
+        // No Python calls or safepoints between the handoff and acquiring the cache lock.
+        probe->entering.store(true, std::memory_order_release);
+        probe->entering.notify_one();
+    }
     nb::ft_lock_guard lock(owner.core->frozen_mutex);
+    if (locked.is_valid())
+        locked();
     auto& cached = owner.core->frozen_cores[twin->uid()];
     if (cached.wrapper.is_valid())
     {
@@ -2127,6 +2150,9 @@ nb::object frozen_task(nb::handle source, std::string_view atoms)
     cached.wrapper = nb::weakref(wrapper);
     return wrapper;
 }
+}  // namespace
+
+nb::object frozen_task(nb::handle source, std::string_view atoms) { return frozen_task_impl(source, atoms); }
 
 std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
                                                        nb::handle partial)
@@ -2187,6 +2213,12 @@ GroundAtom ground_atom_of(const Owner& o, nb::handle atom) { return atom_key(*o.
 
 void bind_task(nb::module_& m)
 {
+    nb::class_<FrozenCacheProbe>(m, "_FrozenCacheProbe")
+        .def(nb::init<>())
+        .def("wait", &FrozenCacheProbe::wait)
+        .def("frozen", [](FrozenCacheProbe& probe, nb::handle source, nb::object locked, std::string_view atoms) {
+            return frozen_task_impl(source, atoms, &probe, locked.is_none() ? nb::handle{} : locked);
+        }, "source"_a, "locked"_a = nb::none(), "atoms"_a = "auto");
     nb::class_<PyApplicableIter>(m, "ApplicableActions",
                                  "An iterator over the applicable actions of a state (iter_applicable_actions): lazy per "
                                  "schema (the actions of a schema are enumerated when the iterator reaches it), in "

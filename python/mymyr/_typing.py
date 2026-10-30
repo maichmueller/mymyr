@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from mymyr import State
+    from mymyr._core._rl_ops import TensorViewMarker
     from mymyr.encoding import DeviceFlatBatch as DeviceFlatBatch
     from mymyr.encoding import DeviceFlatStream as DeviceFlatStream
     from mymyr.encoding import GoalMasks as GoalMasks
@@ -16,7 +17,8 @@ if TYPE_CHECKING:
     from mymyr.rl import DeviceGoalTemplates as DeviceGoalTemplates
     from mymyr.rl import InstanceSampler as InstanceSampler
 
-__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows"]
+__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows",
+           "TensorView"]
 
 
 class SupportsDLPack(Protocol):
@@ -25,6 +27,12 @@ class SupportsDLPack(Protocol):
     State words are such arrays: [N, W] 64-bit or [N, 2W] 32-bit integers (one state: [W] or [2W])."""
 
     def __dlpack__(self) -> Any: ...
+
+
+TensorView = tuple["TensorViewMarker", int, int, int, int, tuple[int, ...], tuple[int, ...]]
+"""A tensor's memory as mymyr.rl's torch wrappers pass it to the native helpers (no DLPack export): the marker
+``mymyr._core._rl_ops.TENSOR_VIEW``, the data pointer, the DLPack dtype code and bits, the CUDA device (-1: host
+memory), the shape and the strides in elements."""
 
 
 class SupportsCudaStream(Protocol):

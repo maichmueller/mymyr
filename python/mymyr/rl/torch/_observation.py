@@ -185,6 +185,10 @@ class Observer:
         if self.actions and self.capacities is not None and self.device.type == "cuda":
             self._warm_rows = (env.states, env.task_ids, (env.goal_pos, env.goal_neg) if env.goals else None)
         self.goals = [_goal_lanes(e) for e in encoders]
+        # the observations list targets (and so carry action_visited with visited tables)
+        self.has_targets = self.actions and all(
+            bool(e.options["target_sources"]) or e.options["horizon_mode"] is not None for e in encoders)
+        self._implicit = [bool(e.schema.implicit_entities) for e in encoders]
         if self.actions:
             for e in encoders:
                 if not e.options["include_actions"]:
@@ -422,12 +426,65 @@ class Observer:
         observation = SuiteObservation(tuple(batches), domain.to(torch.int32), index.to(torch.int32))
         return observation, tuple(rows) if self.actions else None
 
+    # ------------------------------------------------------------------------------------------ visited targets
+
+    def action_visited(self, encoding: Any, actions: Any, visited: Tensor, count: Tensor) -> Any:
+        """Whether the successor of each action target of ``encoding`` is in its environment's visited table: bool
+        [targets] aligned with the batch's ``target_entity`` (False for a target that is not an action entity, for
+        the tail of a capacity batch and for an observation whose expansion overflowed); a tuple of these, one per
+        domain batch, over a suite of several domains. One ``mymyr::target_visited`` per domain batch, without a host
+        synchronization."""
+        if self.suite is None:
+            return _targets_visited(encoding, actions, visited, count, None, self._implicit[0])
+        n = visited.shape[0]
+        rows = torch.arange(n, dtype=torch.int32, device=visited.device)
+        out = []
+        for d, (batch, part) in enumerate(zip(encoding.batches, actions, strict=True)):
+            # graph g of domain d's batch is the row r of domain d with index[r] = g; slot n takes the other rows
+            slot = torch.where(encoding.domain == d, encoding.index.to(torch.int64), n)
+            env_rows = torch.full((n + 1,), -1, dtype=torch.int32, device=visited.device).scatter_(0, slot, rows)
+            out.append(_targets_visited(batch, part, visited, count, env_rows[:n], self._implicit[d]))
+        return tuple(out)
+
     def close(self) -> None:
         from mymyr.rl.torch import _ops
 
         for h in getattr(self, "handles", ()):
             _ops.unregister(h)
         self.handles = []
+
+
+def _target_arrays(batch: Any, device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
+    """target_entity, entity_role, entity_ref and entity_offsets of a batch as torch tensors on ``device``, and its live
+    targets (int64 [1]: a capacity batch's count, on the device for a device batch; None: all of them)."""
+    if isinstance(batch, _device.DeviceFlatBatch):
+        arrays = [getattr(batch, name) for name in ("target_entity", "entity_role", "entity_ref", "entity_offsets")]
+        sizes = batch.device_sizes
+        return (*arrays, None if sizes is None else sizes[3:4])
+    columns = batch.as_dict("torch")
+    arrays = [columns[name].to(device) for name in ("target_entity", "entity_role", "entity_ref", "entity_offsets")]
+    sizes = batch.sizes
+    live = None if sizes is None else torch.tensor([int(sizes["targets"])], dtype=torch.int64, device=device)
+    return (*arrays, live)
+
+
+def _targets_visited(batch: Any, rows: ActionRows, visited: Tensor, count: Tensor, env_rows: Optional[Tensor],
+                     implicit: bool) -> Tensor:
+    """Observer.action_visited of one batch and its expansion rows; ``env_rows`` maps the batch's graphs to the
+    environment rows (None: graph g is row g); ``implicit``: the batch has implicit entity arrays (no action
+    entities)."""
+    from mymyr.rl.torch import _ops
+
+    if implicit:
+        return torch.zeros(0, dtype=torch.bool, device=visited.device)
+    target, role, ref, entity_offsets, live = _target_arrays(batch, visited.device)
+    if env_rows is not None:
+        env_rows = env_rows[:entity_offsets.shape[0] - 1]  # the batch's graphs
+    args =(target, role, ref, entity_offsets, live, rows.offsets, rows.index, rows.succ_hash, rows.status, visited,
+            count, env_rows)
+    if torch.compiler.is_compiling():
+        return torch.ops.mymyr.target_visited(*args)
+    return _ops.target_visited_impl(*args)
 
 
 def _table_of(table: Any) -> Any:

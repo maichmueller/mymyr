@@ -3,11 +3,14 @@
 //   prefix_masks(parent, schema, binding, query, prefix, depth, mask)   factored action masks (rl/prefix.hpp)
 //   schema_masks(parent, schema, mask)                            the first factored decision
 //   her_relabel(states, done, goal, source, achieved, reward, ...)      hindsight relabels (rl/her.hpp)
-// Destination-passing: every array is the caller's, read and written in place through DLPack. Host arrays run
-// the host loops; CUDA arrays (all on one device) the device kernels of cuda/rl_ops.hpp, enqueued on `stream` (None:
-// the legacy default stream; torch passes its current stream) with the array API's stream handoff and no host
-// synchronization. mymyr.rl (python/mymyr/rl/_ops.py) allocates the outputs in the inputs' framework; JAX arrays take
-// the jnp versions of mymyr.rl.jax instead (JAX arrays are immutable).
+//   visited_mask(table, count, succ_hash, parent, rows, out)      visited-table membership (rl/visited.hpp)
+//   target_visited(target, role, ref, ..., out)                   visited successors of action targets (rl/visited.hpp)
+// Destination-passing: every array is the caller's, read and written in place through DLPack, or as a tensor view
+// (rl_imports.hpp: the torch wrappers pass views, which skip the cost of a DLPack export). Host arrays run the host
+// loops; CUDA arrays (all on one device) the device kernels of cuda/rl_ops.hpp, enqueued on `stream` (None: the legacy
+// default stream; torch passes its current stream) with the array API's stream handoff and no host synchronization.
+// mymyr.rl (python/mymyr/rl/_ops.py) allocates the outputs in the inputs' framework; JAX arrays take the jnp versions
+// of mymyr.rl.jax instead (JAX arrays are immutable).
 
 #include "arrays.hpp"
 #include "dlpack.hpp"
@@ -16,10 +19,12 @@
 #include "rl_typing.hpp"
 #include "typing.hpp"
 
+#include "mymyr/encoding/schema.hpp"
 #include "mymyr/rl/her.hpp"
 #include "mymyr/rl/goal_templates.hpp"
 #include "mymyr/rl/novelty.hpp"
 #include "mymyr/rl/prefix.hpp"
+#include "mymyr/rl/visited.hpp"
 
 #if defined(MYMYR_HAS_CUDA)
 #include "mymyr/cuda/rl_ops.hpp"
@@ -43,7 +48,7 @@ std::shared_ptr<const rl::GoalTemplates> goal_templates_of(nb::handle object);
 namespace
 {
 using namespace rlimp;
-using ArrayArg = Arg<ann::ArrayLike>;
+using ArrayArg = Arg<ann::ArrayOrView>;
 
 /// The device of a call (-1: the host) from its first array, and its stream as a DLPack stream value.
 struct Place
@@ -55,7 +60,7 @@ struct Place
 Place place_of(nb::handle first, nb::handle stream)
 {
     Place p;
-    const dl::Device d = dl::dlpack_device(first);
+    const dl::Device d = device_of(first);
     if (d.device_type < 0)
         throw nb::type_error("mymyr: the arrays must speak DLPack");
     if (dl::host_accessible(d.device_type))
@@ -119,6 +124,114 @@ void novelty_update(ArrayArg seen, ArrayArg states, ArrayArg reward, StreamArg s
 #endif
     nb::gil_scoped_release release;
     rl::novelty_update(s, x, rows, W, SW, r);
+}
+
+void visited_mask(ArrayArg table, ArrayArg count, ArrayArg succ_hash, ArrayArg parent, ArrayArg rows, ArrayArg out,
+                  StreamArg stream)
+{
+    if (table.is_none() || count.is_none() || succ_hash.is_none() || parent.is_none() || out.is_none())
+        throw nb::type_error("mymyr: visited_mask requires table, count, succ_hash, parent and out arrays");
+    const Place pl = place_of(table, stream);
+    Imports in(pl.device, pl.stream, false);
+    std::vector<i64> ext, hashes, mapping;
+    const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
+    const i64 n = ext[0], H = ext[1];
+    if (H < 2 || H > (1 << 20) || (H & (H - 1)))
+        throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+    const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
+    const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &hashes);
+    const i64 size = hashes[0];
+    const i32* p = in.get<const i32>(parent, "parent", {i32t}, {size}, false);
+    const i32* map = in.get<const i32>(rows, "rows", {i32t}, {-1}, false, &mapping);
+    u8* dst = in.get<u8>(out, "out", {boolt}, {size}, true);
+    const i64 parents = rows.is_none() ? n : mapping[0];
+#if defined(MYMYR_HAS_CUDA)
+    if (pl.device >= 0)
+        return launch(pl, "visited_mask", [&](cudaStream_t cs) {
+            return cuda::launch_visited_mask(tab, cnt, static_cast<u64>(n), static_cast<u32>(H), hash, p, map,
+                                             static_cast<u64>(parents), static_cast<u64>(size), dst, cs);
+        });
+#endif
+    nb::gil_scoped_release release;
+    for (i64 j = 0; j < size; ++j)
+        if (p[j] < -1 || p[j] >= parents || (p[j] >= 0 && map && (map[p[j]] < -1 || map[p[j]] >= n)))
+            throw std::invalid_argument("mymyr: visited_mask: parent or mapped row is outside the table");
+    rl::visited_mask(tab, cnt, static_cast<u32>(H), hash, p, map, static_cast<u64>(size), dst);
+}
+
+/// The rest of target_visited, with the index type I of target, ref and entity_offsets (x.target is set).
+template<class I>
+void target_visited_as(Imports& in, const Place& pl, rl::TargetRows<I>& x, nb::handle ref, nb::handle entity_offsets,
+                       i64 row_graphs, nb::handle env_rows, const u64* tab, const i32* cnt, u64 n, u32 H, u8* dst)
+{
+    constexpr DType idx = sizeof(I) == 4 ? i32t : i64t;
+    x.ref = in.get<const I>(ref, "ref", {idx}, {static_cast<i64>(x.entities)}, false);
+    std::vector<i64> ext;
+    x.entity_offsets = in.get<const I>(entity_offsets, "entity_offsets", {idx}, {-1}, false, &ext);
+    if (ext[0] < 1 || row_graphs < ext[0])
+        throw nb::value_error("mymyr: 'entity_offsets' and 'row_offsets' need an entry per graph and one more");
+    x.graphs = static_cast<u64>(ext[0] - 1);
+    x.env_rows = in.get<const i32>(env_rows, "env_rows", {i32t}, {static_cast<i64>(x.graphs)}, false);
+#if defined(MYMYR_HAS_CUDA)
+    if (pl.device >= 0)
+        return launch(pl, "target_visited",
+                      [&](cudaStream_t cs) { return cuda::launch_target_visited(x, tab, cnt, n, H, dst, cs); });
+#endif
+    nb::gil_scoped_release release;
+    rl::target_visited(x, tab, cnt, n, H, dst);
+}
+
+template<class I>
+void target_visited_fill(Imports& in, rl::TargetRows<I>& x, const void* target, i64 targets, nb::handle role,
+                         nb::handle live, nb::handle row_offsets, nb::handle row_index, const u64* hash, i64 rows,
+                         nb::handle status)
+{
+    std::vector<i64> ext;
+    x.target = static_cast<const I*>(target);
+    x.targets = static_cast<u64>(targets);
+    x.live = in.get<const i64>(live, "live", {i64t}, {1}, false);
+    x.role = in.get<const u8>(role, "role", {u8t}, {-1}, false, &ext);
+    x.entities = static_cast<u64>(ext[0]);
+    x.action_role = static_cast<u8>(encoding::EntityRole::Action);
+    x.row_offsets = in.get<const i32>(row_offsets, "row_offsets", {i32t}, {-1}, false);
+    x.row_index = in.get<const i32>(row_index, "row_index", {i32t}, {rows}, false);
+    x.succ_hash = hash;
+    x.rows = static_cast<u64>(rows);
+    x.status = in.get<const i32>(status, "status", {i32t}, {1}, false);
+}
+
+void target_visited(ArrayArg target, ArrayArg role, ArrayArg ref, ArrayArg entity_offsets, ArrayArg row_offsets,
+                    ArrayArg succ_hash, ArrayArg table, ArrayArg count, ArrayArg live, ArrayArg row_index,
+                    ArrayArg status, ArrayArg env_rows, ArrayArg out, StreamArg stream)
+{
+    if (target.is_none() || role.is_none() || ref.is_none() || entity_offsets.is_none() || row_offsets.is_none() ||
+        succ_hash.is_none() || table.is_none() || count.is_none() || out.is_none())
+        throw nb::type_error("mymyr: target_visited requires target, role, ref, entity_offsets, row_offsets, "
+                             "succ_hash, table, count and out arrays");
+    const Place pl = place_of(table, stream);
+    Imports in(pl.device, pl.stream, false);
+    std::vector<i64> ext, targets, rows, graphs;
+    const u64* tab = in.get<const u64>(table, "table", {u64t, i64t}, {-1, -1}, false, &ext);
+    const i64 n = ext[0], H = ext[1];
+    if (H < 2 || H > (1 << 20) || (H & (H - 1)))
+        throw nb::value_error("mymyr: visited capacity must be a power of two in [2, 2^20]");
+    const i32* cnt = in.get<const i32>(count, "count", {i32t}, {n}, false);
+    DType index{};
+    const void* tgt = in.get<const void>(target, "target", {i32t, i64t}, {-1}, false, &targets, &index);
+    const u64* hash = in.get<const u64>(succ_hash, "succ_hash", {u64t, i64t}, {-1}, false, &rows);
+    (void)in.get<const i32>(row_offsets, "row_offsets", {i32t}, {-1}, false, &graphs);
+    u8* dst = in.get<u8>(out, "out", {boolt}, {targets[0]}, true);
+    if (index.bits == 32)
+    {
+        rl::TargetRows<i32> x;
+        target_visited_fill(in, x, tgt, targets[0], role, live, row_offsets, row_index, hash, rows[0], status);
+        return target_visited_as(in, pl, x, ref, entity_offsets, graphs[0], env_rows, tab, cnt, static_cast<u64>(n),
+                                 static_cast<u32>(H), dst);
+    }
+    rl::TargetRows<i64> x;
+    target_visited_fill(in, x, tgt, targets[0], role, live, row_offsets, row_index, hash, rows[0], status);
+    target_visited_as(in, pl, x, ref, entity_offsets, graphs[0], env_rows, tab, cnt, static_cast<u64>(n),
+                      static_cast<u32>(H), dst);
 }
 
 rl::LabelRows label_rows(Imports& in, nb::handle parent, nb::handle schema, nb::handle binding)
@@ -296,7 +409,8 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
     {
         std::vector<i64> alead;
         u32 AW = 0;
-        const nb::object shape = nb::getattr(goal_atoms, "shape", nb::none());
+        const nb::object shape = is_tensor_view(goal_atoms) ? nb::borrow(view_item(goal_atoms, k_view_shape))
+                                                            : nb::getattr(goal_atoms, "shape", nb::none());
         const bool per_env = !shape.is_none() && nb::len(shape) == 2;
         b.goal_atoms = per_env ? in.words_nd(goal_atoms, "goal_atoms", {N}, false, alead, AW)
                                : in.words_nd(goal_atoms, "goal_atoms", {}, false, alead, AW);
@@ -316,6 +430,10 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
 void bind_rl_ops(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
+    nb::class_<TensorViewMarker>(m, "TensorViewMarker",
+                                 "The type of TENSOR_VIEW, the first item of a tensor view (mymyr._typing.TensorView)");
+    view_marker() = nb::cast(TensorViewMarker{}).release();
+    m.attr("TENSOR_VIEW") = view_marker();
     m.def("match_first", &match_first, "rows"_a, "task_ids"_a.none(), "templates"_a, "block"_a.none(),
           "found"_a, "binding"_a, "template_id"_a, "count"_a, "status"_a, nb::kw_only(), "first"_a = false,
           "derived"_a = nb::none(), "stream"_a = nb::none(), "pool"_a = nb::none(), "max_steps"_a,
@@ -323,6 +441,22 @@ void bind_rl_ops(nb::module_& parent)
           "The device block is the uploaded packed template bytes. Status bits: 0 truncation, 1 variable limit, "
           "2 invalid instance, 3 search budget exhausted. "
           "max_steps bounds candidate tiles and binding trials per row/template.");
+    m.def("visited_mask", &visited_mask, "table"_a, "count"_a, "succ_hash"_a, "parent"_a, nb::kw_only(),
+          "rows"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
+          "Writes one bool per successor hash into out [M]: whether succ_hash[j] is in the visited table (table [N, H] "
+          "64-bit keys, count [N] int32) of row parent[j], or of rows[parent[j]] when rows is supplied; -1 is padding. "
+          "Host arrays raise ValueError for a parent or mapped row outside the table; on CUDA arrays such an entry reads "
+          "as not visited.");
+    m.def("target_visited", &target_visited, "target"_a, "role"_a, "ref"_a, "entity_offsets"_a, "row_offsets"_a,
+          "succ_hash"_a, "table"_a, "count"_a, nb::kw_only(), "live"_a = nb::none(), "row_index"_a = nb::none(),
+          "status"_a = nb::none(), "env_rows"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
+          "Writes one bool per target into out [T]: whether target t (target [T], int32 or int64 entity indices; those "
+          "past live [1] int64 are false) is an action entity (role [E] uint8) whose successor is in its graph's "
+          "visited table (table [N, H], count [N] int32). Graph g of entity e by entity_offsets [G + 1] (the targets' "
+          "dtype); its expansion rows [row_offsets[g], row_offsets[g + 1]) of succ_hash [M] (row_offsets int32 "
+          "[>= G + 1]); the action's row: position ref[e] (ref [E], the targets' dtype) among them, or the row whose "
+          "row_index [M] int32 is ref[e]; its table row: env_rows[g] (int32 [G], -1 none; None: g). A nonzero status "
+          "[1] int32 (an overflowed expansion) makes every target false. Host or CUDA arrays.");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),
           "stream"_a = nb::none(),
           "Width-1 novelty update in place: reward[i] = popcount(states[i] & ~seen[i]) over the first S "
