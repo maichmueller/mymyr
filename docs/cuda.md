@@ -98,8 +98,9 @@ apptainer exec --containall --bind "$PWD":/src --bind ~/.cache/mymyr-cuda-toolch
 
 `--archs` takes `CMAKE_CUDA_ARCHITECTURES` (SASS for the GPUs you run on: `80-real` for A100, `90-real` for H100,
 `100-real` for B200), `--python` a CPython ABI of the image (`cp314t`, `cp315t`, `cp314`, `cp315`), and
-`--jobs` and `--cuda-jobs` bound the parallel compiles (nvcc needs up to 3 GB per compile, 7 GB for the largest
-kernels); `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
+`--jobs`, `--cuda-jobs` and `--heavy-jobs` bound the parallel compiles (nvcc needs about 1.3 GB per architecture
+of a compile on average, up to 3.5 GB, and up to 4.8 GB for the six units of the largest kernels), and
+`--nvcc-threads` builds that many architectures of a compile at once; `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
 `ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheel/wheelhouse --python <python3.14t> --abis cp314t --archs 80 v<version>`
 from a checkout of the same version on a GPU node: it installs the pinned test requirements (torch 2.14 for CUDA 13.0
 among them) and the wheel into a fresh environment that also sees the interpreter's JAX, checks that the
@@ -117,11 +118,13 @@ ci/local_cuda_wheels.sh --toolchain ~/.cache/mymyr-cuda-toolchain --work /scratc
 ```
 
 It runs podman, docker or apptainer (`--engine`; the first installed by default). `--cpus` and `--memory-gb` are what
-all builds may use together (default: the online cores and the available memory). Each build gets the most build
-jobs whose compiles fit its share of the memory, at 3 GB per nvcc compile and 7 GB for the one compile of the largest
-kernels that runs at a time, and podman and docker limit each container to that share; the ABIs build side by side
-when each still gets 8 jobs or more. `--parallel`, `--jobs` and `--cuda-jobs` set these numbers instead, and
-`--dry-run` prints them with the container commands. The toolchain directory is filled by the first run and reused;
+all builds may use together (default: the online cores and the available memory). Every nvcc compile builds all
+architectures at once, so a build of J jobs uses up to 3 J cores, and each build gets as many jobs as its share of
+the cores allows, with up to three compiles of the largest kernels at a time where its share of the memory has room
+for them (1.25 GB per architecture of a compile, 5 GB for the largest kernels); podman and docker limit each
+container to that share. The ABIs build side by side when each still gets 4 jobs or more. `--parallel`, `--jobs`,
+`--cuda-jobs`, `--heavy-jobs` and `--nvcc-threads` set these numbers instead, and `--dry-run` prints them with the
+container commands. The toolchain directory is filled by the first run and reused;
 the work directory holds a work directory and a log per ABI. Then, from the same checkout on a machine with a GPU,
 
 ```bash

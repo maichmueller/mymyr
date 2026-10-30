@@ -365,49 +365,67 @@ def local_commands(result: subprocess.CompletedProcess) -> tuple[str, list[list[
 def podman(tmp_path: Path, work: str, gb: int) -> list[str]:
     return ["podman", "run", "--rm", "--memory", f"{gb}g", "--volume", f"{ROOT}:/src",
             "--volume", f"{tmp_path / 'toolchain'}:/opt/mymyr-toolchain",
-            "--volume", f"{tmp_path / 'work' / work}:/work", "--volume", f"{tmp_path / 'out'}:/out", IMAGE, "bash", "/src/ci/cuda_wheel.sh", "--work", "/work"]
+            "--volume", f"{tmp_path / 'work' / work}:/work", "--volume", f"{tmp_path / 'out'}:/out", IMAGE,
+            "bash", "/src/ci/cuda_wheel.sh", "--work", "/work"]
 
 
 def test_local_wheels_derive_the_jobs_from_the_memory_and_the_cores(tmp_path: Path) -> None:
     summary, commands = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "120",
                                                     "--engine", "podman"))
 
-    # 7 GB for the largest kernels, 3 per other compile and 2 for the rest: 7 + 3 * 17 + 2 = 60 GB per ABI
-    assert summary == ("== 64 cores and 120 GB: 2 of 2 ABIs at a time, each with --jobs 18 --cuda-jobs 17 in 60 GB;"
-                       " the toolchain with --jobs 39")
+    # 32 cores per ABI: 10 compiles of 3 architectures at once. 60 GB per ABI: 2 GB, one heavy compile of 3 * 5 GB and
+    # 9 others of 3 * 1.25 GB is 50.75 GB; two heavy compiles would leave room for 7 others only
+    assert summary == ("== 64 cores and 120 GB: 2 of 2 ABIs at a time, each with --jobs 10 --cuda-jobs 9"
+                       " --heavy-jobs 1 --nvcc-threads 3 in 60 GB; the toolchain with --jobs 64")
     assert commands == [
-        [*podman(tmp_path, "toolchain", 120), "--stage", "toolchain", "--jobs", "39"],
+        [*podman(tmp_path, "toolchain", 120), "--stage", "toolchain", "--jobs", "64"],
         *([*podman(tmp_path, abi, 60), "--python", abi, "--archs", "86-real;89-real;90-real", "--out", "/out",
-           "--jobs", "18", "--cuda-jobs", "17"] for abi in ["cp314t", "cp315t"]),
+           "--jobs", "10", "--cuda-jobs", "9", "--heavy-jobs", "1", "--nvcc-threads", "3"]
+          for abi in ["cp314t", "cp315t"]),
     ]
 
 
-def test_local_wheels_build_one_abi_at_a_time_when_two_would_get_fewer_than_8_jobs(tmp_path: Path) -> None:
-    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "16", "--memory-gb", "500"))
-    assert "2 of 2 ABIs at a time, each with --jobs 8 --cuda-jobs 7 in 250 GB" in summary
+def test_local_wheels_compile_the_largest_kernels_side_by_side_where_the_memory_allows(tmp_path: Path) -> None:
+    # 85 GB per ABI: 2 + 3 * (2 * 5 + 14 * 1.25) = 84.5 GB with 16 jobs, the cores' limit; three heavy compiles would
+    # leave room for 13 jobs only
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "96", "--memory-gb", "170"))
+    assert ("2 of 2 ABIs at a time, each with --jobs 16 --cuda-jobs 14 --heavy-jobs 2 --nvcc-threads 3 in 85 GB"
+            in summary)
 
-    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "12", "--memory-gb", "500"))
-    assert "1 of 2 ABIs at a time, each with --jobs 12 --cuda-jobs 11 in 500 GB" in summary
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "120", "--nvcc-threads", "1"))
+    assert ("2 of 2 ABIs at a time, each with --jobs 32 --cuda-jobs 29 --heavy-jobs 3 --nvcc-threads 1 in 60 GB"
+            in summary)
+
+
+def test_local_wheels_build_one_abi_at_a_time_when_two_would_get_fewer_than_4_jobs(tmp_path: Path) -> None:
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "24", "--memory-gb", "500"))
+    assert "2 of 2 ABIs at a time, each with --jobs 4 --cuda-jobs 1 --heavy-jobs 3" in summary
+
+    summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "16", "--memory-gb", "500"))
+    assert ("1 of 2 ABIs at a time, each with --jobs 5 --cuda-jobs 2 --heavy-jobs 3 --nvcc-threads 3 in 500 GB"
+            in summary)
 
     summary, _ = local_commands(local_wheels(tmp_path, "--cpus", "64", "--memory-gb", "30"))
-    assert "1 of 2 ABIs at a time, each with --jobs 8 --cuda-jobs 7 in 30 GB" in summary
+    assert "1 of 2 ABIs at a time, each with --jobs 4 --cuda-jobs 3 --heavy-jobs 1 --nvcc-threads 3 in 30 GB" in summary
 
 
 def test_local_wheels_take_the_numbers_they_are_given(tmp_path: Path) -> None:
     summary, commands = local_commands(local_wheels(
         tmp_path, "--cpus", "64", "--memory-gb", "120", "--parallel", "1", "--jobs", "5", "--cuda-jobs", "2",
-        "--python", "cp314", "--archs", "80-real", "--image", "example.org/image:1", "--engine", "docker"))
+        "--heavy-jobs", "2", "--nvcc-threads", "4", "--python", "cp314", "--archs", "80-real",
+        "--image", "example.org/image:1", "--engine", "docker"))
 
-    assert "1 of 1 ABIs at a time, each with --jobs 5 --cuda-jobs 2 in 120 GB" in summary
+    assert ("1 of 1 ABIs at a time, each with --jobs 5 --cuda-jobs 2 --heavy-jobs 2 --nvcc-threads 4 in 120 GB"
+            in summary)
     expected = podman(tmp_path, "cp314", 120)
     expected[0] = "docker"
     expected[expected.index(IMAGE)] = "example.org/image:1"
     assert commands[1] == [*expected, "--python", "cp314", "--archs", "80-real", "--out", "/out", "--jobs", "5",
-                           "--cuda-jobs", "2"]
+                           "--cuda-jobs", "2", "--heavy-jobs", "2", "--nvcc-threads", "4"]
 
 
 def test_local_wheels_with_apptainer_bind_the_same_directories(tmp_path: Path) -> None:
-    _, commands = local_commands(local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "16", "--engine", "apptainer",
+    _, commands = local_commands(local_wheels(tmp_path, "--cpus", "8", "--memory-gb", "32", "--engine", "apptainer",
                                               "--python", "cp315t"))
 
     binds = (f"{ROOT}:/src,{tmp_path / 'toolchain'}:/opt/mymyr-toolchain,{tmp_path / 'work' / 'cp315t'}:/work,"
@@ -417,8 +435,9 @@ def test_local_wheels_with_apptainer_bind_the_same_directories(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(("args", "status", "message"), [
-    (["--memory-gb", "8"], 1, "8 GB per build (8 GB for 1 at a time) is less than the 9 GB that one build needs"),
-    (["--memory-gb", "16", "--parallel", "2"], 1, "8 GB per build (16 GB for 2 at a time) is less than the 9 GB"),
+    (["--memory-gb", "16"], 1, "16 GB per build (16 GB for 1 at a time) is less than the 17 GB that one build needs"),
+    (["--memory-gb", "32", "--parallel", "2"], 1, "16 GB per build (32 GB for 2 at a time) is less than the 17 GB"),
+    (["--heavy-jobs", "0"], 2, "must be positive integers"),
     (["--python", "cp314t py3"], 2, "expected CPython ABIs such as cp314t, got 'py3'"),
     (["--python", " "], 2, "--python names no ABI"),
     (["--jobs", "0"], 2, "must be positive integers"),

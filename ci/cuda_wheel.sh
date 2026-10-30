@@ -15,7 +15,8 @@
 #      suite with no GPU visible, in a process that imports torch before mymyr.
 #
 # usage: ci/cuda_wheel.sh [--python ABI] [--archs LIST] [--out DIR] [--toolchain DIR] [--work DIR] [--jobs N]
-#                         [--cuda-jobs N] [--stage STAGE] [--minutes N | --deadline T]
+#                         [--cuda-jobs N] [--heavy-jobs N] [--nvcc-threads N] [--stage STAGE]
+#                         [--minutes N | --deadline T]
 #   --python     CPython ABI from /opt/python: cp314t (default), cp315t, cp314 or cp315
 #   --archs      CMAKE_CUDA_ARCHITECTURES (default "86-real;89-real;90-real"); N-real is SASS, N-virtual PTX, N both
 #   --out        receives the wheel (default: wheelhouse/ in the source tree)
@@ -24,8 +25,12 @@
 #                (default /tmp/mymyr-cuda-wheel); the build tree takes about 1.2 GB per architecture, the test
 #                environment about 4.5 GB
 #   --jobs       parallel build jobs of the toolchain and the wheel (default: the number of CPUs)
-#   --cuda-jobs  parallel nvcc compiles (default 2), each up to 3 GB of memory; the four largest kernels (up to 7 GB)
-#                compile one at a time, which can make one compile more than N
+#   --cuda-jobs  parallel nvcc compiles (default 2) besides those of the largest kernels; the compiler processes of
+#                one architecture take about 1.3 GB on average, up to 3.5 GB
+#   --heavy-jobs parallel nvcc compiles of the six largest kernels (default 1), up to 4.8 GB per architecture
+#   --nvcc-threads
+#                architectures that one nvcc compile builds at once (default 1: one after another), each with the
+#                memory above
 #   --stage      all (default): steps 1 to 4;
 #                toolchain: step 1 only;
 #                compile: steps 1 and 2, stopping the build cleanly at the time limit if it has not finished by then;
@@ -53,6 +58,8 @@ toolchain=/opt/mymyr-toolchain
 work=/tmp/mymyr-cuda-wheel
 jobs=$(nproc)
 cuda_jobs=2
+heavy_jobs=1
+nvcc_threads=1
 stage=all
 minutes=
 deadline=
@@ -70,6 +77,8 @@ while [ $# -gt 0 ]; do
         --work) work=$2 ;;
         --jobs) jobs=$2 ;;
         --cuda-jobs) cuda_jobs=$2 ;;
+        --heavy-jobs) heavy_jobs=$2 ;;
+        --nvcc-threads) nvcc_threads=$2 ;;
         --stage) stage=$2 ;;
         --minutes) minutes=$2 ;;
         --deadline) deadline=$2 ;;
@@ -92,9 +101,9 @@ if [ ! -x "$python" ]; then
     echo "error: no $python: run this in the manylinux_2_34 image named in pyproject.toml" >&2
     exit 1
 fi
-[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^([1-9][0-9]*)?$ &&
-   "$deadline" =~ ^([1-9][0-9]*)?$ ]] || {
-    echo "error: --jobs, --cuda-jobs, --minutes and --deadline must be positive" >&2
+[[ "$jobs" =~ ^[1-9][0-9]*$ && "$cuda_jobs" =~ ^[1-9][0-9]*$ && "$heavy_jobs" =~ ^[1-9][0-9]*$ &&
+   "$nvcc_threads" =~ ^[1-9][0-9]*$ && "$minutes" =~ ^([1-9][0-9]*)?$ && "$deadline" =~ ^([1-9][0-9]*)?$ ]] || {
+    echo "error: --jobs, --cuda-jobs, --heavy-jobs, --nvcc-threads, --minutes and --deadline must be positive" >&2
     exit 2
 }
 if [ -n "$minutes" ] && [ -n "$deadline" ]; then
@@ -185,6 +194,10 @@ until=()
 if [ -n "$deadline" ]; then
     until=("$python" -I "$repo/ci/run_until.py" "$deadline" --)
 fi
+cuda_flags=()
+if [ "$nvcc_threads" -gt 1 ]; then
+    cuda_flags=(-C cmake.define.CMAKE_CUDA_FLAGS="--threads=$nvcc_threads")
+fi
 status=0
 ${until[@]+"${until[@]}"} "$build_venv/bin/python" -m pip wheel -v --no-deps --no-build-isolation -w "$work/dist" \
     -C build-dir="$work/build/{wheel_tag}" \
@@ -193,8 +206,9 @@ ${until[@]+"${until[@]}"} "$build_venv/bin/python" -m pip wheel -v --no-deps --n
     -C cmake.define.MYMYR_CUDA=ON \
     -C cmake.define.CMAKE_CUDA_COMPILER="$nvcc" \
     -C cmake.define.CMAKE_CUDA_ARCHITECTURES="$archs" \
-    -C cmake.define.CMAKE_JOB_POOLS="cuda_compile=$cuda_jobs;cuda_compile_heavy=1" \
+    -C cmake.define.CMAKE_JOB_POOLS="cuda_compile=$cuda_jobs;cuda_compile_heavy=$heavy_jobs" \
     -C cmake.define.MYMYR_XLA_FFI_INCLUDE="$xla_include" \
+    ${cuda_flags[@]+"${cuda_flags[@]}"} \
     "$src" || status=$?
 if [ $status -eq 75 ]; then
     if [ "$stage" = compile ] || [ "$stage" = resume ]; then
