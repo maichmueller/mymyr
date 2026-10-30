@@ -107,8 +107,10 @@ case "$engine" in
     *) echo "error: --engine takes podman, docker or apptainer, not '$engine'" >&2; exit 2 ;;
 esac
 if [ -z "$image" ]; then
-    image=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["tool"]["cibuildwheel"]["linux"]["manylinux-x86_64-image"])' \
+    # sed rather than tomllib: the host's python3 may predate 3.11
+    image=$(sed -n '/^\[tool\.cibuildwheel\.linux\]$/,/^\[/s/^manylinux-x86_64-image *= *"\(.*\)"$/\1/p' \
         "$repo/pyproject.toml")
+    [ -n "$image" ] || { echo "error: no manylinux-x86_64-image in $repo/pyproject.toml; pass --image" >&2; exit 1; }
 fi
 if [ "$engine" = apptainer ] && [[ "$image" != *.sif ]]; then
     image=docker://$image
