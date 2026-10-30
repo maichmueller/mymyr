@@ -516,7 +516,7 @@ class BatchedEnv:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
         outputs); returns the step's ``obs``, ``final_obs``, ``actions`` and ``action_visited``."""
         before = self._before_step(final)
-        _ops.step_out(*tuple(out)[:8], *self._step_args(action, next_task_ids, final, out.revisited))
+        _ops.step_impl(*self._step_args(action, next_task_ids, final, out.revisited), out=tuple(out)[:8])
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
         out.count.copy_(self.count)

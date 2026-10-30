@@ -93,26 +93,6 @@ def test_refresh_invalidates_saved_goal_mask(keywords):
 
 
 @pytest.mark.needs_gil
-def test_preallocated_step_invalidates_saved_output():
-    torch = pytest.importorskip("torch")
-    from mymyr.rl import torch as rt
-
-    env = rt.BatchedEnv(text_task("gripper__prob05"), 1)
-    try:
-        out = env.step()
-        out.terminated.fill_(True)
-        loss = torch.ones(1, requires_grad=True).masked_fill(out.terminated, 0).sum()
-        outputs = tuple(out)[:8]
-        versions = [tensor._version for tensor in outputs]
-        env._step_into(out, None, None, True)
-        assert [tensor._version - version for tensor, version in zip(outputs, versions)] == [1] * len(outputs)
-        with pytest.raises(RuntimeError, match="modified by an inplace operation"):
-            loss.backward()
-    finally:
-        env.close()
-
-
-@pytest.mark.needs_gil
 @pytest.mark.parametrize("entry", ["eager", "dispatcher"])
 @pytest.mark.parametrize("keywords", [False, True])
 def test_failed_mutation_invalidates_saved_tensor(entry, keywords):

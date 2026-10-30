@@ -717,63 +717,6 @@ def _(
     return _step_outputs(lookup(env).label_width, states, final)
 
 
-@_op(
-    "mymyr::step_out",
-    mutates_args=(
-        "reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "final_states",
-        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg",
-        "visited", "visited_count", "visited_status", "revisited",
-    ),
-    tags=_unsafe,
-)
-def step_out(
-    reward: Tensor,
-    terminated: Tensor,
-    truncated: Tensor,
-    goal: Tensor,
-    invalid: Tensor,
-    schema: Tensor,
-    binding: Tensor,
-    final_states: Tensor,
-    env: int,
-    states: Tensor,
-    task_ids: Optional[Tensor],
-    steps: Tensor,
-    draws: Tensor,
-    counts: Tensor,
-    views: Tensor,
-    count: Tensor,
-    at_goal: Optional[Tensor],
-    goal_pos: Optional[Tensor],
-    goal_neg: Optional[Tensor],
-    action: Optional[Tensor],
-    next_task_ids: Optional[Tensor],
-    first_env: int,
-    final: bool,
-    action_schema: Optional[Tensor] = None,
-    action_binding: Optional[Tensor] = None,
-    visited: Optional[Tensor] = None,
-    visited_count: Optional[Tensor] = None,
-    visited_status: Optional[Tensor] = None,
-    revisited: Optional[Tensor] = None,
-) -> None:
-    """One step into eight preallocated output tensors with the shapes and dtypes of :func:`step`.
-
-    The general environment path can synchronize, so compiled calls are tagged ``cudagraph_unsafe``.
-    Eager calls on the fast device path can be captured into a CUDA graph.
-    """
-    step_impl(
-        env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited,
-        out=(reward, terminated, truncated, goal, invalid, schema, binding, final_states),
-    )  # fmt: skip
-
-
-@step_out.register_fake
-def _(*args, **kwargs):
-    return None
-
-
 @_op("mymyr::random_actions", mutates_args=())
 def random_actions(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: Optional[int]) -> Tensor:
     """``mymyr::random_actions``: the random policy's next choices [N] int64 at the draw counters (no step);
