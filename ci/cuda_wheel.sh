@@ -23,7 +23,7 @@
 #   --work       the source copy, build tree, test environment, caches and temporary files
 #                (default /tmp/mymyr-cuda-wheel); the build tree takes about 1.2 GB per architecture, the test
 #                environment about 4.5 GB
-#   --jobs       parallel build jobs (default: the number of CPUs)
+#   --jobs       parallel build jobs of the toolchain and the wheel (default: the number of CPUs)
 #   --cuda-jobs  parallel nvcc compiles (default 2), each up to 3 GB of memory; the four largest kernels (up to 7 GB)
 #                compile one at a time, which can make one compile more than N
 #   --stage      all (default): steps 1 to 4;
@@ -127,6 +127,8 @@ work=$(cd "$work" && pwd)
 # everything the build writes stays under --work: the container's own file system may be small
 export TMPDIR=$work/tmp PIP_CACHE_DIR=$work/cache/pip XDG_CACHE_HOME=$work/cache
 export PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
+# the dependency superbuild and the wheel build both take --jobs (CMake builds and Ninja default to all CPUs)
+export CMAKE_BUILD_PARALLEL_LEVEL=$jobs
 mkdir -p "$TMPDIR"
 start=$SECONDS
 step() {
@@ -178,7 +180,6 @@ version=$("$python" -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv
 
 step "build mymyr $version for $python_abi, CUDA architectures $archs"
 rm -rf "$work/dist" "$work/build-status"
-export CMAKE_BUILD_PARALLEL_LEVEL=$jobs
 # Ninja stops cleanly at the time limit (ci/run_until.py), and a resume or finish stage resumes it
 until=()
 if [ -n "$deadline" ]; then
