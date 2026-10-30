@@ -110,11 +110,12 @@ set_target_properties(mymyr_cuda PROPERTIES
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static
     POSITION_INDEPENDENT_CODE ON)
-# Device translation units need up to 3 GB in nvcc's front end and ptxas, and four kernels (conditional effects over
-# 16 or more object-bitset words) up to 7 GB. With Ninja, -DCMAKE_JOB_POOLS=cuda_compile=<n> runs at most n of the
-# library's compiles at a time while the rest of the build keeps its parallelism; cuda_compile_heavy=<m> additionally
-# bounds the compiles of the four largest kernels (the units of mymyr_cuda_lifted_heavy), which otherwise share
-# cuda_compile.
+# Device translation units need up to about 3.5 GB per architecture in nvcc's front end and ptxas (1.3 GB on
+# average), and the six units of the largest kernels (conditional effects over 16 or more object-bitset words) up to
+# about 4.8 GB; nvcc --threads=<t> builds t architectures of a unit at once, with their memory added up. With Ninja,
+# -DCMAKE_JOB_POOLS=cuda_compile=<n> runs at most n of the library's compiles at a time while the rest of the build
+# keeps its parallelism; cuda_compile_heavy=<m> additionally bounds the compiles of the largest kernels (the units of
+# mymyr_cuda_lifted_heavy), which otherwise share cuda_compile.
 if(CMAKE_JOB_POOLS MATCHES "(^|;)cuda_compile=[0-9]+")
     set_target_properties(mymyr_cuda mymyr_cuda_lifted_units PROPERTIES JOB_POOL_COMPILE cuda_compile)
     set_target_properties(mymyr_cuda_lifted_heavy PROPERTIES JOB_POOL_COMPILE cuda_compile)

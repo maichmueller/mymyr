@@ -20,7 +20,7 @@ wheels (v0.1.0 has CPU wheels only), with the local version `<version>+cu13`, e.
   toolkit is needed;
 - the XLA FFI targets of `mymyr.rl.jax` and `mymyr.encoding.jax`; JAX and torch are installed separately. The wheels
   are tested with torch 2.14 for CUDA 13.0 loaded first in the same process;
-- about 1.3 GB per wheel: the device code of the three architectures is in the extension and again in the C++ SDK's
+- about 1.7 GB per wheel: the device code of the three architectures is in the extension and again in the C++ SDK's
   static library.
 
 PyPI has no `+cu13` files: ask for the version and add the release's assets as a source of packages, with
@@ -69,12 +69,15 @@ into a toolchain directory that later builds reuse, builds the wheel with the ve
 requirements, repairs it with auditwheel, checks that it needs only glibc and holds exactly the requested GPU code, and
 runs the CPU test suite on it with torch loaded first. It needs network access; its work directory takes about 1.2 GB
 per architecture for the build tree, which it removes before the test environment (about 4.5 GB) is installed, and the
-toolchain directory about 1.7 GB. One architecture compiled in 50 minutes with 8 build jobs and 4 parallel nvcc
-compiles. Nearly all of that time is per architecture (cicc and ptxas; the front end that the architectures share is a
-few percent), so the three architectures of the release wheels take three times as long. `--stage compile --minutes N`
-stops the build cleanly N minutes after the script started (`--deadline T` at the Unix time T instead), `--stage resume` on the same work directory and toolchain
-resumes it and stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
-the release workflow splits each wheel across up to three jobs this way.
+toolchain directory about 1.7 GB. Nearly all of the compile time is per architecture (cicc and ptxas; the front end
+that the architectures share is a few percent). With 18 build jobs, the architectures of each nvcc compile one after
+another and one compile of the largest kernels at a time, the three architectures of the release wheels compiled in
+84 minutes: the six compiles of the largest kernels ran one after another for 78 of them, alone for about the last
+20. `--nvcc-threads` builds the architectures of a compile at once and `--heavy-jobs` runs several compiles of the
+largest kernels side by side. `--stage compile --minutes N` stops the build cleanly N minutes after the script started
+(`--deadline T` at the Unix time T instead), `--stage resume` on the same work directory and toolchain resumes it and
+stops it the same way, and `--stage finish` resumes it to its end and then packages and tests the wheel;
+the CUDA wheel workflow splits each wheel across up to three jobs this way.
 
 From the repository root, with podman (`docker run` takes the same arguments):
 
@@ -98,12 +101,44 @@ apptainer exec --containall --bind "$PWD":/src --bind ~/.cache/mymyr-cuda-toolch
 
 `--archs` takes `CMAKE_CUDA_ARCHITECTURES` (SASS for the GPUs you run on: `80-real` for A100, `90-real` for H100,
 `100-real` for B200), `--python` a CPython ABI of the image (`cp314t`, `cp315t`, `cp314`, `cp315`), and
-`--jobs` and `--cuda-jobs` bound the parallel compiles (nvcc needs up to 3 GB per compile, 7 GB for the largest
-kernels); `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
+`--jobs`, `--cuda-jobs` and `--heavy-jobs` bound the parallel compiles (nvcc needs about 1.3 GB per architecture
+of a compile on average, up to 3.5 GB, and up to 4.8 GB for the six units of the largest kernels), and
+`--nvcc-threads` builds that many architectures of a compile at once; `ci/cuda_wheel.sh --help` lists the options. The wheel lands in `--out`. To test it on the GPU, run
 `ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheel/wheelhouse --python <python3.14t> --abis cp314t --archs 80 v<version>`
 from a checkout of the same version on a GPU node: it installs the pinned test requirements (torch 2.14 for CUDA 13.0
 among them) and the wheel into a fresh environment that also sees the interpreter's JAX, checks that the
 environment's mymyr is the wheel's and exchanges arrays with torch on GPU 0, and runs the CUDA tests on GPU 0.
+
+### The CUDA wheels of a release
+
+A release gets its CUDA wheels from one large Linux host. From a checkout of the tag, `ci/local_cuda_wheels.sh`
+builds the wheels of every ABI (`--python`, default `cp314t cp315t`) for the release's architectures (`--archs`,
+default `86-real;89-real;90-real`) with `ci/cuda_wheel.sh` in the same image, each ABI in a container of its own:
+
+```bash
+ci/local_cuda_wheels.sh --toolchain ~/.cache/mymyr-cuda-toolchain --work /scratch/mymyr-cuda-wheels \
+    --out /scratch/mymyr-cuda-wheels/wheelhouse --cpus 64 --memory-gb 120
+```
+
+It runs podman, docker or apptainer (`--engine`; the first installed by default). `--cpus` and `--memory-gb` are what
+all builds may use together (default: the online cores and the available memory). Every nvcc compile builds all
+architectures at once, so a build of J jobs uses up to 3 J cores, and each build gets as many jobs as its share of
+the cores allows, with up to three compiles of the largest kernels at a time where its share of the memory has room
+for them (1.25 GB per architecture of a compile, 5 GB for the largest kernels); podman and docker limit each
+container to that share. The ABIs build side by side when each still gets 4 jobs or more. `--parallel`, `--jobs`,
+`--cuda-jobs`, `--heavy-jobs` and `--nvcc-threads` set these numbers instead, and `--dry-run` prints them with the
+container commands. The toolchain directory is filled by the first run and reused;
+the work directory holds a work directory and a log per ABI. Then, from the same checkout on a machine with a GPU,
+
+```bash
+ci/attach_cuda_wheels.sh --dry-run --dir /scratch/mymyr-cuda-wheels/wheelhouse \
+    --python <python3.14t> --python <python3.15t> v<version>
+```
+
+tests every wheel on GPU 0, and the same command without `--dry-run` attaches them to the GitHub Release of the tag.
+Without such a host, a manual run of the CUDA wheel workflow (`cuda-wheels.yml`, with the tag as its input) builds
+the same wheels on GitHub's runners in a chain of jobs of about 12 hours per wheel, and
+`ci/attach_cuda_wheels.sh --run <run id>` takes them from the run's artifacts.
 
 ## Driver
 

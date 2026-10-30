@@ -39,7 +39,8 @@ uv pip install --python .venv/bin/python "mymyr==<version>+cu13" \
 See [Installing a CUDA wheel](docs/cuda.md#installing-a-cuda-wheel) for other GPUs and source builds.
 
 Pushing a `v*` tag that matches the package version publishes to TestPyPI and PyPI; a manual release workflow run is
-a TestPyPI rehearsal with a unique `.devN` version. The tag also builds the CUDA wheels as workflow artifacts;
+a TestPyPI rehearsal with a unique `.devN` version. The CUDA wheels of a release are built on a large Linux host
+with `ci/local_cuda_wheels.sh` (a manual run of the CUDA wheel workflow builds them where there is none), and
 `ci/attach_cuda_wheels.sh` tests them on a GPU and attaches them to the GitHub Release.
 
 ## Try it
