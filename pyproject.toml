@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "mymyr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Data-oriented, lifted-first classical planning core with free-threaded Python bindings"
 readme = "README.md"
 license = "GPL-3.0-or-later"
