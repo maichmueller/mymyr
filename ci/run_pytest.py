@@ -11,9 +11,11 @@ The floors are measured with the full test data. The tests that need torch, JAX,
 without them, so the floor depends on what the job installs:
   --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.15t job, the macOS job, the wheel tests;
   --runtimes rl    ci/rl-requirements.txt installed (pytest_min_passed_rl): the Linux 3.14t job.
-Seven tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
-with RLIMIT_AS and read /proc (4 + 1 cases), and two in test_block_cache.py that read the resident set from /proc. The
-floor on macOS is lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
+Sixteen tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
+with RLIMIT_AS and read /proc (4 + 1 cases), two in test_block_cache.py that read the resident set from /proc, and in
+test_ci_scripts.py five that drive ci/build_state.sh, which needs GNU tar, coreutils and findutils, and four
+(3 + 1 cases) that run ci/run_until.py, which finds the build's Ninja processes through /proc. The floor on macOS is
+lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
 On GIL builds, the floor is lower by pytest_free_threaded_only_tests, which need a free-threaded interpreter.
 
 --import-first imports a module before pytest collects anything, and so before mymyr: the CUDA wheels are tested in

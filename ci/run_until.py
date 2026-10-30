@@ -13,7 +13,11 @@ COMMAND starts with SIGINT at its default action even when this script runs with
 of a non-interactive shell does: an ignored signal stays ignored across exec, so Ninja would ignore the interrupt, and
 a shell cannot trap a signal that was ignored when it started.
 
-Exit status: COMMAND's (0 if it succeeded) when no Ninja had to be interrupted; 75 when the build was stopped.
+The descendants are found through /proc, so the script runs on Linux only, as the CUDA wheel build that uses it
+does; elsewhere it refuses before starting COMMAND. Should the script itself fail, it still waits for COMMAND.
+
+Exit status: COMMAND's (0 if it succeeded) when no Ninja had to be interrupted; 75 when the build was stopped; 2 for
+a wrong command line or a system without /proc.
 """
 
 import os
@@ -24,11 +28,12 @@ import time
 
 STOPPED = 75
 RESEND_SECONDS = 10.0
+PROC = "/proc"
 
 
 def process_name(pid: int) -> str | None:
     try:
-        with open(f"/proc/{pid}/comm") as stream:
+        with open(f"{PROC}/{pid}/comm") as stream:
             return stream.read().strip()
     except OSError:
         return None
@@ -36,11 +41,11 @@ def process_name(pid: int) -> str | None:
 
 def descendants(root: int) -> list[int]:
     children: dict[int, list[int]] = {}
-    for entry in os.listdir("/proc"):
+    for entry in os.listdir(PROC):
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/stat") as stream:
+            with open(f"{PROC}/{entry}/stat") as stream:
                 stat = stream.read()
         except OSError:
             continue
@@ -59,6 +64,10 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     deadline = float(argv[1])
+    if not os.path.isdir(f"{PROC}/self"):
+        print(f"run_until: finds the build's Ninja processes through {PROC}, which this system does not have",
+              file=sys.stderr)
+        return 2
     previous = signal.signal(signal.SIGINT, signal.SIG_DFL)  # inherited by COMMAND, whatever this process ignores
     try:
         process = subprocess.Popen(argv[3:])
@@ -66,21 +75,22 @@ def main(argv: list[str]) -> int:
         signal.signal(signal.SIGINT, previous)
     stopping = False
     interrupted: set[int] = set()
-    while True:
-        try:
-            status = process.wait(timeout=RESEND_SECONDS if stopping else max(0.0, deadline - time.time()))
-            break
-        except subprocess.TimeoutExpired:
-            if not stopping:
-                print("run_until: stopping the build at the deadline", file=sys.stderr, flush=True)
-            stopping = True
-            for pid in descendants(process.pid):
-                if process_name(pid) == "ninja":
-                    try:
-                        os.kill(pid, signal.SIGINT)
-                        interrupted.add(pid)
-                    except ProcessLookupError:
-                        pass
+    with process:  # waits for COMMAND also when this loop raises
+        while True:
+            try:
+                status = process.wait(timeout=RESEND_SECONDS if stopping else max(0.0, deadline - time.time()))
+                break
+            except subprocess.TimeoutExpired:
+                if not stopping:
+                    print("run_until: stopping the build at the deadline", file=sys.stderr, flush=True)
+                stopping = True
+                for pid in descendants(process.pid):
+                    if process_name(pid) == "ninja":
+                        try:
+                            os.kill(pid, signal.SIGINT)
+                            interrupted.add(pid)
+                        except ProcessLookupError:
+                            pass
     while any(process_name(pid) == "ninja" for pid in interrupted):
         time.sleep(0.5)
     if interrupted:

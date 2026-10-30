@@ -96,7 +96,15 @@ if [ -z "$wheel_dir" ]; then
     (cd "$repo" && gh run download "$run_id" --pattern 'cuda-wheel-*' --dir "$work/download")
     wheel_dir=$work/download
 fi
-mapfile -t wheels < <(find "$wheel_dir" -name 'mymyr-*.whl' | sort)
+wheels=()
+while IFS= read -r wheel; do
+    wheels+=("$wheel")
+done < <(find "$wheel_dir" -name 'mymyr-*.whl' | sort)
+# stops here without wheels: under set -u, bash before 4.4 (that of macOS is 3.2) refuses to expand an empty array
+if [ ${#wheels[@]} -eq 0 ]; then
+    echo "error: no mymyr-*.whl in $wheel_dir; nothing tested or attached" >&2
+    exit 1
+fi
 
 # one wheel per expected ABI, each with the release's version and platform tag, and no others
 status=0
