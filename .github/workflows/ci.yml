@@ -98,7 +98,8 @@ jobs:
           cmake --install build/cpu --prefix build/prefix
           ci/check_cmake_consumer.sh build/prefix/lib/cmake/mymyr build/consumer
 
-  # The Python suite against the installed package.
+  # The Python suite against the installed package, on the free-threaded interpreters and on a GIL-enabled one.
+  # runtimes: the RL frameworks the job installs and builds against (ci/run_pytest.py --runtimes).
   python:
     name: Linux GCC 16, Python ${{ matrix.python }}
     needs: deps
@@ -109,7 +110,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.14t", "3.15t"]
+        include:
+          - python: "3.14"
+            runtimes: none
+          - python: "3.14t"
+            runtimes: rl
+          - python: "3.15t"
+            runtimes: none
     steps:
       - name: Install build tools
         run: |
@@ -132,19 +139,23 @@ jobs:
           uv python install ${{ matrix.python }}
           uv venv --python ${{ matrix.python }} .venv
           .venv/bin/python -VV
-          .venv/bin/python -c "import sys; assert not sys._is_gil_enabled(), 'not a free-threaded build'"
+          if [[ "${{ matrix.python }}" == *t ]]; then
+            .venv/bin/python -c "import sys; assert not sys._is_gil_enabled(), 'not a free-threaded build'"
+          else
+            .venv/bin/python -c "import sys, sysconfig; assert not sysconfig.get_config_var('Py_GIL_DISABLED') and sys._is_gil_enabled(), 'not a GIL-enabled build'"
+          fi
       - name: Build and install the package
-        if: matrix.python != '3.14t'
+        if: matrix.runtimes == 'none'
         # $GITHUB_WORKSPACE, not the github.workspace expression: in a container job the expression gives the
         # host path, which only action inputs (the cache paths above) translate into the container
         run: |
           CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release" \
             uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
       - name: Install the tested RL runtimes
-        if: matrix.python == '3.14t'
+        if: matrix.runtimes == 'rl'
         run: uv pip install --python .venv/bin/python -r ci/rl-requirements.txt
       - name: Build with RL framework support
-        if: matrix.python == '3.14t'
+        if: matrix.runtimes == 'rl'
         run: |
           xla_include="$(.venv/bin/python -c 'import pathlib, jaxlib; print(pathlib.Path(jaxlib.__file__).parent / "include")')"
           CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release -DMYMYR_XLA_FFI_INCLUDE=$xla_include" \
@@ -152,11 +163,19 @@ jobs:
           .venv/bin/python -c "import torch, torchrl, tensordict, jax, flashbax, mctx, gymnasium; from mymyr._core import _rl_jax; assert _rl_jax.has_ffi(), 'RL runtime coverage requires XLA FFI'"
       - name: Check for warnings
         run: ci/check_no_warnings.sh build.log
+      # On a GIL-enabled interpreter nanobind prints its report of the objects leaked at exit to stderr.
+      - name: Check that importing the package writes nothing to stderr
+        run: |
+          if ! out="$(.venv/bin/python -c "import mymyr; import mymyr._core._rl_ops" 2>&1 >/dev/null)" || [[ -n "$out" ]]; then
+            printf '%s\n' "$out"
+            echo "::error::importing mymyr wrote to stderr (on a GIL-enabled interpreter: nanobind's report of the objects leaked at exit)"
+            exit 1
+          fi
       - name: Test
         env:
           CUDA_VISIBLE_DEVICES: ""
           JAX_PLATFORMS: cpu
-        run: .venv/bin/python ci/run_pytest.py --runtimes ${{ matrix.python == '3.14t' && 'rl' || 'none' }} -W error -q -rs -p no:cacheprovider tests/python tests/parity/python
+        run: .venv/bin/python ci/run_pytest.py --runtimes ${{ matrix.runtimes }} -W error -q -rs -p no:cacheprovider tests/python tests/parity/python
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
