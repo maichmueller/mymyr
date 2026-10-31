@@ -487,24 +487,14 @@ def test_brfs_window_reaching_max_states_ends_the_search(tmp_path):
         small.synchronize()
 
 
-def compute_sanitizer_attached() -> bool:
-    """Whether compute-sanitizer (or another CUDA injection tool) instruments this process: its injection libraries
-    are named in the environment or mapped into the process once CUDA is initialized."""
-    names = os.environ.get("LD_PRELOAD", "")
-    try:
-        with open("/proc/self/maps") as maps:
-            names += maps.read()
-    except OSError:
-        pass
-    return bool(os.environ.get("CUDA_INJECTION64_PATH")) or "libsanitizer" in names or "TreeLauncher" in names
+# What a refusal of the arenas during a state's successor windows says of the windows that ran before it.
+WINDOW_PROGRESS = re.compile(r", after (\d+) windows of the first (\d+) of a state's (\d+) successors \(the last of (\d+)\): ")
 
 
 def test_brfs_refuses_windows_held_to_a_few_spare_rows(tmp_path):
     """symfan(300) without drop just below the memory it needs: the fan's windows shrink to the arenas' few spare rows,
-    which cannot grow; the search refuses at once instead of going a few successors per window (under 3 s each, a
-    bound that holds only without compute-sanitizer)."""
-    import time
-
+    which cannot grow; the search refuses at the first window held below 64 rows instead of going a few successors per
+    window. The refusal names the windows that ran: the last of them held 64 successors or more."""
     from conftest import symfan_task
 
     task = symfan_task(tmp_path, 300, drop=False)
@@ -512,14 +502,16 @@ def test_brfs_refuses_windows_held_to_a_few_spare_rows(tmp_path):
     window_refusals = 0
     for kib in (5580, 5730, 5890):
         small = mc.Context(0, max_bytes=kib << 10)
-        t = time.perf_counter()
         try:
             brfs_matches(mc.brfs(task, ctx=small, stop_at_goal=False, fingerprint=True), cpu)
         except ValueError as e:
             assert re.match(SIZED_BRFS_REFUSAL, str(e)), str(e)
             window_refusals += "with a successor window's buffers" in str(e)
-            elapsed = time.perf_counter() - t
-            assert elapsed < 3.0 or compute_sanitizer_attached(), f"refused after {elapsed:.1f} s"
+            progress = WINDOW_PROGRESS.search(str(e))
+            assert progress, str(e)
+            windows, first, successors, last = map(int, progress.groups())
+            assert successors == 300 * 300 and 0 < windows and first < successors, str(e)
+            assert last >= 64, str(e)
         small.synchronize()
     assert window_refusals >= 1
 
