@@ -9,7 +9,8 @@ directory can finish green with most of the suite skipped. This wrapper turns th
 
 The floors are measured with the full test data. The tests that need torch, JAX, gymnasium and their RL libraries skip
 without them, so the floor depends on what the job installs:
-  --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.15t job, the macOS job, the wheel tests;
+  --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.14 and 3.15t jobs, the macOS job,
+                   the wheel tests;
   --runtimes rl    ci/rl-requirements.txt installed (pytest_min_passed_rl): the Linux 3.14t job.
 Sixteen tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
 with RLIMIT_AS and read /proc (4 + 1 cases), two in test_block_cache.py that read the resident set from /proc, and in
