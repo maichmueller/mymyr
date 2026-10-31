@@ -5,7 +5,8 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <atomic>
-#include <chrono>
+#include <ctime>
+#include <limits>
 #include <sstream>
 #include <thread>
 
@@ -40,9 +41,30 @@ TaskPtr linked(u32 n, bool fluent_links, TaskOptions::Atoms mode)
     return Task::create(formalism::read_task_text(text), options);
 }
 
-f64 seconds_since(std::chrono::steady_clock::time_point start)
+// The processor time of this process since `start`, in seconds: other processes that share its cores do not add to it.
+f64 cpu_seconds_since(std::clock_t start)
 {
-    return std::chrono::duration<f64>(std::chrono::steady_clock::now() - start).count();
+    return static_cast<f64>(std::clock() - start) / CLOCKS_PER_SEC;
+}
+
+// Mapping tasks of 8 times the facts takes 8 times as long when each fact is looked up once, and 64 times as long when
+// each source fact is compared with every target fact. The bound lies between the two, a factor of about 3 from
+// either; a sanitizer slows both sizes alike, and processor time leaves out what other processes take.
+constexpr u32 k_small_objects = 128, k_large_objects = 1024;  // linked(): 12,800 and 102,400 facts
+constexpr f64 k_linear_ratio_bound = 24;
+
+// The processor seconds of the fastest of three runs of work(n) for n = k_small_objects and k_large_objects, the sizes
+// alternating.
+template<class Work>
+std::array<f64, 2> fastest_runs(Work work)
+{
+    std::array<f64, 2> best{std::numeric_limits<f64>::infinity(), std::numeric_limits<f64>::infinity()};
+    for (u32 run = 0; run < 3; ++run)
+    {
+        best[0] = std::min(best[0], work(k_small_objects));
+        best[1] = std::min(best[1], work(k_large_objects));
+    }
+    return best;
 }
 
 TEST(SlotMap, StaticFactsBecomeConstantFluentBits)
@@ -184,23 +206,29 @@ TEST(SlotMap, SnapshotsAndFingerprintsWaitForConcurrentPublication)
 
 TEST(SlotMap, ManyStaticFactsMapInLinearTime)
 {
-    // 150,000 static facts: comparing every source fact with every target fact takes several seconds.
-    const auto source = linked(1500, false, TaskOptions::Atoms::Dense), target = linked(1500, false, TaskOptions::Atoms::Dense);
-    auto start = std::chrono::steady_clock::now();
-    const auto map = SlotMap::between(*source, *target);
-    EXPECT_EQ(map->translate(source->initial_state()), target->initial_state());
-    const auto lazy = linked(1500, false, TaskOptions::Atoms::Lazy);
-    const auto twin = lazy->frozen(TaskOptions::Atoms::Dense);
-    EXPECT_EQ(lazy->slot_map_to(*twin)->translate(lazy->initial_state()), twin->initial_state());
-    EXPECT_LT(seconds_since(start), 3.0);
+    // Static facts in both tasks, through a name-based map and through the map of a lazy task to its frozen twin.
+    const auto statics = fastest_runs([](u32 n) {
+        const auto source = linked(n, false, TaskOptions::Atoms::Dense), target = linked(n, false, TaskOptions::Atoms::Dense);
+        const auto lazy = linked(n, false, TaskOptions::Atoms::Lazy);
+        const std::clock_t start = std::clock();
+        const auto map = SlotMap::between(*source, *target);
+        EXPECT_EQ(map->translate(source->initial_state()), target->initial_state());
+        const auto twin = lazy->frozen(TaskOptions::Atoms::Dense);
+        EXPECT_EQ(lazy->slot_map_to(*twin)->translate(lazy->initial_state()), twin->initial_state());
+        return cpu_seconds_since(start);
+    });
+    EXPECT_LT(statics[1], k_linear_ratio_bound * statics[0]) << "static facts: " << statics[0] << " s, then " << statics[1] << " s";
 
-    // Every source fluent link is checked against the target's static links.
-    const auto fluent = linked(400, true, TaskOptions::Atoms::Dense), statics = linked(400, false, TaskOptions::Atoms::Dense);
-    start = std::chrono::steady_clock::now();
-    const auto checked = SlotMap::between(*fluent, *statics);
-    const State state = checked->translate(fluent->initial_state());
-    EXPECT_LT(seconds_since(start), 3.0);
-    EXPECT_EQ(state, statics->initial_state());
+    // Every source fluent link is checked against the target's static links. Reachable slots are the initial links, so
+    // that the source's slots grow with its facts (dense slots grow with the square of the objects).
+    const auto checked = fastest_runs([](u32 n) {
+        const auto fluent = linked(n, true, TaskOptions::Atoms::Reachable), target = linked(n, false, TaskOptions::Atoms::Dense);
+        const std::clock_t start = std::clock();
+        const auto map = SlotMap::between(*fluent, *target);
+        EXPECT_EQ(map->translate(fluent->initial_state()), target->initial_state());
+        return cpu_seconds_since(start);
+    });
+    EXPECT_LT(checked[1], k_linear_ratio_bound * checked[0]) << "checked fluents: " << checked[0] << " s, then " << checked[1] << " s";
 }
 
 TEST(SlotMap, LazyTargetsInternOnlyTranslatedAtoms)

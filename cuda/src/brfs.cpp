@@ -557,6 +557,16 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                                        nodes->reserve(total - count, total);
                                    });
         }
+        // the state's first f successors, the windows that took them and the rows of the last one (the refusals of the
+        // arenas name them)
+        u64 f = 0, windows = 0, last_rows = 0;
+        auto progress = [&]
+        {
+            if (windows == 0)
+                return ", before the first window of a state's " + std::to_string(M) + " successors";
+            return ", after " + std::to_string(windows) + " windows of the first " + std::to_string(f) + " of a state's " +
+                   std::to_string(M) + " successors (the last of " + std::to_string(last_rows) + ")";
+        };
         // a window of one successor that does not fit: the arenas' growth when they have no room for it (they hold the
         // stored states twice while they grow), otherwise the successor's own buffers (`failed`: their allocation
         // failed although the bytes are free: the pool holds them in smaller pieces)
@@ -566,13 +576,14 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             if (states->growth_bytes(1, count + 1) + nodes->growth_bytes(1, count + 1) != 0)
                 refuse_memory(*ctx, "device BrFS",
                               "the arenas of more than " + std::to_string(count) + " states with a successor's buffers (" +
-                                  std::to_string(bytes) + (failed ? " bytes, which the pool could not allocate in its free pieces)" : " bytes)"),
+                                  std::to_string(bytes) + (failed ? " bytes, which the pool could not allocate in its free pieces)" : " bytes)") +
+                                  progress(),
                               held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
             refuse_successors(*ctx, "device BrFS", "a state", M, failed ? 0 : bytes, room,
                               "Raise the Context's max_bytes, or use the CPU BrFS.", per_candidate(), held());
         };
         u64 window_cap = M;  // halved when a window's buffers do not fit after all
-        for (u64 f = 0; f < M;)
+        while (f < M)
         {
             if (count >= budget)
             {
@@ -614,7 +625,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 if (const u64 more = window_bytes(successor_window(off, f, spare + 1)); more > usable)
                     refuse_memory(*ctx, "device BrFS",
                                   "the arenas of more than " + std::to_string(count + spare) +
-                                      " states with a successor window's buffers (" + std::to_string(more) + " bytes)",
+                                      " states with a successor window's buffers (" + std::to_string(more) + " bytes)" + progress(),
                                   held(), "Raise the Context's max_bytes, or use the CPU BrFS.");
             // (numeric successor rows are written whole: a numeric state's successors fit at once or are refused)
             if (task->numeric_slots() && w.rows < M)
@@ -737,6 +748,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             r.generated += w.rows;
             ++st.chunks;
             ++st.windows;
+            ++windows;
+            last_rows = w.rows;
             if (f == 0)
             {
                 r.expanded += 1;
