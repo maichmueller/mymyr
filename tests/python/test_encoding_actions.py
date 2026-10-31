@@ -541,6 +541,7 @@ def test_label_mode_observations_carry_action_rows(dev, drop):
     env.close()
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("drop", [False, True])
 def test_captured_label_steps_carry_action_rows(drop):
     torch = torch_or_skip()
@@ -604,6 +605,7 @@ def test_traced_observations_drop_noop_actions(drop, successors):
         torch._dynamo.reset()
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("domain", NOOP_DOMAINS)
 def test_device_encodings_of_dropped_noops_equal_the_host(domain, layout):

@@ -784,7 +784,7 @@ def test_the_workspace_of_a_stream_is_reused_and_reserved_in_advance(cases):
         encoder.reserve_device(-1)
 
 
-@pytest.mark.parametrize("mode", ["exact", "capacities", "op"])
+@pytest.mark.parametrize("mode", ["exact", "capacities", pytest.param("op", marks=pytest.mark.needs_gil)])
 @pytest.mark.parametrize("wrong_stream", [False, True], ids=["current_stream", "default_stream_mutation"])
 def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mode, wrong_stream):
     dev = gpu()
@@ -926,6 +926,7 @@ def test_action_target_schemas_without_expansion_rows_are_encoded():
     encoder.reserve_device(8)
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("outputs", [("simple",), ("relations", "simple")])
 def test_the_simple_graph_with_numeric_relations_is_refused_by_the_device_before_any_launch(outputs):
     dev = gpu()
@@ -985,6 +986,7 @@ def layered_operands(case, dev, options):
                  for key in ("subgoals", "history"))
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
 def test_the_op_equals_encode_with_capacities(cases, layout, n):
@@ -1013,6 +1015,7 @@ def test_the_op_equals_encode_with_capacities(cases, layout, n):
         rt.unregister(handle)
 
 
+@pytest.mark.needs_gil
 def test_the_op_takes_row_goals_and_derived_words(cases):
     dev = gpu()
     case = cases["gripper"]
@@ -1028,6 +1031,7 @@ def test_the_op_takes_row_goals_and_derived_words(cases):
     rt.unregister(handle)
 
 
+@pytest.mark.needs_gil
 def test_the_fake_implementation_gives_the_shapes_of_the_capacities(cases):
     dev = gpu()
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -1078,6 +1082,7 @@ def test_the_op_compiles_without_graph_breaks(cases):
     rt.unregister(handle)
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
 def test_a_captured_cuda_graph_replays_to_the_eager_result(cases, layout):
@@ -1130,6 +1135,7 @@ def test_an_encode_without_capacities_cannot_be_captured(cases):
             encoder.encode(rows)
 
 
+@pytest.mark.needs_gil
 def test_the_handle_keeps_the_encoder_alive(cases):
     dev = gpu()
     case = cases["gripper"]
@@ -1182,6 +1188,7 @@ def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
         encoder.encode(rows)
 
 
+@pytest.mark.needs_gil
 def test_graph_capacity_is_checked_before_device_encoding(cases):
     dev = gpu()
     case = cases["gripper"]
@@ -1272,7 +1279,7 @@ def test_a_compiled_function_specializes_each_encoder_handle(cases):
             rt.unregister(handle)
 
 
-@pytest.mark.parametrize("mode", ["capacities", "op"])
+@pytest.mark.parametrize("mode", ["capacities", pytest.param("op", marks=pytest.mark.needs_gil)])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 def test_captured_scratch_survives_larger_calls_and_a_second_capture(cases, monkeypatch, mode, layout):
     dev = gpu()
@@ -1354,6 +1361,7 @@ def test_capacity_fill_overwrites_dirty_outputs_and_tails(cases, monkeypatch, la
         same_batch(host_encode(encoder, case, capacities=caps), device_encode(encoder, case, dev, capacities=caps))
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("name", ["gripper", "blocks_table", "philosophers_table"])
 def test_the_op_takes_subgoal_layers_and_history(cases, layout, name):
@@ -1381,6 +1389,7 @@ def test_the_op_takes_subgoal_layers_and_history(cases, layout, name):
     rt.unregister(handle)
 
 
+@pytest.mark.needs_gil
 def test_the_fake_implementation_gives_the_history_arrays(cases):
     dev = gpu()
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -1797,6 +1806,7 @@ def test_constant_literals_that_cannot_be_encoded_are_invalid_input_on_the_devic
             encoder.encode(device_rows, **on_device)
 
 
+@pytest.mark.needs_gil
 def test_constant_literals_narrower_than_the_widest_predicate_are_refused_before_a_launch(tmp_path):
     dev = gpu()
     task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
@@ -1866,6 +1876,7 @@ def test_a_device_row_stream_holds_rows_with_and_without_constant_literals(tmp_p
         encoder.device_stream(8, constant_literals=2)
 
 
+@pytest.mark.needs_gil
 def test_the_op_takes_the_constant_literals_of_goals_and_layers(tmp_path):
     dev = gpu()
     task, rows, goal_rows, layer_rows = depot_rows(tmp_path)
