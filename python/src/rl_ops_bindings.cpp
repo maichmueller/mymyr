@@ -537,8 +537,9 @@ void bind_rl_ops(nb::module_& parent)
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
     nb::class_<TensorViewMarker>(m, "TensorViewMarker",
                                  "The type of TENSOR_VIEW, the first item of a tensor view (mymyr._typing.TensorView)");
-    view_marker() = nb::cast(TensorViewMarker{}).release();
-    m.attr("TENSOR_VIEW") = view_marker();
+    nb::object marker = nb::cast(TensorViewMarker{});
+    view_marker() = marker;
+    m.attr("TENSOR_VIEW") = std::move(marker);
     m.def("her_relabel_lifted", &her_relabel_lifted, "states"_a, "done"_a, "task_ids"_a.none(), "templates"_a,
           "block"_a.none(), "prev_states"_a, "outputs"_a, "scratch"_a, nb::kw_only(),
           "derived"_a = nb::none(), "prev_derived"_a = nb::none(), "max_generated"_a, "max_steps"_a,

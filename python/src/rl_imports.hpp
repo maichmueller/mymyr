@@ -34,7 +34,8 @@ struct TensorViewMarker
 };
 
 /// The first item of every tensor view (mymyr._core._rl_ops.TENSOR_VIEW): the one TensorViewMarker, which the module
-/// creates when it is imported, so that no other tuple reads as a view.
+/// creates when it is imported, so that no other tuple reads as a view. A borrowed reference: the module attribute
+/// owns the marker, so that it is freed with the module at interpreter exit; it is set once, before any view exists.
 [[nodiscard]] inline nb::handle& view_marker()
 {
     static nb::handle marker;
