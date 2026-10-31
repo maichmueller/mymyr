@@ -17,7 +17,9 @@ with RLIMIT_AS and read /proc (4 + 1 cases), two in test_block_cache.py that rea
 test_ci_scripts.py five that drive ci/build_state.sh, which needs GNU tar, coreutils and findutils, and four
 (3 + 1 cases) that run ci/run_until.py, which finds the build's Ninja processes through /proc. The floor on macOS is
 lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
-On GIL builds, the floor is lower by pytest_free_threaded_only_tests, which need a free-threaded interpreter.
+On GIL builds, the floor is lower by the two tests that need a free-threaded interpreter
+(pytest_free_threaded_only_tests): test_one_iterator_shared_by_threads in test_bindings.py and
+test_worker_observer_throughput_scales in test_observer.py.
 
 --import-first imports a module before pytest collects anything, and so before mymyr: the CUDA wheels are tested in
 a process that has loaded torch's CUDA libraries first.
