@@ -241,6 +241,7 @@ def test_single_instance_defaults_nullary_empty_and_validation():
         encoding.literal_slots(encoder, predicates.expand(2), objects.expand(2, 0))
 
 
+@pytest.mark.needs_gil
 def test_fluent_words_without_derived_slots_include_the_high_bit():
     from conftest import text_task
     task = text_task("blocks__probBLOCKS-8-0")

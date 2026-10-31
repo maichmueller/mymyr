@@ -267,6 +267,7 @@ def test_all_noop_fallback_empty_parents_and_zero_capacity():
     assert kept.generated == kept.total == 3 and kept.noop.all() and not kept.index.any()
 
 
+@pytest.mark.needs_gil
 def test_overflow_with_drop_reports_the_counts_before_dropping():
     from test_rl_noops import overflow_case
     task, states, full = overflow_case()

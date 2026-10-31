@@ -367,6 +367,7 @@ def mask_policy(table):
     return policy
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "gripper__prob05"])
 def test_label_capture_equals_eager_and_host(name):
     dev = gpu()

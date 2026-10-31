@@ -640,7 +640,7 @@ def cuda_match_runtime():
 
 
 @pytest.mark.parametrize("first", [False, True])
-@pytest.mark.parametrize("via_op", [False, True])
+@pytest.mark.parametrize("via_op", [False, pytest.param(True, marks=pytest.mark.needs_gil)])
 def test_match_first_device_suite_and_capture(first, via_op):
     torch = cuda_match_runtime()
     tasks = [text_task("gripper__prob05"), text_task("blocks__probBLOCKS-8-0")]
@@ -932,7 +932,7 @@ def test_match_first_rejects_impossible_injective_domains(on_device, typed, firs
 
 
 @needs_frontend
-@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("on_device", [False, pytest.param(True, marks=pytest.mark.needs_gil)])
 @pytest.mark.parametrize("first", [False, True])
 def test_match_first_search_budget_exhaustion_and_reset(on_device, first):
     domain = mymyr.Domain.from_string("""(define (domain budget)
