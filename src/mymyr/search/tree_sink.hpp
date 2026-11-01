@@ -42,6 +42,12 @@ public:
         m_tree->node_flags.resize(std::max<usize>(m_tree->node_flags.size(), usize{id} + 1), 0);
         m_tree->node_flags[id] |= static_cast<u8>(flag);
     }
+    /// A counted expansion: Expanded (successors enumerated) or Skipped; appends the node to expansion_order.
+    void expanded(u32 id, bool skipped)
+    {
+        flag(id, skipped ? TreeNodeFlag::Skipped : TreeNodeFlag::Expanded);
+        m_tree->expansion_order.push_back(index(id));
+    }
     void selected(const std::vector<u32>& before, const std::vector<u32>& after)
     {
         for (u32 id : before)

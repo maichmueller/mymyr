@@ -231,13 +231,13 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             {
                 ++st.skipped;
                 if (sink)
-                    sink->flag(id, TreeNodeFlag::Skipped);
+                    sink->expanded(id, true);
                 continue;
             }
             if (!prepared)
                 succ.prepare(cv);
             if (sink)
-                sink->flag(id, TreeNodeFlag::Expanded);
+                sink->expanded(id, false);
             succ.generate<true>(
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {

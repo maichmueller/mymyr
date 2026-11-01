@@ -52,7 +52,8 @@ def task(request):
 def node_key(result):
     return [(p.width, p.status, None if p.tree is None else
              (tuple(p.tree.states()[:p.tree.num_nodes]), tuple(p.tree.parent), tuple(p.tree.depth),
-              tuple(map(str, p.tree.labels()[:p.tree.num_nodes])), tuple(p.tree.node_flags))) for p in result.passes]
+              tuple(map(str, p.tree.labels()[:p.tree.num_nodes])), tuple(p.tree.node_flags),
+              tuple(p.tree.expansion_order))) for p in result.passes]
 
 
 def run(task, kind, **kw):
@@ -170,15 +171,67 @@ def test_incremental_layer_restrictions():
                       (search.abstracted_iw, dict(width=1))]:
         # Several threads without a beam are invalid without incremental_first_applicability too; either rule may
         # report them.
-        for kw in [dict(threads=0), dict(threads=2)]:
+        for kw in [dict(threads=0), dict(threads=2), dict(layer_order='goal_count', beam_width=2, threads=2)]:
             with pytest.raises(ValueError, match='one thread|threads > 1 requires a beam'):
                 fn(task, **width, incremental_first_applicability=True, **kw)
-        for kw in [dict(layer_order='in_order', max_next_layer_states=3),
-                   dict(layer_order='in_order', beam_width=2),
-                   dict(layer_order='in_order', beam_width=2, beam_novelty='survivors_only'),
+        with pytest.raises(ValueError, match='max_next_layer_states'):
+            fn(task, **width, incremental_first_applicability=True, layer_order='in_order', max_next_layer_states=3)
+        for kw in [dict(layer_order='in_order', beam_width=2, beam_novelty='survivors_only'),
                    dict(layer_order='goal_count', beam_width=2, beam_novelty='relaxed_survivors_only')]:
-            with pytest.raises(ValueError, match='unbounded layers, all-tested novelty and one thread'):
+            with pytest.raises(ValueError, match='all-tested novelty in a beam'):
                 fn(task, **width, incremental_first_applicability=True, **kw)
+        # a beam with all-tested novelty runs
+        fn(task, **width, incremental_first_applicability=True, layer_order='in_order', beam_width=2)
+
+
+def childsnack_task():
+    if not hasattr(mymyr, 'Domain'):
+        pytest.skip('built without the loki front end')
+    p = ROOT / 'tests/data/ipc/childsnack-ipc/test'
+    return mymyr.Task.from_pddl(p / 'domain.pddl', p / 'p01-medium.pddl')
+
+
+@pytest.mark.parametrize('name', ['gripper__prob05', 'logistics00__probLOGISTICS-6-1', 'childsnack'])
+@pytest.mark.parametrize('kind', ['ladder', 'optimized', 'abstracted', 'projective'])
+def test_all_tested_beam_filters(name, kind):
+    task = childsnack_task() if name == 'childsnack' else text_task(name)
+    skipped_actions, skipped_rows = False, [False, False, False]
+    for beam_width, ties in [(4, False), (64, True)]:
+        kw = dict(tree='nodes', goal=lambda s: False, layer_order='goal_count', beam_width=beam_width,
+                  beam_novelty='all_tested', randomize_ties=ties, seed=3, progress_interval=1)
+        if kind == 'projective':
+            fn = lambda **k: search.projective_iw(task, typed_projection=True, keep_depth_one_novel=True, **k)
+        elif kind == 'abstracted':
+            fn = lambda **k: search.abstracted_iw(task, **k)
+        else:
+            fn = lambda **k: run(task, kind, **k)
+        baseline = fn(**kw)
+        assert baseline.status == search.Status.EXHAUSTED
+        baseline_obs = Capture(True)
+        observed = fn(**{**kw, 'tree': 'transitions'}, observer=baseline_obs)
+        # expansion_order is the order of on_expand, pass by pass
+        assert len(observed.passes) == len(baseline_obs.passes)
+        for p, (expansions, _) in zip(observed.passes, baseline_obs.passes):
+            assert (p.tree.expansion_order.tolist() if p.tree is not None else []) == [n for n, *_ in expansions]
+        for i, (incremental, precheck) in enumerate([(True, False), (False, True), (True, True)]):
+            filters = dict(incremental_first_applicability=incremental, precheck_add_effects=precheck)
+            result = fn(**kw, **filters)
+            assert node_key(result) == node_key(baseline)
+            for after, before in zip(result.passes, baseline.passes):
+                assert (after.expanded, after.skipped, after.generated_in_tree) == \
+                    (before.expanded, before.skipped, before.generated_in_tree)
+                if after.width == 1:
+                    assert after.generated <= before.generated if incremental else after.generated == before.generated
+                    skipped_actions |= incremental and after.generated < before.generated
+            obs = Capture(True)
+            traced = fn(**{**kw, 'tree': 'transitions'}, observer=obs, **filters)
+            assert node_key(traced) == node_key(observed)
+            assert obs.passes == baseline_obs.passes
+            rows, base_rows = traced.passes[-1].tree.num_transitions, observed.passes[-1].tree.num_transitions
+            assert rows <= base_rows
+            skipped_rows[i] |= rows < base_rows
+    # the filters skip work on every task
+    assert skipped_actions and all(skipped_rows)
 
 
 @pytest.mark.parametrize('kind', ['pass', 'ladder', 'optimized', 'abstracted'])

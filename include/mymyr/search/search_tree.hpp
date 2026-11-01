@@ -32,7 +32,8 @@ enum class TreeNodeFlag : u8
 /// outcomes are TransitionOutcome values. Nodes-only recording leaves all transition arrays empty.
 /// row_goal always uses the pass's own goal, including custom and serialized subproblem goals.
 /// The flat layout allows host and device searches to populate the same result structure.
-/// Shapes below: N = num_nodes(), T = num_transitions(), R = row_goal.size() distinct rows, L = label_width.
+/// Shapes below: N = num_nodes(), T = num_transitions(), R = row_goal.size() distinct rows, L = label_width,
+/// E = the pass's expanded count.
 struct SearchTree
 {
     u32 width = 0;          // the novelty width of the pass
@@ -45,6 +46,7 @@ struct SearchTree
     std::vector<i32> schema;        // [N]: schema id of the incoming action; -1 for the root
     std::vector<i32> binding;       // [N, L]: object ids of the incoming action, -1 padded (all -1 for the root)
     std::vector<u8> node_flags;     // [N]: TreeNodeFlag bits
+    std::vector<i32> expansion_order;  // [E]: the nodes counted as expanded (Expanded or Skipped), in that order
     std::vector<i64> offsets;       // [N + 1]: node i's transitions are [offsets[i], offsets[i + 1]); empty for Nodes
     std::vector<i32> t_schema;      // [T]: schema id of the transition's action
     std::vector<i32> t_binding;     // [T, L]: object ids of the transition's action, -1 padded

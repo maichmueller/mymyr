@@ -763,11 +763,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         {
             ++st.skipped;
             if (sink)
-                sink->flag(e, TreeNodeFlag::Skipped);
+                sink->expanded(e, true);
             return true;
         }
         if (sink)
-            sink->flag(e, TreeNodeFlag::Expanded);
+            sink->expanded(e, false);
         expanded = true;
         return true;
     };
@@ -1010,13 +1010,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         {
             ++st.skipped;
             if (sink)
-                sink->flag(id, TreeNodeFlag::Skipped);
+                sink->expanded(id, true);
             continue;
         }
         if (!prepared)
             succ.prepare(cv);
         if (sink)
-            sink->flag(id, TreeNodeFlag::Expanded);
+            sink->expanded(id, false);
         const u32 cdepth = depth + 1;
 
         auto report = [&](u32 s, const ObjectId* b, StateView child, u32 nid, TransitionOutcome outcome, bool admitted)

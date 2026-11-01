@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <map>
 #include <memory>
@@ -1043,11 +1044,21 @@ void expect_same_nodes(const IwResult& a, const IwResult& b)
             EXPECT_EQ(x.schema, y.schema);
             EXPECT_EQ(x.binding, y.binding);
             EXPECT_EQ(x.node_flags, y.node_flags);
+            EXPECT_EQ(x.expansion_order, y.expansion_order);
             ASSERT_EQ(x.words, y.words);
             const usize count = x.num_nodes() * (x.words + x.numeric_words);
             EXPECT_TRUE(std::equal(x.rows.begin(), x.rows.begin() + count, y.rows.begin(), y.rows.begin() + count));
         }
     }
+}
+
+/// The node ids of the expansions an observer heard, in order.
+std::vector<i32> expansion_ids(const ExpansionProgress& obs)
+{
+    std::vector<i32> ids;
+    for (const auto& [id, state] : obs.expanded)
+        ids.push_back(static_cast<i32>(id));
+    return ids;
 }
 }
 
@@ -1102,4 +1113,138 @@ TEST(Iw1Actions, TreesAndProgressWithSuccessorOrdering)
                     }
                 }
     }
+}
+
+TEST(Iw1Actions, AllTestedBeamsKeepTreesAndExpansionOrder)
+{
+    const std::string childsnack = std::string(MYMYR_TEST_DATA_DIR) + "/tasks_iw/ipc__childsnack-ipc__p01-medium.txt";
+    for (const std::string& path : {task_path("gripper__prob05"), task_path("rovers__p02"), task_path("logistics00__probLOGISTICS-6-1"), childsnack})
+    {
+        const auto task = Task::from_text_file(path);
+        bool skipped_actions = false;
+        std::array<bool, 3> skipped_transitions{};  // per flags 1..3
+        for (int kind = 0; kind < 4; ++kind)  // optimized IW(1), the IW(0)/IW(1) ladder, typed abstracted IW, projective IW
+            for (u32 width : {4u, 64u})
+                for (bool ties : {false, true})
+                {
+                    auto run = [&](u32 flags, SearchObserver* obs, TreeRecord record)
+                    {
+                        IwOptions o;
+                        o.max_width = 1;
+                        o.optimize_iw1 = kind == 0;
+                        o.tree = record;
+                        o.control.observer = obs;
+                        o.control.progress_interval = 1;
+                        o.control.goal.kind = GoalSpec::Kind::Custom;
+                        o.control.goal.test = [](StateView) { return false; };
+                        o.layers.kind = LayerOrdering::Kind::GoalCount;
+                        o.layers.beam_width = width;
+                        o.layers.beam_novelty = LayerOrdering::BeamNovelty::AllTested;
+                        o.layers.randomize_ties = ties;
+                        o.layers.seed = 11;
+                        o.incremental_first_applicability = (flags & 1) != 0;
+                        o.precheck_add_effects = (flags & 2) != 0;
+                        if (kind < 2)
+                            return iw(*task, o);
+                        AbstractedIwOptions a;
+                        a.control = o.control;
+                        a.tree = o.tree;
+                        a.layers = o.layers;
+                        a.preserve_goal_atoms = kind == 2;
+                        a.keep_depth_one_novel = kind == 3;
+                        a.incremental_first_applicability = o.incremental_first_applicability;
+                        a.precheck_add_effects = o.precheck_add_effects;
+                        return abstracted_iw(*task, a);
+                    };
+                    const std::string what = path + " kind " + std::to_string(kind) + " beam " + std::to_string(width) + (ties ? " ties" : "");
+                    const IwResult baseline = run(0, nullptr, TreeRecord::Nodes);
+                    ExpansionProgress baseline_obs;
+                    const IwResult observed = run(0, &baseline_obs, TreeRecord::Transitions);
+                    ASSERT_EQ(baseline.status, SearchStatus::Exhausted) << what;
+                    // expansion_order lists the expansions in the order the observer hears them
+                    std::vector<i32> order;
+                    for (const IwPassStatistics& p : observed.passes)
+                        if (p.tree)
+                        {
+                            EXPECT_EQ(p.tree->expansion_order.size(), p.expanded) << what;
+                            order.insert(order.end(), p.tree->expansion_order.begin(), p.tree->expansion_order.end());
+                        }
+                    EXPECT_EQ(order, expansion_ids(baseline_obs)) << what;
+                    for (u32 flags : {1u, 2u, 3u})
+                    {
+                        SCOPED_TRACE(what + " flags=" + std::to_string(flags));
+                        const IwResult result = run(flags, nullptr, TreeRecord::Nodes);
+                        expect_same_nodes(baseline, result);
+                        ASSERT_EQ(result.passes.size(), baseline.passes.size());
+                        for (usize i = 0; i < result.passes.size(); ++i)
+                        {
+                            const IwPassStatistics& x = result.passes[i];
+                            const IwPassStatistics& y = baseline.passes[i];
+                            EXPECT_EQ(x.expanded, y.expanded);
+                            EXPECT_EQ(x.skipped, y.skipped);
+                            EXPECT_EQ(x.generated_in_tree, y.generated_in_tree);
+                            // incremental discovery skips the actions tested before; the unobserved path prechecks
+                            // add effects with or without the option
+                            if (x.width != 1)
+                                continue;
+                            if (flags & 1)
+                            {
+                                EXPECT_LE(x.generated, y.generated);
+                                skipped_actions = skipped_actions || x.generated < y.generated;
+                            }
+                            else
+                            {
+                                EXPECT_EQ(x.generated, y.generated);
+                            }
+                        }
+                        // observed: the same expansions; the precheck drops the transitions it rejects from the tree
+                        ExpansionProgress obs;
+                        const IwResult traced = run(flags, &obs, TreeRecord::Transitions);
+                        expect_same_nodes(observed, traced);
+                        EXPECT_EQ(obs.expanded, baseline_obs.expanded);
+                        EXPECT_EQ(obs.entered, baseline_obs.entered);
+                        const usize rows = traced.passes.back().tree->num_transitions();
+                        EXPECT_LE(rows, observed.passes.back().tree->num_transitions());
+                        skipped_transitions[flags - 1] = skipped_transitions[flags - 1] || rows < observed.passes.back().tree->num_transitions();
+                    }
+                }
+        // every task has beams where the filters skip work
+        EXPECT_TRUE(skipped_actions) << path;
+        for (bool skipped : skipped_transitions)
+            EXPECT_TRUE(skipped) << path;
+    }
+}
+
+TEST(Iw1Actions, IncrementalRefusesCapsSurvivorsOnlyBeamsAndThreads)
+{
+    const auto task = Task::from_text_file(task_path("gripper__prob05"));
+    auto refused = [&](const LayerOrdering& lo, u32 threads, const char* reason)
+    {
+        AbstractedIwOptions a;
+        a.layers = lo;
+        a.threads = threads;
+        a.incremental_first_applicability = true;
+        try
+        {
+            (void) abstracted_iw(*task, a);
+            ADD_FAILURE() << "not refused: " << reason;
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(reason), std::string::npos) << e.what();
+        }
+    };
+    LayerOrdering lo;
+    lo.kind = LayerOrdering::Kind::GoalCount;
+    lo.max_next_layer_states = 3;
+    refused(lo, 1, "max_next_layer_states");
+    lo.max_next_layer_states = ~u32{0};
+    lo.beam_width = 3;
+    for (auto mode : {LayerOrdering::BeamNovelty::SurvivorsOnly, LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly})
+    {
+        lo.beam_novelty = mode;
+        refused(lo, 1, "all-tested novelty in a beam");
+    }
+    lo.beam_novelty = LayerOrdering::BeamNovelty::AllTested;
+    refused(lo, 2, "one thread");
 }

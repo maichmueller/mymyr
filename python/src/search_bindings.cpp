@@ -949,7 +949,8 @@ nb::tuple enc_tree(const Owner& o, const std::shared_ptr<const search::SearchTre
     return nb::make_tuple(t.width, t.words, t.numeric_words, t.label_width,
                           tree_array(x, t.rows, {t.row_goal.size(), R}), tree_array(x, t.parent, {N}),
                           tree_array(x, t.depth, {N}), tree_array(x, t.schema, {N}), tree_array(x, t.binding, {N, L}),
-                          tree_array(x, t.node_flags, {N}), tree_array(x, t.offsets, {t.offsets.size()}),
+                          tree_array(x, t.node_flags, {N}), tree_array(x, t.expansion_order, {t.expansion_order.size()}),
+                          tree_array(x, t.offsets, {t.offsets.size()}),
                           tree_array(x, t.t_schema, {T}), tree_array(x, t.t_binding, {T, L}),
                           tree_array(x, t.t_row, {T}), tree_array(x, t.t_child, {T}),
                           tree_array(x, t.t_outcome, {T}), tree_array(x, t.row_goal, {t.row_goal.size()}));
@@ -996,6 +997,7 @@ std::shared_ptr<const search::SearchTree> dec_tree(const Owner& o, nb::handle h)
     dec_tree_array(f, t->schema, {N});
     dec_tree_array(f, t->binding, {N, L});
     dec_tree_array(f, t->node_flags, {N});
+    dec_tree_array(f, t->expansion_order, {~usize{0}});
     dec_tree_array(f, t->offsets, {~usize{0}});
     dec_tree_array(f, t->t_schema, {~usize{0}});
     const usize T = t->t_schema.size();
@@ -1027,6 +1029,14 @@ std::shared_ptr<const search::SearchTree> dec_tree(const Owner& o, nb::handle h)
             f.corrupt();
         label(t->schema[i], t->binding, i, i == 0);
     }
+    // expansion_order lists every node flagged Expanded or Skipped exactly once
+    std::vector<u8> listed(N, 0);
+    for (const i32 id : t->expansion_order)
+        if (id < 0 || static_cast<usize>(id) >= N || listed[id]++ || !(t->node_flags[id] & 5))
+            f.corrupt();
+    for (usize i = 0; i < N; ++i)
+        if (!listed[i] && (t->node_flags[i] & 5))
+            f.corrupt();
     if (t->offsets.empty() ? T != 0 || R != N : t->offsets.size() != N + 1 || t->offsets[0] != 0 ||
         t->offsets.back() != static_cast<i64>(T) || !std::is_sorted(t->offsets.begin(), t->offsets.end()))
         f.corrupt();
@@ -2266,8 +2276,8 @@ constexpr const char* k_iw1_actions_doc =
     "Width 1: incremental_first_applicability processes each ground action until its add features have been tested "
     "once; below the root it discovers bindings from added positive and deleted negative preconditions. Numeric or "
     "derived applicability, witness pruning, noncanonical ordering and blocked states use full binding enumeration "
-    "with the same action filter. It supports every layer order with one thread, unbounded layers and all-tested "
-    "novelty (no caps or beams). precheck_add_effects rejects successors "
+    "with the same action filter. It runs on one thread, with every layer order and with beams of all-tested "
+    "novelty; max_next_layer_states and survivors-only beams are refused. precheck_add_effects rejects successors "
     "whose add features are all marked before building their states, including with an observer. Both options omit "
     "skipped transitions from on_generate, on_prune, on_transition and transition trees. generated counts only "
     "processed actions; expanded states, parents, actions and node ids keep their order. on_progress still follows "
@@ -2539,6 +2549,11 @@ void bind_search(nb::module_& parent)
        "uint8 [N]: bit flags of each node: 1 successors generated, 2 goal, 4 counted as expanded "
        "without generating successors, 8 dropped by a beam's layer selection, 16 entered the queue "
        "more than once.");
+    tree.def_prop_ro("expansion_order", [](const PySearchTree& x) {
+        return tree_array(x, x.tree->expansion_order, {x.tree->expansion_order.size()});
+    }, nb::rv_policy::reference,
+       "int32 [E]: the nodes counted as expanded (node_flags 1 or 4), in the order the search expanded them; "
+       "E is the pass's expanded count. A beam expands its layers in their selected order.");
     tree.def_prop_ro("offsets", [](const PySearchTree& x) {
         return tree_array(x, x.tree->offsets, {x.tree->offsets.size()});
     }, nb::rv_policy::reference,
@@ -4092,7 +4107,8 @@ void bind_search(nb::module_& parent)
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree,
+           bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
@@ -4106,6 +4122,8 @@ void bind_search(nb::module_& parent)
             opts.typed_projection = typed_projection;
             opts.keep_goal_nonunary_atoms = keep_goal_nonunary_atoms;
             opts.tree = tree_record(tree);
+            opts.incremental_first_applicability = incremental_first_applicability;
+            opts.precheck_add_effects = precheck_add_effects;
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::projective_iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -4113,10 +4131,11 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "typed_projection"_a = false, "keep_goal_nonunary_atoms"_a = false,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
-        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
+        MYMYR_CONTROL_ARGS, "tree"_a = nb::none(), "incremental_first_applicability"_a = false, "precheck_add_effects"_a = false,
         paragraphs({"The projective_iw alias: abstracted IW(1) with base_abstracted = not typed_projection "
                      "and preserve_goal_atoms = keep_goal_nonunary_atoms. See abstracted_iw.",
                     k_landmark_doc,
+                    k_iw1_actions_doc,
                     k_layer_doc,
                     k_tree_doc,
                     k_control_doc,

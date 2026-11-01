@@ -763,11 +763,11 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         {
             ++st.skipped;
             if (sink)
-                sink->flag(e, TreeNodeFlag::Skipped);
+                sink->expanded(e, true);
             return true;
         }
         if (sink)
-            sink->flag(e, TreeNodeFlag::Expanded);
+            sink->expanded(e, false);
         pruner.begin(words.data(), n);
         expanded = true;
         return true;
@@ -1043,13 +1043,13 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         {
             ++st.skipped;
             if (sink)
-                sink->flag(id, TreeNodeFlag::Skipped);
+                sink->expanded(id, true);
             continue;
         }
         if (!prepared)
             succ.prepare(cv);
         if (sink)
-            sink->flag(id, TreeNodeFlag::Expanded);
+            sink->expanded(id, false);
         pruner.begin(cw, n);
         const u32 cdepth = depth + 1;
         const bool at_root = id == 0;

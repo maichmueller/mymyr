@@ -110,8 +110,8 @@ struct IwOptions
     /// Width 1 only: precheck add atoms on the observed path too. Both options omit skipped transitions from
     /// observer events and transition trees; on_expand/on_progress and admitted node ids retain their order.
     /// Width 0 below the root generates no transitions when either option is enabled. Conditional effects,
-    /// landmark novelty and transition ordering are unsupported; incremental discovery requires unbounded layers,
-    /// all-tested novelty and one thread (no caps or beams).
+    /// landmark novelty and transition ordering are unsupported; incremental discovery requires one thread and
+    /// refuses max_next_layer_states and survivors-only beams (a beam with all-tested novelty is supported).
     bool precheck_add_effects = false;
 };
 
