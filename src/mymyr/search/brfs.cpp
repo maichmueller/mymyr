@@ -613,9 +613,14 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
 
     std::vector<u32> order, keys;
     std::vector<Expansion> exps;
-    std::vector<std::vector<u64>> mcur(members), mnum(members), mnext(members);
-    std::vector<u64> mpruned(members, 0);  // blocked successors per member
-    std::vector<std::vector<u32>> mids(members);  // chunked: find_successor's scratch
+    // a member's scratch, on cache lines of its own: the member writes it for every transition
+    struct alignas(64) Scratch
+    {
+        std::vector<u64> words, num, next;
+        u64 pruned = 0;        // blocked successors
+        std::vector<u32> ids;  // chunked: find_successor's scratch
+    };
+    std::vector<Scratch> mscratch(members);
     struct Ref
     {
         u32 member, cand, parent;
@@ -635,7 +640,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         x.first = cs.size();
         const u32 id = order[i];
         Successors& sc = team.succ(t);
-        const StateView cv = decode(id, mcur[t], mnum[t]);
+        const StateView cv = decode(id, mscratch[t].words, mscratch[t].num);
         sc.prepare(cv);
         if (concurrent_goal)
         {
@@ -644,23 +649,24 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 return;
         }
         x.expanded = 1;
-        std::vector<u64>& nx = mnext[t];
+        std::vector<u64>& nx = mscratch[t].next;
         if constexpr (!flat)
-            mids[t].resize(store.chunks_per_state());
+            mscratch[t].ids.resize(store.chunks_per_state());
+        u32 transitions = 0;  // counted on this thread's stack: the members' Expansions share cache lines
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
-                if ((x.transitions + 1) % search::k_check_transitions == 0 &&
+                if ((transitions + 1) % search::k_check_transitions == 0 &&
                     ((ctl.timed() && Clock::now() >= ctl.deadline()) || o.cancel.requested()))
                 {
                     x.interrupted = 1;
                     return false;
                 }
-                const u32 seq = x.transitions++;
+                const u32 seq = transitions++;
                 const u32 nn = apply_delta(cv.w, cv.nw, d, nx);
                 if (ctl.blocked(nx.data(), nn, d.num, NN))
                 {
-                    ++mpruned[t];
+                    ++mscratch[t].pruned;
                     return true;
                 }
                 if (!relaxed)
@@ -671,13 +677,14 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                         if (store.find(StateView{nx.data(), nn, d.num, NN}).valid())
                             return true;
                     }
-                    else if (store.find_successor(StateId{id}, cv.w, nx.data(), nn, d, mids[t].data()).valid())
+                    else if (store.find_successor(StateId{id}, cv.w, nx.data(), nn, d, mscratch[t].ids.data()).valid())
                         return true;
                 }
                 cs.push(seq, s, b, sc.arity(s), {}, flat ? nullptr : &d, nx.data(), nn, d.num, NN);
                 return true;
             },
             witness, canonical);
+        x.transitions = transitions;
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)
@@ -839,7 +846,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 keys.resize(order.size());
                 team.for_each(order.size(), 64,
                               [&](u32 t, usize i)
-                              { keys[i] = lo.key(team.succ(t), decode(order[i], mcur[t], mnum[t])); });
+                              { keys[i] = lo.key(team.succ(t), decode(order[i], mscratch[t].words, mscratch[t].num)); });
                 lo.select_keyed(order, keys);
             }
             else
@@ -889,8 +896,8 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
     r.search_s = seconds_since(t0);
     r.exhausted = exhausted;
     r.states = store.size();
-    for (const u64 p : mpruned)
-        r.pruned += p;
+    for (const Scratch& m : mscratch)
+        r.pruned += m.pruned;
     if constexpr (flat)
         r.words = store.stride();
     else

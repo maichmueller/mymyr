@@ -599,9 +599,14 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const bool relaxed = team && lo->relaxed();
     std::vector<Expansion> exps;
     const u32 members = team ? team->size() : 0;
-    std::vector<novelty::NoveltyTable::Scratch> mscratch(members);
-    std::vector<std::vector<u64>> mcur(members), mnext(members);
-    std::vector<std::vector<u32>> madd(members);
+    // a member's scratch, on cache lines of its own: the member writes it for every transition
+    struct alignas(64) Scratch
+    {
+        novelty::NoveltyTable::Scratch table;
+        std::vector<u64> words, next;
+        std::vector<u32> add;
+    };
+    std::vector<Scratch> mscratch(members);
     struct Ref
     {
         u32 member, cand, parent;
@@ -622,10 +627,10 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         x.first = cs.size();
         const u32 e = layer[i];
         Successors& sc = team->succ(t);
-        std::vector<u64>& pc = mcur[t];
-        std::vector<u64>& nx = mnext[t];
-        std::vector<u32>& ad = madd[t];
-        novelty::NoveltyTable::Scratch& scr = mscratch[t];
+        std::vector<u64>& pc = mscratch[t].words;
+        std::vector<u64>& nx = mscratch[t].next;
+        std::vector<u32>& ad = mscratch[t].add;
+        novelty::NoveltyTable::Scratch& scr = mscratch[t].table;
         const u32 W = tree.stride();
         pc.assign(tree.words(e), tree.words(e) + tree.row());
         const u32 n = bits::trimmed_size(pc.data(), W);
@@ -648,16 +653,17 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             sc.prepare(cv);
         x.expanded = 1;
         const bool root_rule = e == 0 && (k == 0 || ps.root_continuation);
+        u32 transitions = 0;  // counted on this thread's stack: the members' Expansions share cache lines
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
                 // the time and the token: the pop of this entry then stops the pass (both stay set once set)
-                if ((x.transitions + 1) % k_check_transitions == 0 && (c.out_of_time() || cancel.requested()))
+                if ((transitions + 1) % k_check_transitions == 0 && (c.out_of_time() || cancel.requested()))
                 {
                     x.interrupted = 1;
                     return false;
                 }
-                const u32 seq = x.transitions++;
+                const u32 seq = transitions++;
                 if (k == 0 && !root_rule)
                     return true;  // width 0 below the root: pruned
                 ad.clear();
@@ -694,6 +700,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 return true;
             },
             witness, canonical);
+        x.transitions = transitions;
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)

@@ -116,6 +116,12 @@ private:
         return out;
     }
 public:
+    /// The features of a slot computed before, or an empty span if they were not (every atom has at least one).
+    /// Reads only.
+    [[nodiscard]] std::span<const u32> computed(u32 slot) const noexcept
+    {
+        return slot < m_features.size() ? std::span<const u32>(m_features[slot]) : std::span<const u32>{};
+    }
     std::span<const u32> features(u32 slot)
     {
         if (slot >= m_features.size())

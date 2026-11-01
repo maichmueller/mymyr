@@ -278,6 +278,43 @@ TEST(BeamParallel, IwFamilyVariantsEqualTheSerialBeam)
     }
 }
 
+TEST(BeamParallel, AbstractedIwOnDenseLayersEqualsTheSerialBeam)
+{
+    // Most transitions of these layers add only marked features, so the members' add-effect precheck drops them
+    // before the merge; the searches run with the task's goal and with a goal never met.
+    const std::string childsnack = std::string(MYMYR_TEST_DATA_DIR) + "/tasks_iw/ipc__childsnack-ipc__p01-medium.txt";
+    for (const std::string& path : {childsnack, task_path("logistics00__probLOGISTICS-6-1"), task_path("rovers__p02")})
+    {
+        const auto task = Task::from_text_file(path);
+        for (Novelty mode : {Novelty::AllTested, Novelty::SurvivorsOnly})
+            for (u32 w : {8u, 64u})
+                for (bool exhaust : {true, false})
+                {
+                    const std::string what = path + " " + name_of(mode) + " width " + std::to_string(w) + (exhaust ? " no goal" : " task goal");
+                    AbstractedIwOptions a;
+                    a.layers = beam(w, mode);
+                    a.preserve_goal_atoms = false;
+                    a.keep_depth_one_novel = true;
+                    if (exhaust)
+                    {
+                        a.control.goal.kind = GoalSpec::Kind::Custom;
+                        a.control.goal.test = [](StateView) { return false; };
+                    }
+                    a.threads = 1;
+                    const IwResult s = abstracted_iw(*task, a);
+                    if (exhaust)
+                    {
+                        EXPECT_EQ(s.status, SearchStatus::Exhausted) << what;
+                    }
+                    for (u32 threads : {2u, 8u})
+                    {
+                        a.threads = threads;
+                        expect_same(abstracted_iw(*task, a), s, what + " threads " + std::to_string(threads));
+                    }
+                }
+    }
+}
+
 // ------------------------------------------------------------------------------------------------- relaxed
 namespace
 {
