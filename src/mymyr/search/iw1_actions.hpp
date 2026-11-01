@@ -34,9 +34,18 @@ inline void check_iw1_actions(const Task& task, bool incremental, bool precheck,
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects do not support conditional effects");
     if (landmarks || deferred)
         throw std::invalid_argument("incremental_first_applicability and precheck_add_effects require atom novelty without landmark novelty or transition ordering");
-    if (incremental && (layers.beam() || layers.max_next_layer_states != ~u32{0} ||
-                        layers.beam_novelty != LayerOrdering::BeamNovelty::AllTested || threads != 1))
-        throw std::invalid_argument("incremental_first_applicability requires unbounded layers, all-tested novelty and one thread (no caps or beams)");
+    if (!incremental)
+        return;
+    // An action is skipped once tested because every feature it can add is marked by then. A layer cap ends
+    // expansions early, so an action applicable below a truncated expansion may never have been tested and is not
+    // rediscovered there; a survivors-only beam marks only the kept successors, so the dropped successor of a
+    // tested action leaves features unmarked.
+    if (layers.max_next_layer_states != ~u32{0})
+        throw std::invalid_argument("incremental_first_applicability does not support max_next_layer_states (a capped layer leaves expansions incomplete)");
+    if (layers.beam() && layers.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
+        throw std::invalid_argument("incremental_first_applicability requires all-tested novelty in a beam (survivors-only beams mark only the kept successors)");
+    if (threads != 1)
+        throw std::invalid_argument("incremental_first_applicability requires one thread (the members of a parallel layer step enumerate every action)");
 }
 
 /// Width-1 actions whose effects have not yet been novelty-tested. Once tested, every add feature is marked,

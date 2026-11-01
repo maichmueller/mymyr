@@ -18,6 +18,11 @@
 //   bool peek(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d);
 //                                                          test() without marking (a beam with
 //                                                          BeamNovelty::SurvivorsOnly needs it)
+//   bool prechecks() const;                                whether quick_reject() rejects exactly the transitions
+//                                                          whose added atoms are all marked() (and those adding none)
+//   bool marked(u32 atom) const;                           every feature of the atom is marked; reads only, so the
+//                                                          members of a beam's layer step call it concurrently while
+//                                                          nothing marks
 // `add` holds the atoms the transition adds (true in the child, false in the parent), each once, in effect order.
 //
 // Root rules: Normal (the novelty test applies at the root too); ArityZero (the
@@ -467,6 +472,12 @@ concept QuickRejecting = requires(P& p, std::span<const u32> add, const Delta& d
     { p.quick_reject(add, d) } -> std::convertible_to<bool>;
 };
 
+template<class P>
+concept AtomPrechecking = requires(const P& p, u32 atom) {
+    { p.prechecks() } -> std::convertible_to<bool>;
+    { p.marked(atom) } -> std::convertible_to<bool>;
+};
+
 /// One BrFS pass from `root` with `pruner`.
 template<class Pruner, bool Filtering = false>
 void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc, PassOut& out)
@@ -580,8 +591,21 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     const bool relaxed = team && env.layers->relaxed();
     const u32 members = team ? team->size() : 0;
     std::vector<Expansion> exps;
-    std::vector<std::vector<u64>> mcur(members), mnext(members);
-    std::vector<std::vector<u32>> madd(members);
+    // a member's scratch, on cache lines of its own: the member writes it for every transition
+    struct alignas(64) Scratch
+    {
+        std::vector<u64> words, next, covered;
+        std::vector<u32> add, covered_atoms;
+    };
+    std::vector<Scratch> mscratch(members);
+    // The members' add-effect precheck (below the root). A successor is not recorded when each atom it adds is
+    // marked as the batch starts or was added by a successor this expansion recorded before: the table only grows,
+    // and with all-tested novelty the merge marks every feature of a recorded successor's added atoms (or finds
+    // them marked) before it reaches the next one, so the merge's quick_reject() would reject it.
+    bool member_precheck = false;
+    if constexpr (AtomPrechecking<Pruner>)
+        member_precheck = pruner.prechecks();
+    const bool member_marks = member_precheck && !survivors && !relaxed;
     struct Ref
     {
         u32 member, cand, parent;
@@ -601,9 +625,15 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         x.first = cs.size();
         const u32 e = cur[i];
         Successors& sc = team->succ(t);
-        std::vector<u64>& pw = mcur[t];
-        std::vector<u64>& nx = mnext[t];
-        std::vector<u32>& ad = madd[t];
+        Scratch& scr = mscratch[t];
+        std::vector<u64>& pw = scr.words;
+        std::vector<u64>& nx = scr.next;
+        std::vector<u32>& ad = scr.add;
+        std::vector<u64>& covered = scr.covered;
+        std::vector<u32>& covered_atoms = scr.covered_atoms;
+        for (u32 a : covered_atoms)
+            covered[a >> 6] = 0;
+        covered_atoms.clear();
         pw.assign(tree.words(e), tree.words(e) + tree.stride());
         const u32 n = bits::trimmed_size(pw.data(), tree.stride());
         const StateView cv{pw.data(), n, nullptr, 0};
@@ -625,27 +655,50 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             sc.prepare(cv);
         x.expanded = 1;
         const bool width0 = pc.root == RootRule::ArityZero && e != 0;
+        u32 transitions = 0;  // counted on this thread's stack: the members' Expansions share cache lines
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
                 // the time and the token: the pop of this entry then stops the pass (both stay set once set)
-                if ((x.transitions + 1) % k_check_transitions == 0 && (env.out_of_time() || env.cancelled()))
+                if ((transitions + 1) % k_check_transitions == 0 && (env.out_of_time() || env.cancelled()))
                 {
                     x.interrupted = 1;
                     return false;
                 }
-                const u32 seq = x.transitions++;
+                const u32 seq = transitions++;
                 if (width0)
                     return true;  // width 0 below the root: pruned
                 ad.clear();
                 for (SlotId a : d.add)
                     if (!bits::test(pw.data(), n, a.v) && std::find(ad.begin(), ad.end(), a.v) == ad.end())
                         ad.push_back(a.v);
+                if constexpr (AtomPrechecking<Pruner>)
+                    if (member_precheck && e != 0)
+                    {
+                        bool fresh = false;
+                        for (u32 a : ad)
+                            if (!((a >> 6) < covered.size() && ((covered[a >> 6] >> (a & 63)) & 1)) && !pruner.marked(a))
+                            {
+                                fresh = true;
+                                break;
+                            }
+                        if (!fresh)
+                            return true;
+                        if (member_marks)
+                            for (u32 a : ad)
+                            {
+                                if ((a >> 6) >= covered.size())
+                                    covered.resize(std::max<usize>((a >> 6) + 1, covered.size() * 2), 0);
+                                covered[a >> 6] |= u64{1} << (a & 63);
+                                covered_atoms.push_back(a);
+                            }
+                    }
                 const u32 nn = apply_delta(pw.data(), n, d, nx);
                 cs.push(seq, s, b, sc.arity(s), ad, &d, nx.data(), nn, nullptr, 0);
                 return true;
             },
             env.witness, env.canonical);
+        x.transitions = transitions;
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)
@@ -710,11 +763,11 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         {
             ++st.skipped;
             if (sink)
-                sink->flag(e, TreeNodeFlag::Skipped);
+                sink->expanded(e, true);
             return true;
         }
         if (sink)
-            sink->flag(e, TreeNodeFlag::Expanded);
+            sink->expanded(e, false);
         pruner.begin(words.data(), n);
         expanded = true;
         return true;
@@ -990,13 +1043,13 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         {
             ++st.skipped;
             if (sink)
-                sink->flag(id, TreeNodeFlag::Skipped);
+                sink->expanded(id, true);
             continue;
         }
         if (!prepared)
             succ.prepare(cv);
         if (sink)
-            sink->flag(id, TreeNodeFlag::Expanded);
+            sink->expanded(id, false);
         pruner.begin(cw, n);
         const u32 cdepth = depth + 1;
         const bool at_root = id == 0;
@@ -1311,6 +1364,8 @@ public:
         reserve(add);
         return !m_table.any_new1(add);
     }
+    [[nodiscard]] bool prechecks() const { return m_table.arity() == 1; }
+    [[nodiscard]] bool marked(u32 atom) const { return atom < m_table.capacity() && !m_table.any_new1({&atom, 1}); }
     bool test(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta&)
     {
         if (add.empty())

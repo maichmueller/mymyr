@@ -10,7 +10,7 @@ import mymyr
 from mymyr import search
 from conftest import ROOT, text_task
 
-ARRAYS = ("rows", "parent", "depth", "schema", "binding", "node_flags", "offsets", "t_schema",
+ARRAYS = ("rows", "parent", "depth", "schema", "binding", "node_flags", "expansion_order", "offsets", "t_schema",
           "t_binding", "t_row", "t_child", "t_outcome", "row_goal")
 
 
@@ -76,6 +76,9 @@ def assert_events(p, events):
         assert np.all(t.t_binding[i, len(binding):] == -1)
         assert t.t_outcome[i] == outcome.value
     assert np.count_nonzero(t.node_flags & 1) + np.count_nonzero(t.node_flags & 4) <= len(expanded)
+    assert t.expansion_order.dtype == np.int32
+    assert len(t.expansion_order) == np.count_nonzero(t.node_flags & 5)
+    assert t.expansion_order.tolist() == expanded[:len(t.expansion_order)]
     np.testing.assert_array_equal(t.row_goal, [t.task.is_goal(s) for s in states])
     np.testing.assert_array_equal((t.node_flags & 2) != 0, t.row_goal[:t.num_nodes] != 0)
 
@@ -187,6 +190,42 @@ def test_iw_tree_keeps_partial_search_and_skipped_nodes(options):
         assert np.count_nonzero(r.passes[0].tree.node_flags & 4)
 
 
+@pytest.mark.parametrize("kind", ["iw", "pass", "abstracted", "abstracted_beam"])
+def test_iw_tree_progress_cancel_counts_an_unrecorded_expansion(kind):
+    task = text_task("rovers__p02")
+
+    class StopAtFifth:
+        def __init__(self):
+            self.expanded, self.calls = [], 0
+
+        def on_expand(self, node, state):
+            self.expanded.append(node)
+
+        def on_progress(self, stats):
+            self.calls += 1
+            return self.calls < 5
+
+    obs = StopAtFifth()
+    kw = dict(tree="nodes", goal=lambda s: False, observer=obs, progress_interval=1)
+    if kind == "iw":
+        r = search.iw(task, max_width=1, **kw)
+    elif kind == "pass":
+        r = search.iw_pass(task, 1, **kw)
+    elif kind == "abstracted":
+        r = search.abstracted_iw(task, **kw)
+    else:
+        r = search.abstracted_iw(task, layer_order="goal_count", beam_width=50, keep_depth_one_novel=True, **kw)
+    assert r.status == search.Status.CANCELLED
+    p = r.passes[-1]
+    t = p.tree
+    # the cancelled expansion is counted but generated nothing: its node is neither flagged nor listed
+    assert p.expanded == len(t.expansion_order) + 1 == len(obs.expanded)
+    assert t.expansion_order.tolist() == obs.expanded[:-1]
+    last = obs.expanded[-1]
+    assert t.node_flags[last] & 5 == 0
+    assert last not in t.parent.tolist()
+
+
 def test_iw_tree_cancel_keeps_recorded_nodes():
     task = text_task("gripper__prob05")
     token = search.CancelToken()
@@ -278,12 +317,17 @@ def test_iw_tree_pickle_rejects_corrupt_arrays_and_fingerprint():
     task = text_task("rovers__p02")
     t = search.iw_pass(task, 1, tree="transitions", max_states=20).passes[0].tree
     restore, args = t.__reduce__()
+    order = t.expansion_order
+    assert len(order) >= 2
     for field, bad in [(5, np.full(t.num_nodes, 100, dtype=np.int32)),
-                       (10, np.array([0, 100], dtype=np.int64)),
-                       (13, np.full(t.num_transitions, -1, dtype=np.int32)),
-                       (14, np.full(t.num_transitions, t.num_nodes + 1, dtype=np.int32)),
-                       (15, np.full(t.num_transitions, 255, dtype=np.uint8)),
-                       (16, np.full(len(t.row_goal), 2, dtype=np.uint8)),
+                       (10, np.full(len(order), order[0], dtype=np.int32)),
+                       (10, np.append(order, t.num_nodes).astype(np.int32)),
+                       (10, order[:-1].copy()),
+                       (11, np.array([0, 100], dtype=np.int64)),
+                       (14, np.full(t.num_transitions, -1, dtype=np.int32)),
+                       (15, np.full(t.num_transitions, t.num_nodes + 1, dtype=np.int32)),
+                       (16, np.full(t.num_transitions, 255, dtype=np.uint8)),
+                       (17, np.full(len(t.row_goal), 2, dtype=np.uint8)),
                        (4, t.rows.astype(np.int32))]:
         fields = list(args[-1])
         fields[field] = bad

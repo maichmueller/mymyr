@@ -89,6 +89,19 @@ public:
                     return false;
         return true;
     }
+    [[nodiscard]] bool prechecks() const { return m_cfg.width == 1 && !m_coords && m_precheck; }
+    /// Whether every feature of the atom is marked, without computing features: an atom whose features were never
+    /// computed counts as unmarked. Reads only, so several threads may call it while nothing marks.
+    [[nodiscard]] bool marked(u32 atom) const
+    {
+        const std::span<const u32> fs = m_features.computed(atom);
+        if (fs.empty())
+            return false;
+        for (u32 f : fs)
+            if (unmarked1(f))
+                return false;
+        return true;
+    }
     [[nodiscard]] u64 bytes() const
     {
         u64 b = m_pairs.bytes() + m_triples.bytes() + m_by_feature.capacity() * 8 + m_dense_bytes;
@@ -209,6 +222,10 @@ private:
     {
         if constexpr (Mark)
             return insert1(rank, f);
+        return unmarked1(f, rank);
+    }
+    [[nodiscard]] bool unmarked1(u32 f, u32 rank = 0) const
+    {
         const std::vector<u64>& s = m_single[rank];
         return (f >> 6) >= s.size() || ((s[f >> 6] >> (f & 63)) & 1) == 0;
     }

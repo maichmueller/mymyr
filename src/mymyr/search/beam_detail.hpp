@@ -27,8 +27,8 @@ namespace mymyr::search::detail
 /// The transitions one member recorded, as structure of arrays: per transition its index among its state's
 /// transitions (seq), schema, binding, added atoms (true in the successor, false in the state; each once), the
 /// delta's add and delete slots when the engine needs them, the successor's words (trimmed) and numeric words, and
-/// two engine-defined values.
-class Candidates
+/// two engine-defined values. On cache lines of its own: each member of a layer step appends to its Candidates.
+class alignas(64) Candidates
 {
 public:
     void clear()

@@ -30,15 +30,18 @@ novelty width of a ladder of IW passes is `max_width` (`iw`, `siw`, `liw`, the r
 (`iw_pass`, `abstracted_iw`, `astar_iw`). `astar_iw` is weighted A* with minimum-g novelty
 pruning; it requires a classical task with unit action costs and does not guarantee an optimal plan.
 
-For `iw(max_width=1)`, `iw_pass(width=1)` and `abstracted_iw(width=1)`,
+For `iw(max_width=1)`, `iw_pass(width=1)`, `abstracted_iw(width=1)` and `projective_iw`,
 `incremental_first_applicability=True` processes a ground action only until its add features have been
 novelty-tested. Below the root, bindings are discovered from added positive preconditions and deleted negative
 preconditions. Numeric or derived applicability, witness pruning, noncanonical order and blocked states retain
-full enumeration with the same action filter. Incremental discovery supports every layer order with one thread,
-unbounded layers and all-tested novelty; caps and beams are unsupported.
+full enumeration with the same action filter. Incremental discovery runs on one thread and supports every layer
+order, including beams with `beam_novelty="all_tested"`. It refuses `max_next_layer_states`, whose cut leaves
+expansions incomplete, and the survivors-only beams, which mark only the kept successors, so that an action whose
+successor the beam dropped can be novel again elsewhere.
 `precheck_add_effects=True` rejects a successor before constructing its state when all its add features are already
 marked, including with an observer. Abstracted IW checks abstracted features; plain IW checks atoms. The unobserved
-fast path uses the precheck automatically, falling back on conditional-effect tasks for abstracted IW.
+fast path uses the precheck automatically, also on the threads of a beam's layer step, falling back on
+conditional-effect tasks for abstracted IW.
 
 Both options preserve admitted states, parents, actions, depths and node id order, including the optimized IW(1)
 root rule. They omit skipped transitions from `on_generate`, `on_prune`, `on_transition` and recorded transition
@@ -477,6 +480,7 @@ or tree is deleted. `tree.task` owns the task that interprets the labels and row
 | `parent`, `depth`, `schema` | int32 `[N]`: parent node, depth and incoming action schema; root parent/schema are -1 |
 | `binding` | int32 `[N, label_width]`: incoming full action bindings, padded with -1; root binding is all -1 |
 | `node_flags` | uint8 `[N]`: bit 0 enumerated successors, bit 1 goal, bit 2 skipped expansion, bit 3 dropped by layer selection, bit 4 repeated queue entry |
+| `expansion_order` | int32 `[E]`: the nodes with bit 0 or bit 2 set, in the order they were expanded; `E` is the pass's `expanded` count, or one less when `on_progress` stopped the pass (its last expansion is counted but its node is neither flagged nor listed, as it generated no successors) |
 | `offsets` | int64 `[N + 1]`: transition CSR offsets; empty for node recording |
 | `t_schema`, `t_binding` | int32 `[T]`, `[T, label_width]`: transition action labels with -1 padding |
 | `t_row`, `t_child` | int32 `[T]`: successor row and admitted node id (-1 when rejected) |
@@ -488,6 +492,8 @@ first-generation order. Transitions of each node occupy `offsets[i]:offsets[i + 
 A width-0 duplicate queue entry refers to the existing node and sets its repeated-entry flag; it does not add
 a second row or node. Thus `generated_in_tree + 1` equals the node count for ordinary untruncated passes without
 duplicate entries, while beams retain admitted candidates even when selection later drops them.
+Node ids follow admission, so with ordered layers (a beam among them) the expansion order differs from the id order:
+each layer is expanded in its selected order, which `expansion_order` records.
 
 `tree.states()` returns all rows as `State` objects. `tree.labels()` returns incoming node `Action` objects,
 with `None` for the root. Following `parent` and these labels reconstructs the path to any node. These convenience
