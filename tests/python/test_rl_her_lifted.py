@@ -150,14 +150,28 @@ def goal_graph_task(images, modes, extra_singletons, seed):
     return mymyr.Task(domain.instantiate_string(problem))
 
 
-@needs_frontend
-def test_dense_goal_graph_within_the_time_target():
-    task = goal_graph_task(images=640, modes=3, extra_singletons=60, seed=0)
+def processor_seconds(task):
+    """The least processor time of three template generations after a warm-up (the binding orders' compilation):
+    processor time leaves out what other processes on the same cores take."""
     rl.lifted_goal_templates(task)
-    start = time.perf_counter()
-    t = rl.lifted_goal_templates(task)
-    assert time.perf_counter() - start < 2.0
-    check_reference(t, 0, task)
+    best = math.inf
+    for _ in range(3):
+        start = time.process_time()
+        rl.lifted_goal_templates(task)
+        best = min(best, time.process_time() - start)
+    return best
+
+
+@needs_frontend
+def test_dense_goal_graph_grows_at_most_quadratically():
+    # In a dense component the joinability checks of the subset search cannot settle by branching; their budget keeps
+    # the cost polynomial (about 1.4 powers of the goal's size here). Eight times the image literals may cost up to
+    # 8^2 = 64 times as much; an unbounded check costs thousands of times as much.
+    small = goal_graph_task(images=80, modes=3, extra_singletons=60, seed=0)
+    large = goal_graph_task(images=640, modes=3, extra_singletons=60, seed=0)
+    ratio = processor_seconds(large) / processor_seconds(small)
+    assert ratio < 64, ratio
+    check_reference(rl.lifted_goal_templates(large), 0, large)
 
 
 def sparse_goal_task(shape, rng):

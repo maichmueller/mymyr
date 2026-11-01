@@ -1,6 +1,7 @@
 """Budgets inside an expansion: max_states bounds the stored states of every search and store (search/control.hpp:
 the search stops at the state that fills the store, inside its parent's expansion), and the deadline and the
-cancellation stop a search inside an expansion with many successors."""
+cancellation stop a search inside an expansion with many successors, at the first check of the expansion after they
+become due."""
 
 import threading
 import time
@@ -10,7 +11,7 @@ import pytest
 import mymyr
 from mymyr import search
 
-from mymyr.search import Status  # noqa: E402
+from mymyr.search import Observer, Status  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 
@@ -94,23 +95,21 @@ def test_the_state_that_fills_the_store_stops_the_search(fanout, store):
     assert r.status == Status.SOLVED and r.exhausted and r.stats.states == FANOUT + 1
 
 
-# One expansion with 2^24 + 256 transitions (witness pruning off), almost all to one successor state: without checks
-# inside the expansion a stop waits for the whole expansion.
+WIDE_TRANSITIONS = 2**24 + 256  # of the initial state's expansion
+CHECK_TRANSITIONS = 1024  # the searches check the time and the cancellation every 1024 transitions of an expansion
+
+
+# One expansion with WIDE_TRANSITIONS transitions (witness pruning off), almost all to one successor state: without
+# checks inside the expansion a stop waits for the whole expansion.
 @pytest.fixture(scope="module")
 def wide():
-    return fanout_task(
+    task = fanout_task(
         256,
         " (:action touch :parameters (?x ?y ?z - item) :precondition (free) :effect (and (done) (not (free))))",
     )
-
-
-@pytest.fixture(scope="module")
-def expansion_seconds(wide):
-    """The time of the whole search: one expansion of the initial state, then dead ends."""
-    t0 = time.perf_counter()
-    r = search.brfs(wide, witness_pruning=False, stop_at_goal=False)
-    assert r.exhausted and r.stats.generated == 2**24 + 256
-    return time.perf_counter() - t0
+    r = search.brfs(task, witness_pruning=False, stop_at_goal=False)
+    assert r.exhausted and r.stats.generated == WIDE_TRANSITIONS
+    return task
 
 
 WIDE = {
@@ -123,32 +122,54 @@ WIDE = {
 }
 
 
+class StopOnFirstExpansion(Observer):
+    """Calls `stop` when the first expansion begins: after the checks before it, so that only the checks inside the
+    expansion can see the stop. The worker observers of a parallel search do the same."""
+
+    def __init__(self, stop):
+        self.stop = stop
+        self.expansions = 0
+        self.workers = []
+
+    def on_expand(self, id, state):
+        self.expansions += 1
+        if self.expansions == 1:
+            self.stop()
+
+    def make_worker(self, k):
+        worker = StopOnFirstExpansion(self.stop)
+        self.workers.append(worker)
+        return worker
+
+
+def assert_stopped_inside_the_first_expansion(r, observer):
+    assert sum(o.expansions for o in [observer, *observer.workers]) == r.stats.expanded == 1
+    # at the first check after the stop became due, long before the expansion's end
+    assert r.stats.generated <= CHECK_TRANSITIONS < WIDE_TRANSITIONS
+
+
 @pytest.mark.parametrize("name", sorted(WIDE))
-def test_the_deadline_stops_inside_an_expansion(wide, expansion_seconds, name):
-    deadline = 0.02
-    t0 = time.perf_counter()
-    r = WIDE[name](wide, max_seconds=deadline)
-    reaction = time.perf_counter() - t0 - deadline  # how long after the deadline the search returned
+def test_the_deadline_stops_inside_an_expansion(wide, name):
+    # sleeping inside on_expand passes the deadline in real time, however fast or busy the machine
+    deadline = 0.5
+    observer = StopOnFirstExpansion(lambda: time.sleep(deadline + 0.01))
+    start = time.perf_counter()
+    r = WIDE[name](wide, max_seconds=deadline, observer=observer)
     assert r.status == Status.OUT_OF_TIME
-    assert reaction < expansion_seconds / 3, (reaction, expansion_seconds)
+    assert_stopped_inside_the_first_expansion(r, observer)
+    assert time.perf_counter() - start < 30
 
 
 @pytest.mark.parametrize("name", sorted(WIDE))
-def test_a_cancellation_stops_inside_an_expansion(wide, expansion_seconds, name):
+def test_a_cancellation_stops_inside_an_expansion(wide, name):
     token = search.CancelToken()
-    requested = []
 
-    def request():
-        requested.append(time.perf_counter())
-        token.request()
+    def request_from_another_thread():
+        requester = threading.Thread(target=token.request)
+        requester.start()
+        requester.join()
 
-    timer = threading.Timer(0.02, request)
-    timer.start()
-    try:
-        r = WIDE[name](wide, cancel=token)
-    finally:
-        timer.cancel()
-    returned = time.perf_counter()
+    observer = StopOnFirstExpansion(request_from_another_thread)
+    r = WIDE[name](wide, cancel=token, observer=observer)
     assert r.status == Status.CANCELLED
-    reaction = returned - requested[0]  # how long the search took to react once the token was requested
-    assert reaction < expansion_seconds / 3, (reaction, expansion_seconds)
+    assert_stopped_inside_the_first_expansion(r, observer)

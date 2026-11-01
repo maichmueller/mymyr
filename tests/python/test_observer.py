@@ -1,12 +1,8 @@
 """mymyr.search.Observer: event counts, errors, threads, and the control of brfs (max_seconds, cancel)."""
 
 import gc
-import os
 from pathlib import Path
-import statistics
-import sys
 import threading
-import time
 
 import pytest
 
@@ -199,13 +195,16 @@ def test_worker_callbacks_keep_thread_locals_and_saved_values():
             assert state.task.apply(parent, action) == state
 
 
-def test_worker_observer_throughput_scales():
-    if not hasattr(sys, "_is_gil_enabled") or sys._is_gil_enabled():
-        pytest.skip("requires Python without the GIL")
-    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-    if cores < 2:
-        pytest.skip("requires at least two CPU cores")
-    threads = min(4, cores)
+def test_worker_callbacks_run_at_once_and_keep_their_thread_state():
+    # Every worker thread waits in its first callback until all of them are inside one: a lock held across callbacks
+    # breaks the barrier. A thread-local count equal to the thread's events shows that each worker thread keeps one
+    # Python thread state across all its callbacks.
+    threads = 4
+    barrier = threading.Barrier(threads, timeout=60)
+    local = threading.local()
+    events = {}  # thread ident -> callbacks on that thread
+    lock = threading.Lock()
+    kept = []
 
     class Count(Observer):
         def __init__(self):
@@ -214,6 +213,15 @@ def test_worker_observer_throughput_scales():
 
         def on_generate(self, parent, action, child, state, is_new):
             self.generated += 1
+            ident = threading.get_ident()
+            with lock:
+                first = ident not in events
+                events[ident] = events.get(ident, 0) + 1
+                count = events[ident]
+            if first:
+                barrier.wait()
+            local.events = getattr(local, "events", 0) + 1
+            kept.append(local.events == count)
 
         def make_worker(self, k):
             w = Count()
@@ -221,26 +229,13 @@ def test_worker_observer_throughput_scales():
             return w
 
     task = mymyr.Task.from_text(str(Path(__file__).parents[1] / "data/tasks_iw/ipc__childsnack-ipc__p05-medium.txt"))
+    root = Count()
+    result = search.find_rollouts_parallel(task, list(range(8)), threads=threads, max_width=1, max_states=5000,
+                                           observer=root)
+    assert result.threads_used == threads and len(events) == threads
+    assert sum(w.generated for w in root.workers) == sum(r.stats.generated for r in result) == sum(events.values())
+    assert len(kept) == sum(events.values()) and all(kept)
 
-    def rate(threads):
-        root = Count()
-        start = time.perf_counter()
-        result = search.find_rollouts_parallel(task, list(range(8)), threads=threads, max_width=1,
-                                               max_states=5000, observer=root)
-        elapsed = time.perf_counter() - start
-        events = sum(w.generated for w in root.workers)
-        assert result.threads_used == threads
-        assert events == sum(r.stats.generated for r in result) > 10000
-        return events / elapsed
-
-    rate(1)
-    rate(threads)
-    rates = {1: [], threads: []}
-    for order in ((1, threads), (threads, 1), (1, threads)):
-        for t in order:
-            rates[t].append(rate(t))
-    # callbacks contending for one lock run at a fraction of one thread's rate; the margin absorbs a loaded machine
-    assert statistics.median(rates[threads]) >= 0.5 * statistics.median(rates[1])
 
 
 def test_brfs_threads_return_a_shortest_plan(task):
@@ -349,8 +344,10 @@ def test_cancel_from_another_thread(task):
 
     class Cancel(Observer):
         def on_expand(self, id, state):
-            if id == 1000:
-                threading.Thread(target=token.request).start()
+            if id == 1000:  # the request is made before the search goes on, so it is seen however busy the machine
+                requester = threading.Thread(target=token.request)
+                requester.start()
+                requester.join()
 
     r = search.brfs(task, cancel=token, observer=Cancel())
     assert r.status == Status.CANCELLED
