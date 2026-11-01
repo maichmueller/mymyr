@@ -184,17 +184,19 @@ def test_incremental_layer_restrictions():
         fn(task, **width, incremental_first_applicability=True, layer_order='in_order', beam_width=2)
 
 
-def childsnack_task():
+def pddl_task(domain, problem):
     if not hasattr(mymyr, 'Domain'):
         pytest.skip('built without the loki front end')
-    p = ROOT / 'tests/data/ipc/childsnack-ipc/test'
-    return mymyr.Task.from_pddl(p / 'domain.pddl', p / 'p01-medium.pddl')
+    p = ROOT / 'tests/data/ipc' / domain / 'test'
+    return mymyr.Task.from_pddl(p / 'domain.pddl', p / f'{problem}.pddl')
 
 
-@pytest.mark.parametrize('name', ['gripper__prob05', 'logistics00__probLOGISTICS-6-1', 'childsnack'])
+# sokoban p02-easy: the beams below without random ties reach the task's goal
+@pytest.mark.parametrize('name', ['gripper__prob05', 'logistics00__probLOGISTICS-6-1', 'childsnack', 'sokoban'])
 @pytest.mark.parametrize('kind', ['ladder', 'optimized', 'abstracted', 'projective'])
 def test_all_tested_beam_filters(name, kind):
-    task = childsnack_task() if name == 'childsnack' else text_task(name)
+    task = (pddl_task('childsnack-ipc', 'p01-medium') if name == 'childsnack' else
+            pddl_task('sokoban-ipc', 'p02-easy') if name == 'sokoban' else text_task(name))
     skipped_actions, skipped_rows = False, [False, False, False]
     for beam_width, ties in [(4, False), (64, True)]:
         kw = dict(tree='nodes', goal=lambda s: False, layer_order='goal_count', beam_width=beam_width,
@@ -230,6 +232,16 @@ def test_all_tested_beam_filters(name, kind):
             rows, base_rows = traced.passes[-1].tree.num_transitions, observed.passes[-1].tree.num_transitions
             assert rows <= base_rows
             skipped_rows[i] |= rows < base_rows
+        # the task's goal: the same status, plan and trees up to the goal
+        goal_kw = {k: v for k, v in kw.items() if k != 'goal'}
+        goal_baseline = fn(**goal_kw)
+        if name == 'sokoban' and not ties:
+            assert goal_baseline.status == search.Status.SOLVED
+        for incremental, precheck in [(True, False), (False, True), (True, True)]:
+            result = fn(**goal_kw, incremental_first_applicability=incremental, precheck_add_effects=precheck)
+            assert result.status == goal_baseline.status
+            assert result.plan == goal_baseline.plan
+            assert node_key(result) == node_key(goal_baseline)
     # the filters skip work on every task
     assert skipped_actions and all(skipped_rows)
 

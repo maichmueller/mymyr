@@ -480,7 +480,7 @@ or tree is deleted. `tree.task` owns the task that interprets the labels and row
 | `parent`, `depth`, `schema` | int32 `[N]`: parent node, depth and incoming action schema; root parent/schema are -1 |
 | `binding` | int32 `[N, label_width]`: incoming full action bindings, padded with -1; root binding is all -1 |
 | `node_flags` | uint8 `[N]`: bit 0 enumerated successors, bit 1 goal, bit 2 skipped expansion, bit 3 dropped by layer selection, bit 4 repeated queue entry |
-| `expansion_order` | int32 `[E]`: the nodes with bit 0 or bit 2 set, in the order they were expanded; `E` is the pass's `expanded` count |
+| `expansion_order` | int32 `[E]`: the nodes with bit 0 or bit 2 set, in the order they were expanded; `E` is the pass's `expanded` count, or one less when `on_progress` stopped the pass (its last expansion is counted but its node is neither flagged nor listed, as it generated no successors) |
 | `offsets` | int64 `[N + 1]`: transition CSR offsets; empty for node recording |
 | `t_schema`, `t_binding` | int32 `[T]`, `[T, label_width]`: transition action labels with -1 padding |
 | `t_row`, `t_child` | int32 `[T]`: successor row and admitted node id (-1 when rejected) |

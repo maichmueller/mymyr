@@ -281,9 +281,11 @@ TEST(BeamParallel, IwFamilyVariantsEqualTheSerialBeam)
 TEST(BeamParallel, AbstractedIwOnDenseLayersEqualsTheSerialBeam)
 {
     // Most transitions of these layers add only marked features, so the members' add-effect precheck drops them
-    // before the merge; the searches run with the task's goal and with a goal never met.
+    // before the merge; in zenotravel and pathways a member also drops successors whose added atoms an earlier
+    // successor of the same expansion added. The searches run with the task's goal and with a goal never met.
     const std::string childsnack = std::string(MYMYR_TEST_DATA_DIR) + "/tasks_iw/ipc__childsnack-ipc__p01-medium.txt";
-    for (const std::string& path : {childsnack, task_path("logistics00__probLOGISTICS-6-1"), task_path("rovers__p02")})
+    for (const std::string& path : {childsnack, task_path("logistics00__probLOGISTICS-6-1"), task_path("rovers__p02"),
+                                    task_path("zenotravel__p05"), task_path("pathways__p02")})
     {
         const auto task = Task::from_text_file(path);
         for (Novelty mode : {Novelty::AllTested, Novelty::SurvivorsOnly})

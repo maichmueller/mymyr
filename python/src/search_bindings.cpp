@@ -2553,7 +2553,8 @@ void bind_search(nb::module_& parent)
         return tree_array(x, x.tree->expansion_order, {x.tree->expansion_order.size()});
     }, nb::rv_policy::reference,
        "int32 [E]: the nodes counted as expanded (node_flags 1 or 4), in the order the search expanded them; "
-       "E is the pass's expanded count. A beam expands its layers in their selected order.");
+       "E is the pass's expanded count, or one less when on_progress stopped the pass (that node generated no "
+       "successors and is neither flagged nor listed). A beam expands its layers in their selected order.");
     tree.def_prop_ro("offsets", [](const PySearchTree& x) {
         return tree_array(x, x.tree->offsets, {x.tree->offsets.size()});
     }, nb::rv_policy::reference,

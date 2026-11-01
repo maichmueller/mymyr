@@ -1127,7 +1127,8 @@ TEST(Iw1Actions, AllTestedBeamsKeepTreesAndExpansionOrder)
             for (u32 width : {4u, 64u})
                 for (bool ties : {false, true})
                 {
-                    auto run = [&](u32 flags, SearchObserver* obs, TreeRecord record)
+                    // target: the goal state (null: a goal never met)
+                    auto run = [&](u32 flags, SearchObserver* obs, TreeRecord record, const State* target = nullptr)
                     {
                         IwOptions o;
                         o.max_width = 1;
@@ -1136,7 +1137,7 @@ TEST(Iw1Actions, AllTestedBeamsKeepTreesAndExpansionOrder)
                         o.control.observer = obs;
                         o.control.progress_interval = 1;
                         o.control.goal.kind = GoalSpec::Kind::Custom;
-                        o.control.goal.test = [](StateView) { return false; };
+                        o.control.goal.test = [target](StateView s) { return target && State(s) == *target; };
                         o.layers.kind = LayerOrdering::Kind::GoalCount;
                         o.layers.beam_width = width;
                         o.layers.beam_novelty = LayerOrdering::BeamNovelty::AllTested;
@@ -1206,6 +1207,29 @@ TEST(Iw1Actions, AllTestedBeamsKeepTreesAndExpansionOrder)
                         const usize rows = traced.passes.back().tree->num_transitions();
                         EXPECT_LE(rows, observed.passes.back().tree->num_transitions());
                         skipped_transitions[flags - 1] = skipped_transitions[flags - 1] || rows < observed.passes.back().tree->num_transitions();
+                    }
+                    // a goal met in the middle of the last expanded layer (these beams do not reach the task's goal):
+                    // the same status, plan and trees up to the goal
+                    const SearchTree& full = *baseline.passes.back().tree;
+                    const auto& expanded_nodes = full.expansion_order;
+                    i32 deepest = 0;
+                    for (i32 id : expanded_nodes)
+                        deepest = std::max(deepest, full.depth[id]);
+                    std::vector<i32> last;
+                    for (i32 id : expanded_nodes)
+                        if (full.depth[id] == deepest)
+                            last.push_back(id);
+                    const i32 goal_node = last[last.size() / 2];
+                    const State target(full.rows.data() + usize(goal_node) * (full.words + full.numeric_words), full.words);
+                    const IwResult goal_baseline = run(0, nullptr, TreeRecord::Nodes, &target);
+                    ASSERT_EQ(goal_baseline.status, SearchStatus::Solved) << what;
+                    ASSERT_EQ(goal_baseline.goal_state, target) << what;
+                    for (u32 flags : {1u, 2u, 3u})
+                    {
+                        SCOPED_TRACE(what + " goal flags=" + std::to_string(flags));
+                        const IwResult result = run(flags, nullptr, TreeRecord::Nodes, &target);
+                        expect_same_nodes(goal_baseline, result);
+                        EXPECT_EQ(result.plan, goal_baseline.plan);
                     }
                 }
         // every task has beams where the filters skip work

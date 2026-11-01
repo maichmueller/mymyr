@@ -33,7 +33,8 @@ enum class TreeNodeFlag : u8
 /// row_goal always uses the pass's own goal, including custom and serialized subproblem goals.
 /// The flat layout allows host and device searches to populate the same result structure.
 /// Shapes below: N = num_nodes(), T = num_transitions(), R = row_goal.size() distinct rows, L = label_width,
-/// E = the pass's expanded count.
+/// E = the nodes flagged Expanded or Skipped: the pass's expanded count, or one less when an observer's
+/// on_progress stopped the pass (that expansion is counted, its node is neither flagged nor listed).
 struct SearchTree
 {
     u32 width = 0;          // the novelty width of the pass
