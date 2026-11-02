@@ -56,7 +56,10 @@ __global__ void k_her(rl::HerBatch b, rl::HerConfig c)
     {
         const u32 j = static_cast<u32>(x % c.k);
         const u64 ti = x / c.k;
-        rl::her_one(b, c, ti / b.envs, ti % b.envs, j);
+        const u64 t = ti / b.envs, i = ti % b.envs;
+        u64 start = 0, end = 0;
+        rl::her_bounds(b, t, i, start, end);
+        rl::her_one(b, c, t, i, j, start, end);
     }
 }
 __global__ void k_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
