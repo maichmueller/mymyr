@@ -11,8 +11,7 @@
 // successor index) plus a per-layer counting sort reproduces the single-threaded ids at every thread count.
 //
 // Every expanded state is goal-tested (num_goal_states counts them). The plan reaches the first goal state expanded, a
-// shortest plan (multi-threaded: the goal state of the smallest id among those the threads reached before they
-// stopped, so which plan of that length can depend on the timing), and the status is then Solved. stop_at_goal (the
+// shortest plan, and the status is then Solved. stop_at_goal (the
 // default) ends the search there; without it the search expands the whole reachable space (or what its budgets allow)
 // and `exhausted` says whether it did. max_depth caps the expanded layers: with max_depth = D the states of depth < D
 // are expanded and those of depth D stored (exhausted then says whether depth D was empty).
@@ -24,18 +23,26 @@
 // the new state that fills the store, inside its parent's expansion; max_expanded stops it (OutOfStates) before the
 // expansion that would exceed it; max_seconds and cancel stop it (OutOfTime, Cancelled), checked every few expansions
 // and every search::k_check_transitions transitions inside one. `start` replaces the initial state; `blocked_states`
-// are never stored (compared by content; the start state is exempt) and count as pruned. Observer
+// are never stored (compared by content; the start state is exempt) and count as pruned.
+//
+// The thread count does not change the result: status, plan, counts and (with deterministic_ids) ids. A layer in
+// which the goal (under stop_at_goal), max_states or max_expanded stops the search is settled in id order: the threads
+// stop claiming states, finish the expansions the result can need (one thread: none past the stop), and the result
+// stops where the single-threaded search stops. While they finish, the layer can hold the successors of at most one
+// chunk of 256 expansions per thread beyond max_states, and worker observers get the events of those expansions
+// past the stop. max_seconds, the cancellation and on_progress stop the threads where they are. Observer
 // events: on_start(start state) and, at the end, on_solution(plan, cost) when a plan was found, then on_end(status,
 // totals), all on the calling thread; on_expand(id, state)
 // for every counted expansion; on_generate(parent, action, child, state, is_new) for every generated successor
 // (is_new: it was stored by this transition; a blocked one: child ~0, is_new false), followed by
 // on_prune(parent, action, state) for a blocked successor; on_pass(depth, layer statistics) for every layer expanded (partly, if the search stopped
 // inside it; depth 0 is the initial state's layer); on_progress(statistics so far) every progress_interval
-// expansions (false stops the search: Cancelled). Multi-threaded, the hot events (on_expand, on_generate,
+// expansions (false stops the search: Cancelled). Multi-threaded, the hot events (on_expand, on_generate, on_prune,
 // on_progress) come from the worker threads: the search calls observer->make_worker(t) for every thread t on the
 // calling thread first, and thread t sends them to the observer it got (with child = ~0: ids are assigned when the
 // layer ends; on_progress counts that thread's expansions). If make_worker returns null for some thread, the search
-// runs on the calling thread alone (BrfsResult::threads = 1) with every event on the root observer.
+// runs on the calling thread alone (BrfsResult::threads = 1) with every event on the root observer, and the same
+// result.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/search/control.hpp"

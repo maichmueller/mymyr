@@ -231,3 +231,99 @@ def test_observer_events_match_the_statistics(name, run):
         assert log.unpaired == 0, (name, kw)
         if "blocked_states" in kw and name != "rollout_iw":
             assert log.pruned > 0, (name, kw)
+
+
+# ------------------------------------------------------------------------------------------------ BrFS threads
+
+
+def brfs_outcome(r):
+    return (r.status, labels(r.plan), r.stats.expanded, r.stats.generated, r.stats.pruned, r.stats.states,
+            r.num_goal_states, r.exhausted, r.solved)
+
+
+BRFS_CASES = [
+    ("visitall", "tests/data/pddl/visitall/domain.pddl", "tests/data/pddl/visitall/test_problem.pddl"),
+    ("goals", "tests/data/pddl/goals/domain.pddl", "tests/data/pddl/goals/exists_single_witness.pddl"),
+    ("gripper", None, "gripper__prob05"),
+    ("blocks", None, "blocks__probBLOCKS-8-0"),
+]
+
+
+def brfs_task(domain, problem):
+    from conftest import ROOT
+
+    if domain is None:
+        return text_task(problem)
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    return mymyr.Task.from_pddl(ROOT / domain, ROOT / problem)
+
+
+@pytest.mark.parametrize("name,domain,problem", BRFS_CASES, ids=[c[0] for c in BRFS_CASES])
+def test_brfs_thread_count_does_not_change_the_result(name, domain, problem):
+    task = brfs_task(domain, problem)
+    s0 = task.initial_state
+    blocked = task.successor_states(s0)[:1]
+    budgets = [{}, {"max_states": 50}, {"max_states": 2}, {"max_states": 137}, {"max_states": 1000},
+               {"max_expanded": 1}, {"max_expanded": 45}, {"max_expanded": 300},
+               {"max_states": 400, "max_expanded": 100}, {"stop_at_goal": False, "max_states": 3000},
+               {"stop_at_goal": False, "max_expanded": 500}, {"max_states": 300, "blocked_states": blocked},
+               {"max_depth": 3, "stop_at_goal": False}]
+    for kw in budgets:
+        want = brfs_outcome(search.brfs(task, **kw))
+        for threads in (2, 4, 8):
+            got = brfs_outcome(search.brfs(task, threads=threads, **kw))
+            assert got == want, (name, kw, threads)
+
+
+def test_brfs_without_worker_observers_keeps_the_result():
+    # an observer without make_worker runs the search on one thread: the result is the same as with workers
+    task = text_task("gripper__prob05")
+
+    class Plain(search.Observer):
+        def on_expand(self, id, state):
+            pass
+
+    class Workers(Plain):
+        def make_worker(self, k):
+            return Plain()
+
+    for kw in [{"max_states": 137}, {"max_expanded": 45}, {}]:
+        plain = search.brfs(task, threads=4, observer=Plain(), **kw)
+        workers = search.brfs(task, threads=4, observer=Workers(), **kw)
+        assert plain.threads_used == 1 and workers.threads_used == 4
+        assert brfs_outcome(plain) == brfs_outcome(workers) == brfs_outcome(search.brfs(task, **kw)), kw
+
+
+class EventList(search.Observer):
+    def __init__(self, sink=None):
+        self.sink = [] if sink is None else sink
+
+    def on_expand(self, id, state):
+        self.sink.append(("expand", id, str(state)))
+
+    def on_generate(self, parent, action, child, state, is_new):
+        self.sink.append(("generate", parent, str(action), str(state), is_new))
+
+    def on_prune(self, parent, action, state):
+        self.sink.append(("prune", parent, str(action), str(state)))
+
+    def make_worker(self, k):
+        return EventList(self.sink)  # list.append is atomic: the workers share one list
+
+
+def test_brfs_on_one_thread_of_the_concurrent_store_sends_the_serial_events():
+    # what an observer without make_worker gets from brfs(threads > 1)
+    threads = 1
+    task = text_task("gripper__prob05")
+    blocked = task.successor_states(task.initial_state)[:1]
+    for kw in [{"max_states": 137}, {"max_expanded": 45}, {"max_states": 300, "blocked_states": blocked},
+               {"stop_at_goal": False, "max_states": 500}]:
+        serial = EventList()
+        want = search.brfs(task, observer=serial, **kw)
+        log = EventList()
+        r = search.brfs(task, threads=threads, store="concurrent", observer=log, **kw)
+        assert brfs_outcome(r) == brfs_outcome(want), kw
+        assert sorted(log.sink) == sorted(serial.sink), kw
+        assert sum(e[0] == "generate" for e in log.sink) == r.stats.generated
+        assert sum(e[0] == "expand" for e in log.sink) == r.stats.expanded

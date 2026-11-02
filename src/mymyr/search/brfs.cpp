@@ -1147,6 +1147,14 @@ struct alignas(64) ThreadState
     // successor), of schema `resume_schema`, whose first successor has index `resume_first`
     bool paused = false;
     u32 resume_schema = 0, resume_first = 0, resume_at = 0;
+    std::atomic<u64> cur{0};  // the state this thread expands (or last expanded) in the current layer
+};
+
+/// Counts of a parallel BrFS (ParallelBrfs::settle).
+struct Counts
+{
+    u64 expanded = 0, generated = 0, pruned = 0, goals = 0, states = 0;
+    bool out_of_states = false, exhausted = false;
 };
 
 class ParallelBrfs
@@ -1182,78 +1190,112 @@ public:
         const auto t0 = Clock::now();
         const State& s0 = m_ctl.start_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
-        m_stored.reset(1);
         m_ctl.start(s0.view());
         m_store.begin_layer();
         m_layer_lo = 0;
         m_layer_hi = 1;
         auto totals = [&]
         {
-            std::array<u64, 2> x{0, 0};
+            Counts x;
             for (const ThreadState& w : m_ws)
-                x[0] += w.expanded, x[1] += w.generated;
+                x.expanded += w.expanded, x.generated += w.generated, x.pruned += w.pruned, x.goals += w.goals;
             return x;
         };
         search::SearchObserver* const obs = m_ctl.observer();
         const bool log_layers = m_o.layer_stats || obs;
+        std::optional<Counts> settled;  // the counts of a search an event stopped (settle)
         while (m_layer_lo < m_layer_hi && m_layer_hi < m_o.max_states && !m_stop.load(std::memory_order_relaxed) &&
                !m_halt.load(std::memory_order_relaxed) && r.layers < m_o.max_depth && m_ctl.check())
         {
             ++r.layers;
-            const std::array<u64, 2> before = log_layers ? totals() : std::array<u64, 2>{0, 0};
+            const Counts before = totals();
             const auto layer_t0 = Clock::now();
             const u64 stored = m_layer_hi;
             const u64 L = m_layer_hi - m_layer_lo;
             m_chunk = std::clamp<u64>(L / (static_cast<u64>(m_T) * 32), 1, 256);
             m_chunk_ctr.store(0, std::memory_order_relaxed);
+            m_layer_new.store(0, std::memory_order_relaxed);
+            m_bound.store(~u64{0}, std::memory_order_relaxed);
+            for (ThreadState& w : m_ws)
+                w.cur.store(m_layer_lo, std::memory_order_relaxed);
+            m_gen.assign(L, 0);
+            m_pruned.assign(L, 0);
+            m_goalf.assign(L, 0);
             std::fill(m_pend_lo.begin(), m_pend_lo.end(), 0);
             std::fill(m_pend_hi.begin(), m_pend_hi.end(), 0);
             for (;;)
             {
                 m_team.run([&](u32 t) { work(t); });
-                // a stopped search does not grow: the insert that reaches max_states may also ask for a rehash
-                if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed) ||
-                    !m_store.wants_rehash())
+                // a halted search does not grow; after an event (m_stop) only for expansions the result can need
+                if (m_halt.load(std::memory_order_relaxed) || !m_store.wants_rehash() ||
+                    (m_stop.load(std::memory_order_relaxed) && !needed_work()))
                     break;
                 m_store.rehash(m_team);
             }
-            if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed))
+            if (m_halt.load(std::memory_order_relaxed))
             {
                 if (obs)  // the partly expanded last layer (its new states get no ids)
                 {
-                    const std::array<u64, 2> after = totals();
-                    obs->on_pass(r.layers - 1, {.expanded = after[0] - before[0], .generated = after[1] - before[1],
+                    const Counts after = totals();
+                    obs->on_pass(r.layers - 1, {.expanded = after.expanded - before.expanded,
+                                                .generated = after.generated - before.generated,
                                                 .seconds = seconds_since(layer_t0)});
                 }
                 break;
             }
-            finalize_layer();
+            if (m_stop.load(std::memory_order_relaxed))
+            {
+                settled = settle(before, stored);
+                if (obs)
+                    obs->on_pass(r.layers - 1, {.expanded = settled->expanded - before.expanded,
+                                                .generated = settled->generated - before.generated,
+                                                .states = settled->states - stored, .seconds = seconds_since(layer_t0)});
+                break;
+            }
+            finalize_layer(m_o.deterministic_ids);
+            if (m_goal_settled == ~u64{0})
+                m_goal_settled = m_goal.load(std::memory_order_relaxed);  // a goal expanded in this complete layer
             if (log_layers)
             {
-                const std::array<u64, 2> after = totals();
+                const Counts after = totals();
                 if (m_o.layer_stats)
-                    r.layer_counts.push_back({after[0] - before[0], after[1] - before[1], m_layer_hi - stored});
+                    r.layer_counts.push_back({after.expanded - before.expanded, after.generated - before.generated,
+                                              m_layer_hi - stored});
                 if (obs)
-                    obs->on_pass(r.layers - 1, {.expanded = after[0] - before[0], .generated = after[1] - before[1],
+                    obs->on_pass(r.layers - 1, {.expanded = after.expanded - before.expanded,
+                                                .generated = after.generated - before.generated,
                                                 .states = m_layer_hi - stored, .seconds = seconds_since(layer_t0)});
             }
         }
         if (const u8 why = m_halt.load(std::memory_order_relaxed); why != 0)
             m_ctl.stop(static_cast<search::SearchStatus>(why - 1));
+        else if (settled && settled->out_of_states)
+            m_ctl.stop(search::SearchStatus::OutOfStates);
         r.search_s = seconds_since(t0);
-        r.solved = m_goal.load(std::memory_order_relaxed) != ~u64{0};
+        // stopped by the time or the token: the smallest goal id the threads reached; else the settled first goal
+        const u64 goal = m_halt.load(std::memory_order_relaxed) ? m_goal.load(std::memory_order_relaxed) : m_goal_settled;
+        r.solved = goal != ~u64{0};
         if (r.solved)
-            r.plan = plan_to(m_goal.load(std::memory_order_relaxed));
-        r.exhausted = !m_stop.load(std::memory_order_relaxed) && m_layer_lo == m_layer_hi;
-        r.states = m_layer_hi;  // with ids; a layer the search stopped inside also stored states
-        for (u32 t = 0; t < m_T; ++t)
-            r.states += m_store.local_size(t) - m_store.layer_start(t);
-        for (const ThreadState& w : m_ws)
+            r.plan = plan_to(goal);
+        r.exhausted = settled ? settled->exhausted : !m_stop.load(std::memory_order_relaxed) && m_layer_lo == m_layer_hi;
+        if (settled)
         {
-            r.generated += w.generated;
-            r.num_goal_states += w.goals;
-            r.expanded += w.expanded;
-            r.pruned += w.pruned;
+            r.states = settled->states;
+            r.generated = settled->generated;
+            r.num_goal_states = settled->goals;
+            r.expanded = settled->expanded;
+            r.pruned = settled->pruned;
+        }
+        else
+        {
+            r.states = m_layer_hi;  // with ids; a layer the search stopped inside also stored states
+            for (u32 t = 0; t < m_T; ++t)
+                r.states += m_store.local_size(t) - m_store.layer_start(t);
+            const Counts c = totals();
+            r.generated = c.generated;
+            r.num_goal_states = c.goals;
+            r.expanded = c.expanded;
+            r.pruned = c.pruned;
         }
         r.memory_bytes = m_store.bytes() + m_loc.capacity() * sizeof(u32);
         if (m_o.fingerprint)
@@ -1295,6 +1337,15 @@ private:
                 if (lo >= m_layer_hi)
                     break;
                 hi = std::min(m_layer_hi, lo + m_chunk);
+            }
+            if (!m_ws[t].paused)
+            {
+                if (lo > m_bound.load(std::memory_order_relaxed))  // past the settled stop: the chunk's rest is not needed
+                {
+                    lo = hi;
+                    continue;
+                }
+                m_ws[t].cur.store(lo, std::memory_order_seq_cst);
             }
             if (m_ws[t].paused ? m_halt.load(std::memory_order_relaxed) != 0 : !keep_going(t))
                 break;
@@ -1343,8 +1394,10 @@ private:
         ThreadState& w = m_ws[t];
         if (m_halt.load(std::memory_order_relaxed))
             return false;
-        if (m_o.max_expanded != ~u64{0} && m_expansions.fetch_add(1, std::memory_order_relaxed) >= m_o.max_expanded)
-            return halt(search::SearchStatus::OutOfStates);
+        // the max_expanded-th expansion ends the claims; the chunks claimed run to their end and settle() stops the
+        // result where the single-threaded search stops
+        if (m_o.max_expanded != ~u64{0} && m_expansions.fetch_add(1, std::memory_order_seq_cst) + 1 >= m_o.max_expanded)
+            stop_at_frontier();
         if ((w.tick++ & 7) == 0)
         {
             if (m_ctl.timed() && Clock::now() >= m_ctl.deadline())
@@ -1359,6 +1412,39 @@ private:
                 return halt(search::SearchStatus::Cancelled);
         }
         return true;
+    }
+
+    /// After an event: whether a thread still has an expansion the result can need (a paused one, or a claimed
+    /// state up to m_bound).
+    [[nodiscard]] bool needed_work() const
+    {
+        const u64 bound = m_bound.load(std::memory_order_relaxed);
+        for (u32 t = 0; t < m_T; ++t)
+            if (m_ws[t].paused || (m_pend_lo[t] < m_pend_hi[t] && m_pend_lo[t] <= bound))
+                return true;
+        return false;
+    }
+
+    /// No state past id needs an expansion (the stop of the single-threaded order is at or before it).
+    void lower_bound(u64 id)
+    {
+        u64 b = m_bound.load(std::memory_order_relaxed);
+        while (id < b && !m_bound.compare_exchange_weak(b, id, std::memory_order_relaxed))
+        {
+        }
+    }
+
+    /// A budget event (max_states, max_expanded): the claims end, and no state past the largest one a thread is
+    /// expanding is needed. Every state a thread expanded or began is at most its `cur` (published before its
+    /// expansions are counted, both sequentially consistent), so the states up to that bound hold the
+    /// single-threaded stop.
+    void stop_at_frontier()
+    {
+        u64 frontier = 0;
+        for (const ThreadState& w : m_ws)
+            frontier = std::max(frontier, w.cur.load(std::memory_order_seq_cst));
+        lower_bound(frontier);
+        m_stop.store(true, std::memory_order_relaxed);
     }
 
     bool halt(search::SearchStatus why)
@@ -1376,26 +1462,116 @@ private:
         Successors& succ = *w.succ;
         const StateView rec = m_store.record(m_loc[id]);  // records never move
         succ.prepare(rec);
+        const u64 i = id - m_layer_lo;
+        const u64 generated = w.generated, pruned = w.pruned;
+        bool done;
         if (w.paused)
-            return generate(t, id, rec, w.resume_schema, w.resume_first, w.resume_at);
-        const bool goal = is_goal(m_o.goal, succ, rec);
-        w.goals += goal;
-        if (goal)
+            done = generate(t, id, rec, w.resume_schema, w.resume_first, w.resume_at);
+        else
         {
-            u64 g = m_goal.load(std::memory_order_relaxed);
-            while (id < g && !m_goal.compare_exchange_weak(g, id, std::memory_order_relaxed))
+            const bool goal = is_goal(m_o.goal, succ, rec);
+            w.goals += goal;
+            m_goalf[i] = goal;
+            if (goal)
             {
+                u64 g = m_goal.load(std::memory_order_relaxed);
+                while (id < g && !m_goal.compare_exchange_weak(g, id, std::memory_order_relaxed))
+                {
+                }
+                if (m_o.stop_at_goal)
+                {
+                    lower_bound(id);
+                    m_stop.store(true, std::memory_order_relaxed);
+                    return true;
+                }
             }
-            if (m_o.stop_at_goal)
-            {
-                m_stop.store(true, std::memory_order_relaxed);
-                return true;
-            }
+            ++w.expanded;
+            if (w.obs)
+                w.obs->on_expand(id, rec);
+            done = generate(t, id, rec, 0, 0, 0);
         }
-        ++w.expanded;
-        if (w.obs)
-            w.obs->on_expand(id, rec);
-        return generate(t, id, rec, 0, 0, 0);
+        m_gen[i] += static_cast<u32>(w.generated - generated);
+        m_pruned[i] += static_cast<u32>(w.pruned - pruned);
+        return done;
+    }
+
+    /// The counts of a layer an event stopped (a goal under stop_at_goal, max_states, max_expanded): the states the
+    /// threads claimed form a prefix of the layer [m_layer_lo, ...) whose every expansion ran to its end, so the
+    /// prefix holds every state the single-threaded search reaches before it stops. Walks it in id order as that
+    /// search does (the budget, the goal test, the expansion, the new states in successor order) and returns its
+    /// counts; m_goal_settled is the first goal state it expands. `before`: the counts at the layer's start,
+    /// `stored`: the states then.
+    Counts settle(const Counts& before, u64 stored)
+    {
+        const u64 lo = m_layer_lo, L = stored - lo;
+        finalize_layer(true, false);  // the new states of each parent, in successor order (m_offv, m_tmp)
+        Counts c = before;
+        c.states = stored;
+        const u64 claimed = std::min(L, m_chunk_ctr.load(std::memory_order_relaxed) * m_chunk);
+        const bool bounded = m_o.max_states != ~u64{0};
+        bool stopped = false;
+        for (u64 i = 0; i < claimed && !stopped; ++i)
+        {
+            const u64 id = lo + i;
+            if (c.expanded >= m_o.max_expanded)
+            {
+                c.out_of_states = stopped = true;
+                break;
+            }
+            if (m_goalf[i])
+            {
+                ++c.goals;
+                if (m_goal_settled == ~u64{0})
+                    m_goal_settled = id;
+                if (m_o.stop_at_goal)
+                    break;
+            }
+            ++c.expanded;
+            const u64 fresh = m_offv[i + 1] - m_offv[i];
+            if (bounded && c.states + fresh >= m_o.max_states)
+            {
+                // the state that fills the store ends the expansion at its transition
+                const u32 last = static_cast<u32>(m_tmp[m_offv[i] + (m_o.max_states - c.states) - 1] >> 32);
+                const auto [generated, pruned] = transitions_until(id, last);
+                c.generated += generated;
+                c.pruned += pruned;
+                c.states = m_o.max_states;
+                c.out_of_states = stopped = true;
+                break;
+            }
+            c.generated += m_gen[i];
+            c.pruned += m_pruned[i];
+            c.states += fresh;
+        }
+        if (!stopped && !(m_o.stop_at_goal && m_goal_settled != ~u64{0}))
+        {
+            // the claimed states ended with the budget (max_expanded): the next expansion, if there is a state left,
+            // is the one the budget refuses
+            const bool more = claimed < L || c.states > stored;
+            c.out_of_states = more && c.expanded >= m_o.max_expanded;
+            c.exhausted = !more;
+        }
+        return c;
+    }
+
+    /// The transitions of state `id` up to and including transition `last` (its index among the state's
+    /// successors), and the blocked ones among them, on the calling thread.
+    std::pair<u64, u64> transitions_until(u64 id, u32 last)
+    {
+        Successors& succ = *m_ws[0].succ;  // member 0 is the calling thread
+        const StateView rec = m_store.record(m_loc[id]);
+        succ.prepare(rec);
+        std::vector<u64>& next = m_ws[0].next;
+        u64 k = 0, pruned = 0;
+        succ.generate<true>(
+            [&](u32, const ObjectId*, const Delta& d)
+            {
+                const u32 nn = apply_delta(rec.w, rec.nw, d, next);
+                pruned += m_ctl.blocked(next.data(), nn, d.num, m_task.numeric_words());
+                return k++ != last;
+            },
+            m_o.witness_pruning, m_o.canonical_order);
+        return {k, pruned};
     }
 
     /// The successors of the prepared state `id` from successor `next` on (of schema `first_schema`, whose first
@@ -1453,24 +1629,20 @@ private:
                     }
                     return true;
                 }
-                bool fresh;
-                if (bounded)
-                {
-                    // at most max_states states, exactly: the one that fills the store stops the search
-                    const auto ins = m_store.insert_bounded(t, w.next.data(), nn, (id << 24) | kk, d.num, m_stored,
-                                                            m_o.max_states);
-                    if (!ins)
-                        return halt(search::SearchStatus::OutOfStates);
-                    fresh = ins->second;
-                }
-                else
-                    fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
+                const bool fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
                 ++w.generated;
                 if (w.obs)  // ids are assigned when the layer ends
                     w.obs->on_generate(id, action_of(succ, s, b), ~u64{0},
                                        {w.next.data(), nn, d.num, m_task.numeric_words()}, fresh);
-                if (fresh && bounded && m_stored.stored.load(std::memory_order_relaxed) >= m_o.max_states)
-                    return halt(search::SearchStatus::OutOfStates);
+                // the layer's new states reach max_states: the claims end, the expansions claimed run to their end
+                // (settle() stops the result at the state that fills the store in the single-threaded order)
+                if (fresh && bounded &&
+                    m_layer_hi + m_layer_new.fetch_add(1, std::memory_order_seq_cst) + 1 >= m_o.max_states)
+                {
+                    stop_at_frontier();
+                    if (m_T == 1)
+                        return false;  // one thread expands in id order: this is the state that fills the store
+                }
                 return true;
             },
             m_o.witness_pruning, m_o.canonical_order, first_schema);
@@ -1479,11 +1651,14 @@ private:
         return !w.paused;
     }
 
-    void finalize_layer()
+    /// Gives the layer's new states their ids: in (parent id, successor index) order when `by_key`, else in (thread,
+    /// local index) order. Without `assign` only the order by key (m_offv, m_tmp; settle) is computed: the layer stays
+    /// the current one.
+    void finalize_layer(bool by_key, bool assign = true)
     {
         u64 total = 0;
         const u32 T = m_T;
-        if (!m_o.deterministic_ids)
+        if (!by_key)
         {
             // per-thread ranges: ids in (thread, local index) order; independent of nothing
             for (u32 t = 0; t < T; ++t)
@@ -1540,7 +1715,8 @@ private:
             }
             if (m_tmp.size() < total)
                 m_tmp.resize(total + total / 2);
-            m_loc.resize(m_layer_hi + total);
+            if (assign)
+                m_loc.resize(m_layer_hi + total);
             m_team.run(
                 [&](u32 t)
                 {
@@ -1586,11 +1762,14 @@ private:
                             }
                             *y = v;
                         }
-                        for (u64* x = lo; x < hi; ++x)
-                            m_loc[m_layer_hi + static_cast<u64>(x - m_tmp.data())] = static_cast<u32>(*x);
+                        if (assign)
+                            for (u64* x = lo; x < hi; ++x)
+                                m_loc[m_layer_hi + static_cast<u64>(x - m_tmp.data())] = static_cast<u32>(*x);
                     }
                 });
         }
+        if (!assign)
+            return;
         m_store.begin_layer();
         m_layer_lo = m_layer_hi;
         m_layer_hi += total;
@@ -1613,7 +1792,12 @@ private:
     std::atomic<u64> m_goal{~u64{0}};  // the smallest id of a goal state expanded
     std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress, states)
     std::atomic<u64> m_expansions{0};  // expansions begun, when max_expanded is finite
-    StoreCount m_stored;  // states stored, when max_states is finite (ConcurrentStateStore::insert_bounded)
+    std::atomic<u64> m_layer_new{0};   // new states of the layer, when max_states is finite
+    std::atomic<u64> m_bound{~u64{0}};  // after an event: the last state of the layer the result can need
+    u64 m_goal_settled = ~u64{0};      // the first goal state expanded, in the single-threaded order
+    // per state of the layer (index id - m_layer_lo): transitions, blocked successors, goal test
+    std::vector<u32> m_gen, m_pruned;
+    std::vector<u8> m_goalf;
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
     u64 m_cursor_cap = 0;

@@ -406,7 +406,12 @@ its search space.
 empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 
 `brfs` takes the common options too. It stops at the first goal state it expands and returns a shortest plan
-(`SOLVED`); with `threads > 1` it searches layer-synchronously and still returns a shortest plan. `max_depth=d`
+(`SOLVED`); with `threads > 1` it searches layer-synchronously with the same result: status, plan, statistics and
+state ids do not depend on the thread count. The layer in which the goal, `max_states` or `max_expanded` stops the
+search is settled in id order: its threads stop claiming states and finish only the expansions the result can need,
+so the layer briefly holds the successors of at most one chunk of 256 expansions per thread beyond `max_states`,
+and worker observers can see the events of those expansions past the stop (an observer without `make_worker` runs the
+search on one thread, with the same result and no such events). `max_depth=d`
 expands the states of depth below `d` and stores those of depth `d`. `stop_at_goal=False` goes on through the whole
 reachable space (for counts such as `num_goal_states`); a goal state reached on the way still makes it `SOLVED` with
 that plan, and `exhausted` tells whether every state was expanded.
