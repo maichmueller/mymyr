@@ -360,3 +360,50 @@ def test_statically_false_goals_are_unsolvable_at_once(problem):
         assert r.status == Status.UNSOLVABLE, (name, r.status)
         assert r.stats.expanded == 0, name
     assert not any(task.is_goal(s) for s in [task.initial_state, *task.successor_states(task.initial_state)])
+
+
+# ------------------------------------------------------------------------------------------------ derived goals
+
+DERIVED_GOAL_DOMAIN = """(define (domain dg) (:requirements :strips :typing :derived-predicates :negative-preconditions)
+  (:types obj)
+  (:predicates (p) (q ?x - obj) (r ?x - obj) (s ?x - obj) (dq ?x - obj))
+  (:derived (dq ?x - obj) (and (q ?x) (r ?x)))
+  (:action start :parameters () :precondition (not (p)) :effect (p))
+  (:action make-s :parameters (?x - obj) :precondition (p) :effect (s ?x))
+  (:action make-q :parameters (?x - obj) :precondition (s ?x) :effect (q ?x))
+  (:action make-r :parameters (?x - obj) :precondition (and (p) (q ?x)) :effect (r ?x)))"""
+
+
+def derived_goal_problem(goal):
+    return f"(define (problem dg1) (:domain dg) (:objects o1 o2 - obj) (:init) (:goal {goal}))"
+
+
+@pytest.mark.parametrize(
+    "heuristic,evaluation",
+    [(h, "grounded") for h in ["goal_count", "max", "add", "ff", "lmcut", "h2"]] + [(h, "lifted") for h in ["max", "add", "ff"]],
+)
+def test_derived_atoms_of_goal_alternatives_are_estimated_like_the_task_goal(heuristic, evaluation):
+    task = pddl(DERIVED_GOAL_DOMAIN, derived_goal_problem("(and (q o2))"))
+    as_goal = pddl(DERIVED_GOAL_DOMAIN, derived_goal_problem("(dq o1)"))
+    h = search.Heuristic(as_goal, heuristic, evaluation=evaluation)
+    # every reachable state of task with its twin in as_goal (the same actions from the initial state)
+    pairs = {str(task.initial_state): (task.initial_state, as_goal.initial_state)}
+    frontier = list(pairs.values())
+    while frontier:
+        nxt = []
+        for s, twin in frontier:
+            twins = {str(a): u for a, u in as_goal.successors(twin)}
+            for a, u in task.successors(s):
+                if str(u) not in pairs:
+                    pairs[str(u)] = (u, twins[str(a)])
+                    nxt.append(pairs[str(u)])
+        frontier = nxt
+    checked = 0
+    for s, twin in pairs.values():
+        assert str(s) == str(twin)
+        alternative = search.astar(task, start=s, heuristic=heuristic, evaluation=evaluation,
+                                   goal=[["(dq o1)"]]).initial_h
+        if not as_goal.is_goal(twin):
+            assert alternative == h(twin), (str(s), heuristic)
+            checked += 1
+    assert checked > 5
