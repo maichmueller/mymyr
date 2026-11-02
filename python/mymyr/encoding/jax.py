@@ -18,8 +18,10 @@ larger ones if the batch did not fit, and cuts the arrays to the batch. The held
 similar sizes share one compiled call.
 
 Handles: the target finds the encoder through the FFI handle registry. :func:`register` enters an encoder (``encode``
-does so on first use) and the registry holds it until :func:`unregister`; a compiled function also holds what it calls,
-so it keeps working after its encoder is unregistered and every Python reference to it is gone.
+does so on first use) for as long as the encoder lives: the registry does not keep it alive, and collecting the encoder
+(or :func:`unregister`) removes its handle. A compiled function holds what it calls, so it keeps working after its
+encoder is collected or unregistered; tracing a function anew needs its encoder registered (a function that holds only
+the handle needs the encoder kept alive elsewhere).
 
 What the target encodes: what the device encodes, on both platforms (a function gives the same arrays wherever it
 runs): the rows with their goals, subgoal layers and history steps, but no action relations (they need an expansion,
@@ -84,11 +86,21 @@ class _Registration:
 _lock = threading.Lock()
 _handles: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
 _registrations: dict[int, _Registration] = {}
+_finalizers: dict[int, weakref.finalize] = {}
+
+
+def _release(handle: int) -> None:
+    """Removes a registration (its encoder was collected or unregistered). Lock-free, as it may run inside a garbage
+    collection: whichever of the encoder's finalizer and :func:`unregister` pops the registration releases the handle."""
+    _finalizers.pop(handle, None)
+    if _registrations.pop(handle, None) is not None:
+        _encoding_jax.unregister(handle)
 
 
 def register(encoder: Any) -> int:
     """The FFI handle of ``encoder``, a ``FlatRelationEncoder`` (the same handle for the same encoder while it is
-    registered). The registry holds the encoder (its table, options and device contexts) until :func:`unregister`."""
+    registered). The registration lasts while the encoder lives (it does not keep the encoder alive) or until
+    :func:`unregister`; executables compiled with the handle keep the native encoder they call."""
     if encoder.options["horizon_mode"] is not None:
         raise _error("the JAX FFI does not encode horizons or transitions: its operands carry no node offsets or "
                      "edges; use the torch device encoder")
@@ -103,6 +115,9 @@ def register(encoder: Any) -> int:
             _encoding_jax.unregister(handle)
             raise
         _handles[encoder] = handle
+        finalizer = weakref.finalize(encoder, _release, handle)
+        finalizer.atexit = False  # the process-wide native registry outlives the interpreter
+        _finalizers[handle] = finalizer
         return handle
 
 
@@ -114,19 +129,23 @@ def registered(encoder: Any) -> Optional[int]:
 
 
 def unregister(encoder: Any) -> None:
-    """Drops the registry's reference to an encoder (or to the encoder of a handle). Functions traced afterwards register
-    it again; executables already compiled keep the encoder until they are destroyed (``jax.clear_caches()`` and
-    dropping the jitted functions frees them). A function that is being traced or compiled while its encoder is
-    unregistered fails with ``no encoder is registered`` (an executable looks its encoder up when it is created), so
-    unregister an encoder only once the functions that use it are compiled or no longer needed."""
+    """Removes the registration of an encoder (or of a handle) before the encoder is collected, which removes it as
+    well. Functions traced afterwards with the encoder register it again; executables already compiled keep the native
+    encoder until they are destroyed (``jax.clear_caches()`` and dropping the jitted functions frees them). A function
+    that is being traced or compiled while its encoder is unregistered fails with ``no encoder is registered`` (an
+    executable looks its encoder up when it is created), so unregister an encoder only once the functions that use it
+    are compiled or no longer needed."""
     with _lock:
         if isinstance(encoder, int) and not isinstance(encoder, bool):
             handle: Optional[int] = encoder
         else:
             handle = _handles.pop(encoder, None)
-        if handle is None or _registrations.pop(handle, None) is None:
+        if handle is None:
             return
-        _encoding_jax.unregister(handle)
+        finalizer = _finalizers.get(handle)
+        if finalizer is not None:
+            finalizer.detach()
+        _release(handle)
 
 
 def _registration(encoder: Any) -> tuple[int, _Registration]:
@@ -660,7 +679,8 @@ def encode(
     """``FlatRelationEncoder.encode`` of the rows ``states`` as an XLA FFI call: the CPU encoder on the CPU, the device
     kernels on CUDA, with equal arrays. Usable inside ``jax.jit``, ``lax.scan`` and ``jax.vmap`` (each vmapped batch
     is encoded on its own, with the same capacities). ``encoder`` is a ``FlatRelationEncoder`` (registered on first
-    use) or the handle :func:`register` returned, which a function can hold instead of the encoder.
+    use) or the handle :func:`register` returned, which a function can hold instead of the encoder while the encoder
+    lives.
 
     states: uint32 [N, 2 W] (the u64 words of each row as halves, low first), or uint64 / int64 [N, W] words, or one row.
     task_ids: int32 [N], the instance of each row (None: instance 0; required for a table of several instances).

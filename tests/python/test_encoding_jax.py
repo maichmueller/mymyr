@@ -1,7 +1,8 @@
 """mymyr.encoding.jax: the XLA FFI target mymyr_encode_flat on the CPU and (with a visible GPU) on CUDA gives the host
 encoder's capacity form bit for bit, in both layouts and index types, for batches of 0 to 4097 rows, mixed instances,
 row goals and derived words, with exact, ample, short and zero capacities; jit equals eager, lax.scan and jax.vmap
-work, command buffers give the same arrays, and a compiled function outlives every reference to its encoder.
+work, command buffers give the same arrays, a compiled function outlives every reference to its encoder, and the
+registry does not keep encoders alive.
 
 Without JAX (or a mymyr built without the XLA FFI headers) the module is skipped. The CUDA cases run only when a GPU
 is made visible explicitly (conftest.py hides GPUs by default), e.g.
@@ -19,6 +20,7 @@ import textwrap
 import threading
 import time
 import types
+import weakref
 
 import numpy as np
 import pytest
@@ -92,7 +94,7 @@ PLATFORMS = platforms()
 @pytest.fixture(autouse=True)
 def release_encoders():
     """Unregisters the encoders a test registered and drops its compiled functions, which frees their device contexts
-    (the registry keeps an encoder until it is unregistered)."""
+    (an encoder a test still holds stays registered until it is collected)."""
     before = set(ej._registrations)
     yield
     for handle in set(ej._registrations) - before:
@@ -976,15 +978,51 @@ def test_a_compiled_function_outlives_every_reference_to_its_encoder(cases):
         f = jax.jit(lambda r: ej.encode(handle, r, capacities=caps))
         rows = put(halves(case.rows), platform)
         same_batch(want, f(rows))
+        same_batch(want, f(rows))
+        assert _encoding_jax.calls(handle)["cuda" if platform == "cuda" else "cpu"] == 2
+        collected = weakref.ref(encoder)
         del encoder
         gc.collect()
-        same_batch(want, f(rows))  # the registry holds the encoder
-        assert _encoding_jax.calls(handle)["cuda" if platform == "cuda" else "cpu"] == 2
-        ej.unregister(handle)
-        assert ej.registered(encoding.FlatRelationEncoder(case.source)) is None
-        same_batch(want, f(rows))  # and so does the compiled function
+        assert collected() is None and handle not in ej._registrations  # the registry does not keep the encoder
+        with pytest.raises(ValueError, match="no encoder is registered under handle"):
+            _encoding_jax.calls(handle)
+        same_batch(want, f(rows))  # the compiled function holds it
         with pytest.raises(ValueError, match="no encoder is registered under handle"):
             f(rows[:5])  # a new trace looks the handle up
+
+
+def test_encoders_made_in_a_loop_are_collected_with_their_registrations(cases):
+    case = cases["gripper"]
+    caps = exact_capacities(host_encode(encoding.FlatRelationEncoder(case.source), case))
+    want = host_encode(encoding.FlatRelationEncoder(case.source), case, capacities=caps)
+    before = set(ej._registrations)
+    for platform in PLATFORMS:
+        rows = put(halves(case.rows), platform)
+        refs, handles = [], []
+        for _ in range(4):
+            encoder = encoding.FlatRelationEncoder(case.source)
+            same_batch(want, ej.encode(encoder, rows, capacities=caps))  # registers it
+            same_batch(want, jax.jit(lambda r, e=encoder: ej.encode(e, r, capacities=caps))(rows))
+            handles.append(ej.registered(encoder))
+            refs.append(weakref.ref(encoder))
+            del encoder
+        jax.clear_caches()  # the jitted functions close over their encoders
+        gc.collect()
+        assert all(r() is None for r in refs) and None not in handles
+        assert set(ej._registrations) == before and not set(handles) & set(ej._finalizers)
+        for h in handles:
+            with pytest.raises(ValueError, match="no encoder is registered under handle"):
+                _encoding_jax.calls(h)
+    # unregister detaches the encoder's finalizer; registering again gives a new handle
+    encoder = encoding.FlatRelationEncoder(case.source)
+    first = ej.register(encoder)
+    ej.unregister(first)
+    assert ej.registered(encoder) is None and first not in ej._finalizers
+    second = ej.register(encoder)
+    assert second != first and ej.registered(encoder) == second
+    del encoder
+    gc.collect()
+    assert second not in ej._registrations
 
 
 # ------------------------------------------------------------------------------------------------ CUDA

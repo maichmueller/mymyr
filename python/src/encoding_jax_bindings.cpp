@@ -1,6 +1,6 @@
 // mymyr._core._encoding_jax: the native side of mymyr.encoding.jax.
 //   register(encoder) -> handle  enters a FlatRelationEncoder into the FFI handle registry (ffi_registry.hpp), where
-//                                it stays until unregister(handle)
+//                                it stays until unregister(handle) (mymyr.encoding.jax: when the encoder is collected)
 //   info(handle), scratch_bytes(handle, graphs, device, derived), prepare(handle, device), leaked_devices(),
 //   calls(handle)
 //   ffi_targets(), ffi_types()   the XLA FFI handlers and the state type, for jax.ffi.register_ffi_target and
@@ -1008,7 +1008,8 @@ void bind_encoding_jax(nb::module_& parent)
         },
         "encoder"_a,
         "Enters a FlatRelationEncoder into the FFI handle registry and returns its handle (a new one per call). The "
-        "registry keeps the encoder until unregister(handle).");
+        "registry keeps the encoder until unregister(handle) (mymyr.encoding.jax calls it when the encoder is "
+        "collected).");
     m.def(
         "unregister",
         [](i64 handle) {

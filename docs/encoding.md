@@ -1740,13 +1740,15 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   target: registering it raises `ValueError`.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
   `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
-  of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device
-  contexts until `ej.unregister(encoder or handle)`. Every compiled function that calls the encoder holds it as well,
-  so it keeps working after the encoder is unregistered and every Python reference to it is gone; the encoder is freed
-  when the last of these executables is (`jax.clear_caches()` and dropping the jitted functions). A function traced
-  after `unregister` registers the encoder again, or fails if it holds only the handle; one that is being traced or
-  compiled while its encoder is unregistered fails with `no encoder is registered` (an executable looks its encoder up
-  when it is created), so unregister an encoder only after the functions that use it are compiled. Destroying the last
+  of the encoder, so a function can hold the integer only). The registration lasts while the encoder lives: the
+  registry does not keep the encoder alive, and collecting it (or `ej.unregister(encoder or handle)`) removes the
+  handle, so encoders made in a loop are freed with their tables and device contexts. Every compiled function that
+  calls the encoder holds the native encoder, so it keeps working after the encoder is collected or unregistered; the
+  native encoder is freed when the last of these executables is (`jax.clear_caches()` and dropping the jitted
+  functions). A function traced after that registers the encoder again, or fails if it holds only the handle (keep the
+  encoder alive while such a function may be traced); one that is being traced or compiled while its encoder is
+  unregistered fails with `no encoder is registered` (an executable looks its encoder up when it is created), so
+  unregister an encoder only after the functions that use it are compiled. Destroying the last
   reference of an encoder on a CUDA device waits for the device; where the device cannot synchronize (CUDA refuses the
   wait while another thread captures a CUDA graph, which invalidates that capture) the encoder's device memory is kept
   rather than freed under work that may still read it.
