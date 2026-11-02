@@ -174,9 +174,11 @@ serves any number of concurrent calls.
   hardware thread, whichever is more). The result does not depend on it: a batch is byte-identical for every thread
   count. Threads pay off for large batches only: waking a thread costs as much as encoding hundreds of graphs, so every
   thread gets at least 1024 graphs, and a batch of up to 1024 graphs (a single state included) is encoded on the calling
-  thread whatever the count. The encoder keeps one pool of worker threads, rebuilt when the count changes (calls of one
-  encoder with different counts, from several threads, rebuild it back and forth: give each such caller its own `pool`).
-  The pool belongs to the process that made it: after `os.fork()` the child makes its own.
+  thread whatever the count. The encoder keeps pools of worker threads of the last count used: calls in sequence reuse
+  one, and calls that run at once (from several Python threads) each take a pool of their own, so they encode in
+  parallel. A change of the count rebuilds them (calls of one encoder with different counts, from several threads,
+  rebuild them back and forth: give each such caller its own `pool`). The pools belong to the process that made them:
+  after `os.fork()` the child makes its own.
 - **`pool`:** a `mymyr.rl.ThreadPool` that you hold, like `rl.expand`'s: it is used instead of `threads` and shared by
   the calls that name it (one batch runs on it at a time).
 - **`capacities`** and **`into`:** fixed array sizes and the reuse of a batch's memory
