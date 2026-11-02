@@ -149,6 +149,56 @@ def test_declared_optional_and_keyword_mutations_increment_versions(optional):
             loss.backward()
 
 
+@pytest.mark.parametrize("final", [False, True])
+def test_step_into_invalidates_saved_tensors(final):
+    """The captured rollout's step (BatchedEnv._step_into) writes through pointers, past the registered op: every
+    tensor mymyr::step mutates and every output it writes into gets a new version, so a backward through one of them
+    saved before the step raises instead of reading the new values."""
+    torch = pytest.importorskip("torch")
+    from mymyr import rl
+    from mymyr.rl import torch as rt
+
+    table = rl.TaskTable([text_task("gripper__prob05"), text_task("gripper__prob05")])
+    env = rt.BatchedEnv(table, 4, goals=True, track_visited=True, max_steps=3)
+    try:
+        n, W = env.num_envs, env.row_words
+        b = torch.zeros(n, dtype=torch.bool)
+
+        def i32(*shape):
+            return torch.zeros(shape, dtype=torch.int32)
+
+        def i64(*shape):
+            return torch.zeros(shape, dtype=torch.int64)
+
+        out = rt.StepResult(
+            torch.zeros(n), b, b.clone(), b.clone(), b.clone(), i32(n), i32(n, env.label_width),
+            i64(n if final else 0, W), i32(n), i64(n, W), i32(n), i64(n, env.words), i64(n, env.words), b.clone(),
+            revisited=b.clone(),
+        )
+        schema = torch.ops.mymyr.step.default._schema
+        mutated = [a.name for a in schema.arguments if a.alias_info is not None and a.alias_info.is_write]
+        written = {name: out.revisited if name == "revisited" else getattr(env, name) for name in mutated}
+        written |= {f"out.{name}": x for name, x in out._asdict().items() if isinstance(x, torch.Tensor)}
+        assert all(x is not None for x in written.values())
+
+        def saved(x):  # a differentiable op that saves x (or a view of its bytes) for backward
+            if x.dtype == torch.bool:
+                return torch.ones(x.shape, requires_grad=True).masked_fill(x, 0).sum()
+            as_float = x.view({4: torch.float32, 8: torch.float64}[x.element_size()])
+            return (torch.ones(x.shape, dtype=as_float.dtype, requires_grad=True) * as_float).sum()
+
+        for step in range(4):  # resets, goals and the step limit along the way
+            losses = {name: saved(x) for name, x in written.items()}
+            versions = {name: x._version for name, x in written.items()}
+            env._step_into(out, None, None, final)
+            assert [name for name, x in written.items() if x._version <= versions[name]] == [], step
+            for name, loss in losses.items():
+                with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+                    loss.backward()
+    finally:
+        env.close()
+
+
 @pytest.mark.needs_gil
 def test_dispatch_key_exclusions_preserve_mutation_versions():
     import ctypes
