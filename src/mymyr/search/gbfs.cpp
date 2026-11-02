@@ -60,11 +60,15 @@ struct GbfsEager
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
-        Q open;
+        Q open(c.queue_fallback);
         Transitions tr;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = open.name();
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes());
+        };
         u32 root = 0;
         f64 h0 = 0;
         if (!start_search(c, store, nodes, root, h0))
@@ -157,11 +161,15 @@ struct GbfsLazy
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
         // default weights {64, 1}: 64 pops from the preferred list per pop from the standard one
-        Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 64, c.o.standard_weight);
+        Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 64, c.o.standard_weight, c.queue_fallback);
         Transitions tr;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = open.name();
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes());
+        };
         u32 root = 0;
         f64 h0 = 0;
         if (!start_search(c, store, nodes, root, h0))

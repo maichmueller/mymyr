@@ -62,11 +62,7 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
             owned = heuristics::make_heuristic(task, ho);
             h = owned.get();
         }
-        const heuristics::ActionCosts costs(task);
         const bool admissible = h->admissible() && o.control.goal.kind != GoalSpec::Kind::Custom;
-        // Queue::Auto as A* decides it for its own heuristic: buckets for small integral costs and an integral weight
-        const bool small_integral =
-            o.evaluator == nullptr && costs.integral() && costs.max_constant() >= 0 && costs.max_constant() <= 64;
         const State start = o.start ? *o.start : task.initial_state();
         r.setup_seconds = seconds_since(t0);
         const Clock::time_point search_t0 = Clock::now();
@@ -86,8 +82,6 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
             it.weight = w;
             it.cost_bound = incumbent;
             it.evaluator = h;
-            if (o.queue == BestFirstOptions::Queue::Auto)
-                it.queue = small_integral && w == std::floor(w) ? BestFirstOptions::Queue::Bucket : BestFirstOptions::Queue::Heap;
             it.control.observer = inner.get();
             Budget& b = it.control.budget;
             if (timed)

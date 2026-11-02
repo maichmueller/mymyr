@@ -456,7 +456,6 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
         r.ehc.fallback = true;
         BestFirstOptions g = opts;
         g.evaluator = c->h;
-        g.queue = use_buckets(*c) ? BestFirstOptions::Queue::Bucket : BestFirstOptions::Queue::Heap;
         std::unique_ptr<InnerObserver> inner;
         if (c->obs)
             inner = std::make_unique<InnerObserver>(*c->obs);

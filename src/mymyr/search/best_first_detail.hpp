@@ -24,6 +24,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,8 @@ class HeapQueue
 {
 public:
     static constexpr const char* k_name = "heap";
+    HeapQueue() = default;
+    explicit HeapQueue(bool /*fallback*/) {}
     /// The key of a value: its IEEE-754 bit pattern mapped so that unsigned order is the order of the values (g can
     /// decrease on numeric tasks whose total-cost effects decrease it); -0 and +0 share a key.
     [[nodiscard]] static u64 key(f64 v) noexcept
@@ -50,6 +53,9 @@ public:
         const u64 b = std::bit_cast<u64>(v + 0.0);
         return (b >> 63) ? ~b : (b | (u64{1} << 63));
     }
+    /// The value of a key (the inverse of key).
+    [[nodiscard]] static f64 value(u64 k) noexcept { return std::bit_cast<f64>((k >> 63) ? (k & ~(u64{1} << 63)) : ~k); }
+    [[nodiscard]] const char* name() const noexcept { return k_name; }
 
     void push(u64 p, u64 s, u32 ref)
     {
@@ -115,24 +121,33 @@ private:
     u64 m_seq = 0;
 };
 
-/// Two-level bucket queue over small integer keys (p, s), first in first out within a bucket: the same order as
-/// HeapQueue for integral keys.
+/// Two-level bucket queue over keys (p, s) whose values are small non-negative integers, first in first out within a
+/// bucket: the same order as HeapQueue. Keys are HeapQueue keys, so lists of both kinds compare their keys.
+///
+/// A key whose value is not an integer in [0, k_max_key) cannot be bucketed. With `fallback` (Queue::Auto) the queue
+/// then moves every entry into a HeapQueue, each bucket in its order, and is a heap from then on: the order of pops
+/// stays exactly that of a heap used from the start. Without it (Queue::Bucket) push throws BucketKeyError.
 class BucketQueue
 {
 public:
     static constexpr const char* k_name = "bucket";
     static constexpr u64 k_max_key = u64{1} << 22;
-    [[nodiscard]] static u64 key(f64 v)
-    {
-        const f64 r = v >= 0 ? std::floor(v) : -1;
-        if (r != v || r >= static_cast<f64>(k_max_key))
-            throw std::domain_error("mymyr best-first search: a bucket queue key is not a small non-negative integer "
-                                    "(use BestFirstOptions::Queue::Heap)");
-        return static_cast<u64>(r);
-    }
+    BucketQueue() = default;
+    explicit BucketQueue(bool fallback) : m_fallback(fallback) {}
+    [[nodiscard]] static u64 key(f64 v) noexcept { return HeapQueue::key(v); }
+    /// "bucket", or "heap" once the entries moved into a heap.
+    [[nodiscard]] const char* name() const noexcept { return m_on_heap ? HeapQueue::k_name : k_name; }
 
-    void push(u64 p, u64 s, u32 ref)
+    void push(u64 pk, u64 sk, u32 ref)
     {
+        u64 p = 0, s = 0;
+        if (!m_on_heap && !(bucket(pk, p) && bucket(sk, s)))
+            to_heap(bucket(pk, p) ? sk : pk);
+        if (m_on_heap)
+        {
+            m_heap.push(pk, sk, ref);
+            return;
+        }
         if (p >= m_outer.size())
             m_outer.resize(p + 1);
         Inner& in = m_outer[p];
@@ -144,17 +159,19 @@ public:
         if (m_count++ == 0 || p < m_cur)
             m_cur = p;
     }
-    [[nodiscard]] bool empty() const noexcept { return m_count == 0; }
-    [[nodiscard]] usize size() const noexcept { return m_count; }
+    [[nodiscard]] bool empty() const noexcept { return m_on_heap ? m_heap.empty() : m_count == 0; }
+    [[nodiscard]] usize size() const noexcept { return m_on_heap ? m_heap.size() : m_count; }
     [[nodiscard]] u64 top_key() noexcept
     {
-        while (m_outer[m_cur].count == 0)
-            ++m_cur;
-        return m_cur;
+        if (m_on_heap)
+            return m_heap.top_key();
+        return key(static_cast<f64>(top_bucket()));
     }
     u32 pop(u64& p)
     {
-        p = top_key();
+        if (m_on_heap)
+            return m_heap.pop(p);
+        p = key(static_cast<f64>(top_bucket()));
         Inner& in = m_outer[m_cur];
         while (in.fifo[in.cur].head == in.fifo[in.cur].v.size())
             ++in.cur;
@@ -176,7 +193,7 @@ public:
     }
     [[nodiscard]] u64 bytes() const noexcept
     {
-        u64 b = m_outer.capacity() * sizeof(Inner);
+        u64 b = m_heap.bytes() + m_outer.capacity() * sizeof(Inner);
         for (const Inner& in : m_outer)
         {
             b += in.fifo.capacity() * sizeof(Fifo);
@@ -198,9 +215,48 @@ private:
         u64 cur = 0;
         u64 count = 0;
     };
+    /// The bucket of key k: false when its value is not an integer in [0, k_max_key).
+    [[nodiscard]] static bool bucket(u64 k, u64& b) noexcept
+    {
+        const f64 v = HeapQueue::value(k);
+        if (!(v >= 0 && v < static_cast<f64>(k_max_key)) || v != std::floor(v))
+            return false;
+        b = static_cast<u64>(v);
+        return true;
+    }
+    [[nodiscard]] u64 top_bucket() noexcept
+    {
+        while (m_outer[m_cur].count == 0)
+            ++m_cur;
+        return m_cur;
+    }
+    /// Moves the entries into m_heap (bucket by bucket, each in its first-in-first-out order), or throws BucketKeyError
+    /// without `fallback`; `bad` is the key that cannot be bucketed.
+    void to_heap(u64 bad)
+    {
+        if (!m_fallback)
+            throw BucketKeyError(std::format("mymyr best-first search: the bucket queue takes small non-negative "
+                                             "integral keys (g, h and f values below {}), and the search produced {} "
+                                             "(use Queue::Heap or Queue::Auto)",
+                                             k_max_key, HeapQueue::value(bad)));
+        for (usize p = 0; p < m_outer.size(); ++p)
+            for (usize s = 0; s < m_outer[p].fifo.size(); ++s)
+            {
+                const Fifo& f = m_outer[p].fifo[s];
+                for (usize i = f.head; i < f.v.size(); ++i)
+                    m_heap.push(key(static_cast<f64>(p)), key(static_cast<f64>(s)), f.v[i]);
+            }
+        m_outer = {};
+        m_count = 0;
+        m_cur = 0;
+        m_on_heap = true;
+    }
     std::vector<Inner> m_outer;
     u64 m_cur = 0;
     u64 m_count = 0;
+    HeapQueue m_heap;
+    bool m_fallback = false;
+    bool m_on_heap = false;
 };
 
 /// An alternating open list over a preferred (0) and a standard (1) list: up to `weight` pops from the current
@@ -209,7 +265,15 @@ template<class Q>
 class Alternating
 {
 public:
-    Alternating(u32 preferred_weight, u32 standard_weight) : m_w{preferred_weight, standard_weight} {}
+    Alternating(u32 preferred_weight, u32 standard_weight, bool fallback)
+        : m_q{Q(fallback), Q(fallback)}, m_w{preferred_weight, standard_weight}
+    {
+    }
+    /// The name of the lists' kind: HeapQueue's once either list moved into a heap.
+    [[nodiscard]] const char* name() const noexcept
+    {
+        return m_q[0].name() != Q::k_name ? m_q[0].name() : m_q[1].name();
+    }
     [[nodiscard]] Q& list(u32 i) noexcept { return m_q[i]; }
     [[nodiscard]] bool empty() const noexcept { return m_q[0].empty() && m_q[1].empty(); }
     [[nodiscard]] usize size() const noexcept { return m_q[0].size() + m_q[1].size(); }
@@ -730,6 +794,7 @@ public:
     /// non-negative costs); a transition that lowers g makes the search fail, as under a finite bound.
     bool nonnegative = false;
     bool lowered_g = false;       // a transition lowered g (expand stops; the search fails)
+    bool queue_fallback = false;  // Queue::Auto: a bucket queue moves into a heap at a key it cannot bucket
     f64 lowered_from = 0, lowered_to = 0;  // the metric values of the first such transition
 
     /// Whether a state with metric value g and heuristic value h (0 when not evaluated) cannot lie on a plan cheaper
@@ -944,6 +1009,13 @@ private:
     SearchObserver& m_outer;
 };
 
+/// The kind two open lists ended as: "heap" once either moved into a heap.
+template<class L, class M>
+[[nodiscard]] const char* queue_name(const L& a, const M& b) noexcept
+{
+    return std::string_view(a.name()) == HeapQueue::k_name ? a.name() : b.name();
+}
+
 /// The queue kind for the options (Auto: buckets for small integral costs).
 [[nodiscard]] bool use_buckets(const Context& c);
 /// The store kind for the options (Auto: Flat for W <= 8 words, Chunked above).
@@ -954,6 +1026,7 @@ template<template<class, class> class Run>
 void dispatch(Context& c)
 {
     const bool buckets = use_buckets(c);
+    c.queue_fallback = c.o.queue == BestFirstOptions::Queue::Auto;
     switch (store_kind(c))
     {
         case BestFirstOptions::Store::Chunked:
@@ -985,6 +1058,10 @@ BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* alg
             return r;
         c->nonnegative = astar;
         dispatch<Run>(*c);
+    }
+    catch (const BucketKeyError&)
+    {
+        throw;  // a misuse of Queue::Bucket, like the option checks above
     }
     catch (const heuristics::Interrupted&)
     {

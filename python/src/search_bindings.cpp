@@ -2160,7 +2160,20 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     opts.beam_width = beam_width;
     opts.witness_pruning = witness_pruning;
     const Task& t = *o.core->task;
-    auto r = run_detached(cs, [&] { return search_fn(t, opts); });
+    auto r = [&]
+    {
+        try
+        {
+            return run_detached(cs, [&] { return search_fn(t, opts); });
+        }
+        catch (const search::BucketKeyError&)
+        {
+            throw nb::value_error("mymyr: queue='bucket' takes small non-negative integral keys (g, h and f values "
+                                  "below 2**22), and the search produced another (a negative action cost, a "
+                                  "fractional or infinite heuristic value, or a very deep search); use queue='heap' "
+                                  "or queue='auto'");
+        }
+    }();
     if constexpr (std::is_same_v<decltype(r), search::AStarIwResult>)
     {
         const auto novelty = r.novelty;

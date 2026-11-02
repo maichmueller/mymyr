@@ -272,12 +272,12 @@ bool use_buckets(const Context& c)
         case BestFirstOptions::Queue::Heap: return false;
         case BestFirstOptions::Queue::Auto: break;
     }
-    // g - g0 and h must be small integers: integral constant action costs of at most 64 (the heuristics then produce
-    // integers too: unit costs count actions, real costs sum the same integral costs). A caller's evaluator may not.
-    // An integral weight keeps g + weight * h integral.
+    // Buckets pay off when g - g0 and h are small integers: integral constant action costs of at most 64 (the
+    // heuristics then produce integers too: unit costs count actions, real costs sum the same integral costs) and an
+    // integral weight, which keeps g + weight * h integral. Any other key (a caller's evaluator, a decreasing cost, a
+    // deep search) moves the queue into a heap without changing the order of pops.
     const heuristics::ActionCosts& k = *c.costs;
-    return c.o.evaluator == nullptr && k.integral() && k.max_constant() >= 0 && k.max_constant() <= 64 &&
-           c.weight == std::floor(c.weight);
+    return k.integral() && k.max_constant() >= 0 && k.max_constant() <= 64 && c.weight == std::floor(c.weight);
 }
 
 BestFirstOptions::Store store_kind(const Context& c)

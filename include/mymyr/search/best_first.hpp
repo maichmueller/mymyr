@@ -71,7 +71,10 @@
 // Storage: search nodes are SoA arrays keyed by state id (parent, action, g, h, status); states live in the same
 // stores as BrFS (Auto: Flat up to 8 words, Chunked above, as BrFS; Compact on request: closed states as 128-bit fingerprints and
 // open states' words in the open list, for searches with small open lists). Queues: bucket queues when costs and
-// heuristic values are small integers (Auto: integral constant costs of at most 64), binary heaps otherwise.
+// heuristic values are small integers (Auto: integral constant costs of at most 64), binary heaps otherwise. Both pop
+// in the same order (smallest key, then the tie-breaking key, then first in first out), so the choice never changes a
+// result; an Auto bucket queue that meets a key it cannot bucket (a negative cost, a fractional heuristic value, a
+// depth beyond 2^22) moves into a heap, and result.queue then says "heap".
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -81,6 +84,7 @@
 
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -102,8 +106,10 @@ struct BestFirstOptions
     };
     enum class Queue : u8
     {
-        Auto,    // Bucket for small integral costs (integral, constant per schema, at most 64), else Heap
-        Bucket,  // requires integral g and h values
+        Auto,    // Bucket for small integral costs (integral, constant per schema, at most 64), else Heap; a bucket
+                 // queue that meets a key it cannot bucket moves its entries into a heap (the order of pops is the
+                 // heap's throughout)
+        Bucket,  // requires small non-negative integral keys (g, h, f); BucketKeyError otherwise
         Heap,
     };
 
@@ -128,6 +134,14 @@ struct BestFirstOptions
     // beam
     u32 beam_width = 1000;  // positive (std::invalid_argument otherwise)
 };
+/// Thrown by a search with Queue::Bucket when a key of its open list (g, h, f, or GBFS's tie-breaking g) is not an
+/// integer in [0, 2^22): a negative action cost, a fractional or infinite heuristic value, or a very deep search.
+class BucketKeyError : public std::invalid_argument
+{
+public:
+    using std::invalid_argument::invalid_argument;
+};
+
 // Option values a search does not take (a weight below 1 or not finite, a weight other than 1 or a finite cost bound
 // in GBFS or beam search, a NaN cost bound, a bucket queue with a weight that is not integral) throw
 // std::invalid_argument before the search starts.

@@ -30,7 +30,7 @@ def test_callable_searches_like_the_native_heuristic(task, lazy):
     native = search.astar(task, heuristic="max", queue="heap", lazy=lazy)
     py = search.astar(task, heuristic=lambda s: h(s), lazy=lazy)
     same_search(native, py)
-    assert py.queue == "heap"
+    assert py.queue == "bucket"  # integral values: buckets, popped in the heap's order
     assert py.evaluations == native.evaluations
     assert py.heuristic.evaluations == py.evaluations
 
