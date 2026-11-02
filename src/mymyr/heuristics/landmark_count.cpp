@@ -13,7 +13,8 @@
 // the status of the initial state is the landmarks true in it. A path may start in another state s as well (a search's
 // start, evaluate(s) without a status): its status is then what every path from the initial state to s reaches, as
 // far as s shows it (the landmarks true in s or in the initial state, and those ordered greedy-necessarily before a
-// landmark true in s but not initially), and a flag bit after the landmarks marks it as inferred.
+// landmark true in s but not initially; every landmark when s is a goal state, as every such path is a plan), and a
+// flag bit after the landmarks marks it as inferred.
 // Fast Downward also stores the future landmarks and unites them over the paths; with goal and greedy-necessary
 // orderings only (no reasonable orderings), its future landmarks are those computed here from the reached ones.
 //
@@ -93,9 +94,16 @@ public:
         add_true(s, out, m_scan);
         if (s == m_s0.view())
             return;
+        const u32 n = static_cast<u32>(m_lms.size());
+        if (m_task.is_goal(s))
+        {
+            // every path from the initial state to a goal state is a plan, and every plan reaches every landmark
+            for (u32 i = 0; i <= n; ++i)
+                bits::set(out.data(), i);
+            return;
+        }
         // reached on every path from the initial state: the landmarks true there, and transitively those ordered
         // before a landmark that became true on the way (it was false initially)
-        const u32 n = static_cast<u32>(m_lms.size());
         m_work.clear();
         for (u32 i = 0; i < n; ++i)
             if (bits::test(out.data(), m_words, i) && !bits::test(m_init.data(), m_words, i))

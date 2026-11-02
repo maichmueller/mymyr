@@ -407,3 +407,38 @@ def test_derived_atoms_of_goal_alternatives_are_estimated_like_the_task_goal(heu
             assert alternative == h(twin), (str(s), heuristic)
             checked += 1
     assert checked > 5
+
+
+# ------------------------------------------------------------------------------------------------ landmark count
+
+# a3 makes (p) true through a conditional effect: the landmark (s c c) or (s o1 o1) of the goal is false in the goal
+# state, so the goal state alone does not show that a path to it reached it.
+LANDMARK_GOAL_TASK = (
+    """(define (domain d) (:requirements :adl :derived-predicates :action-costs) (:constants c)
+  (:predicates (p) (t) (q ?x) (r ?x) (s ?x ?y) (dq ?x)) (:functions (total-cost))
+  (:derived (dq ?x0) (or (r ?x0) (and (p) (not (p)))))
+  (:action a0 :parameters (?x0) :precondition (and (q ?x0) (p))
+    :effect (and (q ?x0) (p) (s ?x0 ?x0) (when (q ?x0) (r ?x0)) (increase (total-cost) 1)))
+  (:action a1 :parameters (?x0) :precondition (and (r ?x0) (not (dq ?x0)))
+    :effect (and (p) (not (p)) (q ?x0) (increase (total-cost) 2)))
+  (:action a2 :parameters (?x0 ?x1) :precondition (and (not (dq ?x0)) (not (r ?x1)))
+    :effect (and (s ?x0 ?x1) (increase (total-cost) 2)))
+  (:action a3 :parameters (?x0) :precondition (and (s ?x0 ?x0) (not (p)))
+    :effect (and (q ?x0) (not (p)) (not (s ?x0 ?x0)) (when (s ?x0 ?x0) (p)) (increase (total-cost) 0))))""",
+    """(define (problem pr) (:domain d) (:objects o1) (:init (q c) (q o1) (= (total-cost) 0))
+  (:goal (and (p) (p))) (:metric minimize (total-cost)))""",
+)
+
+
+@pytest.mark.parametrize("costs", ["unit", "real"])
+def test_landmark_count_is_zero_on_a_goal_state_alone(costs):
+    task = pddl(*LANDMARK_GOAL_TASK)
+    h = search.Heuristic(task, "lmcount", costs=costs)
+    seen = {str(task.initial_state): task.initial_state}
+    frontier = [task.initial_state]
+    while frontier:
+        frontier = [u for s in frontier for u in task.successor_states(s) if str(u) not in seen and not seen.update({str(u): u})]
+    goals = [s for s in seen.values() if task.is_goal(s)]
+    assert goals
+    for s in goals:
+        assert h(s) == 0, str(s)
