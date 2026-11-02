@@ -10,7 +10,6 @@ namespace mymyr::search
 namespace
 {
 using namespace bf;
-constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 
 /// The start of every GBFS: the root node, the static goal, the start goal test and h(start). False when the
 /// search is over already (the status is set).
@@ -36,7 +35,7 @@ bool start_search(Context& c, S& store, Nodes& nodes, u32& root, f64& h0)
     h0 = c.evaluate(s0, nodes, root);
     c.r.initial_h = h0;
     c.begin_search();
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++c.r.dead_ends;
         c.r.status = SearchStatus::Unsolvable;
@@ -130,7 +129,7 @@ struct GbfsEager
                     break;
                 }
                 const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
-                if (hv == k_inf)
+                if (c.dead_end(hv))
                 {
                     nodes.set_status(cid, Nodes::DeadEnd);
                     ++r.dead_ends;
@@ -207,7 +206,7 @@ struct GbfsLazy
                 last_evaluated = id;
             }
             const f64 hp = nodes.h[id];
-            if (hp == k_inf)
+            if (c.dead_end(hp))
             {
                 nodes.set_status(id, Nodes::DeadEnd);
                 ++r.dead_ends;

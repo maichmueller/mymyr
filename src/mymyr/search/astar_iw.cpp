@@ -82,7 +82,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
     }
     const f64 h0 = evaluate(c, s0, nodes, root);
     r.initial_h = h0;
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++r.dead_ends;
         r.status = SearchStatus::Unsolvable;
@@ -227,7 +227,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                 }
             }
             const f64 h = evaluate(c, child, nodes, t.child);
-            if (h == k_inf)
+            if (c.dead_end(h))
             {
                 nodes.set_status(t.child, Nodes::DeadEnd);
                 ++r.dead_ends;

@@ -396,6 +396,12 @@ sequence of ground atoms and literals; any one that holds ends the search. See [
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
 literals and numeric constraints; each batched goal selects one conjunction per search. Callable goals and any-of
 alternatives within one device search are not supported; device A*/GBFS use the task goal.
+For the task's goal and for goal alternatives the heuristic estimates the goal the search tests, and an infinite value
+proves a dead end (the state is pruned; an infinite value at the start state makes the result `UNSOLVABLE`). A
+callable goal is opaque to the heuristic, which keeps estimating the task's goal: its values then only order the
+states. No state is pruned for an infinite value (such states come after all others), no search reports
+`UNSOLVABLE`, A* gives no optimality guarantee, and `anytime_astar` claims `optimal` only when an iteration exhausts
+its search space.
 `search.CancelToken` supports cancellation from another thread. A search that does not solve the task returns an
 empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 

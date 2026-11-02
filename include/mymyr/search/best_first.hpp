@@ -64,7 +64,9 @@
 // max_depth the depth (in actions) of expanded states (deeper states are not expanded), max_seconds the wall time
 // (OutOfTime); cancel and on_progress returning false give Cancelled. blocked_states are never entered (the start
 // state is exempt); they count as pruned. The goal: GoalSpec::Task, AnyOf (the heuristic estimates
-// the cheapest of the goals) or Custom (the heuristic estimates the task's goal). Observer events: on_start,
+// the cheapest of the goals) or Custom (the heuristic estimates the task's goal, which the search does not test: its
+// values only order the states; h = +inf prunes nothing and never gives Unsolvable, the states with it come last,
+// and A* gives no optimality guarantee). Under Task and AnyOf h = +inf proves a dead end. Observer events: on_start,
 // on_expand(id), on_generate(parent, action, child id, child, is_new) for every transition that is not blocked,
 // on_prune for blocked successors, on_solution and on_end. Ids are the store's state ids (the start state is 0).
 //

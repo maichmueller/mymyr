@@ -31,6 +31,7 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     start = o.start ? *o.start : task.initial_state();
     if (o.control.goal.kind == GoalSpec::Kind::Custom && !o.control.goal.test)
         throw std::invalid_argument("mymyr best-first search: GoalSpec::Custom without a test");
+    inf_is_dead_end = o.control.goal.kind != GoalSpec::Kind::Custom;
     goal_view = o.control.goal.kind == GoalSpec::Kind::AnyOf &&
                 std::ranges::any_of(o.control.goal.goals, &GoalSpec::AtomGoal::needs_view);
     try

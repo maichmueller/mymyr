@@ -795,6 +795,15 @@ public:
     bool nonnegative = false;
     bool lowered_g = false;       // a transition lowered g (expand stops; the search fails)
     bool queue_fallback = false;  // Queue::Auto: a bucket queue moves into a heap at a key it cannot bucket
+    /// h = +inf proves a dead end only when the heuristic estimates the goal the search tests (GoalSpec::Task or
+    /// AnyOf). Under GoalSpec::Custom it estimates the task's goal, which the search does not test: its values then
+    /// only order the states, and a state with h = +inf stays in the search, after every state with a finite value.
+    bool inf_is_dead_end = true;
+    /// Whether h proves the state a dead end (see inf_is_dead_end).
+    [[nodiscard]] bool dead_end(f64 hv) const noexcept
+    {
+        return inf_is_dead_end && hv == std::numeric_limits<f64>::infinity();
+    }
     f64 lowered_from = 0, lowered_to = 0;  // the metric values of the first such transition
 
     /// Whether a state with metric value g and heuristic value h (0 when not evaluated) cannot lie on a plan cheaper

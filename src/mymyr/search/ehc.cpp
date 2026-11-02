@@ -18,7 +18,6 @@ namespace mymyr::search
 namespace
 {
 using namespace bf;
-constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 
 /// A state entered by the current lookahead: the path to it from the lookahead's start (parent visit and action).
 struct Visit
@@ -96,7 +95,7 @@ public:
         m_root_h = evaluate(s0, m_root_status);
         m_r.initial_h = m_root_h;
         m_c.begin_search();
-        if (m_root_h == k_inf)
+        if (m_c.dead_end(m_root_h))
         {
             ++m_r.dead_ends;
             m_r.status = SearchStatus::Unsolvable;
@@ -229,7 +228,7 @@ private:
             if (v != root)
             {
                 const f64 hv = evaluate(sv, status_of(v));
-                if (hv == k_inf)
+                if (m_c.dead_end(hv))
                 {
                     ++m_r.dead_ends;
                     ++m_r.stats.pruned;

@@ -45,7 +45,7 @@ bool start(Context& c, Nodes& nodes, u32 root, StateView s0)
     const f64 h0 = c.evaluate(s0, nodes, root);
     r.initial_h = h0;
     c.begin_search();
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++r.dead_ends;
         r.status = SearchStatus::Unsolvable;
@@ -176,7 +176,7 @@ struct AStarEager
                         continue;
                     }
                     const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
-                    if (hv == k_inf)
+                    if (c.dead_end(hv))
                     {
                         nodes.set_status(cid, Nodes::DeadEnd);
                         ++r.dead_ends;
@@ -209,7 +209,7 @@ struct AStarEager
                     if (!nodes.has(cid, Nodes::Evaluated) || c.path_dependent)
                     {
                         const f64 hv = c.evaluate(tr.view(t), nodes, cid);
-                        if (hv == k_inf)
+                        if (c.dead_end(hv))
                         {
                             nodes.set_status(cid, Nodes::DeadEnd);
                             ++r.dead_ends;
@@ -235,7 +235,7 @@ struct AStarEager
                     if (c.path_dependent)  // the status has merged another path since h was computed
                     {
                         const f64 hv = c.evaluate(tr.view(t), nodes, cid);
-                        if (hv == k_inf)
+                        if (c.dead_end(hv))
                         {
                             nodes.set_status(cid, Nodes::DeadEnd);
                             ++r.dead_ends;
@@ -341,7 +341,7 @@ struct AStarLazy
                 last_evaluated = id;
                 nodes.h[id] = hv;
                 nodes.set(id, Nodes::Evaluated);
-                if (hv == k_inf)
+                if (c.dead_end(hv))
                 {
                     store.release(ref);
                     nodes.set_status(id, Nodes::DeadEnd);

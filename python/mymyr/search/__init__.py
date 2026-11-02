@@ -109,7 +109,11 @@ run at once on one task (free-threaded CPython). Common keyword arguments:
 - ``goal``: ``None`` (the task's goal), a callable ``state -> bool``, a :class:`mymyr.GroundCondition`, or a sequence
   of goals, each a GroundCondition or a sequence of ground literals and atoms (anything ``task.ground_condition``
   takes: static, fluent and derived literals of either polarity, e.g. ``[["(on a b)", "(not (clear c))"]]``); any of
-  them counts. ``task.ground_condition(literals, constraints=["(>= (fuel t) 10)"])`` adds numeric constraints;
+  them counts. ``task.ground_condition(literals, constraints=["(>= (fuel t) 10)"])`` adds numeric constraints.
+  The heuristic estimates the goal for the task's goal and for goal alternatives, where an infinite value proves a dead
+  end. Under a callable goal it still estimates the task's goal, which the search does not test: its values only
+  order the states (a state with an infinite value is expanded after the others, never pruned), the search never
+  reports UNSOLVABLE, and no result claims optimality from the heuristic's admissibility;
 - ``blocked_states``: States the search never enters;
 - ``observer``: a :class:`Observer` subclass that overrides the events it needs: ``on_start(state)``,
   ``on_expand(id, state)``, ``on_generate(parent, action, child, state, is_new)``, ``on_prune(parent, action, state)``,

@@ -13,7 +13,6 @@ namespace mymyr::search
 namespace
 {
 using namespace bf;
-constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 
 template<class S, class Q>
 struct Beam
@@ -73,7 +72,7 @@ struct Beam
         const f64 h0 = c.evaluate(s0, nodes, root);
         r.initial_h = h0;
         c.begin_search();
-        if (h0 == k_inf)
+        if (c.dead_end(h0))
         {
             ++r.dead_ends;
             r.status = SearchStatus::Unsolvable;
@@ -138,7 +137,7 @@ struct Beam
                         else
                         {
                             const f64 hv = c.evaluate(v, nodes, cid);
-                            if (hv == k_inf)
+                            if (c.dead_end(hv))
                             {
                                 nodes.set_status(cid, Nodes::DeadEnd);
                                 ++r.dead_ends;
@@ -188,7 +187,7 @@ struct Beam
                 {
                     Candidate& x = cand[pend[j]];
                     x.h = batch_h[j];
-                    if (x.h == k_inf)
+                    if (c.dead_end(x.h))
                     {
                         nodes.unset(x.id, Nodes::Candidate);
                         nodes.set_status(x.id, Nodes::DeadEnd);
@@ -200,7 +199,7 @@ struct Beam
                     nodes.set(x.id, Nodes::Evaluated);
                 }
                 pend.clear();
-                std::erase_if(cand, [](const Candidate& x) { return x.h == k_inf; });
+                std::erase_if(cand, [&](const Candidate& x) { return c.dead_end(x.h); });
             }
             // the best `width` candidates by (h, g, generation order): a total order
             auto better = [](const Candidate& a, const Candidate& b)

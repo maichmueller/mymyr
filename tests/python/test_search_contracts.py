@@ -1,4 +1,5 @@
-"""Search contracts on small PDDL tasks: open-list keys a bucket queue cannot hold, and the queue kinds' common order."""
+"""Search contracts on small PDDL tasks: callable goals and heuristic dead ends, open-list keys a bucket queue cannot
+hold, and the queue kinds' common order."""
 
 import zlib
 
@@ -19,6 +20,79 @@ def pddl(domain, problem):
 
 def labels(plan):
     return [str(a) for a in plan]
+
+
+# ------------------------------------------------------------------------------------------------ callable goals
+
+# The task goal (goal) is unreachable (never is false) while a callable goal on (b) is one action away.
+UNREACHABLE_TASK_GOAL = (
+    """(define (domain d) (:requirements :strips)
+  (:predicates (b) (never) (goal))
+  (:action go-b :parameters () :precondition (and) :effect (b))
+  (:action finish :parameters () :precondition (never) :effect (goal)))""",
+    "(define (problem p) (:domain d) (:init) (:goal (goal)))",
+)
+
+# (b) holds only after go-trap, from where the task goal is unreachable: every state with (b) has h = +inf.
+TRAP = (
+    """(define (domain d) (:requirements :strips :negative-preconditions)
+  (:predicates (a) (b) (trap) (goal))
+  (:action go-trap :parameters () :precondition (not (trap)) :effect (and (trap) (b)))
+  (:action go-a :parameters () :precondition (not (trap)) :effect (a))
+  (:action finish :parameters () :precondition (and (a) (not (trap))) :effect (goal)))""",
+    "(define (problem p) (:domain d) (:init) (:goal (goal)))",
+)
+
+
+def holds_b(state):
+    return "(b)" in str(state)
+
+
+CALLABLE_GOAL_SEARCHES = [
+    ("astar", lambda t, **kw: search.astar(t, **kw)),
+    ("astar_lazy", lambda t, **kw: search.astar(t, lazy=True, **kw)),
+    ("gbfs", lambda t, **kw: search.gbfs(t, **kw)),
+    ("gbfs_lazy", lambda t, **kw: search.gbfs(t, lazy=True, **kw)),
+    ("ehc", lambda t, **kw: search.ehc(t, **kw)),
+    ("beam", lambda t, **kw: search.beam(t, **kw)),
+    ("anytime_astar", lambda t, **kw: search.anytime_astar(t, **kw)),
+    ("astar_iw", lambda t, **kw: search.astar_iw(t, **kw)),
+]
+
+
+@pytest.mark.parametrize("heuristic", ["blind", "max", "ff", "lmcut"])
+@pytest.mark.parametrize("name,run", CALLABLE_GOAL_SEARCHES, ids=[n for n, _ in CALLABLE_GOAL_SEARCHES])
+def test_infinite_heuristic_values_do_not_prune_under_a_callable_goal(name, run, heuristic):
+    # the heuristic estimates the task's goal: its infinite values prove nothing about the callable goal
+    task = pddl(*UNREACHABLE_TASK_GOAL)
+    r = run(task, heuristic=heuristic, goal=holds_b)
+    assert r.status == Status.SOLVED, (name, heuristic, r.status)
+    assert labels(r.plan) == ["(go-b)"]
+    trap = pddl(*TRAP)
+    r = run(trap, heuristic=heuristic, goal=holds_b)
+    assert r.status == Status.SOLVED, (name, heuristic, r.status)
+    assert holds_b(r.goal_state)
+    # the task's goal keeps the dead-end proof
+    r = run(task, heuristic=heuristic)
+    assert r.status in ((Status.EXHAUSTED,) if heuristic == "blind" else (Status.UNSOLVABLE,)), (name, r.status)
+
+
+@pytest.mark.parametrize("heuristic", ["max", "ff", "lmcut"])
+def test_callable_goal_never_reports_unsolvable(heuristic):
+    task = pddl(*UNREACHABLE_TASK_GOAL)
+    for run in (search.astar, search.gbfs, search.beam, search.anytime_astar):
+        r = run(task, heuristic=heuristic, goal=lambda s: False)
+        assert r.status == Status.EXHAUSTED
+
+
+@pytest.mark.parametrize("heuristic", ["max", "ff"])
+def test_anytime_optimality_under_a_callable_goal_rests_on_exhaustion(heuristic):
+    task = pddl(*TRAP)
+    r = search.anytime_astar(task, heuristic=heuristic, goal=holds_b)
+    assert r.status == Status.SOLVED
+    assert labels(r.plan) == ["(go-trap)"]  # the cheapest plan; optimal only because the last iteration exhausted
+    assert r.optimal
+    assert r.iterations[-1].status == Status.EXHAUSTED
 
 
 # ------------------------------------------------------------------------------------------------ open lists
@@ -87,3 +161,11 @@ def test_auto_queue_pops_in_the_heap_order_across_the_move(run):
     bucket = run(task, heuristic=integral, queue="bucket", max_expanded=3000)
     assert auto.queue == "bucket" and bucket.queue == "bucket"
     assert outcome(auto) == outcome(heap) == outcome(bucket)
+
+
+def test_auto_queue_takes_infinite_values_under_a_callable_goal():
+    task = pddl(*TRAP)
+    r = search.astar(task, heuristic="max", goal=holds_b)
+    assert r.status == Status.SOLVED and r.queue == "heap"
+    with pytest.raises(ValueError, match="queue='heap'"):
+        search.astar(task, heuristic="max", goal=holds_b, queue="bucket")
