@@ -895,7 +895,10 @@ void bind_datasets(nb::module_& parent)
             "(NumPy, or DLPack arrays on the CPU; copied), state_words included (any framework's word layout). The "
             "arrays are validated: shapes and dtypes, unknown names, ranges, the reverse CSR against the forward one, "
             "flags against distances, and that the rows are states of the task (its row layout and atom slots, its "
-            "initial state first, labels of its schemas and objects); ValueError or TypeError otherwise. A task with "
+            "initial state first, labels of its schemas and objects); the rows are distinct, the goal flags are the "
+            "task's goal test, each label is an action applicable in its source state leading to the target, and the "
+            "goal distances are 0 at goals and elsewhere the smallest transition cost (1: unit distances) plus the "
+            "successor's distance; ValueError or TypeError otherwise. A task with "
             "lazy atom slots is refused (pickle the space or use datasets.save / load). The generation statistics "
             "(threads, layers, seconds) of the result are 1, 0, 0, 0. Linear in the size of the arrays.")
         .def("__reduce__",

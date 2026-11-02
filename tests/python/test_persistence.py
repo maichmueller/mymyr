@@ -146,7 +146,7 @@ def test_from_arrays_validates():
         (edit("goal", flip), ValueError, "do not match the unit goal distances"),
         (edit("state_words", lambda x: x[::-1].copy()), ValueError, "is not the task's initial state"),
         (edit("label_bindings", bad_label), ValueError, "binds an object the task does not have"),
-        (edit("costs", nan), ValueError, "a transition cost is NaN"),
+        (edit("costs", nan), ValueError, "a transition cost is negative or NaN"),
         (edit("backward_sources", broken_reverse), ValueError, "invalid state space arrays"),
         (edit("unit_goal_distances", lambda x: x[:-1]), ValueError, "not [num_states]"),
         ({k: v.tolist() for k, v in a.items()}, TypeError, "must be an array in host memory"),
@@ -162,6 +162,105 @@ def test_from_arrays_validates():
         datasets.StateSpace.from_arrays(pddl_task("counters", "p03-half"), a)
     with pytest.raises(ValueError, match="belong to another task"):  # another numeric layout
         datasets.StateSpace.from_arrays(pddl_task("counters", "p01", numeric_storage="f64"), a)
+
+
+def _with_goals(a, goal):
+    """Arrays `a` with the goal flags `goal` and the goal distances and flags that follow (unit costs)."""
+    off, tgt, n = a["forward_offsets"], a["forward_targets"], len(goal)
+    preds = [[] for _ in range(n)]
+    for s in range(n):
+        for e in range(off[s], off[s + 1]):
+            preds[tgt[e]].append(s)
+    d = np.full(n, -1, np.int32)
+    frontier = list(np.flatnonzero(goal))
+    d[frontier] = 0
+    while frontier:
+        nxt = []
+        for v in frontier:
+            for u in preds[v]:
+                if d[u] == -1:
+                    d[u] = d[v] + 1
+                    nxt.append(u)
+        frontier = nxt
+    return {**a, "goal": goal, "unit_goal_distances": d, "cost_goal_distances": np.where(d >= 0, d, np.inf),
+            "unsolvable": d < 0, "alive": ~goal & (d >= 0)}
+
+
+@needs_frontend
+def test_from_arrays_checks_the_states_transitions_and_distances(tmp_path):
+    task = pddl_task("gripper", "p02")
+    space = datasets.state_space(task)
+    a = space.arrays()
+    assert "costs" not in a or a["costs"].size == 0
+    alive = int(np.flatnonzero(a["alive"])[0])
+    goal = int(np.flatnonzero(a["goal"])[0])
+
+    def edit(name, f):
+        b = {k: v.copy() for k, v in a.items()}
+        f(b[name])
+        return b
+
+    def swap_labels(b):  # two transitions of state 0 to different targets exchange their labels
+        e0, e1 = int(a["forward_offsets"][0]), int(a["forward_offsets"][0]) + 1
+        assert a["forward_targets"][e0] != a["forward_targets"][e1]
+        for k in ("label_schemas", "label_bindings"):
+            b[k][[e0, e1]] = a[k][[e1, e0]]
+        return b
+
+    applicable = {repr(x) for x in task.applicable_actions(space.state(0))}
+    foreign = next(e for e in range(space.num_transitions) if repr(space.label(e)) not in applicable)
+
+    def inapplicable(b):  # a transition of state 0 labelled with an action not applicable there
+        for k in ("label_schemas", "label_bindings"):
+            b[k][0] = a[k][foreign]
+        return b
+
+    moved = a["goal"].copy()
+    moved[goal] = False
+    moved[alive] = True
+    cases = [
+        (edit("state_words", lambda x: x.__setitem__(2, x[3])), "two state rows are equal"),
+        (edit("unit_goal_distances", lambda x: x.__setitem__(alive, x[alive] + 2)), "a unit goal distance is not 1 \\+"),
+        (edit("cost_goal_distances", lambda x: x.__setitem__(alive, 1e30)), "a cost goal distance is not"),
+        (_with_goals(a, moved), "a goal flag is not the task's goal test"),
+        (swap_labels({k: v.copy() for k, v in a.items()}), "a transition's target is not its label's action"),
+        (inapplicable({k: v.copy() for k, v in a.items()}), "a label is not an action applicable in its"),
+    ]
+    for arrays, message in cases:
+        with pytest.raises(ValueError, match=f"^mymyr: invalid state space arrays: {message}"):
+            datasets.StateSpace.from_arrays(task, arrays)
+    # recomputed goal distances of the task's own goal flags are the space's
+    same_arrays(datasets.StateSpace.from_arrays(task, _with_goals(a, a["goal"].copy())).arrays(), a)
+
+    # cost goal distances of transition costs: the smallest cost + distance over the transitions
+    task = pddl_task("counters", "p01")
+    a = datasets.state_space(task).arrays()
+    assert a["costs"].size and np.any(a["costs"] != 1)
+    i = int(np.flatnonzero(a["alive"])[0])
+    b = {**a, "cost_goal_distances": a["cost_goal_distances"].copy()}
+    b["cost_goal_distances"][i] += 0.5
+    with pytest.raises(ValueError, match="^mymyr: invalid state space arrays: a cost goal distance is not"):
+        datasets.StateSpace.from_arrays(task, b)
+    b = {**a, "costs": -a["costs"]}
+    with pytest.raises(ValueError, match="^mymyr: invalid state space arrays: a transition cost is negative"):
+        datasets.StateSpace.from_arrays(task, b)
+
+    # a damaged dataset file: two equal state rows
+    task = pddl_task("gripper", "p02")
+    path = tmp_path / "s.mymyr"
+    datasets.save(space, path)
+    with zipfile.ZipFile(path) as z, zipfile.ZipFile(tmp_path / "dup.mymyr", "w") as w:
+        for n in z.namelist():
+            data = z.read(n)
+            if n == "state_spaces/0/state_words.npy":
+                rows = np.load(io.BytesIO(data))
+                rows[2] = rows[3]
+                out = io.BytesIO()
+                np.save(out, rows)
+                data = out.getvalue()
+            w.writestr(n, data)
+    with pytest.raises(ValueError, match="^mymyr: .*two state rows are equal"):
+        datasets.load(tmp_path / "dup.mymyr", task=task)
 
 
 # ------------------------------------------------------------------------------------------------ pickling

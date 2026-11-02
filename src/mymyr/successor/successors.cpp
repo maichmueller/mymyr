@@ -362,8 +362,21 @@ Delta Successors::apply_with_delta(StateView s, const ActionLabel& a, StateBuild
         throw std::invalid_argument("mymyr: apply: malformed action label");
     if (!applicable_bound(a.schema.v) || !collect(m_schemas[a.schema.v]))
         throw std::invalid_argument("mymyr: apply: the action is not applicable in the state");
+    return write_successor(s, a.schema.v, out);
+}
+
+bool Successors::apply_prepared(StateView s, const ActionLabel& a, StateBuilder& out)
+{
+    if (!bind_label(a) || !applicable_bound(a.schema.v) || !collect(m_schemas[a.schema.v]))
+        return false;
+    (void) write_successor(s, a.schema.v, out);
+    return true;
+}
+
+Delta Successors::write_successor(StateView s, u32 schema, StateBuilder& out)
+{
     m_cd.num = m_e.numeric();
-    const Delta d = delta(m_schemas[a.schema.v]);
+    const Delta d = delta(m_schemas[schema]);
     out.assign(s);
     out.apply(m_dels, m_adds);
     if (m_nnum)

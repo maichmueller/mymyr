@@ -299,7 +299,11 @@ evaluation; a perfect heuristic: its state space) and is built again when unpick
 `StateSpace.from_arrays(task, arrays)` rebuilds a state space from the dict `arrays()` gives (NumPy arrays or DLPack
 arrays on the CPU) and validates it: names, dtypes and shapes, the CSR ranges, the backward CSR against the forward
 one, the flags against the goal distances, and that the arrays belong to `task` (its row layout and atom slots, its
-initial state first, labels of its schemas and objects). `TupleGraph.from_arrays(space, root, arrays, width=...)`
+initial state first, labels of its schemas and objects). It also checks the contents against the task: the rows are
+distinct, the goal flags are the task's goal test, each label is an action applicable in its source state that leads
+to the transition's target, and the goal distances are 0 at goal states and elsewhere the smallest transition cost
+(1 for unit distances) plus the successor's distance. This costs one goal test per state and one action application
+per labelled transition, a fraction of generating the space. `TupleGraph.from_arrays(space, root, arrays, width=...)`
 does the same for a tuple graph. Invalid arrays raise `ValueError` or `TypeError` with a `mymyr: ...` message.
 
 `datasets.save(obj, path)` writes a `StateSpace`, `GeneralizedStateSpace`, `KnowledgeBase`, `TupleGraph` or a list of
