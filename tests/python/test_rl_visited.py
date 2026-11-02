@@ -601,6 +601,63 @@ def test_captured_rollout_replays_tables_and_action_visited():
     graph.close()
 
 
+def test_replay_invalidates_saved_tensors():
+    """A replay writes the environments' tensors and the rollout's outputs in place on the device: like the eager
+    steps, it gives every tensor mymyr::step mutates and every output of the rollout (observations, their action rows
+    and action_visited too) a new version, so a backward through one of them saved before the replay raises."""
+    torch = pytest.importorskip("torch")
+    from mymyr import encoding
+    from mymyr.encoding._device import DeviceFlatBatch
+    from mymyr.rl.torch import BatchedEnv
+
+    device = gpu_device()
+    table = rl.TaskTable([text_task("gripper__prob05"), text_task("gripper__prob05")])
+    encoder = encoding.FlatRelationEncoder(table, target_sources=("action",))
+    env = BatchedEnv(table, 8, device=device, seed=3, max_steps=3, goals=True, track_visited=True,
+                     observation=encoder, obs_actions=True,
+                     obs_capacities=dict(entities=1 << 10, args=1 << 12, targets=1 << 10))
+    rollout = env.capture(2, final=True)
+    schema = torch.ops.mymyr.step.default._schema
+    mutated = [a.name for a in schema.arguments if a.alias_info is not None and a.alias_info.is_write]
+    written = {name: getattr(env, name) for name in mutated if name != "revisited"}
+
+    def add(name, value):
+        if isinstance(value, torch.Tensor):
+            written[name] = value
+        elif isinstance(value, (tuple, list)):
+            for i, x in enumerate(value):
+                add(f"{name}[{i}]", x)
+        elif isinstance(value, DeviceFlatBatch):
+            for key, x in value.as_dict(framework="torch").items():
+                add(f"{name}.{key}", x)
+            for key in ("device_sizes", "device_static_sizes", "device_graphs"):
+                add(f"{name}.{key}", getattr(value, key))
+
+    for field, value in rollout.result._asdict().items():
+        add(f"result.{field}", value)
+    assert all(x is not None for x in written.values())
+    for part in ("obs[1]", "final_obs[1]", "obs_actions[1]", "action_visited[1]", "revisited"):
+        assert any(name.startswith(f"result.{part}") for name in written), part
+
+    def saved(x):  # a differentiable op that saves x (or a view of its bytes) for backward
+        if x.element_size() == 1:
+            return torch.ones(x.shape, device=device, requires_grad=True).masked_fill(x.view(torch.bool), 0).sum()
+        as_float = x.view({2: torch.float16, 4: torch.float32, 8: torch.float64}[x.element_size()])
+        return (torch.ones(x.shape, dtype=as_float.dtype, device=device, requires_grad=True) * as_float).sum()
+
+    for replay in range(3):
+        losses = {name: saved(x) for name, x in written.items()}
+        versions = {name: x._version for name, x in written.items()}
+        rollout.replay()
+        assert [name for name, x in written.items() if x._version <= versions[name]] == [], replay
+        for name, loss in losses.items():
+            with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+                loss.backward()
+    torch.cuda.synchronize(device)
+    env.check_errors()
+    env.close()
+
+
 @pytest.mark.needs_gil
 @pytest.mark.torch_compile
 def test_compiled_device_steps_keep_tables():

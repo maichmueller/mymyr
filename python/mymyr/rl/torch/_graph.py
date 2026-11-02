@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 import torch
 from torch import Tensor
 
+from mymyr.encoding._device import DeviceFlatBatch
+
 if TYPE_CHECKING:
     from ._batched import BatchedEnv
 
@@ -45,6 +47,21 @@ class Rollout(NamedTuple):
     action_binding: Optional[Tensor] = None  # int32 [K, N, L]: their bindings (L: the policy's binding columns)
     obs_actions: Optional[tuple] = None  # the K steps' observation action rows (obs_actions=True)
     action_visited: Optional[tuple] = None  # the K steps' StepResult.action_visited (track_visited, obs_actions)
+
+
+def _collect_tensors(value: Any, out: dict[int, Tensor]) -> None:
+    """Adds the tensors of a rollout's outputs to ``out`` (by id): tensors, tuples (named ones too), dicts and
+    encoded batches."""
+    if isinstance(value, Tensor):
+        out.setdefault(id(value), value)
+    elif isinstance(value, (tuple, list)):
+        for x in value:
+            _collect_tensors(x, out)
+    elif isinstance(value, dict):
+        for x in value.values():
+            _collect_tensors(x, out)
+    elif isinstance(value, DeviceFlatBatch):
+        _collect_tensors(vars(value), out)
 
 
 class CapturedRollout:
@@ -148,7 +165,7 @@ class CapturedRollout:
                     label_schema[k].copy_(schema.reshape(n))
                     label_binding[k].copy_(binding.reshape(n, -1))
                     a = (label_schema[k], label_binding[k])
-                step_obs, step_final, step_actions, step_visited = env._step_into(
+                step_obs, step_final, step_actions, step_visited, env_written = env._step_into(
                     StepResult(*(x[k] for x in out[:14]), revisited=out.revisited[k]), a, next_task_ids, final
                 )
                 obs.append(step_obs)
@@ -160,6 +177,9 @@ class CapturedRollout:
                                    action_schema=label_schema, action_binding=label_binding, obs_actions=(
                                        tuple(obs_actions) if observer is not None and observer.actions else None),
                                    action_visited=tuple(visited) if visited[0] is not None else None)
+        written: dict[int, Tensor] = {id(x): x for x in env_written}
+        _collect_tensors(self._result, written)
+        self._written = list(written.values())
 
     @property
     def result(self) -> Rollout:
@@ -167,7 +187,10 @@ class CapturedRollout:
         return self._result
 
     def replay(self) -> Rollout:
-        """Runs the K captured steps on torch's current stream; returns :attr:`result` (the same tensors every time)."""
+        """Runs the K captured steps on torch's current stream; returns :attr:`result` (the same tensors every time).
+        Like the eager steps, it gives the tensors it writes in place (the environments' and the result's) new
+        autograd versions, so a backward through one of them saved before the replay raises."""
+        torch.autograd.graph.increment_version(self._written)
         self.graph.replay()
         return self._result
 
