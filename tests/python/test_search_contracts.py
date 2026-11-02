@@ -327,3 +327,36 @@ def test_brfs_on_one_thread_of_the_concurrent_store_sends_the_serial_events():
         assert sorted(log.sink) == sorted(serial.sink), kw
         assert sum(e[0] == "generate" for e in log.sink) == r.stats.generated
         assert sum(e[0] == "expand" for e in log.sink) == r.stats.expanded
+
+
+# ------------------------------------------------------------------------------------------------ static goals
+
+STATICALLY_FALSE_GOALS = ["static_false", "contradiction", "or_all_static_false", "forall_static_guard_unsatisfiable",
+                          "not_imply_false", "forall_equality"]
+
+UNSOLVABLE_SEARCHES = [
+    ("brfs", lambda t: search.brfs(t)),
+    ("brfs_threads", lambda t: search.brfs(t, threads=2)),
+    ("brfs_compact", lambda t: search.brfs(t, store="compact")),
+    ("astar", lambda t: search.astar(t, heuristic="blind")),
+    ("gbfs", lambda t: search.gbfs(t, heuristic="ff")),
+    ("ehc", lambda t: search.ehc(t)),
+    ("beam", lambda t: search.beam(t)),
+    ("iw", lambda t: search.iw(t)),
+    ("siw", lambda t: search.siw(t)),
+]
+
+
+@pytest.mark.parametrize("problem", STATICALLY_FALSE_GOALS)
+def test_statically_false_goals_are_unsolvable_at_once(problem):
+    from conftest import ROOT
+
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    goals = ROOT / "tests/data/pddl/goals"
+    task = mymyr.Task.from_pddl(goals / "domain.pddl", goals / f"{problem}.pddl")
+    for name, run in UNSOLVABLE_SEARCHES:
+        r = run(task)
+        assert r.status == Status.UNSOLVABLE, (name, r.status)
+        assert r.stats.expanded == 0, name
+    assert not any(task.is_goal(s) for s in [task.initial_state, *task.successor_states(task.initial_state)])

@@ -1844,6 +1844,17 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store");
     BrfsResult r;
     Control ctl(task, options, options.observer);
+    if (options.goal.kind == search::GoalSpec::Kind::Task && task.compiled().goal.unsatisfiable)
+    {
+        // no state is a goal (as for every search): the start state alone, nothing expanded
+        ctl.start(ctl.start_state().view());
+        ctl.stop(search::SearchStatus::Unsolvable);
+        r.states = 1;
+        r.store = "none";
+        r.fluent_slots = task.atoms().fluent_slots();
+        ctl.finish(r);
+        return r;
+    }
     if (beam && (T > 1 || relaxed))
         r = store == BrfsOptions::Store::Flat ? run_beam<FlatStateStore>(task, options, T, ctl)
                                               : run_beam<ChunkedStateStore>(task, options, T, ctl);

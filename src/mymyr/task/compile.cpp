@@ -1301,6 +1301,29 @@ private:
         }
         for (const NumericConstraint& c : T.constraints_of(T.goal))
             N.goal.push_back(compile_check(c));
+        // The goal as written, expanded into ground literals the goal implies (TaskData::encoding_goal), decides what
+        // goal normalization hides in axioms: a statically false literal there (a disjunction whose disjuncts are all
+        // statically false, a quantified equality that fails), or an atom it wants both true and false.
+        if (T.encoding_goal_unsatisfiable || contradictory(T.encoding_goal_literals()) ||
+            contradictory(T.literals_of(T.goal)))
+            C.goal.unsatisfiable = true;
+    }
+
+    /// Whether a conjunction of ground literals wants one atom both true and false.
+    [[nodiscard]] bool contradictory(std::span<const Literal> lits) const
+    {
+        std::set<std::vector<u32>> positive;
+        auto key = [&](const Literal& l)
+        {
+            std::vector<u32> k{l.pred.v};
+            for (Term x : T.terms_of(l))
+                k.push_back(static_cast<u32>(x));
+            return k;
+        };
+        for (const Literal& l : lits)
+            if (l.positive)
+                positive.insert(key(l));
+        return std::ranges::any_of(lits, [&](const Literal& l) { return !l.positive && positive.contains(key(l)); });
     }
 
     // ------------------------------------------------------------------------------------------------ layout
