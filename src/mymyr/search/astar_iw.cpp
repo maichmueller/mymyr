@@ -167,6 +167,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                 if (c.obs)
                 {
                     const Action a = c.action(schema, binding);
+                    c.obs->on_generate(e.id, a, ~u64{0}, child, false);
                     c.obs->on_prune(e.id, a, child);
                     c.obs->on_transition(e.id, a, ~u64{0}, child, TransitionOutcome::Blocked);
                 }
@@ -188,7 +189,12 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             return true;
         });
         if (interrupted)
+        {
+            if (c.obs)  // the transitions generated before the stop
+                for (const Transitions::T& t : tr.t)
+                    c.obs->on_generate(e.id, c.action(t.schema, tr.binding(t)), t.child, tr.view(t), t.fresh);
             break;
+        }
         for (const Transitions::T& t : tr.t)
         {
             const StateView child = tr.view(t);

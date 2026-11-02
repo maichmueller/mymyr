@@ -535,7 +535,8 @@ lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
 with status `CANCELLED`) and `on_end(status, stats)`. A search never calls an event the subclass does not override,
 and an observer that overrides none is not installed. `on_expand` and `on_generate` are called once per expanded and
-generated state, so their counts equal the result's statistics.
+generated state, so their counts equal the result's statistics; `on_prune` follows the `on_generate` of the successor
+it rejects (a blocked successor's `on_generate` has `child` None and `is_new` False).
 
 `iw`, `iw_pass`, `siw`, the IW family variants, `astar_iw`, `rollout_iw`, `find_rollouts_parallel` and
 `atomic_goal_portfolio` also send `on_transition(parent, action, child, state, outcome)` for every generated

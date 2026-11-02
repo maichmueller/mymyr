@@ -169,3 +169,65 @@ def test_auto_queue_takes_infinite_values_under_a_callable_goal():
     assert r.status == Status.SOLVED and r.queue == "heap"
     with pytest.raises(ValueError, match="queue='heap'"):
         search.astar(task, heuristic="max", goal=holds_b, queue="bucket")
+
+
+# ------------------------------------------------------------------------------------------------ observer events
+
+
+class EventLog(search.Observer):
+    def __init__(self):
+        self.expanded = 0
+        self.generated = 0
+        self.pruned = 0
+        self.last_generate = None
+        self.unpaired = 0
+
+    def on_expand(self, id, state):
+        self.expanded += 1
+
+    def on_generate(self, parent, action, child, state, is_new):
+        self.generated += 1
+        self.last_generate = (parent, str(action), state)
+
+    def on_prune(self, parent, action, state):
+        self.pruned += 1
+        if self.last_generate != (parent, str(action), state):
+            self.unpaired += 1
+        self.last_generate = None
+
+
+OBSERVED_SEARCHES = [
+    ("astar", lambda t, **kw: search.astar(t, heuristic="blind", **kw)),
+    ("astar_lazy", lambda t, **kw: search.astar(t, heuristic="ff", lazy=True, **kw)),
+    ("gbfs", lambda t, **kw: search.gbfs(t, heuristic="ff", **kw)),
+    ("gbfs_lazy", lambda t, **kw: search.gbfs(t, heuristic="ff", lazy=True, **kw)),
+    ("beam", lambda t, **kw: search.beam(t, **kw)),
+    ("ehc", lambda t, **kw: search.ehc(t, **kw)),
+    ("anytime_astar", lambda t, **kw: search.anytime_astar(t, **kw)),
+    ("brfs", lambda t, **kw: search.brfs(t, **kw)),
+    ("brfs_compact", lambda t, **kw: search.brfs(t, store="compact", **kw)),
+    ("iw", lambda t, **kw: search.iw(t, **kw)),
+    ("siw", lambda t, **kw: search.siw(t, **kw)),
+    ("astar_iw", lambda t, **kw: search.astar_iw(t, **kw)),
+    ("rollout_iw", lambda t, **kw: search.rollout_iw(t, max_rollouts=20, **kw)),
+    ("liw", lambda t, **kw: search.liw(t, **kw)),
+    ("abstracted_iw", lambda t, **kw: search.abstracted_iw(t, **kw)),
+]
+
+
+@pytest.mark.parametrize("name,run", OBSERVED_SEARCHES, ids=[n for n, _ in OBSERVED_SEARCHES])
+def test_observer_events_match_the_statistics(name, run):
+    task = text_task("gripper__prob05")
+    s0 = task.initial_state
+    blocked = task.successor_states(s0)[:2]
+    budgets = [{"max_expanded": 500}, {"max_expanded": 500, "blocked_states": blocked}, {"max_states": 40},
+               {"max_states": 40, "blocked_states": blocked}, {"max_expanded": 7, "blocked_states": blocked}]
+    if name == "rollout_iw":  # budgets of its own (max_rollouts)
+        budgets = [{}, {"blocked_states": blocked}]
+    for kw in budgets:
+        log = EventLog()
+        r = run(task, observer=log, **kw)
+        assert (log.expanded, log.generated) == (r.stats.expanded, r.stats.generated), (name, kw, r.status)
+        assert log.unpaired == 0, (name, kw)
+        if "blocked_states" in kw and name != "rollout_iw":
+            assert log.pruned > 0, (name, kw)

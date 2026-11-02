@@ -918,7 +918,8 @@ inline std::string format_g(f64 g) { return std::format("{}", g); }
 /// status of a state reached before). Words are kept for new states, and for all when the store needs them (Compact),
 /// an observer is set, the heuristic is path-dependent or a cost bound is set. `preferred`: record whether each action
 /// is a preferred operator of the last evaluation. False (and r.status set) when the search stops inside the
-/// expansion: a new state filled the store (max_states: OutOfStates), or the time or the cancellation. Throws
+/// expansion: a new state filled the store (max_states: OutOfStates), or the time or the cancellation; the observer
+/// then gets on_generate for the transitions generated so far (otherwise the caller sends them). Throws
 /// std::invalid_argument when a transition lowers g under a cost bound.
 template<class S>
 bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u64>& next, Transitions& tr, bool preferred)
@@ -949,7 +950,12 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
             {
                 ++c.r.stats.pruned;
                 if (c.obs)
-                    c.obs->on_prune(id, c.action(s, b), {next.data(), nn, d.num, c.nn});
+                {
+                    const Action a = c.action(s, b);
+                    const StateView v{next.data(), nn, d.num, c.nn};
+                    c.obs->on_generate(id, a, ~u64{0}, v, false);
+                    c.obs->on_prune(id, a, v);
+                }
                 return true;
             }
             const f64 g = c.g_next(gp, d);
@@ -992,6 +998,9 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
                                                    : "a cost bound needs non-negative action costs") +
                                     ", and a transition lowered the metric value from " + format_g(c.lowered_from) +
                                     " to " + format_g(c.lowered_to) + " (a negative action cost)");
+    if (stop && c.obs)  // the search ends inside the expansion: the transitions generated so far still get their event
+        for (const Transitions::T& t : tr.t)
+            c.obs->on_generate(id, c.action(t.schema, tr.binding(t)), t.child, tr.view(t), t.fresh);
     return !stop;
 }
 

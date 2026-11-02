@@ -40,7 +40,7 @@
 // false give Cancelled. blocked_states are never entered. The goal: GoalSpec::Task, AnyOf or Custom, as for the
 // best-first searches (best_first.hpp), with the same requirements on the heuristic. Observer events: on_start,
 // on_expand(id), on_generate(parent, action, child id, child, is_new) for every transition the lookahead generates
-// (is_new: not entered by this lookahead before), on_prune for blocked successors, on_pass(lookahead, statistics of
+// (is_new: not entered by this lookahead before; a blocked successor: child ~0, is_new false, then on_prune), on_pass(lookahead, statistics of
 // that lookahead) after each lookahead, then the fallback's on_expand, on_generate, on_prune and on_progress, and
 // on_solution and on_end once. Ids are the store's state ids (the start state is 0; the fallback's ids are its own).
 //

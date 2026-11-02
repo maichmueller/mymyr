@@ -317,7 +317,12 @@ private:
                 {
                     ++m_r.stats.pruned;
                     if (m_c.obs)
-                        m_c.obs->on_prune(id, m_c.action(s, b), {m_next.data(), nn, d.num, m_c.nn});
+                    {
+                        const Action a = m_c.action(s, b);
+                        const StateView bv{m_next.data(), nn, d.num, m_c.nn};
+                        m_c.obs->on_generate(id, a, ~u64{0}, bv, false);
+                        m_c.obs->on_prune(id, a, bv);
+                    }
                     return true;
                 }
                 const f64 g = m_c.g_next(gp, d);
@@ -344,7 +349,12 @@ private:
                 return true;
             });
         if (stop)
+        {
+            if (m_c.obs)  // the transitions generated before the stop
+                for (const Transitions::T& t : tr.t)
+                    m_c.obs->on_generate(id, m_c.action(t.schema, tr.binding(t)), t.child, tr.view(t), t.fresh);
             return false;
+        }
         const StateView pv = m_cur.view();
         const u32 depth = m_visits[v].depth + 1;
         for (usize i = 0; i < tr.t.size(); ++i)

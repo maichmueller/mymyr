@@ -351,7 +351,12 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                 {
                     ++r.pruned;
                     if constexpr (Observed)
-                        obs->on_prune(id, action_of(succ, s, b), {next.data(), nn, d.num, NN});
+                    {
+                        const Action a = action_of(succ, s, b);
+                        const StateView v{next.data(), nn, d.num, NN};
+                        obs->on_generate(id, a, ~u64{0}, v, false);
+                        obs->on_prune(id, a, v);
+                    }
                     return true;
                 }
                 const auto [child, fresh] = store.insert(next.data(), nn, d.num);
@@ -500,7 +505,12 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                 {
                     ++r.pruned;
                     if constexpr (Observed)
-                        obs->on_prune(id, action_of(succ, s, b), {next.data(), bits::trimmed_size(next.data(), W), d.num, NN});
+                    {
+                        const Action a = action_of(succ, s, b);
+                        const StateView v{next.data(), bits::trimmed_size(next.data(), W), d.num, NN};
+                        obs->on_generate(id, a, ~u64{0}, v, false);
+                        obs->on_prune(id, a, v);
+                    }
                     return true;
                 }
                 const auto [child, fresh] = store.insert_successor(StateId{id}, cur.data(), next.data(), d);
@@ -1046,8 +1056,12 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                     {
                         ++r.pruned;
                         if constexpr (Observed)
-                            obs->on_prune(pid, action_of(succ, s, b),
-                                          {next.data(), bits::trimmed_size(next.data(), W), d.num, NN});
+                        {
+                            const Action a = action_of(succ, s, b);
+                            const StateView v{next.data(), bits::trimmed_size(next.data(), W), d.num, NN};
+                            obs->on_generate(pid, a, ~u64{0}, v, false);
+                            obs->on_prune(pid, a, v);
+                        }
                         return true;
                     }
                     Fingerprint128 f = cf;
@@ -1430,6 +1444,13 @@ private:
                 {
                     ++w.generated;
                     ++w.pruned;
+                    if (w.obs)
+                    {
+                        const Action a = action_of(succ, s, b);
+                        const StateView v{w.next.data(), nn, d.num, m_task.numeric_words()};
+                        w.obs->on_generate(id, a, ~u64{0}, v, false);
+                        w.obs->on_prune(id, a, v);
+                    }
                     return true;
                 }
                 bool fresh;

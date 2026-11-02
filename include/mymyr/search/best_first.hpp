@@ -67,8 +67,9 @@
 // the cheapest of the goals) or Custom (the heuristic estimates the task's goal, which the search does not test: its
 // values only order the states; h = +inf prunes nothing and never gives Unsolvable, the states with it come last,
 // and A* gives no optimality guarantee). Under Task and AnyOf h = +inf proves a dead end. Observer events: on_start,
-// on_expand(id), on_generate(parent, action, child id, child, is_new) for every transition that is not blocked,
-// on_prune for blocked successors, on_solution and on_end. Ids are the store's state ids (the start state is 0).
+// on_expand(id), on_generate(parent, action, child id, child, is_new) for every generated transition (a blocked
+// successor: child ~0, is_new false, then on_prune), on_solution and on_end. Ids are the store's state ids (the start
+// state is 0).
 //
 // Storage: search nodes are SoA arrays keyed by state id (parent, action, g, h, status); states live in the same
 // stores as BrFS (Auto: Flat up to 8 words, Chunked above, as BrFS; Compact on request: closed states as 128-bit fingerprints and

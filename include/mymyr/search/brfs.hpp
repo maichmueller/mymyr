@@ -27,9 +27,9 @@
 // are never stored (compared by content; the start state is exempt) and count as pruned. Observer
 // events: on_start(start state) and, at the end, on_solution(plan, cost) when a plan was found, then on_end(status,
 // totals), all on the calling thread; on_expand(id, state)
-// for every counted expansion; on_generate(parent, action, child, state, is_new) for every successor that is not
-// blocked (is_new: it was stored by this transition); on_prune(parent, action, state) for a blocked successor (the
-// single-threaded stores); on_pass(depth, layer statistics) for every layer expanded (partly, if the search stopped
+// for every counted expansion; on_generate(parent, action, child, state, is_new) for every generated successor
+// (is_new: it was stored by this transition; a blocked one: child ~0, is_new false), followed by
+// on_prune(parent, action, state) for a blocked successor; on_pass(depth, layer statistics) for every layer expanded (partly, if the search stopped
 // inside it; depth 0 is the initial state's layer); on_progress(statistics so far) every progress_interval
 // expansions (false stops the search: Cancelled). Multi-threaded, the hot events (on_expand, on_generate,
 // on_progress) come from the worker threads: the search calls observer->make_worker(t) for every thread t on the
