@@ -187,8 +187,8 @@ jobs:
   # build: for SASS sm_90 up to 12 minutes of nvcc time and 3.5 GB each, except six kernels of up to 5 GB (sm_80 takes
   # about 0.7 of the time). A hosted runner has 4 vCPUs and 16 GB, so three ordinary CUDA compiles run at a time (the
   # pool cuda_compile) next to one of the large kernels (the pool cuda_compile_heavy), at most about 13 GB; the C++
-  # compiles stay parallel. A build from scratch takes about 45 minutes for PTX, 80 for SASS sm_80 and 125 for SASS
-  # sm_90.
+  # compiles stay parallel. A build from scratch takes 0.5 to 1.5 hours for PTX and 1.25 to 2.25 hours for one SASS
+  # architecture, depending on the runner.
   #
   # The compiles go through ccache, whose directory is cached per toolchain and architecture: a run recompiles only
   # the units whose sources, flags or compilers changed (with the successor kernels' sources unchanged, SASS sm_90
