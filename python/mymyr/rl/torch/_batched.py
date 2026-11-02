@@ -14,6 +14,9 @@ from ._observation import ActionRows, Observer, SuiteObservation
 
 __all__ = ["ActionRows", "BatchedEnv", "Observation", "StepResult", "SuiteObservation"]
 
+# The positions of mymyr::step's mutated arguments in its schema (and in BatchedEnv._step_args).
+_STEP_MUTATED = tuple(index for index, _, _ in _ops.step._eager_mutations)
+
 
 class Observation(NamedTuple):
     """Owned policy inputs by default; :meth:`BatchedEnv.observation` can explicitly borrow live tensors. ``encoding``
@@ -512,13 +515,23 @@ class BatchedEnv:
 
     def _step_into(
         self, out: StepResult, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool
-    ) -> tuple[Any, Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any, list[Tensor]]:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
-        outputs); returns the step's ``obs``, ``final_obs``, ``actions`` and ``action_visited``."""
+        outputs); returns the step's ``obs``, ``final_obs``, ``actions`` and ``action_visited``, and the environment's
+        tensors it wrote in place."""
         before = self._before_step(final)
-        _ops.step_impl(*self._step_args(action, next_task_ids, final, out.revisited), out=tuple(out)[:8])
+        args = self._step_args(action, next_task_ids, final, out.revisited)
+        mutated = [args[i] for i in _STEP_MUTATED if args[i] is not None]
+        written = tuple(out)[:8]
+        # As mymyr::step does for its mutated arguments: invalidate saved tensors before the step writes them in place
+        # (the copies below bump their destinations themselves).
+        torch.autograd.graph.increment_version(mutated + list(written))
+        _ops.step_impl(*args, out=written)
+        env_written = [x for x in mutated if x is not out.revisited]
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
+            if self.sampler is not None:
+                env_written.append(self._reset_counts)
         out.count.copy_(self.count)
         out.at_goal.copy_(self.at_goal)
         out.states.copy_(self.states)
@@ -527,7 +540,8 @@ class BatchedEnv:
             out.goal_pos.copy_(self.goal_pos)
             out.goal_neg.copy_(self.goal_neg)
         obs, actions = self._observe()
-        return obs, self._final_obs(before, out.final_states, obs, final), actions, self._action_visited(obs, actions)
+        final_obs = self._final_obs(before, out.final_states, obs, final)
+        return obs, final_obs, actions, self._action_visited(obs, actions), env_written
 
     def random_actions(self, max_actions: Optional[int] = None) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``

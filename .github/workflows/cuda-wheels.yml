@@ -8,11 +8,11 @@ name: CUDA wheels
 # of a chain of jobs; this workflow builds the same wheels where no such host is at hand. A manual run builds a tag
 # (the tag input) or the branch it is started on.
 #
-# Time: every architecture compiles the device code once more. One SASS architecture compiles in 1 to 1.5 hours on
-# these runners (the CUDA compile-only jobs of ci.yml), nearly all of it per architecture, so three take about 3 to 4
-# hours, too close to one job's 6 hours with the toolchain build and the tests. Each ABI therefore takes a chain of
-# jobs that hand the build tree and the toolchain on as an artifact (ci/build_state.sh); Ninja resumes the build where
-# it stopped and compiles only what is missing:
+# Time: every architecture compiles the device code once more. One SASS architecture compiles from scratch in 1.25 to
+# 2.25 hours on these runners (the CUDA compile-only jobs of ci.yml), nearly all of it per architecture, and the three
+# of a wheel in about 6.5 hours, more than one job's 6 hours before the toolchain build and the tests. Each ABI
+# therefore takes a chain of jobs that hand the build tree and the toolchain on as an artifact (ci/build_state.sh);
+# Ninja resumes the build where it stopped and compiles only what is missing:
 #   compile  builds until 280 minutes after the job starts (about 4.5 hours of compiling, 4 when the toolchain cache
 #            missed) and hands the build on, with 50 minutes to pack it and upload about 4 GB of parts;
 #   resume   only if the build stopped: resumes it until 280 minutes after its start and hands it on again;
