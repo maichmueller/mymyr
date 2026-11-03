@@ -1,6 +1,7 @@
 """Search contracts on small PDDL tasks: callable goals and heuristic dead ends, open-list keys a bucket queue cannot
 hold, and the queue kinds' common order."""
 
+import math
 import zlib
 
 import pytest
@@ -442,3 +443,57 @@ def test_landmark_count_is_zero_on_a_goal_state_alone(costs):
     assert goals
     for s in goals:
         assert h(s) == 0, str(s)
+
+
+# ------------------------------------------------------------------------------------------------ grounded and lifted
+
+# The second disjunct of dq wants (r ?x0) both true and false; the delete relaxation must not derive dq from it.
+CONTRADICTORY_AXIOM_TASK = (
+    """(define (domain d) (:requirements :adl :derived-predicates :action-costs) (:constants c)
+  (:predicates (p) (t) (q ?x) (r ?x) (s ?x ?y) (dq ?x)) (:functions (total-cost))
+  (:derived (dq ?x0) (or (not (p)) (and (r ?x0) (not (r ?x0)))))
+  (:action a0 :parameters (?x0) :precondition (and (q ?x0)) :effect (and (r ?x0) (increase (total-cost) 1)))
+  (:action a1 :parameters (?x0) :precondition (and )
+    :effect (and (q ?x0) (when (not (r ?x0)) (q ?x0)) (forall (?y) (when (not (r ?x0)) (not (s ?y ?x0))))
+                 (increase (total-cost) 1)))
+  (:action a2 :parameters (?x0) :precondition (and (r ?x0)) :effect (and (not (r ?x0)) (p) (s ?x0 ?x0) (increase (total-cost) 3)))
+  (:action a3 :parameters (?x0 ?x1) :precondition (and (r ?x0)) :effect (and (p) (s ?x0 ?x1) (not (p)) (increase (total-cost) 3)))
+  (:action a4 :parameters (?x0) :precondition (and (s ?x0 ?x0))
+    :effect (and (q ?x0) (s ?x0 ?x0) (not (s ?x0 ?x0)) (when (q ?x0) (q ?x0)) (increase (total-cost) 2))))""",
+    """(define (problem pr) (:domain d) (:objects o1) (:init (s o1 c) (= (total-cost) 0))
+  (:goal (and (q o1) (not (p)) (dq o1))) (:metric minimize (total-cost)))""",
+)
+
+# cheat applies only to a binding with ?x != ?y (?x = ?y wants (q ?x) both true and false); the effect condition of
+# mark contradicts its precondition, which does not make the action inapplicable.
+CONTRADICTORY_BINDING_TASK = (
+    """(define (domain d) (:requirements :adl :action-costs)
+  (:predicates (p) (q ?x) (r ?x) (done ?x)) (:functions (total-cost))
+  (:action set-q :parameters (?x) :precondition (and) :effect (and (q ?x) (increase (total-cost) 4)))
+  (:action unset-q :parameters (?x) :precondition (and) :effect (and (not (q ?x)) (increase (total-cost) 1)))
+  (:action cheat :parameters (?x ?y) :precondition (and (q ?x) (not (q ?y))) :effect (and (r ?y) (increase (total-cost) 1)))
+  (:action mark :parameters (?x) :precondition (and (r ?x) (p))
+    :effect (and (done ?x) (when (not (p)) (q ?x)) (increase (total-cost) 1)))
+  (:action set-p :parameters () :precondition (and) :effect (and (p) (increase (total-cost) 2))))""",
+    """(define (problem pr) (:domain d) (:objects o1 o2) (:init (q o1) (= (total-cost) 0))
+  (:goal (and (done o1) (done o2))) (:metric minimize (total-cost)))""",
+)
+
+
+@pytest.mark.parametrize("name,task_text", [("axiom", CONTRADICTORY_AXIOM_TASK), ("binding", CONTRADICTORY_BINDING_TASK)])
+def test_grounded_and_lifted_relaxations_agree_on_contradictory_conditions(name, task_text):
+    task = pddl(*task_text)
+    seen = {str(task.initial_state): task.initial_state}
+    frontier = [task.initial_state]
+    while frontier:
+        frontier = [u for s in frontier for u in task.successor_states(s) if str(u) not in seen and not seen.update({str(u): u})]
+    assert len(seen) > 5
+    for kind in ["max", "add", "ff"]:
+        grounded = search.Heuristic(task, kind, evaluation="grounded")
+        lifted = search.Heuristic(task, kind, evaluation="lifted")
+        for s in seen.values():
+            a, b = grounded(s), lifted(s)
+            if kind == "ff":
+                assert (a == math.inf) == (b == math.inf), (kind, str(s))
+            else:
+                assert a == b, (kind, str(s), a, b)
