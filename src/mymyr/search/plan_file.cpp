@@ -164,13 +164,15 @@ std::vector<Action> parse_plan(const Task& task, std::string_view text, const st
             case detail::PlanLine::Status::WrongArity:
             {
                 const formalism::Schema& sc = D.schemas[r.named.front()];
-                throw std::invalid_argument(std::format("mymyr plan: line {} '{}': {} takes {} argument{}, the line has {}",
+                throw std::invalid_argument(std::format("mymyr plan: line {} '{}': {} takes {} argument{}, the line "
+                                                        "has {}",
                                                         line_no, line, D.str(sc.name), sc.original_arity,
                                                         sc.original_arity == 1 ? "" : "s", t.size() - 1));
             }
             case detail::PlanLine::Status::UnknownObject:
-                throw std::invalid_argument(std::format("mymyr plan: line {} '{}': argument {} '{}' is no object of the task",
-                                                        line_no, line, r.unknown + 1, t[r.unknown + 1]));
+                throw std::invalid_argument(
+                    std::format("mymyr plan: line {} '{}': argument {} '{}' is no object of the task", line_no, line,
+                                r.unknown + 1, t[r.unknown + 1]));
         }
         std::optional<Action> found = detail::match_plan_line(D, succ, s.view(), r.fitting, r.args);
         if (!found)

@@ -21,7 +21,8 @@ namespace
 {
 // work's hubs ?h ?g occur in its precondition only; dock adds an existential hub ?z by normalization, and its own
 // hubs occur in no effect either
-constexpr const char* kDomain = R"((define (domain binding-hubs) (:requirements :strips :typing :existential-preconditions)
+constexpr const char* kDomain = R"((define (domain binding-hubs)
+  (:requirements :strips :typing :existential-preconditions)
   (:types agent tool hub job)
   (:predicates (link ?h - hub ?g - hub) (end ?t - tool ?h - hub) (free ?t - tool) (ready ?a - agent)
                (holding ?a - agent ?t - tool) (open ?x - job) (done ?x - job))
@@ -63,7 +64,8 @@ TEST(PlanLines, NameBindingsThatWitnessPruningEnumeratesOnce)
     const auto count_work = [&](bool witness) {
         succ.set_witness_pruning(witness);
         const std::vector<Action> all = succ.applicable_actions(s1.view());
-        return std::ranges::count_if(all, [&](const Action& a) { return task->data().str(task->data().schemas[a.schema.v].name) == "work"; });
+        return std::ranges::count_if(
+            all, [&](const Action& a) { return task->data().str(task->data().schemas[a.schema.v].name) == "work"; });
     };
     ASSERT_EQ(count_work(true), 1);  // the case the plan lines must not depend on
     ASSERT_EQ(count_work(false), 2);
@@ -104,9 +106,8 @@ TEST(PlanLines, ErrorsNameTheLineAndTheArgument)
         }
         return "no error";
     };
-    EXPECT_NE(message("(pick a t)\n(work a t h1 h3 x)\n").find("line 2 '(work a t h1 h3 x)': argument 4 'h3' is no object"),
-              std::string::npos)
-        << message("(pick a t)\n(work a t h1 h3 x)\n");
+    const std::string unknown = message("(pick a t)\n(work a t h1 h3 x)\n");
+    EXPECT_NE(unknown.find("line 2 '(work a t h1 h3 x)': argument 4 'h3' is no object"), std::string::npos) << unknown;
     EXPECT_NE(message("(lift a t)\n").find("no action 'lift'"), std::string::npos);
     EXPECT_NE(message("(pick a)\n").find("pick takes 2 arguments, the line has 1"), std::string::npos);
     EXPECT_NE(message("(work a t h1 h2 x)\n").find("line 1 '(work a t h1 h2 x)': the action is not applicable"),
