@@ -111,25 +111,25 @@ struct LayerOrdering
 [[nodiscard]] inline std::string check_layers(const LayerOrdering& lo)
 {
     if (lo.kind == LayerOrdering::Kind::Queue && lo.max_next_layer_states != ~u32{0})
-        return "LayerOrdering::max_next_layer_states requires an ordered layer kind (every kind but Queue)";
+        return "max_next_layer_states needs an ordered layer order (any but the queue)";
     if (lo.max_next_layer_states == 0)
-        return "LayerOrdering::max_next_layer_states must be positive";
+        return "max_next_layer_states must be positive";
     if (lo.beam_width == 0)
-        return "LayerOrdering::beam_width must be positive";
+        return "beam_width must be positive";
     if (lo.beam() && lo.kind == LayerOrdering::Kind::Queue)
-        return "LayerOrdering::beam_width requires an ordered layer kind (every kind but Queue)";
+        return "beam_width needs an ordered layer order (any but the queue)";
     if (lo.beam() && lo.max_next_layer_states != ~u32{0})
-        return "LayerOrdering::beam_width and LayerOrdering::max_next_layer_states are mutually exclusive";
+        return "beam_width and max_next_layer_states exclude each other";
     if (!lo.beam() && lo.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
-        return "LayerOrdering::beam_novelty other than AllTested requires a beam (beam_width)";
+        return "a beam novelty other than all-tested needs a beam (beam_width)";
     if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount && lo.kind != LayerOrdering::Kind::Scored)
-        return "LayerOrdering::randomize_ties requires a kind with scores (GoalCount or Scored)";
+        return "randomize_ties needs a layer order with scores (goal count or a scorer)";
     if ((lo.kind == LayerOrdering::Kind::Scored) != static_cast<bool>(lo.scorer))
-        return "LayerOrdering::scorer is required by Kind::Scored and taken by no other kind";
+        return "a scorer is needed by the scored layer order and taken by no other";
     if (lo.beam_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly && lo.kind != LayerOrdering::Kind::GoalCount)
-        return "LayerOrdering::beam_novelty RelaxedSurvivorsOnly requires Kind::GoalCount (it ranks by score)";
+        return "the relaxed survivors-only beam novelty needs the goal-count layer order (it ranks by score)";
     if (lo.beam_chunk == 0)
-        return "LayerOrdering::beam_chunk must be positive";
+        return "beam_chunk must be positive";
     return {};
 }
 }  // namespace mymyr::search

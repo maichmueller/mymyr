@@ -94,7 +94,8 @@ def test_every_search_on_a_numeric_task(search_name):
         assert r.stderr.startswith("mymyr: error: AStarIW does not support")  # one prefix
         return
     if search_name in ("iw", "siw"):  # supported; novelty over the atoms alone does not reach this goal
-        assert r.returncode == 1 and "no plan" in r.stderr
+        assert r.returncode == 4 and "no plan found (the search is incomplete" in r.stderr
+        assert "exhausted" in r.stderr and "space is exhausted" not in r.stderr
         return
     assert r.returncode == 0, r.stderr
     plan, goal, cost = replay_cost(task, r.stdout)
@@ -137,6 +138,10 @@ def test_exit_codes(tmp_path):
     for s in ("astar", "brfs", "gbfs"):
         r = run("plan", *UNSOLVABLE, "--search", s)
         assert r.returncode == 1 and r.stdout == "" and "no plan" in r.stderr, (s, r.stderr)
+    # 4: an incomplete search ended without a plan
+    r = run("plan", d, p, "--search", "iw", "--width", 0)
+    assert r.returncode == 4 and r.stdout == "" and "incomplete" in r.stderr, r.stderr
+    assert run("plan", d, p, "--search", "iw", "--width", 6).returncode == 2
     # 3: a budget stopped the search
     r = run("plan", d, p, "--max-states", 100)
     assert r.returncode == 3 and "out_of_states" in r.stderr

@@ -48,7 +48,7 @@ inline void apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& ordere
         throw std::invalid_argument(e);
     const u32 T = resolve_threads(threads);
     if (T > 1 && !lo.beam())
-        throw std::invalid_argument("threads > 1 requires a beam (LayerOrdering::beam_width)");
+        throw std::invalid_argument("threads > 1 needs a beam (beam_width)");
     if (lo.kind == LayerOrdering::Kind::Queue)
         return;
     if (env.coord)
@@ -57,7 +57,7 @@ inline void apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& ordere
     orderer = LayerOrderer(env.task, lo);
     env.layers = &orderer;
     if (orderer.relaxed() && env.slow())
-        throw std::invalid_argument("LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+        throw std::invalid_argument("the relaxed survivors-only beam novelty cannot be combined with an observer, blocked states, a "
                "successor order or a transition tree (tree='transitions')");
     if (orderer.beam() && !env.slow() && (T > 1 || orderer.relaxed()) &&
         (env.tree == TreeRecord::None || orderer.relaxed()))

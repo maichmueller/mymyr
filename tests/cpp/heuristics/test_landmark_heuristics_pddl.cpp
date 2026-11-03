@@ -509,7 +509,7 @@ TEST(LandmarkHeuristicsPddl, Refusals)
     o.control.goal.goals = {g};
     const auto r = search::gbfs_eager(*t, o);
     EXPECT_EQ(r.status, search::SearchStatus::Failed);
-    EXPECT_NE(r.message.find("GoalSpec::AnyOf"), std::string::npos) << r.message;
+    EXPECT_NE(r.message.find("goal alternatives"), std::string::npos) << r.message;
     EXPECT_THROW((void)heuristic(*t, H::Kind::LmCount)->evaluate(t->initial_state().view(), o.control.goal.goals),
                  std::invalid_argument);
     // LM-cut estimates the nearest of several goals

@@ -460,7 +460,8 @@ def test_argument_errors(blocks, gripper):
         search.intersect_co_occurrence([b[0], b2[0]])
     with pytest.raises(IndexError):
         b[1]
-    assert search.abstracted_iw(blocks, width=4).status == Status.FAILED  # the C++'s own check (a message)
+    with pytest.raises(ValueError, match="width"):
+        search.abstracted_iw(blocks, width=4)
 
 
 # ------------------------------------------------------------------------------------------------ landmarks, reachability

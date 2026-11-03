@@ -707,7 +707,21 @@ void bind_arrays(nb::module_& m)
     nb::class_<DLArray>(m, "DLArray",
                         "A read-only or fresh array owned by mymyr, exported through DLPack (__dlpack__ / "
                         "__dlpack_device__). Frameworks wrap it zero-copy: numpy.from_dlpack, torch.from_dlpack, "
-                        "jax.dlpack.from_dlpack.")
+                        "jax.dlpack.from_dlpack. numpy.asarray takes an array in host memory zero-copy too and refuses "
+                        "one in device memory with TypeError (NumPy cannot hold it: wrap it with torch or JAX).")
+        .def(
+            "__array__",
+            [](nb::handle self, nb::handle dtype, nb::handle copy) {
+                const DLArray& a = nb::cast<const DLArray&>(self);
+                if (a.device.device_type != dl::k_cpu)
+                    throw nb::type_error("mymyr: this DLArray is in CUDA device memory, which NumPy cannot hold: wrap "
+                                         "it with torch.from_dlpack or jax.dlpack.from_dlpack, or copy it to the host "
+                                         "(for a DeviceStateSpace: to_host().arrays())");
+                nb::module_ np = nb::module_::import_("numpy");
+                return np.attr("asarray")(np.attr("from_dlpack")(self), "dtype"_a = dtype, "copy"_a = copy);
+            },
+            "dtype"_a = nb::none(), "copy"_a = nb::none(),
+            "The NumPy array of a host array (zero-copy unless dtype or copy ask for one); TypeError in device memory.")
         .def("__dlpack__", &dlpack_capsule, nb::kw_only(), "stream"_a = nb::none(), "max_version"_a = nb::none(),
              "dl_device"_a = nb::none(), "copy"_a = nb::none())
         .def("__dlpack_device__", [](const DLArray& a) { return nb::make_tuple(a.device.device_type, a.device.device_id); })

@@ -18,7 +18,8 @@
 // CPU fallback and CPU axioms), and exact batch novelty (the default) resolves every unseen tuple's
 // owner as its smallest candidate, so the tree of every search equals the sequential one for every number of searches,
 // group size and chunk size. The budgets are exact too: max_expanded and a goal stop at their row, max_states (tree
-// nodes, per pass) at the admission that reaches it. MultiIwOptions::exact = false is relaxed batch novelty (opt-in:
+// nodes) at the admission that reaches it, both over a search's whole ladder as in search::iw()
+// (MultiIwOptions::max_expanded_local: each pass). MultiIwOptions::exact = false is relaxed batch novelty (opt-in:
 // one atomicOr pass; IW(k)'s guarantees hold but the kept set depends on timing).
 // With max_next_layer_states set, the CPU equivalent uses LayerOrdering::Kind::InOrder and the same layer limit:
 // filling the next layer ends the current expansion and drops the remaining current-layer entries. With seeds,
@@ -71,7 +72,8 @@ struct MultiIwOptions
     bool witness_pruning = false;  // search::iw()'s default: every applicable action is a transition
     bool canonical_order = true;
     bool exact = true;             // exact batch novelty; false: relaxed (nondeterministic kept sets)
-    search::Budget budget;         // per search and pass as in search::iw(); max_seconds spans the whole call
+    search::Budget budget;         // per search as in search::iw() (all passes together); max_seconds spans the call
+    u64 max_expanded_local = ~u64{0};  // the expansions of each pass (search::IwOptions::max_expanded_local)
     u32 max_next_layer_states = ~u32{0};  // CPU layers: InOrder, or Randomized with seeds; stop generation at this size
     bool track_reached = false;    // the fluent atoms of every state each search created (the rollouts' report)
     bool plans = true;             // plans and goal states of the solved searches

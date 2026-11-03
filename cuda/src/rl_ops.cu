@@ -5,6 +5,8 @@
 #include "mymyr/cuda/rl_ops.hpp"
 #include "mymyr/cuda/lifted.hpp"
 
+#include <algorithm>
+
 namespace mymyr::cuda
 {
 namespace
@@ -56,7 +58,10 @@ __global__ void k_her(rl::HerBatch b, rl::HerConfig c)
     {
         const u32 j = static_cast<u32>(x % c.k);
         const u64 ti = x / c.k;
-        rl::her_one(b, c, ti / b.envs, ti % b.envs, j);
+        const u64 t = ti / b.envs, i = ti % b.envs;
+        u64 start = 0, end = 0;
+        rl::her_bounds(b, t, i, start, end);
+        rl::her_one(b, c, t, i, j, start, end);
     }
 }
 __global__ void k_visited_mask(const u64* table, const i32* count, u64 table_rows, u32 capacity, const u64* succ_hash,
@@ -72,6 +77,8 @@ __global__ void k_visited_mask(const u64* table, const i32* count, u64 table_row
                  rl::visited_contains(table + static_cast<u64>(row) * capacity, capacity, count[row], succ_hash[j]);
     }
 }
+
+constexpr unsigned k_target_blocks = 512;  // enough blocks of k_block threads to fill a GPU
 
 template<class I>
 __global__ void k_target_visited(rl::TargetRows<I> x, const u64* table, const i32* count, u64 table_rows, u32 capacity,
@@ -100,7 +107,10 @@ cudaError_t target_visited_on(const rl::TargetRows<I>& x, const u64* table, cons
     if (!table || !count || !out || !x.target || !x.role || !x.ref || !x.entity_offsets || !x.row_offsets ||
         !x.succ_hash || capacity < 2 || (capacity & (capacity - 1)))
         return cudaErrorInvalidValue;
-    k_target_visited<<<grid_for(x.targets), k_block, 0, s>>>(x, table, count, table_rows, capacity, out);
+    // every block scans the graph offsets once (rl::live_graphs): a grid of at most k_target_blocks blocks bounds
+    // that scan at k_target_blocks * graphs reads, and the grid-stride loop covers the targets
+    const unsigned grid = std::min(grid_for(x.targets), k_target_blocks);
+    k_target_visited<<<grid, k_block, 0, s>>>(x, table, count, table_rows, capacity, out);
     return cudaGetLastError();
 }
 

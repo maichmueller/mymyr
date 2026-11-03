@@ -56,6 +56,11 @@ joins them into one graph, their disjoint union; the tasks must come from one do
 `DeviceStateSpace`; `to_host()` copies the same indexed space back, including CPU-encoded numeric values, costs
 and goal distances.
 
+Both spaces' `arrays(framework=None)` give the same keys, dtypes and shapes without copying, each by default in the
+form its memory allows: a `StateSpace` NumPy arrays, a `DeviceStateSpace` DLPack arrays (`DLArray`) in device
+memory, which NumPy cannot hold. Pass `"torch"` or `"jax"` (or `"dlpack"`) for the same framework from both;
+`np.asarray` of a device `DLArray` raises `TypeError` (use `to_host().arrays()` for NumPy).
+
 ## Task sets, knowledge bases and tuple graphs
 
 A task set is many problems of one domain: a `mymyr.rl.TaskTable`, the same type the RL entry points take.
@@ -265,10 +270,11 @@ the expansion row by row. With `rl.expand(..., drop_noops=True)` the step's row 
 step's `index` (in the padded expansion, `exp.pad().canonical`; `pad().index` is the flat row), unless the step is a
 no-op in a state that has other actions. With `witness_pruning=True` the positions are those of the pruned expansion, as
 in an environment with that option; a step whose action the pruning leaves out is at its witness, the first row of its
-schema with the same successor. A step whose action is not applicable in its state, an action of another task and a task
-with lazy atom slots raise `ValueError`, naming the step (replay a lazy task's plans on `task.frozen()`, its twin with
-fixed slots). Replaying costs one host expansion per step. `source` is the Task, TaskTable or TaskSuite the plan was
-replayed on.
+schema with the same successor. Which action a plan line names does not depend on the option: a line names its own
+binding, also where witness pruning enumerates only another binding with the same effects. A step whose action is not
+applicable in its state, an action of another task and a task with lazy atom slots raise `ValueError`, naming the step
+(replay a lazy task's plans on `task.frozen()`, its twin with fixed slots). Replaying costs one host expansion per step.
+`source` is the Task, TaskTable or TaskSuite the plan was replayed on.
 
 `equivalent=` takes, for every step, the actions a caller regards as interchangeable with the plan's (for instance
 those that object symmetries map onto it, read from a file next to the plan) as Actions, labels `(schema, binding)`
@@ -299,7 +305,11 @@ evaluation; a perfect heuristic: its state space) and is built again when unpick
 `StateSpace.from_arrays(task, arrays)` rebuilds a state space from the dict `arrays()` gives (NumPy arrays or DLPack
 arrays on the CPU) and validates it: names, dtypes and shapes, the CSR ranges, the backward CSR against the forward
 one, the flags against the goal distances, and that the arrays belong to `task` (its row layout and atom slots, its
-initial state first, labels of its schemas and objects). `TupleGraph.from_arrays(space, root, arrays, width=...)`
+initial state first, labels of its schemas and objects). It also checks the contents against the task: the rows are
+distinct, the goal flags are the task's goal test, each label is an action applicable in its source state that leads
+to the transition's target, and the goal distances are 0 at goal states and elsewhere the smallest transition cost
+(1 for unit distances) plus the successor's distance. This costs one goal test per state and one action application
+per labelled transition, a fraction of generating the space. `TupleGraph.from_arrays(space, root, arrays, width=...)`
 does the same for a tuple graph. Invalid arrays raise `ValueError` or `TypeError` with a `mymyr: ...` message.
 
 `datasets.save(obj, path)` writes a `StateSpace`, `GeneralizedStateSpace`, `KnowledgeBase`, `TupleGraph` or a list of

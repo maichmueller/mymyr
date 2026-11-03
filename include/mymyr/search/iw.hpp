@@ -23,8 +23,10 @@
 //     by an empty placeholder entry (arity 0, all zeros), and the width-1 pass admits every distinct successor of the
 //     start state; those that are not novel are goal-tested and counted as expanded but not expanded
 //     (IwPassStatistics::skipped counts them; expanded - skipped is the classical count);
-//   - budgets: max_seconds spans the whole ladder, max_states (states in the tree, the root included) and
-//     max_expanded apply per pass, max_depth bounds the depth of expanded states (deeper ones are popped,
+//   - budgets: max_seconds, max_states and max_expanded bound the whole ladder: a pass may store what the earlier
+//     passes left of max_states (their states statistics, each tree with its root, subtracted) and expand what
+//     they left of max_expanded; IwOptions::max_expanded_local caps the expansions of each pass on its own. A pass
+//     that reaches a budget stops the ladder. max_depth bounds the depth of expanded states (deeper ones are popped,
 //     goal-tested and counted, not expanded). blocked_states are never entered: they are
 //     checked before the novelty test and mark no tuple. The goal, the blocked states and
 //     the observer are forwarded to every pass;
@@ -85,6 +87,9 @@ struct IwOptions
     bool canonical_order = true;    // successors per state in (schema, binding) order
     novelty::TableOptions tables;   // dense/sparse budget of the novelty tables
     std::optional<State> start;     // default: the task's initial state
+    /// The expansions of each pass (OutOfStates when a pass reaches it); control.budget.max_expanded caps the
+    /// expansions of all passes together.
+    u64 max_expanded_local = ~u64{0};
     /// Optional successor order. Called once per expanded state with its actions in generation order; writes into
     /// `order` the indices in the order the transitions are to be tested (invalid and repeated indices are dropped,
     /// missing ones follow in generation order). Setting it runs the observed (slow) path, which buffers every

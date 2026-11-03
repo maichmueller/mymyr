@@ -613,6 +613,9 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
         return 0u;
     }();
     ASSERT_TRUE(S->is_alive(alive));
+    ASSERT_GE(N, 3u);
+    ASSERT_GE(S->forward_offsets()[1], 2u);  // state 0 has two transitions, to different states
+    ASSERT_NE(S->forward_targets()[0], S->forward_targets()[1]);
     struct Case
     {
         const char* what;  // part of the message
@@ -645,7 +648,23 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
              a.label_width = 1;
              a.label_bindings.resize(a.label_schemas.size());
          }},
-        {"cost is NaN", [](StateSpaceArrays& a) { a.costs[0] = std::nan(""); }},
+        {"cost is negative or NaN", [](StateSpaceArrays& a) { a.costs[0] = std::nan(""); }},
+        {"cost is negative or NaN", [](StateSpaceArrays& a) { a.costs[0] = -1; }},
+        {"two state rows are equal", [&](StateSpaceArrays& a) {
+             std::copy_n(a.state_words.begin() + u64{1} * RW, RW, a.state_words.begin() + u64{2} * RW);
+         }},
+        {"a unit goal distance is not 1 +", [&](StateSpaceArrays& a) { a.unit_goal_distances[alive] += 1; }},
+        {"a cost goal distance is not", [&](StateSpaceArrays& a) { a.cost_goal_distances[alive] += 0.5; }},
+        {"target is not its label's action", [](StateSpaceArrays& a) {  // two transitions of state 0 swap labels
+             std::swap(a.label_schemas[0], a.label_schemas[1]);
+             std::swap_ranges(a.label_bindings.begin(), a.label_bindings.begin() + a.label_width,
+                              a.label_bindings.begin() + a.label_width);
+         }},
+        {"not an action applicable in its", [](StateSpaceArrays& a) {  // state 1's first label on state 0
+             const u64 e = a.forward_offsets[1];
+             a.label_schemas[0] = a.label_schemas[e];
+             std::copy_n(a.label_bindings.begin() + e * a.label_width, a.label_width, a.label_bindings.begin());
+         }},
         {"flag is not 0 or 1", [](StateSpaceArrays& a) { a.goal_flags[0] = 2; }},
         {"goal and unsolvable flags", [](StateSpaceArrays& a) { a.goal_flags[0] = 1; }},
         {"goal and unsolvable flags", [&](StateSpaceArrays& a) { a.unsolvable_flags[alive] = 1; }},

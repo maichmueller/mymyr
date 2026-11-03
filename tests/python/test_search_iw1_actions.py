@@ -172,7 +172,7 @@ def test_incremental_layer_restrictions():
         # Several threads without a beam are invalid without incremental_first_applicability too; either rule may
         # report them.
         for kw in [dict(threads=0), dict(threads=2), dict(layer_order='goal_count', beam_width=2, threads=2)]:
-            with pytest.raises(ValueError, match='one thread|threads > 1 requires a beam'):
+            with pytest.raises(ValueError, match='one thread|threads > 1 needs a beam'):
                 fn(task, **width, incremental_first_applicability=True, **kw)
         with pytest.raises(ValueError, match='max_next_layer_states'):
             fn(task, **width, incremental_first_applicability=True, layer_order='in_order', max_next_layer_states=3)

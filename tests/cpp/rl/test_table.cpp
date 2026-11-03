@@ -911,9 +911,10 @@ TEST(TablePool, ConcurrentCallersHomeRangesAndRecycledBatches)
 
 TEST(TablePool, SampledInstancesAreTheEnvsCounterDraws)
 {
-    // with PoolOptions::sampling every env starts in, resets into and autoresets into the draw of (seed, env, its
-    // reset counter): the HostEnv stepped with those ids, for any thread count and split of the sends, uniform and
-    // weighted, over rows of each batch's own width (the send draws the autoresets' instances) and of uniform width
+    // with a sampler (EnvConfig::sampling) every env starts in, resets into and autoresets into the draw of (seed, env,
+    // its reset counter): the HostEnv stepped with those ids, for any thread count and split of the sends, uniform and
+    // weighted, over rows of each batch's own width (the send draws the autoresets' instances) and of uniform width;
+    // and so does a HostEnv that draws them itself (sampling resets, autoresets with the batch's reset counters)
     for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& s : sets(atoms))
         {
@@ -950,7 +951,25 @@ TEST(TablePool, SampledInstancesAreTheEnvsCounterDraws)
                         ids[e] = smp->sample(cfg.seed, e, resets[e]++);
                     Envs ref(T, ids);
                     env.reset(ref.b, nullptr, ref.count.data());
-                    rl::CpuEnvPool pool(s.table, cfg, N, {.threads = threads, .sampling = *smp});
+                    rl::EnvConfig sampled = cfg;
+                    sampled.sampling = *smp;
+                    rl::CpuEnvPool pool(s.table, sampled, N, {.threads = threads});
+                    // the HostEnv drawing the instances itself
+                    rl::HostEnv drawing(s.table, sampled);
+                    ThreadPool workers(threads);
+                    Envs own(T, std::vector<i32>(N, 0));
+                    std::vector<u32> own_resets(N, 0);
+                    own.b.reset_counts = own_resets.data();
+                    drawing.reset(own.b, nullptr, own.count.data(), false, true);
+                    auto expect_own = [&]
+                    {
+                        EXPECT_EQ(own.states, ref.states);
+                        EXPECT_EQ(own.task_ids, ref.task_ids);
+                        EXPECT_EQ(own.count, ref.count);
+                        EXPECT_EQ(own.steps, ref.steps);
+                        EXPECT_EQ(own_resets, resets);
+                    };
+                    expect_own();
                     std::vector<u32> even, odd;
                     for (u32 e = 0; e < N; ++e)
                         (e % 2 ? odd : even).push_back(e);
@@ -972,6 +991,11 @@ TEST(TablePool, SampledInstancesAreTheEnvsCounterDraws)
                                 ref.task_ids[e] = t == 8 ? drawn : given.back();
                             }
                             env.reset(ref.b, mask.data(), ref.count.data());
+                            if (t == 16)
+                                for (u64 k = 0; k < envs.size(); ++k)
+                                    own.task_ids[envs[k]] = given[k];
+                            drawing.reset(own.b, mask.data(), own.count.data(), false, t == 8);
+                            expect_own();
                             const rl::PoolBatch r =
                                 pool.reset(envs.data(), envs.size(), t == 8 ? nullptr : given.data(), nullptr, nullptr);
                             for (u64 k = 0; k < r.rows; ++k)
@@ -984,6 +1008,12 @@ TEST(TablePool, SampledInstancesAreTheEnvsCounterDraws)
                         for (u32 e = 0; e < N; ++e)
                             if (ref.terminated[e] || ref.truncated[e])
                                 ++resets[e];
+                        drawing.step(own.b, own.out, {}, nullptr, threads > 1 ? &workers : nullptr);
+                        expect_own();
+                        EXPECT_EQ(own.reward, ref.reward);
+                        EXPECT_EQ(own.terminated, ref.terminated);
+                        EXPECT_EQ(own.truncated, ref.truncated);
+                        EXPECT_EQ(own.final_states, ref.final_states);
                         if (t % 2 == 0)
                         {
                             const rl::PoolBatch p = pool.step(nullptr, 0, {}, nullptr);
@@ -1017,16 +1047,27 @@ TEST(TablePool, SamplersAreChecked)
 {
     const Set s = sets(TaskOptions::Atoms::Dense).front();
     const u32 I = s.table->size();
-    rl::InstanceSampling bad;
-    bad.instances = I + 1;
-    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
-    bad.instances = I;
-    bad.indices = {0, 1};
-    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
-    bad.thresholds = {7};
-    bad.indices = {0, static_cast<i32>(I)};
-    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
-    bad.thresholds = {9, 7};
-    bad.indices = {0, 1, 0};
-    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
+    rl::EnvConfig bad = config();
+    rl::InstanceSampling& smp = bad.sampling;
+    smp.instances = I + 1;
+    EXPECT_THROW(rl::CpuEnvPool(s.table, bad, 4, {.threads = 1}), std::invalid_argument);
+    EXPECT_THROW(rl::HostEnv(s.table, bad), std::invalid_argument);
+    smp.instances = I;
+    smp.indices = {0, 1};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, bad, 4, {.threads = 1}), std::invalid_argument);
+    smp.thresholds = {7};
+    smp.indices = {0, static_cast<i32>(I)};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, bad, 4, {.threads = 1}), std::invalid_argument);
+    smp.thresholds = {9, 7};
+    smp.indices = {0, 1, 0};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, bad, 4, {.threads = 1}), std::invalid_argument);
+    smp.indices.clear();
+    smp.thresholds = {7};
+    EXPECT_THROW(rl::HostEnv(s.table, bad), std::invalid_argument);
+    // a sampling reset needs a sampler and the reset counters
+    Envs e(*s.table, std::vector<i32>(4, 0));
+    EXPECT_THROW(rl::HostEnv(s.table, config()).reset(e.b, nullptr, nullptr, false, true), std::invalid_argument);
+    rl::EnvConfig uniform = config();
+    uniform.sampling.instances = I;
+    EXPECT_THROW(rl::HostEnv(s.table, uniform).reset(e.b, nullptr, nullptr, false, true), std::invalid_argument);
 }

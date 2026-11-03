@@ -257,6 +257,9 @@ public:
     void parameter_mask(u32 schema, std::span<const ObjectId> prefix, u32 depth, u64* out);
     /// Prepares a mask row, reusing the view and axiom closure when its contents match the last prepared mask row.
     void prepare_masks(StateView s);
+    /// The successor of the prepared state `s` under `a` into out, without preparing s again (many labels of one
+    /// state); false, leaving out unspecified, if `a` is malformed or not applicable in s.
+    [[nodiscard]] bool apply_prepared(StateView s, const ActionLabel& a, StateBuilder& out);
 
     /// Effects of the binding currently in engine().bind() for `schema` (preconditions are not checked). Numeric tasks:
     /// `ok` is false when the numeric effects break the applicability rules (the delta is then incomplete).
@@ -382,6 +385,8 @@ private:
     }
     bool bind_label(const ActionLabel& a);
     bool applicable_bound(u32 schema) const;
+    /// out = s with the effects of `schema` under the bound binding (applicability checked and collected).
+    Delta write_successor(StateView s, u32 schema, StateBuilder& out);
 
     detail::Engine& m_e;
     AxiomEvaluator& m_ax;

@@ -43,7 +43,8 @@ def test_liw_shared_and_per_search_graphs(ctx, name, grouping):
 
 
 @pytest.mark.parametrize("budget", [{}, {"max_states": 1}, {"max_states": 8}, {"max_expanded": 2},
-                                   {"max_depth": 1}, {"max_seconds": 0}])
+                                   {"max_depth": 1}, {"max_seconds": 0}, {"max_states": 30},
+                                   {"max_expanded": 12}, {"max_expanded_local": 6}])
 @pytest.mark.parametrize("width_zero", ["expand_depth_one", "root_only"])
 def test_liw_budgets_and_width_zero(ctx, budget, width_zero):
     task = text_task("blocks__probBLOCKS-8-0")

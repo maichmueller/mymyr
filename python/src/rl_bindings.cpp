@@ -192,6 +192,20 @@ const i32* import_task_ids(nb::handle obj, u64 rows, u32 instances, std::vector<
     return copy.data();
 }
 
+rl::InstanceSampling sampling_of(nb::handle sampler)
+{
+    rl::InstanceSampling out;
+    if (sampler.is_none())
+        return out;
+    out.instances = nb::cast<u32>(sampler.attr("num_instances"));
+    if (!sampler.attr("weights").is_none())
+    {
+        out.thresholds = nb::cast<std::vector<u32>>(sampler.attr("_thresholds").attr("tolist")());
+        out.indices = nb::cast<std::vector<i32>>(sampler.attr("_indices").attr("tolist")());
+    }
+    return out;
+}
+
 rl::DeadEnd parse_dead_end(const std::string& s)
 {
     if (s == "no_successors")
@@ -1320,16 +1334,7 @@ struct PoolRecycler
 std::pair<rl::InstanceSampling, nb::object> pool_sampling(nb::handle sampler, u32 instances)
 {
     nb::object s = nb::module_::import_("mymyr.rl._sampling").attr("_instance_sampler")(sampler, instances, true);
-    rl::InstanceSampling out;
-    if (s.is_none())
-        return {std::move(out), std::move(s)};
-    out.instances = instances;
-    if (!s.attr("weights").is_none())
-    {
-        out.thresholds = nb::cast<std::vector<u32>>(s.attr("_thresholds").attr("tolist")());
-        out.indices = nb::cast<std::vector<i32>>(s.attr("_indices").attr("tolist")());
-    }
-    return {std::move(out), std::move(s)};
+    return {sampling_of(s), std::move(s)};
 }
 
 class PyCpuPool
@@ -2469,8 +2474,10 @@ void bind_rl(nb::module_& parent)
             [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
                bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in,
-               Arg<ann::SamplerArg> sampler, Arg<std::variant<bool, int>> track_visited) {
-                const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
+               Arg<ann::SamplerArg> sampler, Arg<std::variant<bool, int>> track_visited, IntArg first_env_in) {
+                const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1, 0x7FFFFFFF);
+                // the env ids are 32-bit RNG streams
+                const u64 first_env = int_arg<u64>(first_env_in, "first_env", 0, (u64{1} << 32) - num_envs);
                 const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
                 const u64 seed = int_arg<u64>(seed_in, "seed");
@@ -2491,16 +2498,18 @@ void bind_rl(nb::module_& parent)
                 o.threads = threads;
                 o.goals = goals;
                 o.words = words.value_or(0);
+                o.first_env = first_env;
                 const Framework fw = framework.is_none() ? Framework::Numpy : parse_framework(framework, nb::none());
                 SuiteRef ref = suite_of(table);
                 auto [sampling, sampler_obj] = pool_sampling(sampler, ref.suite->size());
-                o.sampling = std::move(sampling);
+                c.sampling = std::move(sampling);
                 new (self) PyCpuPool(std::move(ref), c, num_envs, o, fw, std::move(sampler_obj));
             },
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 1, "goals"_a = false, "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
             "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto", "track_visited"_a = false,
+            "first_env"_a = 0,
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
             "results come as `framework` arrays (None: NumPy). sampler (\"auto\" and \"uniform\": uniform, or an "
             "rl.InstanceSampler) places every env in a sampled instance and restarts it in its next one on each reset "
@@ -2509,7 +2518,9 @@ void bind_rl(nb::module_& parent)
             "every env at instance 0 and keeps its instance unless reset or next_task_ids name one. A batch's rows are "
             "as wide as the widest instance among its envs (after a step: their instances and those they autoreset "
             "into), so a step costs each env's own instance width; "
-            "words fixes the width of every batch instead (at least table.words).")
+            "words fixes the width of every batch instead (at least table.words). first_env: env e's RNG stream "
+            "(successor and instance draws) is first_env + e, as row e of a BatchedEnv or JAX Env with that first_env "
+            "(the env ids of calls stay 0 .. num_envs - 1).")
         .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); },
                      "The TaskTable or TaskSuite the environments run on.")
         .def_prop_ro("visited_capacity", [](const PyCpuPool& p) { return p.pool().visited_capacity(); },
@@ -2520,6 +2531,8 @@ void bind_rl(nb::module_& parent)
              "env_ids"_a = nb::none(), "Clear selected idle environments' tables and insert their current states.")
         .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); },
                      "The number of environments.")
+        .def_prop_ro("first_env", [](const PyCpuPool& p) { return p.pool().first_env(); },
+                     "The env id of env 0 (env e draws as env first_env + e).")
         .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); },
                      "The worker threads of a step.")
         .def_prop_ro("goals", [](const PyCpuPool& p) { return p.pool().goals(); },

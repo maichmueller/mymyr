@@ -28,8 +28,11 @@
 // non-increasing (LAMA's 5, 3, 2, 1 by default). Invalid options throw std::invalid_argument; a heuristic that cannot
 // run on the task gives status Failed with a message.
 //
-// SearchControl: max_seconds and max_expanded bound the whole search, max_states and max_depth each iteration (a depth
-// budget voids the proof of optimality by exhaustion); cancel and blocked_states, the goal and progress_interval apply to
+// SearchControl: max_seconds, max_states and max_expanded bound the whole search (an iteration gets what the earlier
+// ones left; with nothing left the next iteration ends with OutOfStates before it stores its start state),
+// max_expanded_local
+// the expansions of each iteration, max_depth the depth within each iteration (a depth budget voids the proof of
+// optimality by exhaustion); cancel and blocked_states, the goal and progress_interval apply to
 // every iteration. Observer events: on_start once; the on_expand, on_generate, on_prune and on_progress events of every
 // iteration (ids are the iteration's own state ids); on_solution(plan, cost) for each improved plan as it is found;
 // on_pass(iteration, statistics of the iteration) after each iteration; on_end once.
@@ -50,6 +53,7 @@ struct AnytimeOptions : BestFirstOptions
 {
     std::vector<double> weights{5, 3, 2, 1};  // the weight of iteration k: weights[min(k, n - 1)]
     bool lazy = false;                        // iterations run lazy weighted A* (astar_lazy)
+    u64 max_expanded_local = ~u64{0};         // the expansions of each iteration (control.budget.max_expanded: all)
 };
 
 /// An improved plan, in the order found.

@@ -1,0 +1,3 @@
+(pick a2 t159)
+(work a2 t159 h47 h61 x10)
+; cost 2 = 2 * 1 jobs (optimal)

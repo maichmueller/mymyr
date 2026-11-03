@@ -437,8 +437,8 @@ __global__ void k_rows_select(Nodes nodes, Searches s, Limits lim, Chunk c)
         const u64 li = live_rank(c, static_cast<u32>(r), fl);
         const u32 fg = s.first_goal[id];
         const u64 gi = fg == k_none ? ~0ull : live_rank(c, fg, fl);
-        const unsigned long long e = s.expanded[id];
-        const u64 bi = lim.max_expanded > e ? lim.max_expanded - e : 0;
+        const unsigned long long e = s.expanded[id], me = s.max_expanded[id];
+        const u64 bi = me > e ? me - e : 0;
         const u64 stop = gi < bi ? gi : bi;
         if (li < stop)
         {
@@ -779,9 +779,10 @@ __global__ void k_cut(Gathered g, Candidates c, Searches s, Limits lim, const u6
         const u32 fc = first_candidate(c, s, id);
         const u32 tree = s.tree[id], next = s.next[id];
         // a tree the root alone fills: the first admitted candidate cuts, and k_keep drops it too
-        const u32 lim_states = lim.max_states > tree ? lim.max_states - tree : 1;
+        const u32 ms = s.max_states[id];
+        const u32 lim_states = ms > tree ? ms - tree : 1;
         const u32 lim_next = lim.max_next > next ? lim.max_next - next : 1;
-        if ((f & k_cand_adm) && lim.max_states != k_none && lo32(scan[i + 1]) - lo32(scan[fc]) == lim_states)
+        if ((f & k_cand_adm) && ms != k_none && lo32(scan[i + 1]) - lo32(scan[fc]) == lim_states)
             atomicMin(s.cut + id, static_cast<u32>(2 * i));
         if ((f & k_cand_ent) && lim.max_next != k_none && hi32(scan[i + 1]) - hi32(scan[fc]) == lim_next)
             atomicMin(s.cut + id, static_cast<u32>(2 * i + 1));
@@ -796,7 +797,7 @@ __global__ void k_keep(Gathered g, Candidates c, Searches s, Limits lim)
         const u32 id = g.search[c.parent[i]];
         const u32 cut = s.cut[id];
         // a state cut of a tree the root alone fills keeps candidates before its own: the search stops before storing it
-        const bool full = !(cut & 1) && lim.max_states != k_none && lim.max_states <= s.tree[id];
+        const bool full = !(cut & 1) && s.max_states[id] != k_none && s.max_states[id] <= s.tree[id];
         if (cut == k_none || i < (cut >> 1) || (i == (cut >> 1) && !full))
             c.flags[i] |= k_cand_kept;
     }
@@ -1007,8 +1008,8 @@ __global__ void k_search_update(Gathered g, Candidates c, Searches s, Limits lim
                 const u64 nl = live_rank(ch, s.last_live[id] + 1, fl);
                 const u32 fgoal = s.first_goal[id];
                 const u64 gi = fgoal == k_none ? ~0ull : live_rank(ch, fgoal, fl);
-                const unsigned long long e = s.expanded[id];
-                const u64 bi = lim.max_expanded > e ? lim.max_expanded - e : 0;
+                const unsigned long long e = s.expanded[id], me = s.max_expanded[id];
+                const u64 bi = me > e ? me - e : 0;
                 const u64 stop = gi < bi ? gi : bi;
                 const u32 fg = s.first_gen[id];
                 const u32 cut = s.cut[id];

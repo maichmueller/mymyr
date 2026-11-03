@@ -155,6 +155,23 @@ struct Instances
     const u32* numeric_words = nullptr;  // [I]
 };
 
+/// The instance sampler of autoresets and sampling resets (rl/sampling.hpp, rl::rng::instance_draw) and the rows'
+/// reset counters (rl::EnvBatch::reset_counts): a row's next sampled instance is the draw of (its key, its env id, its
+/// counter).
+struct Sampling
+{
+    u32* reset_counts = nullptr;      // [rows], advanced by every reset and autoreset of the row (null: no counting)
+    u32 instances = 0;                // 0: no sampler
+    const u32* thresholds = nullptr;  // [m - 1] (device)
+    const i32* indices = nullptr;     // [m] (device; m = 0: uniform)
+    u32 m = 0;
+    u64 seed = 0;
+    const u64* seed_dev = nullptr;  // the key in device memory instead of `seed` (captured steps follow set_seed)
+    const u64* seeds = nullptr;     // [rows] per-row keys (null: the key)
+    u64 first_env = 0;
+    const u32* env_ids = nullptr;   // [rows] per-row env ids (null: first_env + row)
+};
+
 /// The end of a step: goal test (or given flags, or per-env goal masks), dead ends, rewards, termination, truncation,
 /// step counters, final states, the labels of non-moves, counts, the visited tables (the reached state's membership
 /// and insert, unless the row's episode is over without autoreset), and the autoreset (the initial row of the row's
@@ -185,6 +202,7 @@ struct Finish
     u32 dead_end_terminal = 1;  // a dead end terminates
     Instances in;
     const i32* next_task_ids = nullptr;  // [rows]: the instance an autoresetting row restarts in (null: its own)
+    Sampling sampling;                   // without a next task id: the row's next sampled instance (with a sampler)
     u32* error = nullptr;                // bit 4 (16): per-env goals outside the instance's fluent slots;
                                          // value 4: a task id outside the table (a next id of any row, used or not;
                                          // an autoresetting row keeps its instance; the row's own: instance 0)
@@ -222,6 +240,8 @@ cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, c
 /// Resets rows with mask[i] != 0 (all without a mask) to the initial state of their instance: the initial row, step 0,
 /// the initial count and cache, (unless keep_goals) the instance's goal masks, whether the row is at a goal (its
 /// goal masks' test with per-env goals, else the instance's init_goal) and a visited table holding the initial state.
+/// With `sample` a row's instance is first its next sampled one (in.inst written); with reset counters every reset
+/// row's counter advances.
 struct Reset
 {
     u64 rows = 0;
@@ -241,6 +261,8 @@ struct Reset
     u8* at_goal = nullptr;  // [rows] (null: not written)
     u32* error = nullptr;  // value 4: a task id outside the table (the row is reset into instance 0)
     VisitedRows visited;
+    Sampling sampling;
+    u32 sample = 0;
 };
 cudaError_t launch_reset(const Reset& p, cudaStream_t s);
 

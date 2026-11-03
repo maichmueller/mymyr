@@ -131,8 +131,8 @@ struct CpuEnvPool::Impl
     std::vector<i32> visited_count;
     alignas(std::atomic_ref<i32>::required_alignment) i32 visited_status = 0;
     EnvBatch batch;
-    InstanceSampling sampling;
     std::vector<u32> resets;  // per env: the sampler's reset counter
+    u64 first_env = 0;        // the RNG stream (env id) of env 0
 
     // under mu: the envs held by sends in flight, and the marks of the env id checks
     mutable std::mutex mu;
@@ -188,8 +188,9 @@ struct CpuEnvPool::Impl
             spare.push_back(std::move(b));
     }
 
+    [[nodiscard]] const InstanceSampling& sampling() const noexcept { return env.config().sampling; }
     /// Env e's next sampled instance.
-    [[nodiscard]] i32 sample(u32 e) const { return sampling.sample(env.config().seed, e, resets[e]); }
+    [[nodiscard]] i32 sample(u32 e) const { return sampling().sample(env.config().seed, first_env + e, resets[e]); }
 
     /// The atom words of instance g's rows.
     [[nodiscard]] u32 instance_words(i32 g) const { return inst_words[static_cast<u32>(g)]; }
@@ -420,6 +421,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     if (num_envs > static_cast<u32>(std::numeric_limits<i32>::max()))
         throw std::invalid_argument("mymyr: CpuEnvPool: more than 2^31 - 1 envs");
     I.N = num_envs;
+    I.first_env = options.first_env;
     I.T = resolve_threads(options.threads);
     I.W = tt.words();
     I.NN = tt.numeric_words();
@@ -448,21 +450,8 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     }
     I.busy.assign(I.N, 0);
     I.mark.assign(I.N, 0);
-    if (options.sampling.enabled())
+    if (I.sampling().enabled())
     {
-        const InstanceSampling& smp = options.sampling;
-        if (smp.instances != tt.size())
-            throw std::invalid_argument("mymyr: CpuEnvPool: a sampler over " + std::to_string(smp.instances) +
-                                        " instances; the " + tt.noun() + " has " + std::to_string(tt.size()));
-        if (!smp.indices.empty() && smp.thresholds.size() + 1 != smp.indices.size())
-            throw std::invalid_argument("mymyr: CpuEnvPool: a weighted sampler needs one threshold fewer than indices");
-        if (!std::is_sorted(smp.thresholds.begin(), smp.thresholds.end()))
-            throw std::invalid_argument("mymyr: CpuEnvPool: the sampler's thresholds are not ascending");
-        for (const i32 g : smp.indices)
-            if (g < 0 || static_cast<u32>(g) >= tt.size())
-                throw std::invalid_argument("mymyr: CpuEnvPool: the sampler's instance " + std::to_string(g) +
-                                            " is outside the " + tt.noun());
-        I.sampling = smp;
         I.resets.assign(I.N, 0);
         for (u32 e = 0; e < I.N; ++e)
             I.task_ids[e] = I.sample(e);
@@ -488,7 +477,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     b.steps = I.steps.data();
     b.draws = I.draws.data();
     b.at_goal = I.at_goal.data();
-    b.first_env = 0;
+    b.first_env = options.first_env;
     check_env(tt, b, nullptr);
     I.env.reset(b);  // every env at its instance's initial state (instance 0 without sampling)
     I.scratch.resize(I.T);
@@ -512,6 +501,7 @@ CpuEnvPool::~CpuEnvPool() { m_impl->stop_workers(); }
 const TaskSuitePtr& CpuEnvPool::suite() const noexcept { return m_impl->env.suite(); }
 const EnvConfig& CpuEnvPool::config() const noexcept { return m_impl->env.config(); }
 u32 CpuEnvPool::num_envs() const noexcept { return m_impl->N; }
+u64 CpuEnvPool::first_env() const noexcept { return m_impl->first_env; }
 u32 CpuEnvPool::threads() const noexcept { return m_impl->T; }
 bool CpuEnvPool::goals() const noexcept { return m_impl->goals; }
 u32 CpuEnvPool::words() const noexcept { return m_impl->fixed_words; }
@@ -549,7 +539,7 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
     std::lock_guard lock(I.mu);
     I.check_envs(ids, env_ids == nullptr, "reset");
     std::vector<i32> sampled;
-    if (!task_ids && I.sampling.enabled())
+    if (!task_ids && I.sampling().enabled())
     {
         sampled.resize(ids.size());
         for (u64 p = 0; p < ids.size(); ++p)
@@ -590,7 +580,7 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
             std::copy_n(goal_neg + p * goal_words, w, gn);
             std::fill(gn + w, gn + z, u64{0});
         }
-        if (I.sampling.enabled())
+        if (I.sampling().enabled())
             ++I.resets[e];
         I.at_goal[e] = I.env.reset_goal(I.batch, e, inst) ? 1 : 0;
         out.goal[p] = I.at_goal[e];
@@ -620,7 +610,7 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
     }
     if (next_task_ids)
         job->next.assign(next_task_ids, next_task_ids + B);
-    job->count_resets = I.sampling.enabled() && I.env.config().autoreset;
+    job->count_resets = I.sampling().enabled() && I.env.config().autoreset;
     job->sample = job->count_resets && !next_task_ids;
     job->out = I.take_spare();
     // home ranges of at least 128 rows, at most one per worker, claimed in pieces of about a quarter of a range

@@ -574,18 +574,28 @@ TEST(IwControl, Budgets)
     const auto task = Task::from_text_file(task_path("blocks__probBLOCKS-8-0"));
     {
         IwOptions o = with_k(2);
-        o.control.budget.max_states = 100;  // per pass: the root plus 99 admitted states
+        o.control.budget.max_states = 100;  // all passes: width 2 holds what widths 0 and 1 left
         const IwResult r = iw(*task, o);
         EXPECT_EQ(r.status, SearchStatus::OutOfStates);
         ASSERT_EQ(r.passes.size(), 3u);  // widths 0 and 1 stay below 100 states
-        EXPECT_EQ(r.passes[2].generated_in_tree, 99u);
+        EXPECT_EQ(r.passes[2].generated_in_tree + 1, 100 - r.passes[0].stats().states - r.passes[1].stats().states);
+        EXPECT_EQ(r.stats.states, 100u);
     }
     {
         IwOptions o = with_k(2);
-        o.control.budget.max_expanded = 10;
+        o.control.budget.max_expanded = 10;  // all passes together
+        const IwResult r = iw(*task, o);
+        EXPECT_EQ(r.status, SearchStatus::OutOfStates);
+        EXPECT_EQ(r.stats.expanded, 10u);
+    }
+    {
+        IwOptions o = with_k(2);
+        o.max_expanded_local = 10;  // each pass
         const IwResult r = iw(*task, o);
         EXPECT_EQ(r.status, SearchStatus::OutOfStates);
         EXPECT_EQ(r.passes.back().expanded, 10u);
+        for (const IwPassStatistics& p : r.passes)
+            EXPECT_LE(p.expanded, 10u);
     }
     {
         IwOptions o = with_k(2);

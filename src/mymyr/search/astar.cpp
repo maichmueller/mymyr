@@ -46,7 +46,7 @@ bool start(Context& c, Nodes& nodes, u32 root, StateView s0)
     const f64 h0 = c.evaluate(s0, nodes, root);
     r.initial_h = h0;
     c.begin_search();
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++r.dead_ends;
         r.status = SearchStatus::Unsolvable;
@@ -75,11 +75,15 @@ struct AStarEager
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
-        Q open, goals;  // goal states wait in their own list: popped first among equal f
+        Q open(c.queue_fallback), goals(c.queue_fallback);  // goal states wait in their own list: popped first among equal f
         Transitions tr;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = queue_name(open, goals);
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes());
+        };
 
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
@@ -94,7 +98,7 @@ struct AStarEager
         {
             const u64 f = Q::key(fval(nodes, id, c.g0, c.weight));
             if (nodes.has(id, Nodes::Goal))
-                goals.push(f, 0, store.make_ref(id, v));
+                goals.push(f, Q::key(0), store.make_ref(id, v));
             else
                 open.push(f, Q::key(nodes.h[id]), store.make_ref(id, v));
         };
@@ -173,7 +177,7 @@ struct AStarEager
                         continue;
                     }
                     const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
-                    if (hv == k_inf)
+                    if (c.dead_end(hv))
                     {
                         nodes.set_status(cid, Nodes::DeadEnd);
                         ++r.dead_ends;
@@ -206,7 +210,7 @@ struct AStarEager
                     if (!nodes.has(cid, Nodes::Evaluated) || c.path_dependent)
                     {
                         const f64 hv = c.evaluate(tr.view(t), nodes, cid);
-                        if (hv == k_inf)
+                        if (c.dead_end(hv))
                         {
                             nodes.set_status(cid, Nodes::DeadEnd);
                             ++r.dead_ends;
@@ -232,7 +236,7 @@ struct AStarEager
                     if (c.path_dependent)  // the status has merged another path since h was computed
                     {
                         const f64 hv = c.evaluate(tr.view(t), nodes, cid);
-                        if (hv == k_inf)
+                        if (c.dead_end(hv))
                         {
                             nodes.set_status(cid, Nodes::DeadEnd);
                             ++r.dead_ends;
@@ -263,12 +267,16 @@ struct AStarLazy
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
-        Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 1, c.o.standard_weight);
-        Q goals;  // requeue: evaluated goal states, accepted once no open entry has a smaller key
+        Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 1, c.o.standard_weight, c.queue_fallback);
+        Q goals(c.queue_fallback);  // requeue: evaluated goal states, accepted once no open entry has a smaller key
         Transitions tr;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = queue_name(open, goals);
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes());
+        };
 
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
@@ -334,7 +342,7 @@ struct AStarLazy
                 last_evaluated = id;
                 nodes.h[id] = hv;
                 nodes.set(id, Nodes::Evaluated);
-                if (hv == k_inf)
+                if (c.dead_end(hv))
                 {
                     store.release(ref);
                     nodes.set_status(id, Nodes::DeadEnd);
@@ -361,7 +369,7 @@ struct AStarLazy
                 }
                 if (nodes.has(id, Nodes::Goal))
                 {
-                    goals.push(fk, 0, ref);
+                    goals.push(fk, Q::key(0), ref);
                     continue;
                 }
             }

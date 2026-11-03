@@ -105,7 +105,13 @@ def test_invalid_weight_returns_failed(gap, weight):
     assert r.status == Status.FAILED and "weight" in r.message
 
 
-@pytest.mark.parametrize("features,width", [("classical", 0), ("classical", 6), ("abstracted", 4), ("base_abstracted", 4)])
+@pytest.mark.parametrize("width", [0, 6])
+def test_width_outside_the_novelty_tables_raises(gap, width):
+    with pytest.raises(ValueError, match="width"):
+        search.astar_iw(gap, width=width)
+
+
+@pytest.mark.parametrize("features,width", [("abstracted", 4), ("base_abstracted", 4)])
 def test_invalid_width_returns_failed(gap, features, width):
     r = search.astar_iw(gap, features=features, width=width)
     assert r.status == Status.FAILED and "width" in r.message

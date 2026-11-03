@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 
 from mymyr._core import _rl, _rl_torch
-from mymyr.rl._sampling import _instance_sampler
+from mymyr.rl._sampling import _env_range, _instance_sampler, _num_instances
 
 from . import _ops
 from ._graph import CapturedRollout
@@ -16,6 +16,7 @@ __all__ = ["ActionRows", "BatchedEnv", "Observation", "StepResult", "SuiteObserv
 
 # The positions of mymyr::step's mutated arguments in its schema (and in BatchedEnv._step_args).
 _STEP_MUTATED = tuple(index for index, _, _ in _ops.step._eager_mutations)
+_REVISITED = 20  # the position of ``revisited`` in BatchedEnv._step_args
 
 
 class Observation(NamedTuple):
@@ -117,6 +118,7 @@ class BatchedEnv:
     The environments' state is held in tensors on ``device``: ``states`` [N, row_words] int64 (rows over a
     table are the table's words wide, over a suite the widest domain's), ``task_ids`` [N] int32 (each env's instance;
     global ids over a suite), ``steps`` [N] int32 (the episode's steps), ``draws`` [N] int64 (the RNG draw counters),
+    ``reset_counts`` [N] int32 (with a sampler: each env's instance draw counter, uint32 bits),
     ``count`` [N] int32 (successors of the current state), ``at_goal`` [N] bool (the current state is a goal: reset,
     step and refresh keep it, a step absorbs those rows), with ``goals=True`` the per-env goal masks ``goal_pos`` /
     ``goal_neg`` [N, words] int64 (the step's goal test is then the mask test; reset sets the instances' goals unless
@@ -127,7 +129,9 @@ class BatchedEnv:
 
     ``sampler="auto"`` samples instances uniformly unless constructor ``task_ids`` pin the assignment. ``sampler=None``
     keeps instances, ``"uniform"`` always samples, and ``rl.InstanceSampler(I, weights)`` specifies a weighted
-    curriculum. Sampling uses independent per-env reset counters, so partial resets and batch splits agree.
+    curriculum. Sampling uses independent per-env reset counters, so partial resets and batch splits agree; the
+    native reset and step draw the instances (the draws of ``InstanceSampler.sample`` with the seed, env id
+    ``first_env + i`` and the env's counter), on the CPU and on a device alike, inside captured steps too.
     ``autoreset=True`` restarts finished environments within the step in sampled instances or explicit
     ``next_task_ids[i]`` (``final=True`` returns the reached states); TorchRL's convention is ``autoreset=False`` plus
     ``reset(mask)``. ``step(action=None)`` is the random policy: a uniform successor from the counter-based RNG (seed,
@@ -204,6 +208,7 @@ class BatchedEnv:
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
         autoreset: bool = True,
+        canonical_order: bool = True,
         witness_pruning: bool = False,
         path: str = "auto",
         threads: int = 1,
@@ -217,6 +222,7 @@ class BatchedEnv:
         track_visited: bool | int = False,
     ) -> None:
         self.device = torch.device(device)
+        self.num_envs, self.first_env = _env_range(num_envs, first_env)
         if actions not in ("index", "label"):
             raise ValueError("mymyr: actions must be 'index' or 'label'")
         self.visited_capacity = _rl._visited_capacity(track_visited, max_steps)
@@ -224,25 +230,22 @@ class BatchedEnv:
         index = _device_index(self.device)
         if index is not None:
             self.device = torch.device("cuda", index)
+        self.sampler = _instance_sampler(sampler, _num_instances(table), default_uniform=task_ids is None)
         self.core = _rl_torch.Env(
             table, device=index, ctx=ctx, seed=seed, max_steps=max_steps, step_reward=step_reward,
             goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
-            dead_end_terminal=dead_end_terminal, autoreset=autoreset, witness_pruning=witness_pruning, path=path,
-            threads=threads, actions=actions,
+            dead_end_terminal=dead_end_terminal, autoreset=autoreset, canonical_order=canonical_order,
+            witness_pruning=witness_pruning, path=path,
+            threads=threads, actions=actions, sampler=self.sampler,
         )  # fmt: skip
         self.handle = _ops.register(self.core)
-        self.num_envs = int(num_envs)
-        self.first_env = int(first_env)
         self.multi = self.core.num_instances > 1
-        self.sampler = _instance_sampler(sampler, self.core.num_instances, default_uniform=task_ids is None)
         self._autoreset = bool(autoreset)
         n, d = self.num_envs, self.device
         self.states = torch.zeros((n, self.core.row_words), dtype=torch.int64, device=d)
         self.task_ids = torch.zeros(n, dtype=torch.int32, device=d)
-        self._reset_counts = torch.zeros(n, dtype=torch.int64, device=d)
-        self._sampling_seed = torch.tensor([int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=d)
-        self._sampling_env_ids = torch.arange(self.first_env, self.first_env + n, dtype=torch.int64, device=d)
-        self._sampling_arrays = None if self.sampler is None else self.sampler._arrays(self.task_ids)
+        # the sampler's per-env counters (uint32 bits): every reset and autoreset of an env advances its own
+        self.reset_counts = torch.zeros(n, dtype=torch.int32, device=d)
         H = self.visited_capacity
         self.visited = torch.zeros((n, H), dtype=torch.int64, device=d) if H else None
         self.visited_count = torch.zeros(n, dtype=torch.int32, device=d) if H else None
@@ -383,20 +386,14 @@ class BatchedEnv:
 
     def _tensors(self) -> list[Tensor]:
         t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count, self.at_goal,
-             self._reset_counts, self._sampling_seed, self._sampling_env_ids]
+             self.reset_counts]
         return t + ([self.goal_pos, self.goal_neg] if self.goals else []) + (
             [self.visited, self.visited_count, self.visited_status] if self.visited_capacity else []
         )
 
-    def _sample_task_ids(self) -> Tensor:
-        return self.sampler.sample(
-            self._sampling_seed, self._sampling_env_ids, self._reset_counts, _arrays=self._sampling_arrays
-        )
-
-    def _advance_resets(self, mask: Optional[Tensor] = None) -> None:
-        if self.sampler is not None:
-            increment = 1 if mask is None else mask.to(torch.int64)
-            self._reset_counts.copy_((self._reset_counts + increment) & 0xFFFFFFFF)
+    def _counters(self) -> Optional[Tensor]:
+        """The reset counters the native reset and step advance (None without a sampler: nothing to count)."""
+        return None if self.sampler is None else self.reset_counts
 
     def reset(
         self,
@@ -413,9 +410,8 @@ class BatchedEnv:
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
         ids = self.task_ids
-        if task_ids is None and self.sampler is not None:
-            ids = _where(mask, self._sample_task_ids(), ids)
-        elif task_ids is not None:
+        sample = task_ids is None and self.sampler is not None  # the op draws the reset rows' instances into task_ids
+        if task_ids is not None:
             new = _task_ids(self.core, task_ids, mask, self.num_envs, self.device, "reset")
             ids = _where(mask, new, ids)
         keep = goal_pos is not None or goal_neg is not None
@@ -429,13 +425,14 @@ class BatchedEnv:
         args = (
             self.handle, self.states, ids if self.multi else None, self.steps, self.counts, self.views, pos, neg,
             self.count, self.at_goal, mask, keep, self.visited, self.visited_count, self.visited_status,
+            self._counters(), sample, self.first_env,
         )  # fmt: skip
         _ops.reset(*args)
-        self.task_ids.copy_(ids)
+        if ids is not self.task_ids:
+            self.task_ids.copy_(ids)
         if keep:
             self.goal_pos.copy_(pos)
             self.goal_neg.copy_(neg)
-        self._advance_resets(mask)
         return self.count
 
     def clear_visited(self, mask: Optional[Tensor] = None) -> None:
@@ -474,13 +471,11 @@ class BatchedEnv:
         args = self._step_args(action, next_task_ids, final)
         before = self._before_step(final)
         r = (_ops.step if self.capturable else _ops.step_sync)(*args)
-        if self._autoreset:
-            self._advance_resets(r[1] | r[2])
         observation = self.observation(copy=copy)
         final_obs = self._final_obs(before, r[7], observation.encoding, final)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
                           observation.goal_pos, observation.goal_neg, observation.at_goal, observation.encoding,
-                          final_obs, args[-1], observation.actions, observation.action_visited)
+                          final_obs, args[_REVISITED], observation.actions, observation.action_visited)
 
     def _step_args(self, action: Tensor | tuple[Tensor, Tensor] | None, next_task_ids: Optional[Tensor], final: bool,
                    revisited: Optional[Tensor] = None) -> tuple:
@@ -498,19 +493,18 @@ class BatchedEnv:
         elif isinstance(action, tuple):
             raise ValueError("mymyr: label actions require actions='label'")
         elif action is not None:
+            action = torch.as_tensor(action)
+            if action.dtype.is_floating_point or action.dtype.is_complex or action.dtype == torch.bool:
+                raise TypeError(f"mymyr: actions must be integer successor indices, not {action.dtype}")
             action = action.reshape(self.num_envs).to(device=self.device, dtype=torch.int64).contiguous()
-        sampled = next_task_ids is None and self.sampler is not None and self._autoreset
-        if sampled:
-            next_task_ids = self._sample_task_ids()
         if next_task_ids is not None:
-            if not sampled:
-                next_task_ids = _task_ids(self.core, next_task_ids, None, self.num_envs, self.device, "next_task_ids")
+            next_task_ids = _task_ids(self.core, next_task_ids, None, self.num_envs, self.device, "next_task_ids")
             if not self.multi:
                 next_task_ids = None  # a table of one: every instance is 0
         return (
             self.handle, self.states, self._ids(), self.steps, self.draws, self.counts, self.views, self.count,
             self.at_goal, self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final, schema, binding,
-            self.visited, self.visited_count, self.visited_status, revisited,
+            self.visited, self.visited_count, self.visited_status, revisited, self._counters(),
         )  # fmt: skip
 
     def _step_into(
@@ -528,10 +522,6 @@ class BatchedEnv:
         torch.autograd.graph.increment_version(mutated + list(written))
         _ops.step_impl(*args, out=written)
         env_written = [x for x in mutated if x is not out.revisited]
-        if self._autoreset:
-            self._advance_resets(out.terminated | out.truncated)
-            if self.sampler is not None:
-                env_written.append(self._reset_counts)
         out.count.copy_(self.count)
         out.at_goal.copy_(self.at_goal)
         out.states.copy_(self.states)
@@ -563,10 +553,7 @@ class BatchedEnv:
         stream = torch.cuda.current_stream(self.device) if self.device.type == "cuda" else None
         self.core.set_seed(int(seed), stream=stream)
         self.draws.zero_()
-        self._sampling_seed.copy_(torch.tensor(
-            [int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=self.device
-        ))
-        self._reset_counts.zero_()
+        self.reset_counts.zero_()
 
     def capture(
         self,

@@ -1,0 +1,7 @@
+(pick a20 t200)
+(work a20 t200 h23 h53 x13)
+(pick a23 t106)
+(work a23 t106 h20 h15 x23)
+(pick a33 t63)
+(work a33 t63 h80 h79 x24)
+; cost 6 = 2 * 3 jobs (optimal)

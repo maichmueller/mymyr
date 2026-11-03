@@ -5,6 +5,7 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
+#include "mymyr/search/control.hpp"
 #include "mymyr/task/task.hpp"
 
 #include <algorithm>
@@ -148,4 +149,19 @@ private:
     std::vector<u32> m_slot_pos, m_slot_neg;
     std::vector<std::pair<CanonicalAtom, u64>> m_order;  // lazy slots: (canonical id, slot) of the state's atoms
 };
+/// The "true" propositions of the positive derived atoms of an atom goal, appended to out; negated derived atoms are
+/// left out, as in the task's goal (RelaxedTask::goal). False when one is outside R (it is never reachable).
+inline bool derived_goal_props(const RelaxedTask& R, const search::GoalSpec::AtomGoal& g, std::vector<u32>& out)
+{
+    bool reachable = true;
+    for (CanonicalAtom c : g.derived_positive)
+    {
+        const u32 pp = R.fluent_props(c).first;
+        if (pp == RelaxedTask::k_none)
+            reachable = false;
+        else
+            out.push_back(pp);
+    }
+    return reachable;
+}
 }  // namespace mymyr::heuristics::detail

@@ -40,7 +40,7 @@ GoalTest GoalTest::from_spec(const Task& task, const GoalSpec& spec)
             break;
         case GoalSpec::Kind::Custom:
             if (!spec.test)
-                throw std::invalid_argument("GoalSpec::Kind::Custom needs a test function");
+                throw std::invalid_argument("a custom goal needs a test function");
             g.m_kind = Kind::Custom;
             break;
     }
@@ -151,16 +151,16 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
     if (o.layers.kind != LayerOrdering::Kind::Queue)
     {
         if (o.transition_ordering)
-            throw std::invalid_argument("IwOptions::layers cannot be combined with a transition ordering");
+            throw std::invalid_argument("an ordered layer order cannot be combined with a transition ordering");
         else
             layers = std::make_unique<LayerOrderer>(t, o.layers);
     }
     const u32 T = resolve_threads(o.threads);
     const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
     if (T > 1 && !o.layers.beam())
-        throw std::invalid_argument("IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)");
+        throw std::invalid_argument("threads > 1 needs a beam (beam_width)");
     else if (layers && layers->relaxed() && slow)
-        throw std::invalid_argument("LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+        throw std::invalid_argument("the relaxed survivors-only beam novelty cannot be combined with an observer, blocked states, a "
                                     "successor order or a transition tree (tree='transitions')");
     else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
              (o.tree == TreeRecord::None || layers->relaxed()))
@@ -347,7 +347,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const auto t0 = Clock::now();
     const Task& task = c.task;
     const IwOptions& o = c.options;
-    const Budget& budget = o.control.budget;
+    const Budget& budget = c.pass;
     const CancelToken& cancel = o.control.cancel;
     SearchObserver* const obs = c.observer;
     Successors& succ = c.succ;
@@ -1274,6 +1274,8 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
     {
         r.passes.push_back(p);
         add_pass(r.stats, p);
+        c.spent_expanded += p.expanded;
+        c.spent_states += p.stats().states;
         if (c.observer)
             c.observer->on_pass(p.width, p.stats());
     };
@@ -1310,6 +1312,13 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
         }
         PassOut po;
         const PassSpec ps{.arity = k, .root_continuation = optimize && k == 1};
+        c.pass = pass_budget(o.control.budget, o.max_expanded_local, c.spent_expanded, c.spent_states);
+        if (c.spent_states > 0 && (c.pass.max_states == 0 || c.pass.max_expanded == 0))
+        {
+            // the earlier passes used up the budget: a pass would only store its root again
+            r.status = SearchStatus::OutOfStates;
+            return r;
+        }
         try
         {
             if (k == 1 && o.transition_ordering)

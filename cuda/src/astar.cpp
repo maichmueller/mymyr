@@ -108,7 +108,7 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
         return why;
     const search::BestFirstOptions& so = o.search;
     if (so.control.goal.kind != search::GoalSpec::Kind::Task)
-        return "goals other than the task's (GoalSpec::Kind::Task)";
+        return "goals other than the task's";
     if (!so.control.blocked_states.empty())
         return "blocked states";
     if (so.control.observer)
@@ -116,9 +116,9 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
     if (so.evaluator)
         return "a caller-owned evaluator (the device builds its heuristic from search.heuristic)";
     if (so.weight != 1)
-        return "weighted A* (BestFirstOptions::weight other than 1)";
+        return "weighted A* (a weight other than 1)";
     if (so.cost_bound != std::numeric_limits<double>::infinity())
-        return "a cost bound (BestFirstOptions::cost_bound)";
+        return "a cost bound";
     if (o.batch == 0)
         return "a batch of 0 states";
     const heuristics::Kind k = so.heuristic.kind;

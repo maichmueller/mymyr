@@ -76,6 +76,7 @@ public:
             C.kinds[p] = T.predicates[p].kind;
             C.arity[p] = T.predicates[p].arity;
         }
+        check_parameters();
         setup_statics();
         setup_view();
         setup_numeric();
@@ -1104,6 +1105,27 @@ private:
         return m;
     }
 
+    /// Refuses a task whose schemas or axioms bind more variables than binding enumeration supports.
+    void check_parameters() const
+    {
+        auto refuse = [](const std::string& what, u32 n)
+        {
+            throw std::invalid_argument("mymyr: " + what + " has " + std::to_string(n) + " parameters; at most " +
+                                        std::to_string(formalism::k_max_parameters) + " are supported");
+        };
+        for (const Schema& s : T.schemas)
+        {
+            u32 extra = 0;
+            for (const ConditionalEffect& ce : T.effects_of(s))
+                extra = std::max(extra, ce.extra_params.count);
+            if (s.arity() + u64{extra} > formalism::k_max_parameters)
+                refuse("action " + std::string(T.str(s.name)), s.arity() + extra);
+        }
+        for (const Axiom& a : T.axioms)
+            if (a.params.count > formalism::k_max_parameters)
+                refuse("an axiom of " + std::string(T.str(T.predicates[a.head.pred.v].name)), a.params.count);
+    }
+
     void compile_schemas()
     {
         for (const Schema& s : T.schemas)
@@ -1301,6 +1323,29 @@ private:
         }
         for (const NumericConstraint& c : T.constraints_of(T.goal))
             N.goal.push_back(compile_check(c));
+        // The goal as written, expanded into ground literals the goal implies (TaskData::encoding_goal), decides what
+        // goal normalization hides in axioms: a statically false literal there (a disjunction whose disjuncts are all
+        // statically false, a quantified equality that fails), or an atom it wants both true and false.
+        if (T.encoding_goal_unsatisfiable || contradictory(T.encoding_goal_literals()) ||
+            contradictory(T.literals_of(T.goal)))
+            C.goal.unsatisfiable = true;
+    }
+
+    /// Whether a conjunction of ground literals wants one atom both true and false.
+    [[nodiscard]] bool contradictory(std::span<const Literal> lits) const
+    {
+        std::set<std::vector<u32>> positive;
+        auto key = [&](const Literal& l)
+        {
+            std::vector<u32> k{l.pred.v};
+            for (Term x : T.terms_of(l))
+                k.push_back(static_cast<u32>(x));
+            return k;
+        };
+        for (const Literal& l : lits)
+            if (l.positive)
+                positive.insert(key(l));
+        return std::ranges::any_of(lits, [&](const Literal& l) { return !l.positive && positive.contains(key(l)); });
     }
 
     // ------------------------------------------------------------------------------------------------ layout

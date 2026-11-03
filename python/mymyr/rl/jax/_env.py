@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from mymyr._core import _rl, _rl_jax
-from mymyr.rl._sampling import _instance_sampler
+from mymyr.rl._sampling import _env_range, _instance_sampler, _num_instances
 
 from . import _ffi
 
@@ -188,6 +188,22 @@ def _numeric(table: Any) -> bool:
     return bool(numeric_words)
 
 
+def _actions(action: Any) -> Any:
+    """Successor indices as int32 [N]: integer actions only (TypeError otherwise), and those outside the int32 range
+    become -1, which the step flags invalid like any other index outside [0, count)."""
+    if not isinstance(action, jax.Array):  # traced actions are jax.Arrays too
+        action = np.asarray(action)
+    if not jnp.issubdtype(action.dtype, jnp.integer):
+        raise TypeError(f"mymyr: actions must be integer successor indices, not {action.dtype}")
+    if action.dtype == jnp.int32:
+        return jnp.asarray(action)
+    if isinstance(action, np.ndarray):
+        outside = (action < 0) | (action > np.iinfo(np.int32).max)
+        return jnp.asarray(np.where(outside, -1, action.astype(np.int64)).astype(np.int32))
+    outside = (action < 0) | (action > jnp.iinfo(jnp.int32).max)
+    return jnp.where(outside, jnp.int32(-1), action.astype(jnp.int32))
+
+
 class Env:
     """N planning environments over a TaskSuite or a TaskTable (or a Task: its table of one) as pure JAX functions
     (gymnax / Jumanji style)::
@@ -206,9 +222,14 @@ class Env:
     A step follows the host environments' (CpuEnvPool's) semantics: the action indexes the current state's successors in
     canonical order (outside [0, count): no move, ``info["invalid"]``), the reward is step_reward (+ goal_reward
     at a goal, + dead_end_reward at a dead end), terminated = goal or dead end (``dead_end_terminal``), truncated = not
-    terminated and the episode reached max_steps. With ``autoreset`` (SAME_STEP) a finished environment restarts from
-    the initial state of its instance (or of ``next_task_ids[i]``) within the step and ``info["final_state"]`` holds the
-    state it reached (for bootstrapping truncated episodes); ``autoreset=False`` leaves resets to :meth:`reset_where`.
+    terminated and the episode reached max_steps. With ``autoreset`` (SAME_STEP) a finished environment restarts within
+    the step from the initial state of ``next_task_ids[i]`` where given, else of its next sampled instance, else (with
+    ``sampler=None``) of its own instance, and ``info["final_state"]`` holds the state it reached (for bootstrapping
+    truncated episodes); ``autoreset=False`` leaves resets to :meth:`reset_where`. ``sampler`` (``"auto"`` and
+    ``"uniform"``: uniform, an ``rl.InstanceSampler``: weighted, None: no sampling) draws the instances of resets
+    without task ids and of autoresets: the draw of the state's ``sampling_seed``, ``env_id`` and ``reset_counts``
+    (``InstanceSampler.sample``, the draws of a torch BatchedEnv and a CpuEnvPool with that seed), inside the native
+    step; every reset and autoreset advances the environment's counter.
     With ``goals=True`` each environment carries goal masks (the goal test is then the mask test; reset sets its
     instance's goal unless goals are given).
 
@@ -252,7 +273,7 @@ class Env:
         *,
         device: Any = None,
         goals: bool = False,
-        sampler: Any = "uniform",
+        sampler: Any = "auto",
         max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
@@ -272,6 +293,7 @@ class Env:
         track_visited: bool | int = False,
     ) -> None:
         numeric = _numeric(table)
+        self.sampler = _instance_sampler(sampler, _num_instances(table))
         self.device: jax.Device = _jax_device(device, numeric)
         on_gpu = self.device.platform in ("gpu", "cuda")
         index = getattr(self.device, "local_hardware_id", None)
@@ -292,13 +314,13 @@ class Env:
             witness_pruning=witness_pruning,
             path=path,
             track_visited=track_visited,
+            sampler=self.sampler,
         )
         _ffi.register()
         self.table = table
         self.visited_capacity: int = self.native.visited_capacity
         self.handle: int = self.native.handle
         self.num_instances: int = self.native.num_instances
-        self.sampler = _instance_sampler(sampler, self.num_instances)
         self.autoreset = bool(autoreset)
         self.words: int = self.native.words
         self.row_words: int = self.native.row_words
@@ -444,7 +466,7 @@ class Env:
         disables sampling and an int N then starts instance 0. ``goal_pos`` / ``goal_neg`` [N, 2 words] (goals=True)
         set the goals (default: the instances'). The key and counters are retained in the functional state."""
         if isinstance(task_ids, (int, np.integer)):
-            n = int(task_ids)
+            n, first_env = _env_range(task_ids, first_env)
             env_id = jnp.arange(first_env, first_env + n, dtype=jnp.uint32)
             seed = jnp.broadcast_to(key_seed(0 if key is None else key), (n, 2))
             ids = jnp.zeros((n,), jnp.int32) if self.sampler is None else self.sampler.sample(
@@ -452,7 +474,7 @@ class Env:
             )
         else:
             ids = self._ids(task_ids)
-        n = ids.shape[0]
+        n, first_env = _env_range(ids.shape[0], first_env)
         with self._dev():
             ids = jnp.asarray(ids)
             states, steps, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status = _ffi.env_init(
@@ -570,9 +592,7 @@ class Env:
         n = state.states.shape[:-1]
         with self._dev():
             seed = jnp.broadcast_to(key_seed(key), (*n, 2))
-            act = jnp.zeros((0,), jnp.int32) if action is None else jnp.asarray(action).astype(jnp.int32)
-            if next_task_ids is None and self.sampler is not None and self.autoreset:
-                next_task_ids = self.sampler.sample(state.sampling_seed, state.env_id, state.reset_counts)
+            act = jnp.zeros((0,), jnp.int32) if action is None else _actions(action)
             nxt = (
                 jnp.zeros((0,), jnp.int32) if next_task_ids is None else self._checked(next_task_ids, "next_task_ids")
             )
@@ -591,18 +611,17 @@ class Env:
                 state.visited,
                 state.visited_count,
                 state.visited_status,
+                state.reset_counts,
                 state.env_id,
                 seed,
+                state.sampling_seed,
                 act,
                 nxt,
                 self.label_width if self.labels else 0,
                 self.final_state,
             )
         (states, task_id, steps, draws, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status,
-         reward, terminated, truncated, goal, invalid, schema, binding, final, revisited) = outs  # fmt: skip
-        reset_counts = state.reset_counts
-        if self.autoreset:
-            reset_counts = reset_counts + (terminated | truncated).astype(jnp.uint32)
+         reset_counts, reward, terminated, truncated, goal, invalid, schema, binding, final, revisited) = outs  # fmt: skip
         s = state._replace(
             states=states, task_id=task_id, steps=steps, draws=draws, count=count, counts=counts, views=views,
             goal_pos=gpos, goal_neg=gneg, reset_counts=reset_counts, at_goal=at_goal,

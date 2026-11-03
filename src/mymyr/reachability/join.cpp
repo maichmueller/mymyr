@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <stdexcept>
+#include <string>
 
 namespace mymyr::reach
 {
@@ -181,6 +183,9 @@ Plan compile(StaticTables& st, const std::vector<Lit>& lits, const CompileSpec& 
     const plan::Compiled& C = st.compiled();
     const CanonicalLayout& L = C.layout;
     const u32 V = spec.num_vars, n = st.n(), OW = st.ow();
+    if (V > formalism::k_max_parameters)  // Executor::search recurses once per variable
+        throw std::length_error("mymyr: a condition over " + std::to_string(V) + " variables (at most " +
+                                std::to_string(formalism::k_max_parameters) + " are supported)");
     Plan p;
     p.statics = C.statics.data();
     p.num_vars = V;

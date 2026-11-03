@@ -1,0 +1,7 @@
+(pick a18 t25)
+(work a18 t25 h9 h47 x11)
+(pick a27 t117)
+(work a27 t117 h50 h26 x14)
+(pick a24 t32)
+(work a24 t32 h58 h82 x10)
+; cost 6 = 2 * 3 jobs (optimal)

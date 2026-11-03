@@ -204,6 +204,8 @@ struct DeviceEnv::Impl
     DeviceBuffer starts;  // [I + 1] the launch order's key starts (a ranged() step's select writes them)
     // the RNG key and the control words (k_ctl_words u32, zeroed at construction; check_errors() clears them)
     DeviceBuffer seed, ctl;
+    // the instance sampler's thresholds and indices (a weighted sampler; rl::EnvConfig::sampling)
+    DeviceBuffer smp_thresholds, smp_indices;
     // scratch (grow())
     DeviceBuffer pick_schema, pick_rank, pick_row, status, goal_flag, order_temp, part_ids, restarts;
     std::vector<u64> goal_rows;
@@ -236,7 +238,8 @@ struct DeviceEnv::Impl
                                      &iota,        &starts,      &seed,        &ctl,        &pick_schema, &pick_rank,
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
                                      &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2,
-                                     &label_views, &init_hash,   &inst_numeric, &restarts};
+                                     &label_views, &init_hash,   &inst_numeric, &restarts, &smp_thresholds,
+                                     &smp_indices};
         for (Part& P : parts)
             for (DeviceBuffer* b : {&P.region, &P.rank, &P.rank_table, &P.sets, &P.fc_of})
                 v.push_back(b);
@@ -309,6 +312,28 @@ struct DeviceEnv::Impl
     }
 
     [[nodiscard]] const u64* dseed() const { return static_cast<const u64*>(seed.data()); }
+
+    /// The instance sampler of the batch's resets and autoresets (its counters, keys and env ids).
+    [[nodiscard]] envk::Sampling sampling_of(const rl::EnvBatch& b) const
+    {
+        envk::Sampling p;
+        p.reset_counts = b.reset_counts;
+        p.instances = cfg.sampling.instances;
+        p.thresholds = static_cast<const u32*>(smp_thresholds.data());
+        p.indices = static_cast<const i32*>(smp_indices.data());
+        p.m = cfg.sampling.weighted();
+        p.seed = cfg.seed;
+        p.seed_dev = dseed();
+        p.seeds = b.sampling_seeds;
+        p.first_env = b.first_env;
+        p.env_ids = b.env_ids;
+        return p;
+    }
+    /// Whether a step of the batch may autoreset rows into other instances than their own.
+    [[nodiscard]] bool moves_instances(const rl::EnvBatch& b, const i32* next_task_ids) const
+    {
+        return next_task_ids || (b.reset_counts && cfg.sampling.enabled());
+    }
     /// The order of the env's bindings: its actions are labels (under witness pruning, with the CPU's witnesses).
     [[nodiscard]] rl::dev::MatchOrder env_order() const noexcept
     {
@@ -990,6 +1015,15 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
         throw std::logic_error("mymyr: DeviceEnv: constructed while the context's stream captures a graph");
     // the RNG key and the control words
     I.seed = upload(I.ctx, std::vector<u64>{I.cfg.seed}, I.home);
+    if (I.cfg.sampling.weighted())
+    {
+        rl::check_sampling(I.cfg.sampling, I.I, "device env");
+        // a sampler of one positive weight has no thresholds: one word keeps the buffer allocated
+        std::vector<u32> th = I.cfg.sampling.thresholds;
+        th.resize(std::max<usize>(th.size(), 1), 0);
+        I.smp_thresholds = upload(I.ctx, th, I.home);
+        I.smp_indices = upload(I.ctx, I.cfg.sampling.indices, I.home);
+    }
     I.ctl = DeviceBuffer(I.ctx, k_ctl_words * sizeof(u32), I.home);
     check(cudaMemsetAsync(I.ctl.data(), 0, k_ctl_words * sizeof(u32), I.home), "cudaMemsetAsync");
     // the initial rows, their successor counts (the host engine's: both paths agree with it) and the goal masks, at the
@@ -1178,10 +1212,14 @@ void DeviceEnv::random_actions(const u64* draws, const i32* count, u64 rows, u64
           "launch_random_actions");
 }
 
-void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goals)
+void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goals, bool sample)
 {
     Impl& I = *m;
     I.check_batch(b, nullptr);
+    if (sample && !I.cfg.sampling.enabled())
+        throw std::invalid_argument("mymyr: env: a sampling reset needs an instance sampler");
+    if (sample && b.rows && !b.reset_counts)
+        throw std::invalid_argument("mymyr: env: a sampling reset needs the reset counters");
     DeviceGuard g(I.ctx->device());
     I.begin_call();
     envk::Reset r;
@@ -1205,6 +1243,8 @@ void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goa
     r.at_goal = b.at_goal;
     r.error = I.dctl() + k_err;
     r.visited = Impl::visited_of(b);
+    r.sampling = I.sampling_of(b);
+    r.sample = sample ? 1 : 0;
     check(envk::launch_reset(r, I.s), "launch_reset");
     I.order_rows(b.task_ids, b.rows, b.counts);
 }
@@ -1303,6 +1343,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     f.dead_end_terminal = I.cfg.dead_end_terminal ? 1 : 0;
     f.in = I.instances(b.task_ids);
     f.next_task_ids = next_task_ids;
+    f.sampling = I.sampling_of(b);
     f.error = ctl + k_err;
     f.reward = out.reward;
     f.terminated = out.terminated;
@@ -1390,7 +1431,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
             f.order_bad = ctl + k_order_bad;
         check(envk::launch_finish(I.several() ? rl::dev::TaskView{} : I.parts[0].dt->view(0), f, s), "launch_finish");
         // autoresets into other instances regroup the rows
-        if (next_task_ids)
+        if (I.moves_instances(b, next_task_ids))
             I.order_rows(b.task_ids, N, b.counts);
         return;
     }
@@ -1494,6 +1535,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Labels lab
     f.dead_end_terminal = I.cfg.dead_end_terminal ? 1 : 0;
     f.in = I.instances(b.task_ids);
     f.next_task_ids = next_task_ids;
+    f.sampling = I.sampling_of(b);
     f.error = ctl + k_err;
     f.reward = out.reward;
     f.terminated = out.terminated;

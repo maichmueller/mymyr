@@ -43,6 +43,17 @@ struct Round
         return tr[ids.size()];
     }
 
+    /// The observer's on_generate for the transitions of the round's expansions, when the search stops before handling
+    /// them (the expansion the search stopped in sent its own).
+    void generated(Context& c) const
+    {
+        if (!c.obs)
+            return;
+        for (usize j = 0; j < ids.size(); ++j)
+            for (const Transitions::T& t : tr[j].t)
+                c.obs->on_generate(ids[j], c.action(t.schema, tr[j].binding(t)), t.child, tr[j].view(t), t.fresh);
+    }
+
     /// Goal-tests the fresh transitions of the round's expansions in order and evaluates them in one call: GBFS
     /// (`stop_at_goal`) those before the first goal state, A* all of them (goal states too) but those a cost bound
     /// prunes before evaluation.
@@ -110,7 +121,7 @@ bool astar_start(Context& c, Nodes& nodes, u32 root, StateView s0)
     const f64 h0 = c.evaluate(s0);
     r.initial_h = h0;
     c.begin_search();
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++r.dead_ends;
         r.status = SearchStatus::Unsolvable;
@@ -146,11 +157,15 @@ struct AStarEagerBatched
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
-        Q open, goals;
+        Q open(c.queue_fallback), goals(c.queue_fallback);  // goal states wait in their own list
         Round round;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = queue_name(open, goals);
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes() + goals.bytes());
+        };
 
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
@@ -163,7 +178,7 @@ struct AStarEagerBatched
         {
             const u64 f = Q::key(fval(nodes, id, c.g0, c.weight));
             if (nodes.has(id, Nodes::Goal))
-                goals.push(f, 0, store.make_ref(id, v));
+                goals.push(f, Q::key(0), store.make_ref(id, v));
             else
                 open.push(f, Q::key(nodes.h[id]), store.make_ref(id, v));
         };
@@ -253,7 +268,10 @@ struct AStarEagerBatched
                 round.ids.push_back(id);
             }
             if (stop)
+            {
+                round.generated(c);
                 break;
+            }
             round.evaluate(c, false);
             for (usize j = 0; j < round.ids.size(); ++j)
             {
@@ -275,7 +293,7 @@ struct AStarEagerBatched
                             continue;
                         }
                         const f64 hv = round.h[i];
-                        if (hv == k_inf)
+                        if (c.dead_end(hv))
                         {
                             dead_end(cid);
                             continue;
@@ -306,7 +324,7 @@ struct AStarEagerBatched
                         if (!nodes.has(cid, Nodes::Evaluated))
                         {
                             const f64 hv = c.evaluate(tr.view(t));
-                            if (hv == k_inf)
+                            if (c.dead_end(hv))
                             {
                                 dead_end(cid);
                                 continue;
@@ -349,11 +367,15 @@ struct GbfsEagerBatched
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
-        Q open;
+        Q open(c.queue_fallback);
         Round round;
         Cur cur;
         std::vector<u64> next;
-        auto finish = [&] { c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes()); };
+        auto finish = [&]
+        {
+            r.queue = open.name();
+            c.finish(store.size(), store.bytes() + nodes.bytes() + open.bytes());
+        };
 
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
@@ -373,7 +395,7 @@ struct GbfsEagerBatched
         const f64 h0 = c.evaluate(s0);
         r.initial_h = h0;
         c.begin_search();
-        if (h0 == k_inf)
+        if (c.dead_end(h0))
         {
             ++r.dead_ends;
             r.status = SearchStatus::Unsolvable;
@@ -432,7 +454,10 @@ struct GbfsEagerBatched
                 round.ids.push_back(id);
             }
             if (stop)
+            {
+                round.generated(c);
                 break;
+            }
             round.evaluate(c, true);
             bool done = false;
             for (usize j = 0; j < round.ids.size(); ++j)
@@ -459,7 +484,7 @@ struct GbfsEagerBatched
                         continue;
                     }
                     const f64 hv = round.h[i];
-                    if (hv == k_inf)
+                    if (c.dead_end(hv))
                     {
                         nodes.set_status(cid, Nodes::DeadEnd);
                         ++r.dead_ends;

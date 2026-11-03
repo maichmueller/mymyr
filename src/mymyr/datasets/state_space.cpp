@@ -47,24 +47,30 @@ bool rows_equal(StateView a, StateView b)
 }
 }  // namespace
 
+bool StateSpace::build_index() const
+{
+    auto idx = std::make_shared<Index>();
+    u64 cap = 16;
+    while (cap < static_cast<u64>(m_n) * 2)
+        cap *= 2;
+    idx->slots.assign(cap, 0);
+    idx->mask = cap - 1;
+    bool distinct = true;
+    for (u32 id = 0; id < m_n; ++id)
+    {
+        const StateView r = state(id);
+        u64 j = row_hash(r) & idx->mask;
+        for (; idx->slots[j]; j = (j + 1) & idx->mask)
+            distinct = distinct && !rows_equal(state(idx->slots[j] - 1), r);
+        idx->slots[j] = id + 1;
+    }
+    m_index = std::move(idx);
+    return distinct;
+}
+
 i64 StateSpace::find(StateView s) const
 {
-    m_index_once.call([&] {
-        auto idx = std::make_shared<Index>();
-        u64 cap = 16;
-        while (cap < static_cast<u64>(m_n) * 2)
-            cap *= 2;
-        idx->slots.assign(cap, 0);
-        idx->mask = cap - 1;
-        for (u32 id = 0; id < m_n; ++id)
-        {
-            u64 j = row_hash(state(id)) & idx->mask;
-            while (idx->slots[j])
-                j = (j + 1) & idx->mask;
-            idx->slots[j] = id + 1;
-        }
-        m_index = std::move(idx);
-    });
+    m_index_once.call([&] { (void) build_index(); });
     if (s.nnum != m_numeric_words)
         return -1;
     for (u64 j = row_hash(s) & m_index->mask;; j = (j + 1) & m_index->mask)
@@ -88,7 +94,7 @@ u32 StateSpace::source(u64 edge) const
 Action StateSpace::label(u64 edge) const
 {
     if (!m_has_labels)
-        throw std::logic_error("mymyr: this state space was generated without labels (StateSpaceOptions::labels)");
+        throw std::logic_error("mymyr: this state space was generated without labels");
     if (edge >= m_targets.size())
         throw std::out_of_range("mymyr: transition index out of range");
     const u32 s = m_schemas[edge];
@@ -468,7 +474,16 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a, Array
     need(below(a.backward_edges, E), "a backward edge is not a transition");
     if (check == ArraysCheck::Full)
         check_contents(a, need);
-    return assemble(std::move(a));
+    auto space = assemble(std::move(a));
+    if (check == ArraysCheck::Full)
+    {
+        // the index find() uses, built here: the rows are distinct states (states and ids are one to one)
+        bool distinct = true;
+        space->m_index_once.call([&] { distinct = space->build_index(); });
+        need(distinct, "two state rows are equal (every state of a space has one id)");
+        space->check_task(need);
+    }
+    return space;
 }
 
 void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need)
@@ -506,7 +521,7 @@ void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<v
         }
     }
     for (const f64 c : a.costs)
-        need(!std::isnan(c), "a transition cost is NaN");
+        need(c >= 0, "a transition cost is negative or NaN");
 
     // distances and flags: flags are 0 or 1, goal states are at distance 0, unsolvable ones at -1 (cost +inf), and
     // alive means neither
@@ -521,6 +536,63 @@ void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<v
         need(u ? c == std::numeric_limits<f64>::infinity() : (c >= 0 && c < std::numeric_limits<f64>::infinity()),
              "the cost goal distances do not match the unsolvable flags");
         need(al == (!g && !u), "the alive flags are not the states neither goal nor unsolvable");
+    }
+
+    // the goal distances solve their equations over the transitions: a goal state is at 0, any other state at the
+    // minimum over its transitions of cost + the target's distance (unit cost 1, the transition costs), or
+    // unsolvable (no transition to a solvable state). Exact: the generators compute the same sums.
+    const f64 inf = std::numeric_limits<f64>::infinity();
+    for (u64 i = 0; i < N; ++i)
+    {
+        i64 du = k_unsolvable_distance;  // i64: 1 + the largest i32 does not overflow
+        f64 dc = inf;
+        if (a.goal_flags[i])
+            du = 0, dc = 0;
+        else
+            for (u64 e = a.forward_offsets[i]; e < a.forward_offsets[i + 1]; ++e)
+            {
+                const u32 t = a.forward_targets[e];
+                const i64 d = a.unit_goal_distances[t];
+                if (d != k_unsolvable_distance && (du == k_unsolvable_distance || d + 1 < du))
+                    du = d + 1;
+                if (!a.costs.empty() && a.cost_goal_distances[t] < inf)
+                    dc = std::min(dc, a.costs[e] + a.cost_goal_distances[t]);
+            }
+        need(a.unit_goal_distances[i] == du,
+             "a unit goal distance is not 1 + the smallest unit goal distance of the state's successors");
+        if (a.costs.empty())
+            dc = du == k_unsolvable_distance ? inf : static_cast<f64>(du);
+        need(a.cost_goal_distances[i] == dc,
+             "a cost goal distance is not the smallest transition cost + cost goal distance of the state's successors");
+    }
+}
+
+void StateSpace::check_task(const std::function<void(bool, const char*)>& need) const
+{
+    // the states as the task evaluates them: the goal flags are its goal test, and each labelled transition is its
+    // label's action applied to the source state
+    const WorkspaceLease lease = m_task->workspace();
+    Successors& succ = lease->successors();
+    StateBuilder next;
+    std::vector<ObjectId> binding;
+    for (u32 i = 0; i < m_n; ++i)
+    {
+        const StateView s = state(i);
+        succ.prepare(s);
+        need(succ.goal_holds() == (m_goal[i] != 0), "a goal flag is not the task's goal test of its state");
+        if (!m_has_labels)
+            continue;
+        for (u64 e = m_offsets[i]; e < m_offsets[i + 1]; ++e)
+        {
+            const u32 sch = m_schemas[e];
+            binding.resize(m_task->data().schemas[sch].arity());
+            for (u32 k = 0; k < binding.size(); ++k)
+                binding[k] = ObjectId{m_bindings[e * m_label_width + k]};
+            need(succ.apply_prepared(s, ActionLabel{SchemaId{sch}, binding}, next),
+                 "a label is not an action applicable in its transition's source state");
+            need(rows_equal(next.view(), state(m_targets[e])),
+                 "a transition's target is not its label's action applied to its source state");
+        }
     }
 }
 

@@ -97,6 +97,26 @@ def test_multi_iw_launch_configuration_and_budgets(ctx):
     assert set(mc.multi_iw(task, starts, ctx=ctx, max_seconds=0).status) == {mymyr.search.Status.OUT_OF_TIME}
 
 
+@pytest.mark.parametrize("budget", [{"max_expanded": 40}, {"max_states": 60}, {"max_expanded_local": 12},
+                                   {"max_expanded": 40, "max_expanded_local": 25}, {"max_states": 0}])
+def test_budgets_bound_the_whole_ladder_as_on_the_cpu(ctx, budget):
+    task = text_task("logistics00__probLOGISTICS-6-1")
+    starts = [task.initial_state, *walk(task, steps=6, seed=2, walks=2)]
+    batch = mc.multi_iw(task, starts, ctx=ctx, max_width=2, **budget)
+    for i, s in enumerate(starts):
+        cpu = mymyr.search.iw(task, max_width=2, start=s, **budget)
+        assert_equal(batch, i, cpu)
+        if "max_expanded" in budget:
+            assert batch.expanded[i] <= budget["max_expanded"]
+        if "max_expanded_local" in budget:
+            assert max(p.expanded for p in batch.passes(i)) <= budget["max_expanded_local"]
+    seeds = [0, 5]
+    cpu = mymyr.search.find_rollouts_parallel(task, seeds=seeds, max_width=2, threads=1, **budget)
+    batch = mc.rollouts(task, seeds, ctx=ctx, max_width=2, **budget)
+    for i, rollout in enumerate(cpu.rollouts):
+        assert_equal(batch, i, rollout)
+
+
 def test_batched_iw1_from_torch_rows(ctx):
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():

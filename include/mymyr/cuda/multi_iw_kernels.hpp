@@ -238,6 +238,9 @@ struct Searches
     u32* last_gen = nullptr;
     u32* cut = nullptr;      // 2 * candidate + (0: max_states, 1: max_next_layer_states) of the cut, or k_none
     u32* cut_row = nullptr;  // chunk row of the cut candidate's parent
+    // the pass's budgets per search: what the ladder's budgets left after the search's earlier passes
+    unsigned long long* max_expanded = nullptr;
+    u32* max_states = nullptr;  // tree nodes; k_none: unlimited
     // goals: per search [count, goal_words] positive / negative masks over fluent slots, or null (the task's goal)
     const u64* goal_pos = nullptr;
     const u64* goal_neg = nullptr;
@@ -246,11 +249,10 @@ struct Searches
     u32 reached_words = 0;
 };
 
-/// Budgets of the pass (per search).
+/// Budgets of the pass (the per-search expansion and state budgets are in Searches).
 struct Limits
 {
-    unsigned long long max_expanded = ~0ull;
-    u32 max_states = k_none;  // tree nodes
+    u32 max_states = k_none;  // k_none: no search has a state budget (else Searches::max_states)
     u32 max_next = k_none;    // entries of the next layer (max_next_layer_states)
     u32 max_depth = k_none;
 };

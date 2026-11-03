@@ -268,7 +268,7 @@ def test_scored_layers_values_and_errors():
         search.iw(blocks, max_width=1, layer_order=lambda s: math.nan, beam_width=4)
     with pytest.raises(ZeroDivisionError):
         search.brfs(blocks, layer_order=lambda s: 1 / 0)
-    with pytest.raises(ValueError, match="relaxed_survivors_only|RelaxedSurvivorsOnly"):
+    with pytest.raises(ValueError, match="relaxed survivors-only beam novelty needs the goal-count"):
         search.brfs(blocks, layer_order=lambda s: 0.0, beam_width=4, beam_novelty="relaxed_survivors_only")
     with pytest.raises(ValueError, match="layer_order must be"):
         search.iw(blocks, layer_order="best")

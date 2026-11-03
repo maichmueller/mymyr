@@ -391,7 +391,7 @@ def absorbing_rollout(env, steps, autoreset):
             record["reset_count"] = env.reset(done).cpu().numpy().copy()
         record.update(env_arrays(env))
         assert np.array_equal(record["at_goal"], env.is_goal().cpu().numpy())  # the flags are the states' goal tests
-        record.update(draws=env.draws.cpu().numpy().copy(), reset_counts=env._reset_counts.cpu().numpy().copy())
+        record.update(draws=env.draws.cpu().numpy().copy(), reset_counts=env.reset_counts.cpu().numpy().copy())
         out.append(record)
     return out
 
@@ -457,7 +457,7 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
                     want = ref[r * K + k][field]
                     assert np.array_equal(got[k].view(want.dtype), want), (kind, r, k, field)
         env.check_errors()
-        assert np.array_equal(env._reset_counts.cpu().numpy(), host._reset_counts.numpy())
+        assert np.array_equal(env.reset_counts.cpu().numpy(), host.reset_counts.numpy())
         assert np.array_equal(env.draws.cpu().numpy(), host.draws.numpy())
 
 

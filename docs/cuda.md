@@ -204,7 +204,7 @@ search require CPU search; device A*/GBFS use the task goal. See [Formula values
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
 Exact device IW reproduces each CPU search's status, plan, goal state and per-pass counts with matching options,
-including `max_states`, `max_expanded` and `max_depth`, unless a pass's novelty table exceeds `table_bytes` (see
+including `max_states`, `max_expanded`, `max_expanded_local` and `max_depth`, unless a pass's novelty table exceeds `table_bytes` (see
 below). Python `multi_iw` and `batched_iw1` have no next-layer limit and equal `search.iw` with the default `"queue"`
 order. The C++ `MultiIwOptions::max_next_layer_states` corresponds to
 CPU `IwOptions::layers` with `Kind::InOrder` and the same limit (in Python `search.iw(layer_order="in_order",

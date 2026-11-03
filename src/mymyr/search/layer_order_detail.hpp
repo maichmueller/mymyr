@@ -195,7 +195,7 @@ private:
         for (usize i = 0; i < n; ++i)
         {
             if (std::isnan(m_scores[i]))
-                throw std::invalid_argument("mymyr: a layer score is NaN (LayerOrdering::scorer)");
+                throw std::invalid_argument("mymyr: a layer score is NaN");
             m_wide_keys[i] = score_key(m_scores[i]);
         }
     }

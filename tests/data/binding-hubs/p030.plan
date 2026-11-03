@@ -1,0 +1,5 @@
+(pick a22 t168)
+(work a22 t168 h96 h39 x9)
+(pick a13 t192)
+(work a13 t192 h38 h81 x3)
+; cost 4 = 2 * 2 jobs (optimal)
