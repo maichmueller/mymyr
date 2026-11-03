@@ -199,7 +199,8 @@ def test_stubs_parse_and_are_typed():
     assert "def tuple_graphs(self, space: int) -> list[TupleGraph]:" in ds
     # persistence: rebuilt from arrays, pickled by reduction (mymyr._pickle)
     arrays = "arrays: Mapping[str, mymyr._typing.SupportsDLPack]"
-    assert f"def from_arrays(task: mymyr._core.Task | mymyr._core.TaskHandle, {arrays}) -> StateSpace:" in ds
+    checks = "check: Literal['full', 'structure'] = 'full'"
+    assert f"def from_arrays(task: mymyr._core.Task | mymyr._core.TaskHandle, {arrays}, *, {checks}) -> StateSpace:" in ds
     assert f"def from_arrays(space: StateSpace, root: int, {arrays}, *, width: int, dominance_pruning: bool = True) -> TupleGraph:" in ds
     assert ds.count("def __reduce__(self) -> tuple[object, ...]: ...") == 5  # spaces, results, GSS, tuple graphs, KBs
     assert "__getstate__" not in ds and "-> object" not in ds

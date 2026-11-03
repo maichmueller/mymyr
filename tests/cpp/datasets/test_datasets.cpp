@@ -620,6 +620,8 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
     {
         const char* what;  // part of the message
         std::function<void(StateSpaceArrays&)> mutate;
+        // ArraysCheck::Structure's message (empty: `what`), or nullptr: Structure accepts the arrays
+        const char* structure = "";
     };
     const Case cases[] = {
         {"no task", [](StateSpaceArrays& a) { a.task = nullptr; }},
@@ -631,11 +633,15 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
          }},
         {"state_words", [](StateSpaceArrays& a) { a.state_words.pop_back(); }},
         {"target is not a state", [&](StateSpaceArrays& a) { a.forward_targets[0] = N; }},
-        {"backward CSR", [](StateSpaceArrays& a) { std::swap(a.backward_edges[0], a.backward_edges[1]); }},
-        {"backward CSR", [](StateSpaceArrays& a) { a.backward_sources[0] = a.backward_sources[0] == 0 ? 1 : 0; }},
+        {"backward CSR", [](StateSpaceArrays& a) { std::swap(a.backward_edges[0], a.backward_edges[1]); }, nullptr},
+        {"backward CSR", [](StateSpaceArrays& a) { a.backward_sources[0] = a.backward_sources[0] == 0 ? 1 : 0; }, nullptr},
         {"words is not the task's", [&](StateSpaceArrays& a) {
              a.words += 1;
              a.state_words.assign(u64{N} * (RW + 1), 0);
+         }, "initial state"},  // ArraysCheck::Structure reads wider rows (zero words past the task's)
+        {"words is not the task's", [&](StateSpaceArrays& a) {
+             a.words -= 1;
+             a.state_words.assign(u64{N} * (RW - 1), 0);
          }},
         {"numeric_words", [&](StateSpaceArrays& a) {
              a.numeric_words = 1;
@@ -652,19 +658,19 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
         {"cost is negative or NaN", [](StateSpaceArrays& a) { a.costs[0] = -1; }},
         {"two state rows are equal", [&](StateSpaceArrays& a) {
              std::copy_n(a.state_words.begin() + u64{1} * RW, RW, a.state_words.begin() + u64{2} * RW);
-         }},
-        {"a unit goal distance is not 1 +", [&](StateSpaceArrays& a) { a.unit_goal_distances[alive] += 1; }},
-        {"a cost goal distance is not", [&](StateSpaceArrays& a) { a.cost_goal_distances[alive] += 0.5; }},
+         }, nullptr},
+        {"a unit goal distance is not 1 +", [&](StateSpaceArrays& a) { a.unit_goal_distances[alive] += 1; }, nullptr},
+        {"a cost goal distance is not", [&](StateSpaceArrays& a) { a.cost_goal_distances[alive] += 0.5; }, nullptr},
         {"target is not its label's action", [](StateSpaceArrays& a) {  // two transitions of state 0 swap labels
              std::swap(a.label_schemas[0], a.label_schemas[1]);
              std::swap_ranges(a.label_bindings.begin(), a.label_bindings.begin() + a.label_width,
                               a.label_bindings.begin() + a.label_width);
-         }},
+         }, nullptr},
         {"not an action applicable in its", [](StateSpaceArrays& a) {  // state 1's first label on state 0
              const u64 e = a.forward_offsets[1];
              a.label_schemas[0] = a.label_schemas[e];
              std::copy_n(a.label_bindings.begin() + e * a.label_width, a.label_width, a.label_bindings.begin());
-         }},
+         }, nullptr},
         {"flag is not 0 or 1", [](StateSpaceArrays& a) { a.goal_flags[0] = 2; }},
         {"goal and unsolvable flags", [](StateSpaceArrays& a) { a.goal_flags[0] = 1; }},
         {"goal and unsolvable flags", [&](StateSpaceArrays& a) { a.unsolvable_flags[alive] = 1; }},
@@ -672,27 +678,25 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
         {"alive flags", [&](StateSpaceArrays& a) { a.alive_flags[alive] = 0; }},
     };
     for (const Case& c : cases)
-    {
-        SCOPED_TRACE(c.what);
-        StateSpaceArrays a = S->to_arrays();
-        c.mutate(a);
-        try
+        for (const ArraysCheck check : {ArraysCheck::Full, ArraysCheck::Structure})
         {
-            (void)StateSpace::create(std::move(a));
-            ADD_FAILURE() << "accepted";
+            SCOPED_TRACE(std::string(c.what) + (check == ArraysCheck::Full ? " (full)" : " (structure)"));
+            StateSpaceArrays a = S->to_arrays();
+            c.mutate(a);
+            const char* what = check == ArraysCheck::Full || !c.structure || !*c.structure ? c.what : c.structure;
+            const bool rejected = check == ArraysCheck::Full || c.structure != nullptr;
+            try
+            {
+                // ArraysCheck::Structure accepts what only the goal tests, applications or cross-array checks reject
+                const auto space = StateSpace::create(std::move(a), check);
+                EXPECT_FALSE(rejected) << "accepted";
+                EXPECT_EQ(space->num_states(), N);
+            }
+            catch (const std::invalid_argument& e)
+            {
+                EXPECT_TRUE(rejected) << e.what();
+                EXPECT_NE(std::string(e.what()).find(what), std::string::npos) << e.what();
+            }
         }
-        catch (const std::invalid_argument& e)
-        {
-            EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
-        }
-    }
-    // ArraysCheck::Structure checks sizes and ranges only: contents of another task pass, broken ranges do not
-    StateSpaceArrays a = S->to_arrays();
-    a.task = other;
-    a.goal_flags[0] = 1;
-    EXPECT_EQ(StateSpace::create(std::move(a), ArraysCheck::Structure)->num_goal_states(), S->num_goal_states() + 1);
-    StateSpaceArrays b = S->to_arrays();
-    b.forward_targets[0] = N;
-    EXPECT_THROW((void)StateSpace::create(std::move(b), ArraysCheck::Structure), std::invalid_argument);
 }
 }  // namespace

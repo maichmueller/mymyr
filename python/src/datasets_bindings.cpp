@@ -334,7 +334,7 @@ std::vector<nb::handle> items(nb::handle h, usize n, const char* what)
 /// The state space of `task` from the arrays of arrays() (state_words included). The rows: [N, W + NN] 64-bit words
 /// (uint64 or int64), or 32-bit halves [N, 2 (W + NN)]. Generation statistics: `stats` (threads, layers,
 /// search_seconds, post_seconds) if given, else 1, 0, 0, 0.
-StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stats)
+StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stats, ArraysCheck check)
 {
     const char* what = "state space";
     check_keys(arrays,
@@ -406,7 +406,20 @@ StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stat
     }
     a.task = std::move(task);
     nb::gil_scoped_release release;  // validation: linear in the size of the arrays
-    return StateSpace::create(std::move(a));
+    return StateSpace::create(std::move(a), check);
+}
+
+/// The ArraysCheck of a `check` argument: "full" or "structure" (ValueError otherwise).
+ArraysCheck arrays_check(Arg<ann::ArraysCheck> check)
+{
+    std::string s;
+    if (!nb::try_cast(check, s, false))
+        throw nb::type_error("mymyr: check must be 'full' or 'structure'");
+    if (s == "full")
+        return ArraysCheck::Full;
+    if (s == "structure")
+        return ArraysCheck::Structure;
+    throw nb::value_error(("mymyr: check must be 'full' or 'structure', not '" + s + "'").c_str());
 }
 
 /// The generation statistics of a state space: (threads, layers, search seconds, post seconds).
@@ -623,11 +636,11 @@ SpaceState space_state(const PyStateSpace& s)
 }
 
 PyStateSpace restore_space(nb::handle task, u64 fingerprint, u64 encoding_fingerprint, nb::handle slots, nb::handle stats,
-                           nb::handle arrays)
+                           nb::handle arrays, ArraysCheck check)
 {
     const Owner o = task_owner(task);
     adopt_task(*o.core->task, fingerprint, encoding_fingerprint, slots, "state space");
-    return PyStateSpace{space_from_arrays(o.core->task, arrays, stats), o};
+    return PyStateSpace{space_from_arrays(o.core->task, arrays, stats, check), o};
 }
 
 /// The keyword arguments of KnowledgeBase(), in order (KbOptions: those after the tasks).
@@ -884,15 +897,16 @@ void bind_datasets(nb::module_& parent)
         .def("__len__", [](const PyStateSpace& s) { return s.space->num_states(); })
         .def_static(
             "from_arrays",
-            [](TaskArg task, Arg<nb::typed<nb::mapping, std::string, ann::ArrayLike>> arrays) {
+            [](TaskArg task, Arg<nb::typed<nb::mapping, std::string, ann::ArrayLike>> arrays, Arg<ann::ArraysCheck> check) {
+                const ArraysCheck c = arrays_check(check);
                 const Owner o = task_owner(task);
                 if (!o.core->task->atoms().frozen())
                     throw nb::value_error("mymyr: a state space of a task with lazy atom slots is not rebuilt from arrays "
                                           "(the slot numbering is the task object's history): pickle the StateSpace or "
                                           "use datasets.save / load");
-                return PyStateSpace{space_from_arrays(o.core->task, arrays, nb::none()), o};
+                return PyStateSpace{space_from_arrays(o.core->task, arrays, nb::none(), c), o};
             },
-            "task"_a, "arrays"_a,
+            "task"_a, "arrays"_a, nb::kw_only(), "check"_a = "full",
             "The state space of `task` from its arrays: a mapping with the names, dtypes and shapes arrays() gives "
             "(NumPy, or DLPack arrays on the CPU; copied), state_words included (any framework's word layout). The "
             "arrays are validated: shapes and dtypes, unknown names, ranges, the reverse CSR against the forward one, "
@@ -900,7 +914,11 @@ void bind_datasets(nb::module_& parent)
             "initial state first, labels of its schemas and objects); the rows are distinct, the goal flags are the "
             "task's goal test, each label is an action applicable in its source state leading to the target, and the "
             "goal distances are 0 at goals and elsewhere the smallest transition cost (1: unit distances) plus the "
-            "successor's distance; ValueError or TypeError otherwise. A task with "
+            "successor's distance; ValueError or TypeError otherwise. check='structure', for arrays the caller trusts "
+            "(those of a mymyr state space of this task), keeps the checks of shapes, dtypes, ranges, the row layout "
+            "and atom slots, the initial state, the labels' schemas and objects, costs and flags against distances, "
+            "which every use of the result relies on, and skips the rest: the reverse CSR's pairing, distinct rows, "
+            "goal tests, label applications and the distance equations. A task with "
             "lazy atom slots is refused (pickle the space or use datasets.save / load). The generation statistics "
             "(threads, layers, seconds) of the result are 1, 0, 0, 0. Linear in the size of the arrays.")
         .def("__reduce__",
@@ -1519,13 +1537,13 @@ void bind_datasets(nb::module_& parent)
     m.def(
         "_restore_state_space",
         [](TaskArg task, u64 fingerprint, u64 encoding_fingerprint, std::optional<Arg<ann::ArrayLike>> slots, Arg<SpaceStats> stats,
-           ArraysArg arrays) {
+           ArraysArg arrays, Arg<ann::ArraysCheck> check) {
             return restore_space(task, fingerprint, encoding_fingerprint, slots ? nb::handle(*slots) : nb::none(), stats,
-                                 arrays);
+                                 arrays, arrays_check(check));
         },
-        "task"_a, "fingerprint"_a, "encoding_fingerprint"_a, "slots"_a.none(), "stats"_a, "arrays"_a,
+        "task"_a, "fingerprint"_a, "encoding_fingerprint"_a, "slots"_a.none(), "stats"_a, "arrays"_a, "check"_a = "full",
         "The state space of _state_space_state's parts, of `task` (checked against the fingerprints; a task with lazy "
-        "atom slots takes the saved numbering).");
+        "atom slots takes the saved numbering), its arrays checked as StateSpace.from_arrays(check=) checks them.");
     m.def(
         "_restore_tuple_graph",
         [](Arg<PyStateSpace> space, u32 root, u32 width, bool dominance_pruning, ArraysArg arrays) {

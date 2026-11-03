@@ -308,15 +308,22 @@ initial state first, labels of its schemas and objects). It also checks the cont
 distinct, the goal flags are the task's goal test, each label is an action applicable in its source state that leads
 to the transition's target, and the goal distances are 0 at goal states and elsewhere the smallest transition cost
 (1 for unit distances) plus the successor's distance. This costs one goal test per state and one action application
-per labelled transition, a fraction of generating the space. `TupleGraph.from_arrays(space, root, arrays, width=...)`
-does the same for a tuple graph. Invalid arrays raise `ValueError` or `TypeError` with a `mymyr: ...` message.
+per labelled transition, a fraction of generating the space, but most of the time of rebuilding a large one.
+`check="structure"` (default `"full"`) is for arrays you trust, such as those of your own saved spaces: it keeps
+the checks of names, dtypes, shapes, ranges, the row layout and atom slots, the initial state, the labels' schemas
+and objects, costs, and flags against distances, which reading the space relies on, and skips the backward CSR's
+pairing, distinct rows, goal tests, label applications and the distance equations. Such a space never reads out of
+range, but a mismatch the skipped checks would catch goes unnoticed. `TupleGraph.from_arrays(space, root, arrays,
+width=...)` does the same for a tuple graph. Invalid arrays raise `ValueError` or `TypeError` with a `mymyr: ...`
+message.
 
 `datasets.save(obj, path)` writes a `StateSpace`, `GeneralizedStateSpace`, `KnowledgeBase`, `TupleGraph` or a list of
 tuple graphs of one state space to a file, and `datasets.load(path)` reads it back. `load` builds the tasks from the
 file; pass `task=` (or `tasks=`, one per task of the file in its order, or a `TaskTable`) to attach the dataset to tasks
 you already have. A given task must be the file's task: another task (content fingerprint) or another encoding of
 it (for example another `atoms=` or `numeric_storage=`, compared through the encoding fingerprint) raises
-`ValueError`.
+`ValueError`. `load(path, check="structure")` checks the file's state spaces as `from_arrays(..., check="structure")`
+does, for files you trust.
 
 ```python
 import pickle
@@ -340,6 +347,8 @@ with tempfile.TemporaryDirectory() as d:
     datasets.save(kb, Path(d) / "gripper.mymyr")
     loaded = datasets.load(Path(d) / "gripper.mymyr", tasks=tasks)
     assert loaded.tasks[0] is tasks[0] and loaded.state_spaces[1].num_states == space.num_states
+    trusted = datasets.load(Path(d) / "gripper.mymyr", tasks=tasks, check="structure")
+    assert trusted.state_spaces[1].num_transitions == space.num_transitions
 ```
 
 A task with lazy atom slots (`atoms="lazy"`) numbers its atoms in the order it first meets them, so its state rows
@@ -417,5 +426,6 @@ fields it does not know, so later versions can add objects (encoding schemas and
 breaking older files.
 
 Loading a file reads data only: JSON, text and arrays read with `allow_pickle=False`, then validated as `from_arrays`
-does, so a damaged or hostile file raises `ValueError` rather than running code. Pickles are the opposite: like every
+does, so a damaged or hostile file raises `ValueError` rather than running code (with `check="structure"`, rather
+than reading out of range). Pickles are the opposite: like every
 pickle, `pickle.loads` can run arbitrary code, so unpickle only data you trust and share datasets as files.

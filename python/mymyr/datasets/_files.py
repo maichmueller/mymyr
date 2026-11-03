@@ -40,7 +40,7 @@ import os
 import secrets
 import zipfile
 from collections.abc import Sequence
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
 import numpy as np
 
@@ -321,7 +321,7 @@ def _given_tasks(r: _Reader, given: Sequence[Task | TaskHandle] | TaskTable) -> 
     return tasks
 
 
-def _read(r: _Reader, tasks: Sequence[Task | TaskHandle] | TaskTable | None) -> Dataset:
+def _read(r: _Reader, tasks: Sequence[Task | TaskHandle] | TaskTable | None, check: str) -> Dataset:
     h = r.header
     entries = h["tasks"]
     ts = [r.task(e) for e in entries] if tasks is None else _given_tasks(r, tasks)
@@ -334,7 +334,7 @@ def _read(r: _Reader, tasks: Sequence[Task | TaskHandle] | TaskTable | None) -> 
         e = entries[t]
         return _restore_state_space(ts[t], _unhex(e["fingerprint"], "a fingerprint"),
                                     _unhex(e["encoding_fingerprint"], "an encoding fingerprint"), r.slots(e), stats,
-                                    r.arrays(s["arrays"]))
+                                    r.arrays(s["arrays"]), check)
 
     kind = h["kind"]
     if kind == "state_space":
@@ -356,7 +356,8 @@ def _read(r: _Reader, tasks: Sequence[Task | TaskHandle] | TaskTable | None) -> 
 
 
 def load(path: str | os.PathLike[str] | BinaryIO, *, task: Task | TaskHandle | None = None,
-         tasks: Sequence[Task | TaskHandle] | TaskTable | None = None) -> Dataset:
+         tasks: Sequence[Task | TaskHandle] | TaskTable | None = None,
+         check: Literal["full", "structure"] = "full") -> Dataset:
     """Loads a dataset saved by mymyr.datasets.save: the StateSpace, GeneralizedStateSpace, KnowledgeBase, TupleGraph
     or list of TupleGraphs it holds.
 
@@ -368,9 +369,14 @@ def load(path: str | os.PathLike[str] | BinaryIO, *, task: Task | TaskHandle | N
     takes the saved numbering: its slots must agree with it so far (ValueError otherwise).
 
     Every array is validated (as StateSpace.from_arrays and TupleGraph.from_arrays do) and the file holds no pickle,
-    so loading reads data only. ValueError for a file that is not a mymyr dataset, a newer format version or an
-    unknown kind.
+    so loading reads data only. check= is StateSpace.from_arrays' option for the file's state spaces: "full" (the
+    default) checks everything, "structure" (for files the caller trusts, such as its own datasets.save output)
+    keeps what reading the arrays relies on and skips the goal tests, label applications, distinct-row and distance
+    checks, which take most of a large space's load time. ValueError for a file that is not a mymyr dataset, a newer
+    format version or an unknown kind.
     """
+    if check not in ("full", "structure"):
+        raise ValueError(f"mymyr: check must be 'full' or 'structure', not {check!r}")
     if task is not None:
         if tasks is not None:
             raise TypeError("mymyr: pass task= or tasks=, not both")
@@ -385,7 +391,7 @@ def load(path: str | os.PathLike[str] | BinaryIO, *, task: Task | TaskHandle | N
     with zf:
         r = _Reader(zf, name)
         try:
-            return _read(r, tasks)
+            return _read(r, tasks, check)
         except (KeyError, TypeError, IndexError) as e:
             if isinstance(e, TypeError) and str(e).startswith("mymyr:"):
                 raise

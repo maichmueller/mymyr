@@ -267,6 +267,76 @@ def test_from_arrays_checks_the_states_transitions_and_distances(tmp_path):
         datasets.load(tmp_path / "dup.mymyr", task=task)
 
 
+@needs_frontend
+def test_structure_check_skips_the_content_checks_only(tmp_path):
+    task = pddl_task("gripper", "p02")
+    space = datasets.state_space(task)
+    a = space.arrays()
+    alive = int(np.flatnonzero(a["alive"])[0])
+
+    def edit(name, f):
+        b = {k: v.copy() for k, v in a.items()}
+        f(b[name])
+        return b
+
+    # what only the content checks reject: equal rows, distances off their equations, a swapped backward CSR pair
+    def swap_backward(x):
+        x[[0, 1]] = x[[1, 0]]
+
+    content = [
+        edit("state_words", lambda x: x.__setitem__(2, x[3])),
+        edit("unit_goal_distances", lambda x: x.__setitem__(alive, x[alive] + 2)),
+        edit("cost_goal_distances", lambda x: x.__setitem__(alive, 1e30)),
+        edit("backward_edges", swap_backward),
+    ]
+    for arrays in content:
+        with pytest.raises(ValueError, match="^mymyr: invalid state space arrays: "):
+            datasets.StateSpace.from_arrays(task, arrays)
+        trusted = datasets.StateSpace.from_arrays(task, arrays, check="structure")
+        same_arrays(trusted.arrays(), arrays)
+    # what reading the arrays relies on stays checked
+    labels = int(np.max(a["label_schemas"])) + 1
+    structure = [
+        (edit("forward_targets", lambda x: x.__setitem__(0, space.num_states)), "a transition target is not a state"),
+        (edit("backward_edges", lambda x: x.__setitem__(0, space.num_transitions)), "a backward edge is not a transition"),
+        (edit("label_schemas", lambda x: x.__setitem__(0, labels + 99)), "a label's schema is not one of the task's"),
+        (edit("label_bindings", lambda x: x.__setitem__((0, 0), 999)), "a label binds an object the task does not have"),
+        (edit("alive", lambda x: x.__setitem__(alive, False)), "the alive flags are not"),
+        (edit("unit_goal_distances", lambda x: x.__setitem__(alive, -5)), "the goal and unsolvable flags"),
+        (edit("state_words", lambda x: x.__setitem__((0, -1), x[0, -1] | np.uint64(1 << 63))), "a state row sets an atom slot"),
+    ]
+    for arrays, message in structure:
+        with pytest.raises(ValueError, match=f"^mymyr: invalid state space arrays: {message}"):
+            datasets.StateSpace.from_arrays(task, arrays, check="structure")
+    with pytest.raises(ValueError, match="^mymyr: check must be 'full' or 'structure', not 'none'"):
+        datasets.StateSpace.from_arrays(task, a, check="none")
+    with pytest.raises(TypeError, match="check"):
+        datasets.StateSpace.from_arrays(task, a, check=False)
+
+    # files: a trusted file loads unchecked contents, a damaged range still raises
+    datasets.save(space, tmp_path / "s.mymyr")
+    same_arrays(datasets.load(tmp_path / "s.mymyr", task=task, check="structure").arrays(), a)
+    for name, f, message in (("state_words", lambda rows: rows.__setitem__(2, rows[3]), None),
+                             ("forward_targets", lambda t: t.__setitem__(0, space.num_states), "a transition target")):
+        with zipfile.ZipFile(tmp_path / "s.mymyr") as z, zipfile.ZipFile(tmp_path / "edit.mymyr", "w") as w:
+            for n in z.namelist():
+                data = z.read(n)
+                if n == f"state_spaces/0/{name}.npy":
+                    x = np.load(io.BytesIO(data))
+                    f(x)
+                    out = io.BytesIO()
+                    np.save(out, x)
+                    data = out.getvalue()
+                w.writestr(n, data)
+        if message is None:
+            assert datasets.load(tmp_path / "edit.mymyr", task=task, check="structure").num_states == space.num_states
+        else:
+            with pytest.raises(ValueError, match=f"^mymyr: .*{message}"):
+                datasets.load(tmp_path / "edit.mymyr", task=task, check="structure")
+    with pytest.raises(ValueError, match="^mymyr: check must be 'full' or 'structure'"):
+        datasets.load(tmp_path / "s.mymyr", task=task, check="fast")
+
+
 # ------------------------------------------------------------------------------------------------ pickling
 @pytest.mark.parametrize("case", SPACES, ids=lambda c: f"{c[0]}-{c[1]}")
 def test_pickle_state_spaces(case):

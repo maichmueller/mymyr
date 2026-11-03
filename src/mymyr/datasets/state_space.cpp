@@ -472,8 +472,9 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a, Array
     need(below(a.forward_targets, N), "a transition target is not a state");
     need(below(a.backward_sources, N), "a transition source is not a state");
     need(below(a.backward_edges, E), "a backward edge is not a transition");
+    check_values(a, check, need);
     if (check == ArraysCheck::Full)
-        check_contents(a, need);
+        check_relations(a, need);
     auto space = assemble(std::move(a));
     if (check == ArraysCheck::Full)
     {
@@ -486,16 +487,19 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a, Array
     return space;
 }
 
-void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need)
+void StateSpace::check_values(const StateSpaceArrays& a, ArraysCheck check,
+                              const std::function<void(bool, const char*)>& need)
 {
     const Task& T = *a.task;
     const u64 N = a.num_states, E = a.forward_targets.size(), RW = u64{a.words} + a.numeric_words;
-    need(reverse_matches(a), "the backward CSR does not list the forward transitions by target");
 
     // the rows are states of this task: its row layout, no atom slot it lacks, and its initial state first
     need(a.numeric_words == T.numeric_words(), "numeric_words is not the task's (the arrays belong to another task)");
+    // (a generator may pad rows: wider rows whose extra words are zero, which the atom slot check below ensures, are
+    // read as the task's rows)
     if (T.atoms().frozen())
-        need(a.words == T.words(), "words is not the task's (the arrays belong to another task or atom mode)");
+        need(check == ArraysCheck::Full ? a.words == T.words() : a.words >= T.words(),
+             "words is not the task's (the arrays belong to another task or atom mode)");
     else
         need(a.words <= T.max_words(), "words is wider than any state of the task (the arrays belong to another task)");
     need(rows_within(a.state_words, N, a.words, static_cast<u32>(RW), T.atoms().fluent_slots()),
@@ -537,6 +541,12 @@ void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<v
              "the cost goal distances do not match the unsolvable flags");
         need(al == (!g && !u), "the alive flags are not the states neither goal nor unsolvable");
     }
+}
+
+void StateSpace::check_relations(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need)
+{
+    const u64 N = a.num_states;
+    need(reverse_matches(a), "the backward CSR does not list the forward transitions by target");
 
     // the goal distances solve their equations over the transitions: a goal state is at 0, any other state at the
     // minimum over its transitions of cost + the target's distance (unit cost 1, the transition costs), or
