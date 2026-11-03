@@ -297,7 +297,7 @@ TEST_P(CudaMultiIwSuite, Iw2EqualsTheCpu)
     const std::vector<State> starts = full_suite() ? device_ref_walks(*task, 4, 25, 7) : device_ref_walks(*task, 2, 11, 7);
     cuda::MultiIwOptions o;
     o.max_width = 2;
-    o.budget.max_states = 20000;  // per pass: bounds the CPU reference's time on the large tasks
+    o.budget.max_states = 20000;  // bounds the CPU reference's time on the large tasks
     check_against_cpu(task, starts, o, "iw2");
     check_against_cpu(task, starts, o, "iw2_goals", walk_goals(*task, starts, 3, true));
 }
