@@ -318,6 +318,15 @@ __device__ __forceinline__ u32 reset_row(const Instances& in, u32 k, u64 i, u64*
     return in.init_count[k];
 }
 
+/// Row i's next sampled instance.
+__device__ __forceinline__ u32 sample_row(const Sampling& p, u64 i)
+{
+    const u64 key = p.seeds ? p.seeds[i] : p.seed_dev ? __ldg(p.seed_dev) : p.seed;
+    const u64 env = p.env_ids ? u64{p.env_ids[i]} : p.first_env + i;
+    return static_cast<u32>(rl::rng::instance_draw(key, env, p.reset_counts[i], p.instances, p.thresholds, p.indices,
+                                                   p.m));
+}
+
 /// Row i of k_finish; returns the instance that the row's visited table restarts with (an autoreset with visited
 /// tables), else k_keep.
 __device__ __forceinline__ u32 finish_row(rl::dev::TaskView t, const Finish& p, u64 i)
@@ -381,6 +390,10 @@ __device__ __forceinline__ u32 finish_row(rl::dev::TaskView t, const Finish& p, 
             if (x >= 0 && static_cast<u32>(x) < p.in.count)
                 next = static_cast<u32>(x);
         }
+        else if (p.sampling.reset_counts && p.sampling.instances)
+            next = sample_row(p.sampling, i);
+        if (p.sampling.reset_counts)
+            ++p.sampling.reset_counts[i];
         const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
                                  stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);
         if (p.steps)
@@ -458,7 +471,9 @@ __global__ void k_reset(Reset p)
     {
         if (p.mask && !p.mask[i])
             continue;
-        u32 k = instance_of(p.in, i);
+        u32 k = p.sample ? sample_row(p.sampling, i) : instance_of(p.in, i);
+        if (p.sampling.reset_counts)
+            ++p.sampling.reset_counts[i];
         if (k >= p.in.count)
         {
             if (p.error)

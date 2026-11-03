@@ -272,6 +272,36 @@ def test_large_batches_are_split_over_threads_and_pools(layout):
         encoder.encode(rows, pool=3)
 
 
+def test_concurrent_calls_of_one_encoder_with_threads_give_the_sequential_batches():
+    import threading
+
+    task = text_task("gripper__prob05")
+    rows = big_rows(task)
+    encoder = encoder_of(task)
+    base = encoder.encode(rows)
+    parts = [rows[k::3] for k in range(3)]
+    want = [encoder.encode(p) for p in parts]
+    start = threading.Barrier(6)
+    errors = []
+
+    def work(c):
+        try:
+            start.wait()
+            for k in range(6):  # calls at once take pools of their own; the counts 2 and 3 alternate between callers
+                threads = 2 + (c + k) % 2
+                same_arrays(base, encoder.encode(rows, threads=threads))
+                same_arrays(want[(c + k) % 3], encoder.encode(parts[(c + k) % 3], threads=threads))
+        except BaseException as e:  # noqa: BLE001 - reported by the main thread
+            errors.append(e)
+
+    workers = [threading.Thread(target=work, args=(c,)) for c in range(6)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    assert not errors, errors
+
+
 def test_a_forked_child_encodes_with_the_threads_of_its_parent():
     import os
     import signal

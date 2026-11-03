@@ -17,7 +17,7 @@
 //     no allocation after the first step. Over several instances the multi-instance kernels run the same steps, each
 //     thread resolving its row's instance; the launches go per object-bitset width group and row-width bucket
 //     (set_launch; the groups concurrently, on auxiliary streams of the env forked from its stream and joined back
-//     into it by events), in the cached launch order (recomputed by reset(), refresh() and steps with next_task_ids; a
+//     into it by events), in the cached launch order (recomputed by reset(), refresh() and steps that may autoreset into other instances; a
 //     batch rearranged since then is detected and runs in batch order: the same results, slower). A step's select also
 //     finds where each instance's rows start in that order, so the step's launches take the positions of their own
 //     groups' rows only (range launches, lifted::Multi::starts). Needs: every
@@ -155,9 +155,11 @@ public:
     [[nodiscard]] u32 initial_count(u32 instance) const;
 
     /// rl::HostEnv::reset on device arrays; mask [rows] (device, null: all rows). The rows' task ids (device) are the
-    /// caller's (global ids of the suite); an id outside it resets the row into instance 0 and is reported by
-    /// check_errors().
-    void reset(rl::EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false);
+    /// caller's (global ids of the suite), or with `sample` the selected rows' next sampled instances (the config's
+    /// sampler and the batch's reset counters; drawn on the device); an id outside the suite resets the row into
+    /// instance 0 and is reported by check_errors().
+    void reset(rl::EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false,
+               bool sample = false);
     /// Recomputes the cache (fast path: counts, views, launch order), the successor counts of the current states and
     /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
     /// per-env masks on the host). Per-env masks that set bits past their instance's fluent slots set a sticky

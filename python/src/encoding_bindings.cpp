@@ -262,37 +262,61 @@ struct PyFlatEncoder
     TableRef reference;
     nb::object pickle_source;
     std::shared_ptr<const encoding::FlatEncoder> encoder;
-    std::mutex pool_mutex;  // guards the cached pool
-    struct CachedPool
+    std::mutex pool_mutex;  // guards the idle pools
+    struct IdlePools
     {
-        std::shared_ptr<ThreadPool> pool;
+        std::vector<std::shared_ptr<ThreadPool>> pools;  // of `threads` members each
         u32 threads = 0;
         pid_t process = 0;
-    } cached;
+    } idle;
+    static constexpr usize k_max_idle = 4;  // the idle pools kept (calls running at once beyond it build their own)
 
     PyFlatEncoder(TableRef reference_, std::shared_ptr<const encoding::FlatEncoder> encoder_)
         : reference(std::move(reference_)), encoder(std::move(encoder_))
     {
     }
 
-    /// The pool of `threads` members (at least 1) that the calls of this encoder share: one pool, rebuilt when the
-    /// count changes. A pool made by another process (before a fork) has no workers here and is dropped without being
-    /// joined.
-    std::shared_ptr<ThreadPool> pool(u32 threads)
+    /// A pool of `threads` members (at least 1) for one call, handed back with release(): calls in sequence reuse one
+    /// pool, and calls that run at once each get a pool of their own (a pool runs one job at a time). A one-member pool
+    /// starts no thread and is made per call. Pools made by another process (before a fork) have no workers here and
+    /// are dropped without being joined.
+    std::shared_ptr<ThreadPool> acquire(u32 threads)
     {
         if (threads == 1)
+            return std::make_shared<ThreadPool>(1);
+        std::vector<std::shared_ptr<ThreadPool>> dropped;  // joined after the lock
         {
-            // one member never runs a job on the pool: the calling thread encodes
-            static const auto single = std::make_shared<ThreadPool>(1);
-            return single;
+            std::lock_guard lock(pool_mutex);
+            const pid_t process = getpid();
+            if (idle.process != process)
+            {
+                for (auto& p : idle.pools)
+                    new std::shared_ptr<ThreadPool>(std::move(p));  // intentionally leaked: its workers are gone
+                idle = {{}, threads, process};
+            }
+            if (idle.threads != threads)
+            {
+                dropped = std::move(idle.pools);
+                idle = {{}, threads, process};
+            }
+            if (!idle.pools.empty())
+            {
+                auto p = std::move(idle.pools.back());
+                idle.pools.pop_back();
+                return p;
+            }
         }
+        return std::make_shared<ThreadPool>(threads);
+    }
+    /// Returns a pool acquire() gave (kept for the next call unless the thread count changed or enough are idle).
+    void release(std::shared_ptr<ThreadPool> p)
+    {
+        if (p->size() == 1)
+            return;
         std::lock_guard lock(pool_mutex);
-        const pid_t process = getpid();
-        if (cached.pool && cached.process != process)
-            new std::shared_ptr<ThreadPool>(std::move(cached.pool));  // intentionally leaked: its workers are gone
-        if (!cached.pool || cached.threads != threads)
-            cached = {std::make_shared<ThreadPool>(threads), threads, process};
-        return cached.pool;
+        if (idle.process == getpid() && idle.threads == p->size() && idle.pools.size() < k_max_idle)
+            idle.pools.push_back(std::move(p));
+        // else p joins its workers after the lock: a count change, or more concurrent calls than idle pools
     }
 };
 
@@ -1278,14 +1302,24 @@ void import_rows(ImportedRows& rows, const encoding::FlatEncoder& encoder, State
     }
 }
 
-/// Runs `work(pool)` on the pool of a call (`pool=`, else the encoder's own of `threads` members) with the GIL released.
+/// Runs `work(pool)` on the pool of a call (`pool=`, else one of the encoder's of `threads` members) with the GIL released.
 template<class Work>
 void run_on_pool(PyFlatEncoder& self, u32 threads, PoolArg pool_in, Work&& work)
 {
     PyPool* held = pool_arg(pool_in);
     std::shared_ptr<ThreadPool> own;
     if (!held)
-        own = self.pool(threads == 0 ? hardware_threads() : threads);
+        own = self.acquire(threads == 0 ? hardware_threads() : threads);
+    struct Release
+    {
+        PyFlatEncoder& self;
+        std::shared_ptr<ThreadPool>& pool;
+        ~Release()
+        {
+            if (pool)
+                self.release(std::move(pool));
+        }
+    } give_back{self, own};
     nb::gil_scoped_release release;
     std::unique_lock<std::mutex> hold;
     if (held)
@@ -3054,8 +3088,9 @@ void bind_encoding(nb::module_& parent)
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
-             "one pool of that size, rebuilt when the count changes. pool: a mymyr.rl.ThreadPool to use instead (it "
-             "takes precedence over threads; one batch at a time runs on it). The result does not depend on either. "
+             "pools of that size (calls running at once each take one), rebuilt when the count changes. pool: a "
+             "mymyr.rl.ThreadPool to use instead (it takes precedence over threads; one batch at a time runs on it). "
+             "The result does not depend on either. "
              "capacities: a dict with the keys 'graphs', 'entities', 'args' (and 'targets' with target_sources, "
              "'history' with history, 'numeric' with numeric values, 'static_instances' and 'static_args' with "
              "statics='shared'); the batch then has relation_args, the entity arrays, the target arrays, the "

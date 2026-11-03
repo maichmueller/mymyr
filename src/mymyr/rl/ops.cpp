@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 namespace mymyr::rl
 {
@@ -63,10 +64,19 @@ void her_relabel(const HerBatch& b, const HerConfig& c)
         return;
     if (!b.states || !b.done || !b.goal || b.row_words < b.words)
         throw std::invalid_argument("mymyr: her_relabel needs states [T, N, >= words], done [T, N] and goal outputs");
-    for (u64 t = 0; t < b.steps; ++t)
-        for (u64 i = 0; i < b.envs; ++i)
+    // the episode bounds of every step: start forward, end backward over the done flags
+    const u64 T = b.steps, N = b.envs;
+    std::vector<u64> start(T * N), end(T * N);
+    for (u64 t = 0; t < T; ++t)
+        for (u64 i = 0; i < N; ++i)
+            start[t * N + i] = t == 0 || b.done[(t - 1) * N + i] ? t : start[(t - 1) * N + i];
+    for (u64 t = T; t-- > 0;)
+        for (u64 i = 0; i < N; ++i)
+            end[t * N + i] = t + 1 == T || b.done[t * N + i] ? t : end[(t + 1) * N + i];
+    for (u64 t = 0; t < T; ++t)
+        for (u64 i = 0; i < N; ++i)
             for (u32 j = 0; j < c.k; ++j)
-                her_one(b, c, t, i, j);
+                her_one(b, c, t, i, j, start[t * N + i], end[t * N + i]);
 }
 }  // namespace mymyr::rl
 

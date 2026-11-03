@@ -115,8 +115,14 @@ public:
     ///     state; labels name schemas and objects of the task (unused binding positions ~0u);
     ///   - labels of states: flags are 0 or 1, goal states are exactly those at unit distance 0, unsolvable ones
     ///     exactly those at k_unsolvable_distance (cost distance +inf; finite and nonnegative otherwise), alive ones
-    ///     those neither goal nor unsolvable, and no cost is NaN.
-    /// Linear in the size of the arrays. The goal distances themselves are taken as given.
+    ///     those neither goal nor unsolvable, and every transition cost is nonnegative;
+    ///   - the states: no two rows are equal, and the goal flags are the task's goal test of the rows;
+    ///   - the transitions: each label is an action applicable in its source state whose successor is the target row;
+    ///   - the goal distances: 0 at goal states; elsewhere the minimum over the state's transitions of the transition
+    ///     cost (1 for the unit distances, and for the cost distances without costs) plus the target's distance, or
+    ///     unsolvable when no transition leads to a solvable state (exact equality).
+    /// Linear in the size of the arrays: one goal test per state and, with labels, one action application per
+    /// transition.
     [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays,
                                                                   ArraysCheck check = ArraysCheck::Full);
     /// A copy of the arrays: create(to_arrays()) is an equal state space.
@@ -202,6 +208,10 @@ private:
     friend class StateSpaceBuilder;
     static void check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need);
     static std::shared_ptr<const StateSpace> assemble(StateSpaceArrays&& a);
+    /// Builds find()'s index; false if two rows are equal.
+    bool build_index() const;
+    /// The goal flags and labelled transitions against the task (create's last check).
+    void check_task(const std::function<void(bool, const char*)>& need) const;
 
     TaskPtr m_task;
     u32 m_n = 0;

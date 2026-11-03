@@ -819,7 +819,9 @@ void bind_datasets(nb::module_& parent)
             "forward_targets [E], label_schemas [E] and label_bindings [E, label_width] (unused positions 2^32 - 1; "
             "with labels), backward_offsets [N + 1], backward_sources and backward_edges [E] (per target, ascending "
             "forward edge indices), unit_goal_distances [N] (int32, -1: unsolvable), cost_goal_distances [N] (float64, "
-            "inf: unsolvable), costs [E] (float64; absent for unit costs), goal, unsolvable, alive [N] (bool).")
+            "inf: unsolvable), costs [E] (float64; absent for unit costs), goal, unsolvable, alive [N] (bool). "
+            "framework: 'numpy' (None), 'torch', 'jax' or 'dlpack' (DeviceStateSpace.arrays gives the same keys in "
+            "device memory, DLPack by default).")
         .def(
             "state",
             [](const PyStateSpace& s, i64 id) { return make_state(s.owner, State(s.space->state(state_id(s, id)))); },
@@ -895,7 +897,10 @@ void bind_datasets(nb::module_& parent)
             "(NumPy, or DLPack arrays on the CPU; copied), state_words included (any framework's word layout). The "
             "arrays are validated: shapes and dtypes, unknown names, ranges, the reverse CSR against the forward one, "
             "flags against distances, and that the rows are states of the task (its row layout and atom slots, its "
-            "initial state first, labels of its schemas and objects); ValueError or TypeError otherwise. A task with "
+            "initial state first, labels of its schemas and objects); the rows are distinct, the goal flags are the "
+            "task's goal test, each label is an action applicable in its source state leading to the target, and the "
+            "goal distances are 0 at goals and elsewhere the smallest transition cost (1: unit distances) plus the "
+            "successor's distance; ValueError or TypeError otherwise. A task with "
             "lazy atom slots is refused (pickle the space or use datasets.save / load). The generation statistics "
             "(threads, layers, seconds) of the result are 1, 0, 0, 0. Linear in the size of the arrays.")
         .def("__reduce__",

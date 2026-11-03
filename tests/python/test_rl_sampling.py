@@ -69,13 +69,13 @@ def test_batched_sampler_partial_reset_and_reseed(table):
     second = rt.BatchedEnv(table, 21, seed=9, max_steps=1, first_env=11)
     assert torch.equal(whole.task_ids, torch.cat([first.task_ids, second.task_ids]))
     mask = torch.arange(32) % 3 == 0
-    before_ids, before_counts = whole.task_ids.clone(), whole._reset_counts.clone()
+    before_ids, before_counts = whole.task_ids.clone(), whole.reset_counts.clone()
     whole.reset(mask)
     first.reset(mask[:11])
     second.reset(mask[11:])
     assert torch.equal(whole.task_ids, torch.cat([first.task_ids, second.task_ids]))
     assert torch.equal(whole.task_ids[~mask], before_ids[~mask])
-    assert torch.equal(whole._reset_counts, before_counts + mask.long())
+    assert torch.equal(whole.reset_counts, before_counts + mask.int())
     for _ in range(3):
         whole.step()
         first.step()
@@ -85,10 +85,94 @@ def test_batched_sampler_partial_reset_and_reseed(table):
     whole.reset()
     fresh = rt.BatchedEnv(table, 32, seed=9, max_steps=1)
     assert torch.equal(whole.task_ids, fresh.task_ids)
-    expected = whole._reset_counts.clone()
+    expected = whole.reset_counts.clone()
     whole.reset(mask, task_ids=torch.ones(32, dtype=torch.int32))
     assert bool((whole.task_ids[mask] == 1).all())
-    assert torch.equal(whole._reset_counts, expected + mask.long())
+    assert torch.equal(whole.reset_counts, expected + mask.int())
+
+
+def _devices():
+    torch = pytest.importorskip("torch")
+    return ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
+
+
+@pytest.mark.parametrize("weights", [None, [3, 1]])
+def test_native_draws_are_the_samplers_in_every_environment(table, weights):
+    """The torch BatchedEnv (CPU and device, eager and captured), the JAX Env and the CpuEnvPool draw their resets'
+    and autoresets' instances natively: InstanceSampler.sample(seed, env id, the env's reset counter), with a seed past
+    2^32, env ids from first_env and the counters crossing their 2^32 wrap."""
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    sampler = rl.InstanceSampler(2, weights)
+    n, first, seed = 24, 5, 2**40 + 7
+    env_ids = np.arange(first, first + n, dtype=np.uint32)
+
+    def draws(counters):
+        return sampler.sample(seed, env_ids, np.asarray(counters, np.uint32)).tolist()
+
+    counters = np.zeros(n, np.int64)
+    expected = [draws(counters)]  # the start, then every step autoresets every env (max_steps 1)
+    for _ in range(6):
+        counters += 1
+        expected.append(draws(counters))
+    for device in _devices():
+        env = rt.BatchedEnv(table, n, device=device, seed=seed, max_steps=1, sampler=sampler, first_env=first)
+        assert env.task_ids.tolist() == expected[0]
+        for k in range(1, 4):
+            env.step()
+            assert env.task_ids.tolist() == expected[k], (device, k)
+        assert env.reset_counts.tolist() == [4] * n
+        # a counter at its wrap: the draws continue with counter 0
+        env.reset_counts.fill_(-1)
+        env.reset()
+        assert env.task_ids.tolist() == sampler.sample(seed, env_ids, np.full(n, 2**32 - 1, np.uint32)).tolist()
+        assert env.reset_counts.tolist() == [0] * n
+        env.step()
+        assert env.task_ids.tolist() == expected[0]
+        if env.capturable:
+            env.set_seed(seed)
+            env.reset()
+            rollout = env.capture(3)
+            env.set_seed(seed)
+            env.reset()
+            result = rollout.replay()
+            torch.cuda.synchronize()
+            assert result.task_ids.tolist() == expected[1:4]
+    if "jax" in _jax_platforms():
+        jax = pytest.importorskip("jax")
+        rj = pytest.importorskip("mymyr.rl.jax")
+        jenv = rj.Env(table, max_steps=1, sampler=sampler)
+        state, _ = jenv.reset(seed, n, first_env=first)
+        assert np.asarray(state.task_id).tolist() == expected[0]
+        step = jax.jit(lambda s: jenv.step(11, s)[0])
+        for k in range(1, 4):
+            state = step(state)
+            assert np.asarray(state.task_id).tolist() == expected[k]
+        assert np.asarray(state.reset_counts).tolist() == [4] * n
+    pool = rl.CpuEnvPool(table, num_envs=n, threads=2, seed=seed, max_steps=1, sampler=sampler, first_env=first)
+    for k in range(4):  # the constructor's start drew counter 0: the reset draws counter 1
+        batch = pool.reset() if k == 0 else pool.step(actions=np.zeros(n, np.int64))
+        assert np.asarray(batch.task_ids)[np.argsort(np.asarray(batch.env_ids))].tolist() == expected[k + 1]
+
+
+def _jax_platforms():
+    try:
+        import jax  # noqa: F401
+    except ImportError:
+        return ()
+    return ("jax",)
+
+
+def test_reset_counters_are_mutated_arguments_of_the_ops():
+    """The native step and reset advance the reset counters in place: a mutated argument of mymyr::step,
+    mymyr::step_sync and mymyr::reset (so their autograd versions bump with the other environment tensors)."""
+    pytest.importorskip("torch")
+    pytest.importorskip("mymyr.rl.torch")
+    import torch
+
+    for op in (torch.ops.mymyr.step.default, torch.ops.mymyr.step_sync.default, torch.ops.mymyr.reset.default):
+        written = [a.name for a in op._schema.arguments if a.alias_info is not None and a.alias_info.is_write]
+        assert "reset_counts" in written, op
 
 
 @pytest.mark.parametrize("weights", [None, [1, 3]])
@@ -158,7 +242,7 @@ def test_batched_sampler_compiled_autoreset_and_fixed_ids(table):
         eager.step()
         run()
         assert torch.equal(compiled.task_ids, eager.task_ids)
-        assert torch.equal(compiled._reset_counts, eager._reset_counts)
+        assert torch.equal(compiled.reset_counts, eager.reset_counts)
     fixed = rt.BatchedEnv(table, 16, task_ids=[1] * 16, max_steps=1)
     fixed.reset()
     fixed.step()

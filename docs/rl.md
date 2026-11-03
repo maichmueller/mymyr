@@ -687,11 +687,10 @@ unregister(carry_handle)
 
 ## Instance sampling and curricula
 
-Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at
-each reset.
-Explicit constructor ids retain a fixed assignment (`sampler="auto"`); `sampler="uniform"` enables sampling even with
-an explicit initial assignment. JAX `Env.reset(key, N)` samples N instances uniformly; `reset(key, ids)` overrides
-the initial draw. In either framework, `sampler=None` disables sampling and
+The torch `BatchedEnv`, the JAX `Env` and `CpuEnvPool` share the default `sampler="auto"`: uniform sampling across a
+table or suite at each reset, unless constructor `task_ids` pin the assignment (only `BatchedEnv` takes them).
+`sampler="uniform"` enables sampling even with an explicit initial assignment. JAX `Env.reset(key, N)` samples N
+instances; `reset(key, ids)` overrides the initial draw. In every environment, `sampler=None` disables sampling and
 `sampler=rl.InstanceSampler(num_instances, weights=[...])` selects a weighted distribution. Weights must be finite,
 nonnegative and not all zero; zero-weight instances are excluded.
 
@@ -705,10 +704,14 @@ External curricula override a draw with `reset(task_ids=ids)` or `step(..., next
 TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
 new episode to the preceding one. Likewise custom reset goals use `next_goal_pos` / `next_goal_neg` or explicit
 `reset(goal_pos=..., goal_neg=...)` kwargs; observed goal masks do not override a new instance's default goals.
-`CpuEnvPool(sampler=...)` takes the same samplers (`"auto"` and `"uniform"` sample uniformly, `None` starts every
-env at instance 0 and keeps its instance) and draws what a torch `BatchedEnv` with the same seed and sampler draws: the
-pool's env id is its index, and each reset and each autoresetting step of an env advances that env's counter, whichever
-send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws.
+`CpuEnvPool(sampler=...)` takes the same samplers (`None` starts every env at instance 0 and keeps its instance) and
+draws what a torch `BatchedEnv` with the same seed, sampler and `first_env` draws: the pool's env id is `first_env`
+plus its index, and each reset and each autoresetting step of an env advances that env's counter, whichever send or
+thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws. The three environments
+also take the same `canonical_order` and `witness_pruning` options (the successor order that actions index), and
+`first_env`, the env id of the first environment (a constructor argument; of `reset` for JAX), so that the
+environments of several workers draw distinct streams; env ids fit in 32 bits, so `first_env + num_envs` is at most
+2^32.
 
 ## Encoding the pool's states
 

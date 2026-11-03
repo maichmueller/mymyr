@@ -14,7 +14,9 @@ class InstanceSampler:
     ``sample(seed, env_ids, reset_counts)`` returns int32 ids in the arrays' framework and on their device. A draw
     depends only on the 64-bit seed, the environment id and its uint32 reset counter, not on batch order or the
     action RNG. Zero-weight instances are never selected. The distribution is immutable after construction;
-    dynamic curricula override the next instance ids in an environment's reset or step.
+    dynamic curricula override the next instance ids in an environment's reset or step. The environments
+    (``mymyr.rl.torch.BatchedEnv``, ``mymyr.rl.jax.Env``, ``CpuEnvPool``) draw the same ids natively, inside their
+    reset and step.
     """
 
     def __init__(self, num_instances: int, weights: Optional[Sequence[float]] = None) -> None:
@@ -121,6 +123,31 @@ def _framework(value: Any) -> str:
     if jax is not None and isinstance(value, (jax.Array, jax.core.Tracer)):
         return "jax"
     return "numpy"
+
+
+def _env_range(num_envs: Any, first_env: Any) -> tuple[int, int]:
+    """``num_envs`` and ``first_env`` as ints, checked: the env ids ``first_env .. first_env + num_envs - 1`` are the
+    32-bit RNG streams of the environments' successor and instance draws, so they must lie in [0, 2**32)."""
+    import operator
+
+    try:
+        n, first = operator.index(num_envs), operator.index(first_env)
+    except TypeError:
+        raise TypeError("mymyr: num_envs and first_env must be ints") from None
+    if n < 0 or n > 0x7FFFFFFF:
+        raise ValueError(f"mymyr: num_envs must be in [0, 2**31 - 1], not {n}")
+    if first < 0 or first + n > 2**32:
+        raise ValueError(
+            f"mymyr: first_env must be in [0, 2**32 - num_envs] (the env ids are 32-bit RNG streams), not {first}"
+        )
+    return n, first
+
+
+def _num_instances(table: Any) -> int:
+    """The instances of a TaskSuite, a TaskTable, or a Task / TaskHandle (one)."""
+    from mymyr._core import _rl
+
+    return len(table) if isinstance(table, (_rl.TaskTable, _rl.TaskSuite)) else 1
 
 
 def _instance_sampler(value: Any, num_instances: int, default_uniform: bool = True) -> Optional[InstanceSampler]:

@@ -4,8 +4,8 @@
   "ctest_max_skipped": 214,
   "ctest_sanitized_min_total": 2039,
   "ctest_sanitized_max_skipped": 223,
-  "pytest_min_passed_plain": 5620,
-  "pytest_min_passed_rl": 6408,
+  "pytest_min_passed_plain": 5622,
+  "pytest_min_passed_rl": 6417,
   "pytest_linux_only_tests": 16,
   "pytest_free_threaded_only_tests": 1
 }

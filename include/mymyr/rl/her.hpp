@@ -68,7 +68,8 @@ struct HerBatch
     u8* valid = nullptr;
 };
 
-/// The episode bounds of step t of environment i: (start, end) as in the file comment.
+/// The episode bounds of step t of environment i: (start, end) as in the file comment (O(episode length); the host
+/// loop computes every step's bounds in one pass instead).
 MYMYR_HD void her_bounds(const HerBatch& b, u64 t, u64 i, u64& start, u64& end)
 {
     start = t;
@@ -88,13 +89,11 @@ MYMYR_HD bool her_holds(const u64* s, const u64* g, u32 words)
     return ok;
 }
 
-/// Relabel j of transition (t, i).
-MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j)
+/// Relabel j of transition (t, i), whose episode bounds are (start, end) (her_bounds).
+MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j, u64 start, u64 end)
 {
     const u64 env = b.env_ids ? u64{b.env_ids[i]} : c.first_env + i;
     const u64 base = (t * c.k + j) * (u64{1} + c.subset);
-    u64 start = 0, end = 0;
-    her_bounds(b, t, i, start, end);
     const u64 lo = c.strategy == HerStrategy::Future ? t : c.strategy == HerStrategy::Final ? end : start;
     const u64 pick = rng::below(rng::bits64(c.seed, env, base, rng::k_her), static_cast<u32>(end - lo + 1));
     const u64 src = lo + pick;
@@ -150,7 +149,9 @@ MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j
         b.reward[out] = c.step_reward + (ok ? c.goal_reward : 0.0f);
 }
 
-/// Every relabel of the window (host loop; T * N * k independent relabels, valid tests O(t - start) states each).
+/// Every relabel of the window (host loop; T * N * k independent relabels after one O(T N) pass over the done flags
+/// for the episode bounds; the valid output tests up to t - start earlier states per relabel, stopping at the first
+/// that holds the goal).
 /// Throws std::invalid_argument for a missing array or k == 0.
 void her_relabel(const HerBatch& b, const HerConfig& c);
 }  // namespace mymyr::rl

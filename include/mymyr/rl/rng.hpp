@@ -82,4 +82,34 @@ MYMYR_HD u32 successor_index(u64 seed, u64 env, u64 draw, u32 count)
 {
     return below(bits64(seed, env, draw, k_successor), count);
 }
+
+/// The 32-bit finalizer of MurmurHash3 (fmix32), the mixing of the instance draws.
+MYMYR_HD constexpr u32 fmix32(u32 x)
+{
+    x = (x ^ (x >> 16)) * 0x85EBCA6Bu;
+    x = (x ^ (x >> 13)) * 0xC2B2AE35u;
+    return x ^ (x >> 16);
+}
+
+/// The instance of environment `env`'s draw number `reset_count` under `seed` (rl/sampling.hpp, the draws of
+/// mymyr.rl.InstanceSampler): uniform over `instances` when `m` is 0, else indices[k] with k the number of the m - 1
+/// ascending `thresholds` that are at most the draw's 32 bits. A hash of its inputs, not a Philox block.
+MYMYR_HD i32 instance_draw(u64 seed, u64 env, u32 reset_count, u32 instances, const u32* thresholds, const i32* indices,
+                           u32 m)
+{
+    const u32 value = fmix32(static_cast<u32>(seed) ^ fmix32(static_cast<u32>(seed >> 32) ^ 0x53414D50u));
+    const u32 bits = fmix32(value ^ fmix32(static_cast<u32>(env)) ^ fmix32(reset_count ^ 0x9E3779B9u));
+    if (m == 0)
+        return static_cast<i32>((u64{bits} * instances) >> 32);
+    u32 lo = 0, hi = m - 1;  // the first threshold above bits, by bisection
+    while (lo < hi)
+    {
+        const u32 mid = lo + (hi - lo) / 2;
+        if (thresholds[mid] <= bits)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return indices[lo];
+}
 }  // namespace mymyr::rl::rng
