@@ -593,3 +593,31 @@ def test_python_errors_name_no_cpp_types(call):
         call(text_task("gripper__prob05"))
     assert "::" not in str(e.value), str(e.value)
 
+
+# ------------------------------------------------------------------------------------------------ parameter bounds
+
+def wide_action_task(n):
+    params = " ".join(f"?v{i}" for i in range(n))
+    domain = ("(define (domain wide) (:requirements :strips) (:predicates (g) (o ?x)) "
+              f"(:action x :parameters ({params}) :precondition (o ?v0) :effect (g)))")
+    return pddl(domain, "(define (problem wide1) (:domain wide) (:objects a) (:init (o a)) (:goal (g)))")
+
+
+def test_actions_with_more_parameters_than_binding_supports_are_refused():
+    with pytest.raises(ValueError, match="1100 parameters; at most 1024"):
+        wide_action_task(1100)
+    r = search.brfs(wide_action_task(1024))
+    assert r.status == Status.SOLVED and len(r.plan) == 1
+
+
+def test_task_text_refuses_parameter_counts_beyond_the_maximum(tmp_path):
+    text = text_task("gripper__prob05").to_text()
+    lines = text.split("\n")
+    at = next(i for i, line in enumerate(lines) if line.startswith("move "))
+    for count in ["1025", "65535"]:
+        bad = list(lines)
+        bad[at] = "move " + count
+        path = tmp_path / "bad.txt"
+        path.write_text("\n".join(bad))
+        with pytest.raises(Exception, match="parameters exceed the maximum"):
+            mymyr.Task.from_text(str(path))
