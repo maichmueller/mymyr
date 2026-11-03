@@ -15,16 +15,21 @@ The environment state over a table: ``states`` [N, row_words] int64, ``task_ids`
 None over a table of one), ``steps``, ``draws``, the fast path's cache (``counts``, ``views``), optional per-env goal
 masks ``goal_pos`` / ``goal_neg`` [N, words] int64 (the step's goal test is then the mask test) and ``at_goal`` [N]
 bool, whether each row's state is a goal (reset, refresh and step keep it; a step absorbs those rows without testing
-the states again; required on a device).
+the states again; required on a device), and, with an instance sampler, ``reset_counts`` [N] int32 (the sampler's
+per-env counters, as uint32 bits).
 
 - ``mymyr::reset(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask,
-  keep_goals)``: resets rows (all, or those with mask[i]) in place into their instances (task_ids, set by the caller
-  first).
+  keep_goals, visited=None, visited_count=None, visited_status=None, reset_counts=None, sample=False, first_env=0)``:
+  resets rows (all, or those with mask[i]) in place into their instances (task_ids, set by the caller first, or with
+  ``sample`` drawn by the op from the environment's sampler); every reset row's counter advances.
 - ``mymyr::refresh(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)``: recomputes the cache,
   counts and at_goal flags of states (task ids, goal masks) the caller wrote.
 - ``mymyr::step(env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action,
-  next_task_ids, first_env, final, action_schema=None, action_binding=None)``: one step of every environment in place (autoresetting rows restart in
-  next_task_ids[i] where given); returns (reward, terminated, truncated, goal, invalid, schema, binding, final_states).
+  next_task_ids, first_env, final, action_schema=None, action_binding=None, visited=None, visited_count=None,
+  visited_status=None, revisited=None, reset_counts=None)``: one step of every environment in place (autoresetting
+  rows restart in next_task_ids[i] where given, else, with ``reset_counts``, in their next sampled instances; every
+  autoreset advances its row's counter); returns (reward, terminated, truncated, goal, invalid, schema, binding,
+  final_states).
 - ``mymyr::refresh_sync`` / ``mymyr::step_sync``: ``refresh`` / ``step`` of environments whose calls synchronize (the
   device's general path), tagged ``cudagraph_unsafe``.
 - ``mymyr::random_actions(env, draws, count, first_env, max_actions)``: the random policy's next choices [N] int64
@@ -330,6 +335,9 @@ def reset_impl(
     visited: Optional[Tensor] = None,
     visited_count: Optional[Tensor] = None,
     visited_status: Optional[Tensor] = None,
+    reset_counts: Optional[Tensor] = None,
+    sample: bool = False,
+    first_env: int = 0,
 ) -> None:
     """The body of ``mymyr::reset``."""
     e, info = _env_info(env)
@@ -342,7 +350,8 @@ def reset_impl(
         _ptr(at_goal, "at_goal", torch.bool, (n,), info[0]),
     ]
     vp, H = _visited_ptrs(info, states, visited, visited_count, visited_status)
-    e._reset_ptrs(n, p + vp, keep_goals, _stream(states), H)
+    rc = _ptr(reset_counts, "reset_counts", torch.int32, (n,), info[0])
+    e._reset_ptrs(n, p + vp + [rc], keep_goals, _stream(states), H, sample, first_env)
 
 
 def refresh_impl(
@@ -404,6 +413,7 @@ def step_impl(
     visited_count: Optional[Tensor] = None,
     visited_status: Optional[Tensor] = None,
     revisited: Optional[Tensor] = None,
+    reset_counts: Optional[Tensor] = None,
     out: Optional[tuple[Tensor, ...]] = None,
 ) -> tuple[Tensor, ...]:
     """The body of ``mymyr::step``; ``out``: the 8 outputs' destinations (contiguous, of _step_outputs' shapes and
@@ -446,7 +456,8 @@ def step_impl(
     ]
     vp, H = _visited_ptrs(info, states, visited, visited_count, visited_status)
     rp = _ptr(revisited, "revisited", torch.bool, (n,), dev)
-    e._step_ptrs(n, p + vp + [rp], L, first_env, _stream(states), stride, H)
+    rc = _ptr(reset_counts, "reset_counts", torch.int32, (n,), dev)
+    e._step_ptrs(n, p + vp + [rp, rc], L, first_env, _stream(states), stride, H)
     return out
 
 
@@ -542,8 +553,8 @@ def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, 
 
 
 @_op(
-    "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count", "at_goal",
-                  "visited", "visited_count", "visited_status")
+    "mymyr::reset", mutates_args=("states", "task_ids", "steps", "counts", "views", "goal_pos", "goal_neg", "count",
+                  "at_goal", "visited", "visited_count", "visited_status", "reset_counts")
 )
 def reset(
     env: int,
@@ -561,17 +572,22 @@ def reset(
     visited: Optional[Tensor] = None,
     visited_count: Optional[Tensor] = None,
     visited_status: Optional[Tensor] = None,
+    reset_counts: Optional[Tensor] = None,
+    sample: bool = False,
+    first_env: int = 0,
 ) -> None:
     """``mymyr::reset``: resets the rows (all, or those with ``mask[i]``) in place into their instances ``task_ids``
-    (set by the caller first): steps 0, the instance's goal masks unless ``keep_goals``, the cache, ``count`` and
-    ``at_goal``. ``env`` is a :func:`register` handle; the tensors are the environment state of the module docstring."""
+    (set by the caller first, or with ``sample`` their next sampled ones, written into ``task_ids``): steps 0, the
+    instance's goal masks unless ``keep_goals``, the cache, ``count`` and ``at_goal``; ``reset_counts[i]`` advances for
+    every reset row. ``env`` is a :func:`register` handle; the tensors are the environment state of the module
+    docstring."""
     reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals,
-               visited, visited_count, visited_status)
+               visited, visited_count, visited_status, reset_counts, sample, first_env)
 
 
 @reset.register_fake
 def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals,
-      visited=None, visited_count=None, visited_status=None):
+      visited=None, visited_count=None, visited_status=None, reset_counts=None, sample=False, first_env=0):
     return None
 
 
@@ -623,7 +639,7 @@ def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
     "mymyr::step",
     mutates_args=(
         "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg",
-        "visited", "visited_count", "visited_status", "revisited"
+        "visited", "visited_count", "visited_status", "revisited", "reset_counts"
     ),
 )
 def step(
@@ -648,15 +664,17 @@ def step(
     visited_count: Optional[Tensor] = None,
     visited_status: Optional[Tensor] = None,
     revisited: Optional[Tensor] = None,
+    reset_counts: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step``: one step of every environment in place, ``action`` [N] int64 (None: the random policy);
     label mode instead takes ``action_schema`` int32 [N] and ``action_binding`` int32 [N, L] with action=None.
-    Autoresetting rows restart in ``next_task_ids[i]`` where given. Returns (reward, terminated, truncated, goal,
+    Autoresetting rows restart in ``next_task_ids[i]`` where given, else, with ``reset_counts`` and the environment's
+    sampler, in their next sampled instances (every autoreset advances its row's counter). Returns (reward, terminated, truncated, goal,
     invalid, schema, binding, final_states); ``final_states`` is [N, row_words], the reached states before the
     autoreset, with ``final`` and [0, row_words] without."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited,
+        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited, reset_counts,
     )  # fmt: skip
 
 
@@ -664,7 +682,7 @@ def step(
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
     first_env, final, action_schema=None, action_binding=None, visited=None, visited_count=None,
-    visited_status=None, revisited=None,
+    visited_status=None, revisited=None, reset_counts=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 
@@ -673,7 +691,7 @@ def _(
     "mymyr::step_sync",
     mutates_args=(
         "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg",
-        "visited", "visited_count", "visited_status", "revisited"
+        "visited", "visited_count", "visited_status", "revisited", "reset_counts"
     ),
     tags=_unsafe,
 )
@@ -699,12 +717,13 @@ def step_sync(
     visited_count: Optional[Tensor] = None,
     visited_status: Optional[Tensor] = None,
     revisited: Optional[Tensor] = None,
+    reset_counts: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::step_sync``: :func:`step` for environments whose calls synchronize (the device's general path);
     tagged ``cudagraph_unsafe``."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
-        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited,
+        first_env, final, action_schema, action_binding, visited, visited_count, visited_status, revisited, reset_counts,
     )  # fmt: skip
 
 
@@ -712,7 +731,7 @@ def step_sync(
 def _(
     env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
     first_env, final, action_schema=None, action_binding=None, visited=None, visited_count=None,
-    visited_status=None, revisited=None,
+    visited_status=None, revisited=None, reset_counts=None,
 ):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 

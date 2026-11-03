@@ -198,6 +198,7 @@ struct RunOptions
     bool keep_order = false;    // and leave the counts' launch-order columns in place: still a permutation of the
                                 // rows, no longer sorted by key (several instances)
     bool switch_stream = false;  // move the device env to another stream in the middle
+    bool sampling = false;       // reset counters: the env's sampler draws the resets' and autoresets' instances
     u64 chunk_rows = 0;
     int steps = 36;
 };
@@ -221,8 +222,19 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
         env.set_chunk_rows(r.chunk_rows);
     HostEnvs h(T, ids, r.goals);
     DeviceEnvs d(ctx, env, ids, r.goals);
-    host.reset(h.b, nullptr, h.out.count);
-    env.reset(d.b, nullptr, d.out.count);
+    // with sampling: the reset counters (from a nonzero start, so the counters' wrap is crossed), a sampling reset of
+    // every row, and the autoresets of the steps without next ids draw from the env's sampler
+    std::vector<u32> resets(N);
+    for (u64 i = 0; i < N; ++i)
+        resets[i] = 0xFFFFFFF0u + static_cast<u32>(i % 32);
+    cuda::DeviceBuffer d_resets = to_device(ctx, resets, d.s);
+    if (r.sampling)
+    {
+        h.b.reset_counts = resets.data();
+        d.b.reset_counts = static_cast<u32*>(d_resets.data());
+    }
+    host.reset(h.b, nullptr, h.out.count, false, r.sampling);
+    env.reset(d.b, nullptr, d.out.count, false, r.sampling);
     if (r.goals)
     {
         custom_goals(h.v, W);
@@ -263,6 +275,8 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
             permute_device<u64>(d.draws, N, 1, perm, d.s);
             permute_device<i32>(d.count, N, 1, perm, d.s);
             permute_device<u8>(d.at_goal, N, 1, perm, d.s);
+            permute_host(resets, perm, 1);
+            permute_device<u32>(d_resets, N, 1, perm, d.s);
             permute_device<u32>(d.counts, N, d.C, perm, d.s, r.keep_order && I > 1 ? d.C - 2 : d.C);
             permute_device<u64>(d.views, N, d.V, perm, d.s);
             if (r.goals)
@@ -285,8 +299,19 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
         env.step(d.b, d.out, rl::Actions{given ? static_cast<const i64*>(d.action.data()) : nullptr},
                  curriculum ? static_cast<const i32*>(d.next.data()) : nullptr);
         host.step(h.b, h.out, rl::Actions{given ? act.data() : nullptr}, curriculum ? next.data() : nullptr);
+        if (r.sampling && t % 5 == 3)
+        {
+            // a sampling reset of every third row
+            std::vector<u8> mask(N);
+            for (u64 i = 0; i < N; ++i)
+                mask[i] = (i + static_cast<u64>(t)) % 3 == 0 ? 1 : 0;
+            const cuda::DeviceBuffer d_mask = to_device(ctx, mask, d.s);
+            host.reset(h.b, mask.data(), h.out.count, false, true);
+            env.reset(d.b, static_cast<const u8*>(d_mask.data()), d.out.count, false, true);
+        }
         env.check_errors();
         expect_equal(d.snapshot(), h.v, t);
+        ASSERT_EQ(to_host<u32>(d_resets.data(), N, d.s), resets) << "step " << t;
         if (::testing::Test::HasFatalFailure())
             break;
     }
@@ -760,6 +785,43 @@ TEST(DeviceTableEnv, MixedBatchEqualsHost)
                 if (::testing::Test::HasFatalFailure())
                     return;
             }
+}
+
+TEST(DeviceTableEnv, SampledInstancesEqualHost)
+{
+    // the env's sampler draws the instances of sampling resets and of the autoresets without next ids on the device
+    // as on the host (rl::rng::instance_draw), uniform and weighted, on the fast and the general path, with goal masks
+    // and rearranged rows
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const Set& set : sets(TaskOptions::Atoms::Dense))
+    {
+        const u32 I = set.table->size();
+        rl::InstanceSampling uniform;
+        uniform.instances = I;
+        rl::InstanceSampling weighted;  // instance 0 never, instance 1 three times as often as each other one
+        weighted.instances = I;
+        for (u32 g = 1; g < I; ++g)
+            weighted.indices.push_back(static_cast<i32>(g));
+        const u32 m = I - 1, total = m + 2;
+        for (u32 k = 1; k < m; ++k)
+            weighted.thresholds.push_back(static_cast<u32>((u64{k + 2} << 32) / total));
+        for (const rl::InstanceSampling* smp : {&uniform, &weighted})
+            for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
+            {
+                SCOPED_TRACE(set.name + (smp == &uniform ? " uniform" : " weighted") +
+                             (path == cuda::DeviceEnv::Path::Auto ? " auto" : " general"));
+                rl::EnvConfig cfg = config(0x5a3e + I);
+                cfg.sampling = *smp;
+                RunOptions r;
+                r.sampling = true;
+                r.rearrange = true;
+                r.goals = set.name != "miconic-simpleadl";  // goal axioms: no goal masks
+                run_env(ctx, set.table, cfg, path, r);
+                if (::testing::Test::HasFatalFailure())
+                    return;
+            }
+    }
 }
 
 TEST(DeviceTableEnv, OrderNotSortedByKeyIsStale)

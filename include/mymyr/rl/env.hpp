@@ -23,9 +23,11 @@
 //      max_steps > 0 and the episode's step count reaches max_steps;
 //   6. count: the successors of s' in Index mode; in Label mode 0/1 (whether an applicable action exists);
 //   7. autoreset (SAME_STEP): a terminated or truncated environment restarts in the same
-//      step from the initial state of its instance, or of next_task_ids[i] when the step is given next_task_ids (the
-//      caller's curriculum; over a suite the next instance may be of another domain); the row's task id and goal
-//      masks follow the new instance. final_states keeps s' (the
+//      step from the initial state of next_task_ids[i] when the step is given next_task_ids (the caller's curriculum;
+//      over a suite the next instance may be of another domain), else of its next sampled instance when the config
+//      has a sampler and the batch reset counters (EnvConfig::sampling, EnvBatch::reset_counts), else of its own
+//      instance; the row's task id and goal masks follow the new instance. With reset counters every autoreset
+//      advances its row's counter, sampled or not. final_states keeps s' (the
 //      bootstrap state), count is the initial state's. Without autoreset the caller resets finished environments with
 //      reset(mask) (TorchRL's convention).
 // Special cases: goals and terminal dead ends are absorbing until reset: no move, reward zero and no step-counter
@@ -48,6 +50,7 @@
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/sampling.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/rl/task_table.hpp"
 
@@ -83,6 +86,9 @@ struct EnvConfig
     bool autoreset = true;     // SAME_STEP autoreset; false: the caller resets finished environments
     bool canonical_order = true;   // the order successor indices refer to
     bool witness_pruning = false;  // off: every applicable ground action is a successor
+    /// The instances that autoresets and sampling resets draw (rl/sampling.hpp) for batches with reset counters
+    /// (EnvBatch::reset_counts); disabled: none.
+    InstanceSampling sampling = {};
 };
 
 /// The per-environment state: caller-owned arrays of `rows` environments. A null array is not read or written, except
@@ -107,6 +113,11 @@ struct EnvBatch
     // per-row RNG streams (e.g. the JAX env's keys and env ids)
     const u64* seeds = nullptr;    // [rows] per-row RNG keys (null: EnvConfig::seed)
     const u32* env_ids = nullptr;  // [rows] per-row env ids (null: first_env + row)
+    /// [rows] the instance sampler's per-row counters (rl/sampling.hpp): a row's next sampled instance is the draw of
+    /// (its sampling key, its env id, reset_counts[row]); every reset and autoreset of the row advances it (mod 2^32),
+    /// sampled or given. null: no counting and no sampling.
+    u32* reset_counts = nullptr;
+    const u64* sampling_seeds = nullptr;  // [rows] per-row sampling keys (null: EnvConfig::seed)
     /// [rows] whether each row's state is a goal (by its goal masks, else its instance's goal test): written by reset,
     /// step and refresh, read by step instead of testing the state (null: the host env tests it; the device env
     /// requires it). Writing states or goal masks directly needs refresh().
@@ -191,8 +202,11 @@ public:
     /// (task_ids, which the caller sets first): steps 0, goal masks (if the batch has them and keep_goals is false)
     /// the instances' goals, count (if set) the initial states' successor counts (Label: 0/1), at_goal (if set) their goal tests (kept
     /// goal masks included). Draw counters are kept (set_seed and the caller decide when streams restart).
-    /// Reset clears each selected visited table and inserts its initial state.
-    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false) const;
+    /// Reset clears each selected visited table and inserts its initial state. `sample`: the selected rows' task ids
+    /// are first drawn from the config's sampler (it needs one and the batch's reset counters). With reset counters
+    /// every selected row's counter advances.
+    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false,
+               bool sample = false) const;
     /// Clears the masked visited rows and inserts their current states; leaves the sticky overflow status alone.
     void clear_visited(EnvBatch& b, const u8* mask = nullptr) const;
     /// One step of every row (see the file comment); `action` [rows] indexes the canonical successor order (none: the
@@ -224,7 +238,8 @@ public:
     /// One step of row `row` of b, its outputs at row `out_row` of `out` (the unit step() and the CPU pool run;
     /// the batch must have passed check_env and step()'s argument checks). `random` draws from the row's RNG stream,
     /// otherwise `action` is the given one (outside [0, count): invalid); an autoreset restarts in instance
-    /// `next_instance` (< 0: the row's own). Thread-safe for distinct rows (each thread with its own scratch).
+    /// `next_instance` (< 0: the row's next sampled one with reset counters and a sampler, else its own). Thread-safe
+    /// for distinct rows (each thread with its own scratch).
     void step_row(EnvBatch& b, u64 row, const StepOutputs& out, u64 out_row, i64 action, bool random,
                   i32 next_instance, Scratch& scratch) const;
     /// Resets row `row` into instance `instance` (steps 0, goal masks unless keep_goals, the task id); returns the
@@ -237,6 +252,12 @@ public:
     /// goal_row of a row that reset_row just put into `instance`: its goal masks' test (with masks), else the
     /// instance's initial_goal.
     [[nodiscard]] bool reset_goal(const EnvBatch& b, u64 row, u32 instance) const;
+    /// Row `row`'s next sampled instance (the batch needs reset counters, the config a sampler).
+    [[nodiscard]] i32 sample_row(const EnvBatch& b, u64 row) const noexcept
+    {
+        return m_config.sampling.sample(b.sampling_seeds ? b.sampling_seeds[row] : m_config.seed,
+                                        b.env_ids ? u64{b.env_ids[row]} : b.first_env + row, b.reset_counts[row]);
+    }
 
 private:
     void check_step(const EnvBatch& b, const StepOutputs& out, Actions action, const i32* next_task_ids) const;

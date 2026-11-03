@@ -27,7 +27,7 @@ def compare_steps(index, label, action, **kwargs):
             assert torch.equal((x > 0).to(torch.int32), y)
         elif isinstance(x, torch.Tensor):
             assert torch.equal(x, y), name
-    for name in ("states", "steps", "draws", "task_ids", "at_goal", "_reset_counts"):
+    for name in ("states", "steps", "draws", "task_ids", "at_goal", "reset_counts"):
         assert torch.equal(getattr(index, name), getattr(label, name)), name
     return b
 

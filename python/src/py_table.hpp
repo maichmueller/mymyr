@@ -131,6 +131,9 @@ using TaskIdsArg = Arg<std::variant<ann::ArrayLike, nb::typed<nb::sequence, int>
                                          std::shared_ptr<void>& keep, const char* name = "task_ids",
                                          const char* noun = "table");
 
+/// The native sampler of a mymyr.rl.InstanceSampler (None: disabled), for EnvConfig::sampling.
+[[nodiscard]] rl::InstanceSampling sampling_of(nb::handle sampler);
+
 /// The dead-end mode of an environment configuration: "no_successors" or "none".
 [[nodiscard]] rl::DeadEnd parse_dead_end(const std::string& s);
 [[nodiscard]] const char* dead_end_name(rl::DeadEnd d) noexcept;

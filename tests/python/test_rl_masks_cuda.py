@@ -260,7 +260,7 @@ def labels_of(env, actions):
     return schema, binding
 
 
-ENV_FIELDS = ("states", "task_ids", "steps", "draws", "count", "at_goal", "goal_pos", "goal_neg", "_reset_counts")
+ENV_FIELDS = ("states", "task_ids", "steps", "draws", "count", "at_goal", "goal_pos", "goal_neg", "reset_counts")
 
 
 def expect_equal(host_env, dev_env, a, b, where):

@@ -149,14 +149,15 @@ def env_refresh(handle: int, states, task_ids, counts, views, goal_pos, goal_neg
 
 
 def env_step(
-    handle: int, states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, env_id, seed,
-    action, next_task_ids, label_width: int, final: bool,
+    handle: int, states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status,
+    reset_counts, env_id, seed, sampling_seed, action, next_task_ids, label_width: int, final: bool,
 ):  # fmt: skip
-    """The state arrays and transition outputs of mymyr_env_step."""
+    """The state arrays (reset_counts included) and transition outputs of mymyr_env_step."""
     n = states.shape[:-1]
     same = tuple(
         jax.ShapeDtypeStruct(x.shape, x.dtype)
-        for x in (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status)
+        for x in (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status,
+                  reset_counts)
     )
     outs = same + (
         _f32(n),
@@ -172,12 +173,12 @@ def env_step(
     call = jax.ffi.ffi_call(
         "mymyr_env_step" if _fast(counts) else "mymyr_env_step_sync",
         outs,
-        input_output_aliases={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12},
+        input_output_aliases={i: i for i in range(14)},
         vmap_method="broadcast_all",
     )
     return call(
-        states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, env_id, seed, action,
-        next_task_ids, handle=np.int64(handle),
+        states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, reset_counts,
+        env_id, seed, sampling_seed, action, next_task_ids, handle=np.int64(handle),
     )  # fmt: skip
 
 

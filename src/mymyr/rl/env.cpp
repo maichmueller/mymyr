@@ -15,6 +15,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace mymyr::rl
 {
@@ -133,10 +134,28 @@ void check_env(const TaskSuite& table, const EnvBatch& b, const StepOutputs* out
                                     " is below the largest schema arity " + std::to_string(table.label_width()));
 }
 
+void check_sampling(const InstanceSampling& s, u32 instances, const std::string& what)
+{
+    if (!s.enabled())
+        return;
+    if (s.instances != instances)
+        throw std::invalid_argument("mymyr: " + what + ": a sampler over " + std::to_string(s.instances) +
+                                    " instances for " + std::to_string(instances));
+    if (s.indices.empty() ? !s.thresholds.empty() : s.thresholds.size() + 1 != s.indices.size())
+        throw std::invalid_argument("mymyr: " + what + ": a weighted sampler needs one threshold fewer than indices");
+    if (!std::is_sorted(s.thresholds.begin(), s.thresholds.end()))
+        throw std::invalid_argument("mymyr: " + what + ": the sampler's thresholds are not ascending");
+    for (const i32 g : s.indices)
+        if (g < 0 || static_cast<u32>(g) >= instances)
+            throw std::invalid_argument("mymyr: " + what + ": the sampler's instance " + std::to_string(g) +
+                                        " is outside the " + std::to_string(instances) + " instances");
+}
+
 HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::move(suite)), m_config(config)
 {
     if (!m_suite)
         throw std::invalid_argument("mymyr: HostEnv: null task suite");
+    check_sampling(m_config.sampling, m_suite->size(), "env");
     m_init_count.resize(m_suite->size());
     m_init_goal.resize(m_suite->size());
     m_init_hash.resize(m_suite->size());
@@ -201,21 +220,38 @@ void HostEnv::clear_visited(EnvBatch& b, const u8* mask) const
     }
 }
 
-void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) const
+void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals, bool sample) const
 {
     check_env(*m_suite, b, nullptr);
-    m_suite->check_task_ids(b.task_ids, b.rows);
+    if (sample && !m_config.sampling.enabled())
+        throw std::invalid_argument("mymyr: env: a sampling reset needs an instance sampler");
+    if (sample && b.rows && !b.reset_counts)
+        throw std::invalid_argument("mymyr: env: a sampling reset needs the reset counters");
+    // the rows' instances after the reset, checked (with given goals) before any row changes
+    std::vector<i32> drawn;
+    EnvBatch after = b;
+    if (sample && b.task_ids)
+    {
+        drawn.assign(b.task_ids, b.task_ids + b.rows);
+        for (u64 i = 0; i < b.rows; ++i)
+            if (!mask || mask[i])
+                drawn[i] = sample_row(b, i);
+        after.task_ids = drawn.data();
+    }
+    m_suite->check_task_ids(after.task_ids, b.rows);
     if (keep_goals)
-        check_goals(*m_suite, b, mask);
+        check_goals(*m_suite, after, mask);
     for (u64 i = 0; i < b.rows; ++i)
     {
         if (mask && !mask[i])
             continue;
-        const u32 c = reset_row(b, i, b.instance(i), keep_goals, b.words);  // what the row held: unknown
+        const u32 c = reset_row(b, i, after.instance(i), keep_goals, b.words);  // what the row held: unknown
         if (count)
             count[i] = static_cast<i32>(c);
         if (b.at_goal)
             b.at_goal[i] = reset_goal(b, i, b.instance(i)) ? 1 : 0;
+        if (b.reset_counts)
+            ++b.reset_counts[i];
     }
 }
 
@@ -466,7 +502,11 @@ void HostEnv::step_row_impl(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i
     // 5. the move, or the autoreset
     if (m_config.autoreset && (term || trunc))
     {
-        const u32 next = next_instance >= 0 ? static_cast<u32>(next_instance) : inst;
+        const u32 next = next_instance >= 0 ? static_cast<u32>(next_instance)
+                         : b.reset_counts && m_config.sampling.enabled() ? static_cast<u32>(sample_row(b, i))
+                                                                         : inst;
+        if (b.reset_counts)
+            ++b.reset_counts[i];
         const u32 n0 = reset_row(b, i, next, false, w);
         if (out.count)
             out.count[o] = static_cast<i32>(n0);

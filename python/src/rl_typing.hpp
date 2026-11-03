@@ -35,6 +35,10 @@ struct SamplerArg
 struct Sampler
 {
 };
+/// A mymyr.rl.InstanceSampler (an argument whose default None the stubs add).
+struct InstanceSampler
+{
+};
 /// A packed host query table.
 struct GoalTemplates
 {
@@ -81,6 +85,11 @@ template<>
 struct type_caster<mymyr::python::ann::Sampler>
 {
     static constexpr auto Name = const_name("mymyr._typing.InstanceSampler | None");
+};
+template<>
+struct type_caster<mymyr::python::ann::InstanceSampler>
+{
+    static constexpr auto Name = const_name("mymyr._typing.InstanceSampler");
 };
 template<>
 struct type_caster<mymyr::python::ann::HerStrategy>

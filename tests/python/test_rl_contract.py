@@ -218,3 +218,133 @@ def test_torchrl_explicit_reset_goals_remain_supported(via_tensordict):
     assert not bool(result["goal_pos"].any())
     assert not bool(result["goal_neg"].any())
     env.close()
+
+
+def gripper_task():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    from conftest import ROOT
+
+    d = ROOT / "tests/data/pddl/gripper"
+    return mymyr.Task.from_pddl(d / "domain.pddl", d / "p01.pddl")
+
+
+def test_environment_sizes_and_env_ids_are_checked_up_front():
+    """num_envs and first_env are checked by the constructors (and JAX reset) with ValueError: the env ids
+    first_env .. first_env + num_envs - 1 are 32-bit RNG streams."""
+    task = gripper_task()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    bad = [dict(num_envs=-1), dict(num_envs=2, first_env=-1), dict(num_envs=2, first_env=2**32 - 1),
+           dict(num_envs=2**31)]
+    for kw in bad:
+        n, first = kw["num_envs"], kw.get("first_env", 0)
+        with pytest.raises(ValueError, match="^mymyr: (num_envs|first_env)"):
+            rt.BatchedEnv(task, n, first_env=first)
+        with pytest.raises(ValueError, match="^mymyr: (num_envs|first_env)"):
+            rl.CpuEnvPool(task, n, first_env=first)
+    with pytest.raises(TypeError, match="^mymyr: num_envs and first_env must be ints"):
+        rt.BatchedEnv(task, 2, first_env=1.5)
+    last = rt.BatchedEnv(task, 2, first_env=2**32 - 2)  # the last two streams
+    last.reset()
+    last.step()
+    assert rl.CpuEnvPool(task, 2, first_env=2**32 - 2).first_env == 2**32 - 2
+    try:
+        rj = jax_rl()
+    except pytest.skip.Exception:
+        return
+    env = rj.Env(task, device="cpu")
+    for kw in bad:
+        with pytest.raises(ValueError, match="^mymyr: (num_envs|first_env)"):
+            env.reset(None, kw["num_envs"], first_env=kw.get("first_env", 0))
+
+
+def test_actions_must_be_integers_and_wide_ones_are_invalid():
+    """A float action raises TypeError in every environment; an integer action outside the int32 range is flagged
+    invalid (never wrapped into a valid index)."""
+    task = gripper_task()
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    env = rt.BatchedEnv(task, 2)
+    env.reset()
+    for bad in (torch.tensor([0.7, 1.9]), torch.tensor([True, False]), [0.5, 1.0]):
+        with pytest.raises(TypeError, match="^mymyr: actions must be integer"):
+            env.step(bad)
+    assert env.step(torch.tensor([2**32, 0])).invalid.tolist() == [True, False]
+    pool = rl.CpuEnvPool(task, 2)
+    with pytest.raises(TypeError, match="integers"):
+        pool.step(actions=np.array([0.7, 1.9]))
+    assert np.asarray(pool.step(actions=np.array([2**32, 0])).invalid).tolist() == [True, False]
+    try:
+        rj = jax_rl()
+    except pytest.skip.Exception:
+        return
+    import jax
+    import jax.numpy as jnp
+
+    jenv = rj.Env(task, device="cpu")
+    state, _ = jenv.reset(None, 2)
+    with pytest.raises(TypeError, match="^mymyr: actions must be integer"):
+        jenv.step(0, state, jnp.array([0.7, 1.9]))
+    for wide in (np.array([2**32, 0], np.int64), np.array([2**31, 0], np.uint32)):
+        assert np.asarray(jenv.step(0, state, wide)[5]["invalid"]).tolist() == [True, False]
+    old = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        traced = jax.jit(lambda s, a: jenv.step(0, s, a)[5]["invalid"])
+        assert np.asarray(traced(state, jnp.array([2**32, 0], jnp.int64))).tolist() == [True, False]
+    finally:
+        jax.config.update("jax_enable_x64", old)
+
+
+def test_the_parallel_environments_take_the_same_options():
+    """BatchedEnv, CpuEnvPool and the JAX Env share canonical_order (the successor order actions index), first_env
+    and the sampler default, and step the same successors under them."""
+    from conftest import text_task
+
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    rj = None
+    try:
+        rj = jax_rl()
+    except pytest.skip.Exception:
+        pass
+    task = text_task("gripper__prob05")  # its generator order differs from the canonical one
+    n, steps = 8, 12
+    runs = {}
+    for canonical in (True, False):
+        env = rt.BatchedEnv(task, n, seed=3, first_env=7, max_steps=50, canonical_order=canonical)
+        assert env.core.canonical_order is canonical
+        pool = rl.CpuEnvPool(task, n, seed=3, first_env=7, max_steps=50, canonical_order=canonical, threads=2)
+        env.reset()
+        pool.reset()
+        jenv = state = None
+        if rj is not None:
+            jenv = rj.Env(task, device="cpu", max_steps=50, canonical_order=canonical)
+            state, _ = jenv.reset(None, n, first_env=7)
+        rows = []
+        for k in range(steps):
+            # indices whose successors depend on the order: the last, a third and two thirds into the successors
+            action = ((env.count - 1).clamp(min=0) if k % 3 == 0 else env.count * (k % 3) // 3).to(torch.int64)
+            r = env.step(action)
+            b = pool.step(actions=action.numpy())
+            order = np.argsort(np.asarray(b.env_ids))
+            got = r.states.numpy().view(np.uint64)
+            assert np.array_equal(np.asarray(b.states)[order], got), (canonical, k)
+            if jenv is not None:
+                state = jenv.step(0, state, action.numpy().astype(np.int32))[0]
+                assert np.array_equal(rj.as_words(state.states), got), (canonical, k)
+            rows.append(got.copy())
+        # the random policy: the env ids' streams from first_env on
+        for k in range(3):
+            got = env.step().states.numpy().view(np.uint64)
+            b = pool.step()
+            assert np.array_equal(np.asarray(b.states)[np.argsort(np.asarray(b.env_ids))], got), (canonical, k)
+        runs[canonical] = rows
+    assert any(not np.array_equal(a, b) for a, b in zip(runs[True], runs[False]))
+    # one sampler default: "auto" (uniform without constructor task ids)
+    table = rl.TaskTable([task, task])
+    samplers = [rt.BatchedEnv(table, 2).sampler, rl.CpuEnvPool(table, 2).sampler]
+    if rj is not None:
+        samplers.append(rj.Env(table, device="cpu").sampler)
+    assert all(isinstance(s, rl.InstanceSampler) and s.weights is None for s in samplers), samplers
+    assert rt.BatchedEnv(table, 2, task_ids=[0, 1]).sampler is None

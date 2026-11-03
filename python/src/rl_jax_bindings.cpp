@@ -19,14 +19,16 @@
 //                      instance task_ids[i] (goal masks: the instance's goal unless keep_goals)
 //   mymyr_env_refresh  (states, task_ids, counts, views) -> count, counts, views: the cache and counts of written
 //                      states
-//   mymyr_env_step     (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, env_id, seed,
-//                      action, next_task_ids)
-//                      -> states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, reward, terminated,
-//                         truncated, goal, invalid, schema, binding, final_states
+//   mymyr_env_step     (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, reset_counts,
+//                      env_id, seed, sampling_seed, action, next_task_ids)
+//                      -> states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, reset_counts,
+//                         reward, terminated, truncated, goal, invalid, schema, binding, final_states
 //                      action int32 [N] indexes the canonical successor order; an empty action array is the random
 //                      policy (Philox of (seed[i], env_id[i], draws[i]), rl/rng.hpp); next_task_ids int32 [N] (empty:
-//                      none) names the instances autoresetting rows restart in. binding [0, L] and final_states
-//                      [0, 2 RW] are not written (the caller asked for neither)
+//                      none) names the instances autoresetting rows restart in, else they restart in their next
+//                      sampled instances (the env's sampler: the draw of (sampling_seed[i], env_id[i],
+//                      reset_counts[i]), rl/sampling.hpp); every autoreset advances its row's reset_counts (uint32
+//                      [N]). binding [0, L] and final_states [0, 2 RW] are not written (the caller asked for neither)
 //   mymyr_expand       (states, task_ids) -> succ [N, K, 2 RW], schema, binding [N, K, L], goal, mask [N, K], count [N]
 //                      (+ derived [N, K, 2 D], D = the table's derived words, as an optional seventh result)
 //   mymyr_expand_flat  (states, task_ids) -> succ [M, 2 RW], parent, schema, binding [M, L], goal [M], offsets
@@ -428,14 +430,14 @@ i32* task_ids_of(const Entry& e, const View& v, u64 N, const char* name = "task_
 struct StateBufs
 {
     View states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal;
-    View visited, visited_count, visited_status;
+    View visited, visited_count, visited_status, reset_counts;
 };
 
 /// Which in-place arrays a call has, in this order: states, [task_ids], [steps], [draws], count, counts, views,
-/// goal_pos, goal_neg, at_goal, visited, visited_count, visited_status.
+/// goal_pos, goal_neg, at_goal, visited, visited_count, visited_status, [reset_counts].
 struct Fields
 {
-    bool task_ids = false, steps = true, draws = false;
+    bool task_ids = false, steps = true, draws = false, reset_counts = false;
 };
 
 rl::EnvBatch make_batch(const Entry& e, const StateBufs& s, u64 N, i32* task_ids)
@@ -458,6 +460,7 @@ rl::EnvBatch make_batch(const Entry& e, const StateBufs& s, u64 N, i32* task_ids
     b.visited_count = s.visited_count.as<i32>();
     b.visited_status = s.visited_status.as<i32>();
     b.visited_status_per_row = true;
+    b.reset_counts = s.reset_counts.data ? s.reset_counts.as<u32>() : nullptr;
     return b;
 }
 
@@ -497,7 +500,11 @@ StateBufs state_results(const Entry& e, ffi::Result<ffi::AnyBuffer>* res, const 
     s.visited = next("visited", ffi::DataType::U32, false, 2 * e.H);
     s.visited_count = next("visited_count", ffi::DataType::S32, true, -1);
     s.visited_status = next("visited_status", ffi::DataType::S32, true, -1);
+    if (f.reset_counts)
+        s.reset_counts = next("reset_counts", ffi::DataType::U32, true, -1);
     const u64 N = s.states.rows;
+    if (f.reset_counts)
+        expect_rows(s.reset_counts, N, "reset_counts");
     expect_rows(s.visited, N, "visited");
     expect_rows(s.visited_count, N, "visited_count");
     expect_rows(s.visited_status, e.H ? N : 0, "visited_status");
@@ -692,19 +699,22 @@ rl::StepOutputs make_outputs(const StepBufs& o)
     return out;
 }
 
-/// The per-row inputs of a step: env ids, seeds, the action (empty: the random policy) and the next task ids (empty:
-/// none).
+/// The per-row inputs of a step: env ids, seeds, sampling seeds, the action (empty: the random policy) and the next task
+/// ids (empty: none).
 struct StepInputs
 {
-    View env_id, seed, action, next;
+    View env_id, seed, sampling_seed, action, next;
 };
 
-StepInputs step_inputs(u64 N, const ffi::AnyBuffer& env_id, const ffi::AnyBuffer& seed, const ffi::AnyBuffer& action,
+StepInputs step_inputs(u64 N, const ffi::AnyBuffer& env_id, const ffi::AnyBuffer& seed,
+                       const ffi::AnyBuffer& sampling_seed, const ffi::AnyBuffer& action,
                        const ffi::AnyBuffer& next_task_ids)
 {
     StepInputs in;
     in.env_id = view(env_id, "env_id", ffi::DataType::U32, true);
     in.seed = view(seed, "seed", ffi::DataType::U32, false, 2);
+    in.sampling_seed = view(sampling_seed, "sampling_seed", ffi::DataType::U32, false, 2);
+    expect_rows(in.sampling_seed, N, "sampling_seed");
     in.action = view(action, "action", ffi::DataType::S32, true);
     in.next = view(next_task_ids, "next_task_ids", ffi::DataType::S32, true);
     expect_rows(in.env_id, N, "env_id");
@@ -720,14 +730,15 @@ StepInputs step_inputs(u64 N, const ffi::AnyBuffer& env_id, const ffi::AnyBuffer
     ffi::AnyBuffer states_in, ffi::AnyBuffer task_ids_in, ffi::AnyBuffer steps_in, ffi::AnyBuffer draws_in,             \
         ffi::AnyBuffer count_in, ffi::AnyBuffer counts_in, ffi::AnyBuffer views_in, ffi::AnyBuffer goal_pos_in,         \
         ffi::AnyBuffer goal_neg_in, ffi::AnyBuffer at_goal_in, ffi::AnyBuffer visited_in,                               \
-        ffi::AnyBuffer visited_count_in, ffi::AnyBuffer visited_status_in, ffi::AnyBuffer env_id, ffi::AnyBuffer seed,  \
-        ffi::AnyBuffer action, ffi::AnyBuffer next_task_ids, ffi::Result<ffi::AnyBuffer> states,                        \
+        ffi::AnyBuffer visited_count_in, ffi::AnyBuffer visited_status_in, ffi::AnyBuffer reset_counts_in,             \
+        ffi::AnyBuffer env_id, ffi::AnyBuffer seed, ffi::AnyBuffer sampling_seed, ffi::AnyBuffer action,                \
+        ffi::AnyBuffer next_task_ids, ffi::Result<ffi::AnyBuffer> states,                                               \
         ffi::Result<ffi::AnyBuffer> task_ids, ffi::Result<ffi::AnyBuffer> steps, ffi::Result<ffi::AnyBuffer> draws,     \
         ffi::Result<ffi::AnyBuffer> count, ffi::Result<ffi::AnyBuffer> counts, ffi::Result<ffi::AnyBuffer> views,       \
         ffi::Result<ffi::AnyBuffer> goal_pos, ffi::Result<ffi::AnyBuffer> goal_neg,                                     \
         ffi::Result<ffi::AnyBuffer> at_goal, ffi::Result<ffi::AnyBuffer> visited,                                       \
         ffi::Result<ffi::AnyBuffer> visited_count, ffi::Result<ffi::AnyBuffer> visited_status,                          \
-        ffi::Result<ffi::AnyBuffer> reward,                                                                             \
+        ffi::Result<ffi::AnyBuffer> reset_counts, ffi::Result<ffi::AnyBuffer> reward,                                   \
         ffi::Result<ffi::AnyBuffer> terminated, ffi::Result<ffi::AnyBuffer> truncated, ffi::Result<ffi::AnyBuffer> goal,\
         ffi::Result<ffi::AnyBuffer> invalid, ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,   \
         ffi::Result<ffi::AnyBuffer> final_states, ffi::Result<ffi::AnyBuffer> revisited
@@ -746,13 +757,13 @@ StepCall step_call(const Entry& e, MYMYR_STEP_PARAMS, Copy copy)
 {
     StepCall c;
     ffi::Result<ffi::AnyBuffer> res[] = {states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg,
-                                         at_goal, visited, visited_count, visited_status};
-    const ffi::AnyBuffer args[] = {states_in, task_ids_in, steps_in, draws_in,    count_in,
-                                   counts_in, views_in,    goal_pos_in, goal_neg_in, at_goal_in,
-                                       visited_in, visited_count_in, visited_status_in};
-    c.s = state_results(e, res, args, Fields{true, true, true}, copy);
+                                         at_goal, visited, visited_count, visited_status, reset_counts};
+    const ffi::AnyBuffer args[] = {states_in,   task_ids_in, steps_in,         draws_in,          count_in,
+                                   counts_in,   views_in,    goal_pos_in,      goal_neg_in,       at_goal_in,
+                                   visited_in,  visited_count_in, visited_status_in, reset_counts_in};
+    c.s = state_results(e, res, args, Fields{true, true, true, true}, copy);
     c.N = c.s.states.rows;
-    c.in = step_inputs(c.N, env_id, seed, action, next_task_ids);
+    c.in = step_inputs(c.N, env_id, seed, sampling_seed, action, next_task_ids);
     c.o = step_results(e, c.N, reward, terminated, truncated, goal, invalid, schema, binding, final_states, revisited);
     return c;
 }
@@ -763,14 +774,15 @@ ffi::Error env_step_cpu(i64 handle, MYMYR_STEP_PARAMS)
         EntryPtr e = entry(handle);
         const StepCall c = step_call(*e, states_in, task_ids_in, steps_in, draws_in, count_in, counts_in, views_in,
                                      goal_pos_in, goal_neg_in, at_goal_in, visited_in, visited_count_in, visited_status_in,
-                                     env_id, seed, action, next_task_ids, states,
+                                     reset_counts_in, env_id, seed, sampling_seed, action, next_task_ids, states,
                                      task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal,
-                                     visited, visited_count, visited_status, reward,
+                                     visited, visited_count, visited_status, reset_counts, reward,
                                      terminated, truncated, goal, invalid, schema, binding, final_states, revisited, Host::copy);
         require_host_cache(c.s);
         rl::EnvBatch b = make_batch(*e, c.s, c.N, e->multi() ? c.s.task_ids.as<i32>() : nullptr);
         b.seeds = c.in.seed.as<u64>();
         b.env_ids = c.in.env_id.as<u32>();
+        b.sampling_seeds = c.in.sampling_seed.as<u64>();
         rl::StepOutputs out = make_outputs(c.o);
         out.count = c.s.count.as<i32>();
         std::lock_guard lock(e->host_mutex);
@@ -1143,6 +1155,8 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Arg<ffi::AnyBuffer>()                                                                                          \
         .Arg<ffi::AnyBuffer>()                                                                                          \
         MYMYR_VISIT_ARGS                                                                                                \
+        .Arg<ffi::AnyBuffer>()                                                                                          \
+        .Arg<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
@@ -1160,7 +1174,7 @@ ffi::Error expand_flat_cpu(i64 handle, bool hashes, bool noops, bool drop, ffi::
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
-        .Ret<ffi::AnyBuffer>() MYMYR_VISIT_RETS .Ret<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>() MYMYR_VISIT_RETS .Ret<ffi::AnyBuffer>() .Ret<ffi::AnyBuffer>()
 #define MYMYR_EXPAND_ATTRS .Attr<bool>("hashes").Attr<bool>("noops").Attr<bool>("drop_noops")
 #define MYMYR_EXPAND_BINDING                                                                                            \
     .Arg<ffi::AnyBuffer>()                                                                                              \
@@ -1315,9 +1329,9 @@ ffi::Error env_step_cuda(cudaStream_t st, i32 ordinal, i64 handle, MYMYR_STEP_PA
         EntryPtr e = entry(handle);
         const StepCall c = step_call(*e, states_in, task_ids_in, steps_in, draws_in, count_in, counts_in, views_in,
                                      goal_pos_in, goal_neg_in, at_goal_in, visited_in, visited_count_in, visited_status_in,
-                                     env_id, seed, action, next_task_ids, states,
+                                     reset_counts_in, env_id, seed, sampling_seed, action, next_task_ids, states,
                                      task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal,
-                                     visited, visited_count, visited_status, reward,
+                                     visited, visited_count, visited_status, reset_counts, reward,
                                      terminated, truncated, goal, invalid, schema, binding, final_states, revisited, OnStream{st});
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
@@ -1329,6 +1343,7 @@ ffi::Error env_step_cuda(cudaStream_t st, i32 ordinal, i64 handle, MYMYR_STEP_PA
         rl::EnvBatch b = make_batch(*e, c.s, c.N, e->multi() ? c.s.task_ids.as<i32>() : nullptr);
         b.seeds = c.in.seed.as<u64>();
         b.env_ids = c.in.env_id.as<u32>();
+        b.sampling_seeds = c.in.sampling_seed.as<u64>();
         rl::StepOutputs out = make_outputs(c.o);
         out.count = c.s.count.as<i32>();
         env.step(b, out, rl::Actions{nullptr, c.in.action.as<i32>()}, e->multi() ? c.in.next.as<i32>() : nullptr);
@@ -1576,9 +1591,11 @@ void bind_rl_jax(nb::module_& parent)
             "__init__",
             [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
-               bool canonical, bool witness, Arg<ann::EnvPath> path, Arg<std::variant<bool, int>> track_visited) {
+               bool canonical, bool witness, Arg<ann::EnvPath> path, Arg<std::variant<bool, int>> track_visited,
+               Arg<ann::InstanceSampler> sampler) {
                 const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 rl::EnvConfig c;
+                c.sampling = sampling_of(sampler);
                 c.max_steps = max_steps;
                 c.step_reward = step_reward;
                 c.goal_reward = goal_reward;
@@ -1594,7 +1611,7 @@ void bind_rl_jax(nb::module_& parent)
             "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
-            "path"_a = "auto", "track_visited"_a = false)
+            "path"_a = "auto", "track_visited"_a = false, "sampler"_a = nb::none())
         .def_prop_ro("visited_capacity", [](const PyJaxEnv& e) { return e.entry().H; })
         .def_prop_ro("handle", &PyJaxEnv::handle, "The FFI attribute `handle` of this environment's calls.")
         .def_prop_ro("table", [](const PyJaxEnv& e) { return SuiteArg(e.ref().obj); })
