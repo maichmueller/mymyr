@@ -39,7 +39,7 @@ public:
             Predicate p;
             p.kind = kind == "S" ? PredKind::Static : kind == "F" ? PredKind::Fluent : kind == "D" ? PredKind::Derived
                                                                                                    : (fail("bad predicate kind " + kind), PredKind::Static);
-            p.arity = u();
+            p.arity = parameters(0);
             p.name = t.intern_string(word());
             p.params = anonymous_params(p.arity);
             t.predicates.push_back(p);
@@ -55,7 +55,7 @@ public:
                 Function f;
                 f.kind = kind == "S" ? FuncKind::Static : kind == "F" ? FuncKind::Fluent : kind == "A" ? FuncKind::Auxiliary
                                                                                                        : (fail("bad function kind " + kind), FuncKind::Static);
-                f.arity = u();
+                f.arity = parameters(0);
                 f.name = t.intern_string(word());
                 f.params = anonymous_params(f.arity);
                 t.functions.push_back(f);
@@ -122,7 +122,7 @@ public:
                 Axiom a;
                 a.head.pred = PredicateId{u()};
                 a.head.positive = true;
-                const u32 arity = u();
+                const u32 arity = parameters(0);
                 a.params = anonymous_params(arity);
                 expect("H");
                 std::vector<Term> head(t.predicates.at(a.head.pred.v).arity);
@@ -172,6 +172,15 @@ private:
             fail("unexpected end of input");
         return w;
     }
+    /// A parameter count: with `before` parameters already bound, at most k_max_parameters in all.
+    u32 parameters(u32 before)
+    {
+        const u32 n = u();
+        if (n > k_max_parameters - before)
+            fail(std::to_string(n) + (before ? " more" : "") + " parameters exceed the maximum of " + std::to_string(k_max_parameters));
+        return n;
+    }
+
     u32 u()
     {
         const std::string w = word();
@@ -349,7 +358,7 @@ private:
     {
         Schema s;
         s.name = t.intern_string(word());
-        const u32 arity = u();
+        const u32 arity = parameters(0);
         s.original_arity = arity;  // the format does not record which parameters normalization introduced
         s.params = anonymous_params(arity);
         s.precondition = condition();
@@ -359,7 +368,7 @@ private:
         for (u32 i = 0; i < ne; ++i)
         {
             ConditionalEffect ce;
-            const u32 extra = u();
+            const u32 extra = parameters(arity);
             std::vector<Parameter> ps(extra);
             for (u32 j = 0; j < extra; ++j)
                 ps[j].name = t.intern_string("x" + std::to_string(arity + j));

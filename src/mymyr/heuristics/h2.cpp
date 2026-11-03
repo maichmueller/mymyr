@@ -133,6 +133,8 @@ public:
                 else
                     m_goal_props.push_back(pp);
             }
+            if (!detail::derived_goal_props(*m_R, g, m_goal_props))
+                dead = true;
             for (SlotId p : g.negative)
             {
                 const u32 np = m_R->fluent_props(A.canonical(AtomKind::Fluent, p.v)).second;

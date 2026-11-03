@@ -155,8 +155,9 @@ search::WidthZero width_zero_of(nb::handle v)
 /// The options shared by the three entry points.
 cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optimize_iw1, bool witness_pruning,
                                 bool canonical_order, bool exact, nb::handle max_states, nb::handle max_expanded,
-                                nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states,
-                                nb::handle table_bytes, nb::handle unfit_tables)
+                                nb::handle max_expanded_local, nb::handle max_depth, nb::handle max_seconds,
+                                nb::handle max_searches, nb::handle chunk_states, nb::handle table_bytes,
+                                nb::handle unfit_tables)
 {
     cuda::MultiIwOptions o;
     o.max_width = max_width;
@@ -169,6 +170,8 @@ cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optim
         o.budget.max_states = int_arg<u64>(max_states, "max_states");
     if (!max_expanded.is_none())
         o.budget.max_expanded = int_arg<u64>(max_expanded, "max_expanded");
+    if (!max_expanded_local.is_none())
+        o.max_expanded_local = int_arg<u64>(max_expanded_local, "max_expanded_local");
     if (!max_depth.is_none())
         o.budget.max_depth = int_arg<u32>(max_depth, "max_depth");
     if (const auto s = opt_float_arg(max_seconds, "max_seconds", 0))
@@ -550,9 +553,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
 
 #define MYMYR_IW_SEARCH_ARGS                                                                                                  \
     "witness_pruning"_a = false, "canonical_order"_a = true, "exact"_a = true, "max_states"_a = nb::none(),              \
-        "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),                        \
-        "max_searches"_a = nb::none(), "chunk_states"_a = nb::none(), "table_bytes"_a = nb::none(),                     \
-        "unfit_tables"_a = "raise"
+        "max_expanded"_a = nb::none(), "max_expanded_local"_a = nb::none(), "max_depth"_a = nb::none(),                 \
+        "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(), "chunk_states"_a = nb::none(),                     \
+        "table_bytes"_a = nb::none(), "unfit_tables"_a = "raise"
 #define MYMYR_MULTI_IW_COMMON_ARGS                                                                                            \
     "max_width"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, MYMYR_IW_SEARCH_ARGS
 
@@ -560,12 +563,12 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "multi_iw",
         [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
            bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
-           IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
-           IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids) {
+           IntArg max_expanded, IntArg max_expanded_local, IntArg max_depth, FloatArg max_seconds, IntArg max_searches,
+           IntArg chunk_states, IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
-                                                         exact, max_states, max_expanded, max_depth, max_seconds,
-                                                         max_searches, chunk_states, table_bytes, unfit_tables);
+                                                         exact, max_states, max_expanded, max_expanded_local, max_depth,
+                                                         max_seconds, max_searches, chunk_states, table_bytes, unfit_tables);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -607,7 +610,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "chunk size (exact batch novelty; exact=False is relaxed novelty: valid IW, but the kept states depend on "
         "timing). Numeric tasks keep their CPU I32/F64 encodings.\n\n"
         "goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
-        "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
+        "numeric constraints, or (positive slots, negative slots). Budgets apply per search as in search.iw "
+        "(max_states and max_expanded to the whole ladder, max_expanded_local to each pass); "
         "max_seconds spans the call.\n\n"
         "table_bytes: the novelty tables of a group of searches (default 1 GiB); groups shrink to fit it. When the "
         "width-1 table exceeds it, the call raises ValueError (unfit_tables='raise'), or every search that width 0 "
@@ -621,13 +625,13 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "liw",
         [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
            bool witness_pruning, bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded,
-           IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes,
-           StrArg unfit_tables, TaskIdsArg task_ids, LandmarksArg landmarks, bool disjunctive, bool all_private,
+           IntArg max_expanded_local, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
+           IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids, LandmarksArg landmarks, bool disjunctive, bool all_private,
            UnsharedArg unshared_atoms) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             cuda::MultiIwOptions opts = options_of(max_width, width_zero, false, witness_pruning, canonical_order, exact,
-                                                   max_states, max_expanded, max_depth, max_seconds, max_searches,
-                                                   chunk_states, table_bytes, unfit_tables);
+                                                   max_states, max_expanded, max_expanded_local, max_depth, max_seconds,
+                                                   max_searches, chunk_states, table_bytes, unfit_tables);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {
@@ -682,16 +686,16 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "rollouts",
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
            IntArg max_next_layer_states, IntArg max_width_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
-           bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
-           FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes, StrArg unfit_tables,
-           LandmarksArg landmarks, bool disjunctive, bool all_private, UnsharedArg unshared_atoms) {
+           bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_expanded_local,
+           IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states, IntArg table_bytes,
+           StrArg unfit_tables, LandmarksArg landmarks, bool disjunctive, bool all_private, UnsharedArg unshared_atoms) {
             const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
             const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
             cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
-                                                   exact, max_states, max_expanded, max_depth, max_seconds, max_searches,
-                                                   chunk_states, table_bytes, unfit_tables);
+                                                   exact, max_states, max_expanded, max_expanded_local, max_depth,
+                                                   max_seconds, max_searches, chunk_states, table_bytes, unfit_tables);
             if (!max_next_layer_states.is_none())
             {
                 opts.max_next_layer_states = int_arg<u32>(max_next_layer_states, "max_next_layer_states");
@@ -748,8 +752,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches,
            IntArg chunk_states, IntArg table_bytes, StrArg unfit_tables, TaskIdsArg task_ids) {
             cuda::MultiIwOptions opts = options_of(1, nb::str("expand_depth_one"), true, false, true, exact, max_states,
-                                                   max_expanded, max_depth, max_seconds, max_searches, chunk_states,
-                                                   table_bytes, unfit_tables);
+                                                   max_expanded, nb::none(), max_depth, max_seconds, max_searches,
+                                                   chunk_states, table_bytes, unfit_tables);
             PyIwBatch x;
             if (nb::isinstance<PyTable>(task))
             {

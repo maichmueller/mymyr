@@ -131,7 +131,7 @@ def test_every_best_first_search(depot, kind):
 
 def test_refusals(chain):
     r = search.gbfs(chain, heuristic="lmcount", goal=[["(h)"]])
-    assert r.status == Status.FAILED and "AnyOf" in r.message
+    assert r.status == Status.FAILED and "goal alternatives" in r.message
     r = search.astar(chain, heuristic="lmcut", goal=[["(h)"]])
     assert r.status == Status.SOLVED and r.cost == 1
 

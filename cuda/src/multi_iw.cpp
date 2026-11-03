@@ -666,10 +666,10 @@ void DeviceMultiIw::Impl::alloc_searches(u32 count)
     B = count;
     constexpr u32 k_u32_arrays = 17;
     u32* a = sa_u32.ensure(ctx, u64{k_u32_arrays} * count, s);
-    unsigned long long* b = sa_u64.ensure(ctx, u64{4} * count, s);
+    unsigned long long* b = sa_u64.ensure(ctx, u64{5} * count, s);
     u32** fields[k_u32_arrays] = {&sv.status,     &sv.tree,      &sv.next,       &sv.layer_cut, &sv.goal_node, &sv.goal_depth,
                                   &sv.seg_begin,  &sv.seg_end,   &sv.first_live, &sv.first_goal, &sv.first_gen, &sv.cut,
-                                  &sv.cut_row,    &sv.last_live, &sv.last_gen,   nullptr,       nullptr};
+                                  &sv.cut_row,    &sv.last_live, &sv.last_gen,   &sv.max_states, nullptr};
     for (u32 i = 0; i < k_u32_arrays; ++i)
         if (fields[i])
             *fields[i] = a + u64{i} * count;
@@ -678,6 +678,7 @@ void DeviceMultiIw::Impl::alloc_searches(u32 count)
     sv.generated = b + count;
     sv.in_tree = b + 2 * u64{count};
     sv.skipped = b + 3 * u64{count};
+    sv.max_expanded = b + 4 * u64{count};
 }
 
 void DeviceMultiIw::Impl::ensure_nodes(u64 n)
@@ -1172,6 +1173,10 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     auto* counters = reinterpret_cast<unsigned long long*>(staged);
     auto* codes = reinterpret_cast<u32*>(staged + u64{count} * 4 * sizeof(u64));
     u32* depth = codes + count;
+    // the budgets bound each search's whole ladder: a pass gets what the search's earlier passes left
+    std::vector<u64> spent_expanded(count, 0), spent_states(count, 0);
+    std::vector<unsigned long long> pass_expanded(count);
+    std::vector<u32> pass_states(count);
     for (u32 k = first; k <= o.max_width && !pending.empty(); ++k)
     {
         if (out_of_time())
@@ -1209,6 +1214,31 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
             if (pending.empty())
                 break;
         }
+        {
+            std::vector<u32> running;
+            for (u32 id : pending)
+            {
+                constexpr u64 k_unlimited = std::numeric_limits<u64>::max();
+                u64 me = o.max_expanded_local, ms = k_unlimited;
+                if (o.budget.max_expanded != k_unlimited)
+                    me = std::min(me, o.budget.max_expanded - std::min(o.budget.max_expanded, spent_expanded[id]));
+                if (o.budget.max_states != k_unlimited)
+                    ms = o.budget.max_states - std::min(o.budget.max_states, spent_states[id]);
+                if (spent_states[id] > 0 && (ms == 0 || me == 0))
+                {
+                    out.status[g0 + id] = search::SearchStatus::OutOfStates;  // the earlier passes used up the budget
+                    continue;
+                }
+                pass_expanded[id] = me;
+                pass_states[id] = ms >= k_none ? k_none : static_cast<u32>(ms);
+                running.push_back(id);
+            }
+            pending.swap(running);
+            if (pending.empty())
+                break;
+            to_device(sv.max_expanded, pass_expanded.data(), count, s);
+            to_device(sv.max_states, pass_states.data(), count, s);
+        }
         try
         {
             run_pass(starts, k, rule, pending, k == first);
@@ -1237,6 +1267,8 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
             p.generated_in_tree = counters[2 * u64{count} + id];
             p.skipped = counters[3 * u64{count} + id];
             p.seconds = secs;
+            spent_expanded[id] += p.expanded;
+            spent_states[id] += p.stats().states;
             push(g0 + id, p);
             if (codes[id] == miw::k_solved)
             {
@@ -1758,7 +1790,6 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
     r.exact = r.novelty && o.exact;
     r.close = arity == 0 && layer == 0;
     r.lim = miw::Limits{};
-    r.lim.max_expanded = o.budget.max_expanded;
     r.lim.max_states = o.budget.max_states >= k_none ? k_none : static_cast<u32>(o.budget.max_states);
     r.lim.max_next = o.max_next_layer_states;
     r.lim.max_depth = o.budget.max_depth;
@@ -1877,7 +1908,7 @@ void DeviceMultiIw::Impl::build_chunk(Run& r, u32 arity, u32 rule, u32 layer, u3
     Key k;
     k.all(arity, rule, pcap, u64{r.last}, u64{r.loop}, u64{r.root_rule}, u64{r.write}, u64{r.novelty}, u64{r.exact}, u64{r.cut},
           u64{r.close}, u64{randomized}, u64{o.width_zero == search::WidthZero::RootOnly}, u64{o.dedup_parents}, W, LW, L, S, RW, B);
-    k.all(r.lim.max_expanded, r.lim.max_states, r.lim.max_next, r.lim.max_depth);
+    k.all(r.lim.max_states, r.lim.max_next, r.lim.max_depth);
     const miw::Nodes nd = nodes();
     k.all(nd.rows, nd.parent, nd.search, nd.label, nd.flags, u64{r.nxt_cap}, ch.step, ctl, ch.row_flags, ch.live_scan, ch.gen_scan,
           ch.host_goal);

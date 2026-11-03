@@ -18,7 +18,6 @@ namespace mymyr::search
 namespace
 {
 using namespace bf;
-constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 
 /// A state entered by the current lookahead: the path to it from the lookahead's start (parent visit and action).
 struct Visit
@@ -96,7 +95,7 @@ public:
         m_root_h = evaluate(s0, m_root_status);
         m_r.initial_h = m_root_h;
         m_c.begin_search();
-        if (m_root_h == k_inf)
+        if (m_c.dead_end(m_root_h))
         {
             ++m_r.dead_ends;
             m_r.status = SearchStatus::Unsolvable;
@@ -229,7 +228,7 @@ private:
             if (v != root)
             {
                 const f64 hv = evaluate(sv, status_of(v));
-                if (hv == k_inf)
+                if (m_c.dead_end(hv))
                 {
                     ++m_r.dead_ends;
                     ++m_r.stats.pruned;
@@ -318,7 +317,12 @@ private:
                 {
                     ++m_r.stats.pruned;
                     if (m_c.obs)
-                        m_c.obs->on_prune(id, m_c.action(s, b), {m_next.data(), nn, d.num, m_c.nn});
+                    {
+                        const Action a = m_c.action(s, b);
+                        const StateView bv{m_next.data(), nn, d.num, m_c.nn};
+                        m_c.obs->on_generate(id, a, ~u64{0}, bv, false);
+                        m_c.obs->on_prune(id, a, bv);
+                    }
                     return true;
                 }
                 const f64 g = m_c.g_next(gp, d);
@@ -345,7 +349,12 @@ private:
                 return true;
             });
         if (stop)
+        {
+            if (m_c.obs)  // the transitions generated before the stop
+                for (const Transitions::T& t : tr.t)
+                    m_c.obs->on_generate(id, m_c.action(t.schema, tr.binding(t)), t.child, tr.view(t), t.fresh);
             return false;
+        }
         const StateView pv = m_cur.view();
         const u32 depth = m_visits[v].depth + 1;
         for (usize i = 0; i < tr.t.size(); ++i)
@@ -456,7 +465,6 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
         r.ehc.fallback = true;
         BestFirstOptions g = opts;
         g.evaluator = c->h;
-        g.queue = use_buckets(*c) ? BestFirstOptions::Queue::Bucket : BestFirstOptions::Queue::Heap;
         std::unique_ptr<InnerObserver> inner;
         if (c->obs)
             inner = std::make_unique<InnerObserver>(*c->obs);
@@ -466,6 +474,8 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
             b.max_seconds = std::max(0.0, b.max_seconds - seconds_since(t0));
         if (b.max_expanded != std::numeric_limits<u64>::max())
             b.max_expanded -= std::min(b.max_expanded, r.stats.expanded);
+        if (b.max_states != std::numeric_limits<u64>::max())
+            b.max_states -= std::min(b.max_states, out.states);
         BestFirstResult f = gbfs_eager(task, g);
         r.status = f.status;
         r.plan = std::move(f.plan);
@@ -483,8 +493,9 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
     }
     catch (const heuristics::Interrupted&)
     {
-        r.status = c->interrupted_status();
-        c->finish(r.stats.states, r.stats.memory_bytes);
+        r.status = interrupted_status(o.control);
+        if (c)
+            c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const std::exception& e)
     {

@@ -89,8 +89,10 @@ print(relaxed.status, len(relaxed.plan))
 
 `astar` and `gbfs` accept `lazy=True` for lazy successor scoring, a heuristic, and its costs: `costs="auto"` (the
 default: the task's objective), `"unit"` or `"real"` (see the heuristics guide). The
-best-first `beam` also takes a heuristic and `beam_width=`. IW and SIW support numeric tasks; the other best-first
-algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
+best-first `beam` also takes a heuristic and `beam_width=`. IW and SIW support numeric tasks, but their novelty
+counts atoms only: a successor that changes numeric fluents alone is not novel, so a goal that needs numeric progress
+without new atoms is out of their reach (they end `EXHAUSTED` where BrFS and the best-first searches find a plan). The
+other best-first algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
 
 ## Weighted A*, enforced hill-climbing and the anytime search
 
@@ -172,8 +174,9 @@ afresh; the heuristic is built once and shared.
 | `lazy` | `False` | lazy weighted A* iterations (with `lazy_requeue`, `preferred_operators` and the list weights of `astar`) |
 | `cost_bound` | `None` | the bound of the first iteration |
 
-The other options are those of `astar` and apply to every iteration. `max_seconds` and `max_expanded` bound the whole
-search, `max_states` and `max_depth` each iteration. The search ends when
+The other options are those of `astar` and apply to every iteration. `max_seconds`, `max_states` and `max_expanded`
+bound the whole search (an iteration gets what the earlier ones left), `max_expanded_local` the expansions of each
+iteration and `max_depth` the depth within each iteration. The search ends when
 
 - an iteration exhausts its search space: no plan is cheaper than the best one. With `reopen=True` (the default) and
   no `max_depth` this proves the plan optimal (`result.optimal`);
@@ -385,8 +388,10 @@ fact landmark can differ. To keep a computed index exactly, pickle the graph (or
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and
-`max_seconds=`. `max_states=` counts the states a search stores, the start state included (IW: the nodes of a
-pass): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
+`max_seconds=`. Budgets bound the whole search, every pass of an IW ladder, every SIW subproblem and every anytime
+iteration together; the searches made of several passes take `max_expanded_local=` for the expansions of each pass
+([API conventions](conventions.md)). `max_states=` counts the states a search stores, the start state included (IW:
+the nodes of the passes' trees): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
 never stores more ([API conventions](conventions.md)); the deadline and the cancellation are checked inside
 expansions as well (device BrFS and the numeric device A* and GBFS stop at the same state as the CPU's; the other
 GPU searches check `max_states`, the deadline and the cancellation between chunks, and stop once a chunk's new states
@@ -396,11 +401,22 @@ sequence of ground atoms and literals; any one that holds ends the search. See [
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
 literals and numeric constraints; each batched goal selects one conjunction per search. Callable goals and any-of
 alternatives within one device search are not supported; device A*/GBFS use the task goal.
+For the task's goal and for goal alternatives the heuristic estimates the goal the search tests, and an infinite value
+proves a dead end (the state is pruned; an infinite value at the start state makes the result `UNSOLVABLE`). A
+callable goal is opaque to the heuristic, which keeps estimating the task's goal: its values then only order the
+states. No state is pruned for an infinite value (such states come after all others), no search reports
+`UNSOLVABLE`, A* gives no optimality guarantee, and `anytime_astar` claims `optimal` only when an iteration exhausts
+its search space.
 `search.CancelToken` supports cancellation from another thread. A search that does not solve the task returns an
 empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 
 `brfs` takes the common options too. It stops at the first goal state it expands and returns a shortest plan
-(`SOLVED`); with `threads > 1` it searches layer-synchronously and still returns a shortest plan. `max_depth=d`
+(`SOLVED`); with `threads > 1` it searches layer-synchronously with the same result: status, plan, statistics and
+state ids do not depend on the thread count. The layer in which the goal, `max_states` or `max_expanded` stops the
+search is settled in id order: its threads stop claiming states and finish only the expansions the result can need,
+so the layer briefly holds the successors of at most one chunk of 256 expansions per thread beyond `max_states`,
+and worker observers can see the events of those expansions past the stop (an observer without `make_worker` runs the
+search on one thread, with the same result and no such events). `max_depth=d`
 expands the states of depth below `d` and stores those of depth `d`. `stop_at_goal=False` goes on through the whole
 reachable space (for counts such as `num_goal_states`); a goal state reached on the way still makes it `SOLVED` with
 that plan, and `exhausted` tells whether every state was expanded.
@@ -529,7 +545,8 @@ lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
 with status `CANCELLED`) and `on_end(status, stats)`. A search never calls an event the subclass does not override,
 and an observer that overrides none is not installed. `on_expand` and `on_generate` are called once per expanded and
-generated state, so their counts equal the result's statistics.
+generated state, so their counts equal the result's statistics; `on_prune` follows the `on_generate` of the successor
+it rejects (a blocked successor's `on_generate` has `child` None and `is_new` False).
 
 `iw`, `iw_pass`, `siw`, the IW family variants, `astar_iw`, `rollout_iw`, `find_rollouts_parallel` and
 `atomic_goal_portfolio` also send `on_transition(parent, action, child, state, outcome)` for every generated

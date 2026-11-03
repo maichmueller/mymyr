@@ -103,9 +103,9 @@ def test_invalid_layer_arguments(gripper):
         search.brfs(gripper, layer_order="sideways")
     with pytest.raises(ValueError, match="positive"):
         search.brfs(gripper, layer_order="reverse", max_next_layer_states=0)
-    with pytest.raises(ValueError, match="requires an ordered layer kind"):
+    with pytest.raises(ValueError, match="needs an ordered layer order"):
         search.brfs(gripper, max_next_layer_states=5)
-    with pytest.raises(ValueError, match="requires an ordered layer kind"):
+    with pytest.raises(ValueError, match="needs an ordered layer order"):
         search.iw(gripper, max_next_layer_states=5)
     with pytest.raises(ValueError, match="flat or chunked"):
         search.brfs(gripper, layer_order="reverse", store="compact")

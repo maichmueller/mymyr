@@ -145,6 +145,10 @@ def test_brfs_threads_without_make_worker_run_on_one_thread(task):
     assert r.threads_used == 1 and o.threads == {threading.get_ident()}
     assert (o.expanded, o.generated) == (r.stats.expanded, r.stats.generated)
     assert r.status == Status.SOLVED and o.solutions[0][0] == r.plan
+    assert "not parallel-safe" in r.message and "calling thread" in r.message
+    assert search.brfs(task, threads=1, observer=Counter()).message == ""
+    beam = search.brfs(task, threads=4, layer_order="goal_count", beam_width=8, observer=Counter())
+    assert beam.threads_used == 1 and "calling thread" in beam.message
 
 
 def test_worker_callbacks_keep_thread_locals_and_saved_values():

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <map>
+#include <span>
 #include <string>
 #include <unordered_set>
 
@@ -85,6 +86,9 @@ struct Op
     u32 arity = 0;   // parameters of the original action (the ground action of a relaxed-plan step)
     u32 num_vars = 0;
     std::vector<KeyPat> pos, neg, adds, dels;  // pos: by relation-literal slot
+    std::vector<KeyPat> negd;                  // negated derived atoms of the precondition (they cost 0)
+    u32 pre_pos = 0, pre_neg = 0;              // the leading entries of pos and neg that come from the precondition
+    bool contradicts = false;                  // a precondition atom of pos has the predicate of one of neg or negd
     std::vector<Lit> body;                     // relation literals (slot = index into pos) and static literals
     std::vector<reach::Plan> plans;            // [0] unanchored, [1 + slot] anchored at slot, [1 + |pos|] the seed plan
     u32 seed_slot = k_none;
@@ -406,7 +410,18 @@ void LiftedRelaxation::Impl::build()
             }
             else if (k == PredKind::Fluent)
                 add_unique(op.neg, neg0, l);
+            else if (keep_static)
+                op.negd.push_back(key_pattern(L, l.pred.v, D.terms_of(l)));
         }
+        if (!keep_static)
+            return;
+        // a precondition (or axiom body) is checked for an atom required both true and false, as the grounding does
+        op.pre_pos = static_cast<u32>(op.pos.size());
+        op.pre_neg = static_cast<u32>(op.neg.size());
+        op.contradicts = std::ranges::any_of(op.pos, [&](const KeyPat& p) {
+            auto same = [&](const KeyPat& n) { return n.pred == p.pred; };
+            return std::ranges::any_of(op.neg, same) || std::ranges::any_of(op.negd, same);
+        });
     };
     auto declared_of = [&](std::initializer_list<Range> ranges)
     {
@@ -655,6 +670,18 @@ void LiftedRelaxation::Impl::set_dcost(u32 x, u32 val, u32 sup)
 void LiftedRelaxation::Impl::fire(u32 oi, const u32* b, u32 acc, u32 last_supp, u32 last_cost, u32 parked)
 {
     const Op& op = ops[oi];
+    if (op.contradicts)
+    {
+        // a binding whose precondition wants one atom both true and false never applies
+        const std::span<const KeyPat> pos(op.pos.data(), op.pre_pos), neg(op.neg.data(), op.pre_neg);
+        for (const KeyPat& p : pos)
+        {
+            const u64 c = p.key(b, total);
+            auto same = [&](const KeyPat& n) { return n.pred == p.pred && n.key(b, total) == c; };
+            if (c < total && (std::ranges::any_of(neg, same) || std::ranges::any_of(op.negd, same)))
+                return;
+        }
+    }
     const bool add = kind == Kind::Add && !op.axiom;
     const bool ff = kind == Kind::FF;
     for (const KeyPat& k : op.neg)

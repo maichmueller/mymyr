@@ -153,6 +153,20 @@ TEST(TextFormat, RejectsMalformedInput)
     EXPECT_THROW(read_task_text(truncated), std::runtime_error);
 }
 
+TEST(TextFormat, RejectsParameterCountsBeyondTheMaximum)
+{
+    // a predicate, a schema and a conditional effect with more parameters than binding enumeration supports
+    const std::string tail = "SI 0\nFI 0\nG 0\nA 0\n";
+    std::istringstream predicate("O 1\nP 1\nF 65535 at\n" + tail);
+    EXPECT_THROW(read_task_text(predicate), std::runtime_error);
+    std::istringstream schema("O 1\nP 1\nF 1 at\nSI 0\nFI 0\nG 0\nA 1\nmove 65535\nL 0\nE 0\n");
+    EXPECT_THROW(read_task_text(schema), std::runtime_error);
+    std::istringstream effect("O 1\nP 1\nF 1 at\nSI 0\nFI 0\nG 0\nA 1\nmove 1000\nL 0\nE 1\n25\nL 0\nF 0\n");
+    EXPECT_THROW(read_task_text(effect), std::runtime_error);
+    std::istringstream largest("O 1\nP 1\nF " + std::to_string(k_max_parameters) + " at\n" + tail);
+    EXPECT_EQ(read_task_text(largest).predicates.at(0).arity, k_max_parameters);
+}
+
 TEST(TextFormat, NumericValuesRoundTripBitIdentically)
 {
     auto check = [](f64 value)

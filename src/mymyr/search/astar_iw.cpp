@@ -82,7 +82,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
     }
     const f64 h0 = evaluate(c, s0, nodes, root);
     r.initial_h = h0;
-    if (h0 == k_inf)
+    if (c.dead_end(h0))
     {
         ++r.dead_ends;
         r.status = SearchStatus::Unsolvable;
@@ -167,6 +167,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                 if (c.obs)
                 {
                     const Action a = c.action(schema, binding);
+                    c.obs->on_generate(e.id, a, ~u64{0}, child, false);
                     c.obs->on_prune(e.id, a, child);
                     c.obs->on_transition(e.id, a, ~u64{0}, child, TransitionOutcome::Blocked);
                 }
@@ -188,7 +189,12 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             return true;
         });
         if (interrupted)
+        {
+            if (c.obs)  // the transitions generated before the stop
+                for (const Transitions::T& t : tr.t)
+                    c.obs->on_generate(e.id, c.action(t.schema, tr.binding(t)), t.child, tr.view(t), t.fresh);
             break;
+        }
         for (const Transitions::T& t : tr.t)
         {
             const StateView child = tr.view(t);
@@ -227,7 +233,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                 }
             }
             const f64 h = evaluate(c, child, nodes, t.child);
-            if (h == k_inf)
+            if (c.dead_end(h))
             {
                 nodes.set_status(t.child, Nodes::DeadEnd);
                 ++r.dead_ends;
@@ -309,7 +315,7 @@ AStarIwResult astar_iw(const Task& task, const AStarIwOptions& o)
     }
     catch (const heuristics::Interrupted&)
     {
-        r.status = c ? c->interrupted_status() : SearchStatus::OutOfTime;
+        r.status = interrupted_status(o.control);
         if (c)
             c->finish(r.stats.states, r.stats.memory_bytes);
     }

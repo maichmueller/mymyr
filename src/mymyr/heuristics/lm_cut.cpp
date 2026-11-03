@@ -114,6 +114,8 @@ public:
                 else
                     props.push_back(pp);
             }
+            if (!detail::derived_goal_props(*m_R, g, props))
+                dead = true;
             for (SlotId p : g.negative)
             {
                 if (!s.contains(p))

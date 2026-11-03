@@ -22,7 +22,7 @@ using bf::seconds_since;
 void check(const AnytimeOptions& o)
 {
     if (o.weights.empty())
-        throw std::invalid_argument("mymyr anytime_astar: AnytimeOptions::weights is empty");
+        throw std::invalid_argument("mymyr anytime_astar: the weights are empty");
     for (usize i = 0; i < o.weights.size(); ++i)
     {
         const double w = o.weights[i];
@@ -31,12 +31,12 @@ void check(const AnytimeOptions& o)
         if (i > 0 && w > o.weights[i - 1])
             throw std::invalid_argument("mymyr anytime_astar: the weights must not increase");
         if (o.queue == BestFirstOptions::Queue::Bucket && w != std::floor(w))
-            throw std::invalid_argument("mymyr anytime_astar: a bucket queue needs integral weights (use Queue::Heap or Queue::Auto)");
+            throw std::invalid_argument("mymyr anytime_astar: a bucket queue needs integral weights (use the heap or the automatic queue)");
     }
     if (o.weight != 1)
-        throw std::invalid_argument("mymyr anytime_astar: BestFirstOptions::weight is not used (the schedule is AnytimeOptions::weights)");
+        throw std::invalid_argument("mymyr anytime_astar: the single weight is not used (the schedule is the weights)");
     if (std::isnan(o.cost_bound))
-        throw std::invalid_argument("mymyr anytime_astar: BestFirstOptions::cost_bound is NaN");
+        throw std::invalid_argument("mymyr anytime_astar: the cost bound is NaN");
 }
 }  // namespace
 
@@ -62,11 +62,7 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
             owned = heuristics::make_heuristic(task, ho);
             h = owned.get();
         }
-        const heuristics::ActionCosts costs(task);
         const bool admissible = h->admissible() && o.control.goal.kind != GoalSpec::Kind::Custom;
-        // Queue::Auto as A* decides it for its own heuristic: buckets for small integral costs and an integral weight
-        const bool small_integral =
-            o.evaluator == nullptr && costs.integral() && costs.max_constant() >= 0 && costs.max_constant() <= 64;
         const State start = o.start ? *o.start : task.initial_state();
         r.setup_seconds = seconds_since(t0);
         const Clock::time_point search_t0 = Clock::now();
@@ -86,14 +82,28 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
             it.weight = w;
             it.cost_bound = incumbent;
             it.evaluator = h;
-            if (o.queue == BestFirstOptions::Queue::Auto)
-                it.queue = small_integral && w == std::floor(w) ? BestFirstOptions::Queue::Bucket : BestFirstOptions::Queue::Heap;
             it.control.observer = inner.get();
             Budget& b = it.control.budget;
             if (timed)
                 b.max_seconds = std::max(0.0, budget.max_seconds - seconds_since(t0));
             if (budget.max_expanded != std::numeric_limits<u64>::max())
                 b.max_expanded = budget.max_expanded - std::min(budget.max_expanded, r.stats.expanded);
+            b.max_expanded = std::min(b.max_expanded, o.max_expanded_local);
+            if (budget.max_states != std::numeric_limits<u64>::max())
+                b.max_states = budget.max_states - std::min(budget.max_states, r.stats.states);
+            if (k > 0 && (b.max_states == 0 || b.max_expanded == 0))
+            {
+                // the earlier iterations used up the budget: the iteration ends before it stores its start state
+                AnytimeIteration rec;
+                rec.weight = w;
+                rec.cost_bound = incumbent;
+                rec.status = SearchStatus::OutOfStates;
+                r.iterations.push_back(rec);
+                if (obs)
+                    obs->on_pass(k, rec.stats);
+                last = rec.status;
+                break;
+            }
             BestFirstResult x = o.lazy ? astar_lazy(task, it) : astar_eager(task, it);
 
             r.stats.expanded += x.stats.expanded;

@@ -140,6 +140,7 @@ public:
         if (goals.empty())
             return 0;
         u32 best = k_inf;
+        bool prepared = false;
         for (const auto& g : goals)
         {
             u32 open = 0;
@@ -147,6 +148,26 @@ public:
                 open += !s.contains(p);
             for (SlotId p : g.negative)
                 open += s.contains(p);
+            if (g.needs_view())
+            {
+                // derived literals: on the state's closure under the axioms
+                if (!m_ws)
+                    m_ws = std::make_unique<Workspace>(m_task);
+                Successors& succ = m_ws->successors();
+                if (!prepared)
+                    succ.prepare(s);
+                prepared = true;
+                const auto& e = succ.engine();
+                auto holds = [&](CanonicalAtom c)
+                {
+                    const u32 slot = e.atoms().find(c);
+                    return slot != AtomIndex::k_empty && bits::test(e.derived(), e.derived_words(), slot);
+                };
+                for (CanonicalAtom c : g.derived_positive)
+                    open += !holds(c);
+                for (CanonicalAtom c : g.derived_negative)
+                    open += holds(c);
+            }
             best = std::min(best, open);
         }
         return best;
@@ -237,6 +258,8 @@ public:
             ++m_stats.lifted;
             std::vector<std::vector<GoalLit>> gl;
             const AtomIndex& A = m_task.atoms();
+            const auto& L = A.layout();
+            const auto& arity = m_task.compiled().arity;
             for (const auto& g : goals)
             {
                 auto& lits = gl.emplace_back();
@@ -246,6 +269,14 @@ public:
                         const u32* rec = A.record(AtomKind::Fluent, p.v);
                         lits.push_back({rec[0], std::vector<u32>(rec + 1, rec + 1 + m_task.compiled().arity[rec[0]]), pol == 0});
                     }
+                // derived atoms as in the task's goal: positive ones are explored, negated ones left out
+                for (CanonicalAtom c : g.derived_positive)
+                {
+                    std::vector<u32> args(arity.empty() ? 0 : *std::ranges::max_element(arity));
+                    const u32 p = L.decode(c, args.data());
+                    args.resize(arity[p]);
+                    lits.push_back({p, std::move(args), true});
+                }
             }
             v = lifted().evaluate(s, gl);
         }
@@ -438,6 +469,13 @@ private:
         return to_value(h, m_scale);
     }
 
+    /// The "true" propositions of an atom goal's positive derived atoms into out (negated derived atoms are left out,
+    /// as in the task's goal); false when one is outside the relaxation (never reachable).
+    bool derived_props(const search::GoalSpec::AtomGoal& g, std::vector<u32>& out) const
+    {
+        return detail::derived_goal_props(*m_R, g, out);
+    }
+
     /// The propositions of each atom goal; false if the grounding lacks a "false" proposition that one needs.
     bool goal_props(StateView s, std::span<const search::GoalSpec::AtomGoal> goals)
     {
@@ -456,6 +494,8 @@ private:
                 else
                     m_goal_props.push_back(pp);
             }
+            if (!derived_props(g, m_goal_props))
+                dead = true;
             for (SlotId p : g.negative)
             {
                 if (!s.contains(p))

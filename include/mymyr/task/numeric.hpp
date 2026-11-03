@@ -247,7 +247,7 @@ inline void store(const Numeric& N, u64* num, u32 slot, f64 v)
     }
     if (!(v >= -2147483648.0 && v <= 2147483647.0) || v != std::nearbyint(v))
         throw std::overflow_error("mymyr: a numeric value is not an int32 (" + std::to_string(v) +
-                                  "); build the task with TaskOptions::numeric_storage = F64");
+                                  "); build the task with 64-bit float numeric storage");
     const u64 bits = static_cast<u32>(static_cast<i32>(v));
     const u32 sh = (slot & 1) * 32;
     u64& w = num[slot >> 1];

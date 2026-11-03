@@ -14,7 +14,8 @@
 // an unsolved one has an empty plan, and partial_plan holds the subplans of the subproblems solved before the one
 // that failed (the path to the state where that one started).
 //
-// Budgets: max_seconds spans the whole SIW; max_states, max_expanded and max_depth apply per IW pass, as in iw().
+// Budgets: max_seconds, max_states and max_expanded bound the whole SIW (every pass of every subproblem together);
+// IwOptions::max_expanded_local caps each IW pass and max_depth the depth within each pass, as in iw().
 // blocked_states and the observer are forwarded to every pass of every subproblem.
 // Observer: on_start and on_end once, on_pass per IW pass, on_solution once with the whole plan.
 

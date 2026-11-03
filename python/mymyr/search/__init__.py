@@ -47,7 +47,9 @@ A* and eager GBFS then evaluate the new successors of an expansion in one call, 
 ``preferred_actions()``, the preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred
 list, EHC's helpful actions). It is called on the searching thread like the other callbacks below. Numeric tasks run
 in A*, GBFS, beam search, EHC and the anytime search; h_max, h_add and h_FF ignore their numeric conditions and effects
-(the delete relaxation), and g is the metric value.
+(the delete relaxation), and g is the metric value. IW and SIW run on numeric tasks too, but novelty counts atoms
+only: a successor that changes numeric fluents alone is not novel, so a goal that needs such progress ends them
+EXHAUSTED where brfs finds a plan. ``costs="unit"`` is not admissible on a task with zero-cost actions.
 
 IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (layer ordering
 strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), ``"in_order"``, ``"reverse"``,
@@ -103,13 +105,20 @@ run at once on one task (free-threaded CPython). Common keyword arguments:
 
 - budgets ``max_states``, ``max_expanded``, ``max_depth``, ``max_seconds`` (unset: unlimited; brfs takes
   ``max_states`` and ``max_seconds``). ``max_states`` counts the states a search stores, the start state included
-  (IW: the nodes of a pass); the search stops with OUT_OF_STATES at the new state that fills them, inside its
-  parent's expansion, so it never stores more. The deadline and the cancellation are checked inside expansions too;
+  (IW: the nodes of the passes' trees); the search stops with OUT_OF_STATES at the new state that fills them, inside
+  its parent's expansion, so it never stores more. The deadline and the cancellation are checked inside expansions
+  too. Budgets bound the whole search: every pass of an IW or LIW ladder, every SIW subproblem and every anytime
+  iteration together; iw, siw, liw, find_rollouts_parallel and anytime_astar take ``max_expanded_local``, the
+  expansions of each pass alone;
 - ``cancel``: a :class:`CancelToken`; ``token.request()`` from any thread stops the search (status CANCELLED);
 - ``goal``: ``None`` (the task's goal), a callable ``state -> bool``, a :class:`mymyr.GroundCondition`, or a sequence
   of goals, each a GroundCondition or a sequence of ground literals and atoms (anything ``task.ground_condition``
   takes: static, fluent and derived literals of either polarity, e.g. ``[["(on a b)", "(not (clear c))"]]``); any of
-  them counts. ``task.ground_condition(literals, constraints=["(>= (fuel t) 10)"])`` adds numeric constraints;
+  them counts. ``task.ground_condition(literals, constraints=["(>= (fuel t) 10)"])`` adds numeric constraints.
+  The heuristic estimates the goal for the task's goal and for goal alternatives, where an infinite value proves a dead
+  end. Under a callable goal it still estimates the task's goal, which the search does not test: its values only
+  order the states (a state with an infinite value is expanded after the others, never pruned), the search never
+  reports UNSOLVABLE, and no result claims optimality from the heuristic's admissibility;
 - ``blocked_states``: States the search never enters;
 - ``observer``: a :class:`Observer` subclass that overrides the events it needs: ``on_start(state)``,
   ``on_expand(id, state)``, ``on_generate(parent, action, child, state, is_new)``, ``on_prune(parent, action, state)``,
@@ -133,7 +142,7 @@ exception a callback raises requests the search's CancelToken and is re-raised w
 searches (brfs with ``threads > 1``, find_rollouts_parallel, atomic_goal_portfolio) run their workers on their own
 threads only when the observer and a callable goal have a ``make_worker(k)`` method returning worker k's own object
 (the make_worker protocol; brfs takes no callable goal with ``threads > 1``); otherwise they run on the calling thread
-alone.
+alone, and the result's ``message`` says so.
 """
 
 from mymyr._core._search import (

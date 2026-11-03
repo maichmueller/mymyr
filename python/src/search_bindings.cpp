@@ -536,6 +536,12 @@ search::GoalSpec parse_goal(const Owner& o, nb::handle goal, CallbackErrors& err
 }
 
 /// Fills the control block from the common keyword arguments.
+/// max_expanded_local= of a multi-pass search (None: unlimited).
+u64 max_expanded_local_arg(nb::handle v)
+{
+    return opt_int_arg<u64>(v, "max_expanded_local", 0).value_or(~u64{0});
+}
+
 void fill_control(ControlScope& cs, const Owner& o, nb::handle max_states, nb::handle max_expanded, nb::handle max_depth,
                   nb::handle max_seconds, nb::handle cancel, nb::handle goal, nb::handle blocked_states,
                   nb::handle observer, nb::handle progress_interval)
@@ -664,7 +670,8 @@ constexpr const char* k_cost_doc = "The plan's cost under the task's metric (0.0
 constexpr const char* k_goal_state_doc = "The State the plan reaches (None without a plan).";
 constexpr const char* k_stats_doc = "The search's counts and time (Statistics).";
 constexpr const char* k_message_doc =
-    "Why the search stopped early or could not run (empty when it ran to its end).";
+    "Why the search stopped early or could not run, and why a search given several threads ran on the calling "
+    "thread alone (empty when it ran to its end as asked).";
 
 /// Binds status, solved, plan, cost, goal_state, stats and message on `c`: `get(x)` gives the C++ result (its status,
 /// plan, cost, goal_state and message), `stats(x)` its SearchStatistics.
@@ -2160,7 +2167,20 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     opts.beam_width = beam_width;
     opts.witness_pruning = witness_pruning;
     const Task& t = *o.core->task;
-    auto r = run_detached(cs, [&] { return search_fn(t, opts); });
+    auto r = [&]
+    {
+        try
+        {
+            return run_detached(cs, [&] { return search_fn(t, opts); });
+        }
+        catch (const search::BucketKeyError&)
+        {
+            throw nb::value_error("mymyr: queue='bucket' takes small non-negative integral keys (g, h and f values "
+                                  "below 2**22), and the search produced another (a negative action cost, a "
+                                  "fractional or infinite heuristic value, or a very deep search); use queue='heap' "
+                                  "or queue='auto'");
+        }
+    }();
     if constexpr (std::is_same_v<decltype(r), search::AStarIwResult>)
     {
         const auto novelty = r.novelty;
@@ -2287,7 +2307,8 @@ constexpr const char* k_iw1_actions_doc =
 #define MYMYR_IW_ARGS                                                                                                  \
     "task"_a, nb::kw_only(), "max_width"_a = 2, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true,          \
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,          \
-        "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, "tree"_a = nb::none()
+        "max_expanded_local"_a = nb::none(), "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG, \
+        "tree"_a = nb::none()
 
 #define MYMYR_LANDMARK_ARGS                                                                                            \
     "landmarks"_a = nb::none(), "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),     \
@@ -2324,7 +2345,9 @@ const char* k_control_doc =
     "Common keyword arguments:\n"
     "    max_states, max_expanded, max_depth, max_seconds: budgets; None is unlimited. max_states counts the "
     "stored states, the start state included; the search stops with OUT_OF_STATES at the new state that fills "
-    "them, inside its parent's expansion.\n"
+    "them, inside its parent's expansion. max_states, max_expanded and max_seconds bound the whole search: a "
+    "search of several passes (the IW and LIW ladders, SIW, anytime_astar's iterations) hands each pass what the "
+    "earlier ones left, and those searches take max_expanded_local, the expansions of each pass alone.\n"
     "    cancel: a CancelToken, requestable from any thread.\n"
     "    goal: None (the task's goal); a callable state -> bool; a GroundCondition; or a sequence of goals, "
     "any of which counts, each a GroundCondition or a sequence of ground literals and atoms as "
@@ -3416,14 +3439,14 @@ void bind_search(nb::module_& parent)
            bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           IntArg progress_interval, IntArg max_expanded_local, TransitionArg transition_ordering, LayerArg layer_order,
+           IntArg seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
+            search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1,
                                                 witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
@@ -3431,6 +3454,7 @@ void bind_search(nb::module_& parent)
             opts.tree = tree_record(tree);
             opts.incremental_first_applicability = incremental_first_applicability;
             opts.precheck_add_effects = precheck_add_effects;
+            opts.max_expanded_local = max_expanded_local_arg(max_expanded_local);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -3457,7 +3481,7 @@ void bind_search(nb::module_& parent)
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
-            const u32 k = int_arg<u32>(width, "width");
+            const u32 k = int_arg<u32>(width, "width", 0, novelty::k_max_arity);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
@@ -3485,19 +3509,20 @@ void bind_search(nb::module_& parent)
            bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           IntArg progress_interval, IntArg max_expanded_local, TransitionArg transition_ordering, LayerArg layer_order,
+           IntArg seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
+            search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1,
                                                  witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
+            opts.max_expanded_local = max_expanded_local_arg(max_expanded_local);
             const Task& t = *o.core->task;
             search::SiwResult r = run_detached(cs, [&] { return search::siw(t, opts); });
             return PySiwResult{std::move(r), o};
@@ -3647,7 +3672,7 @@ void bind_search(nb::module_& parent)
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner owner = owner_of(task);
             search::AStarIwOptions options;
-            options.width = int_arg<u32>(width, "width");
+            options.width = int_arg<u32>(width, "width", 1, novelty::k_max_arity);
             const std::string mode = str_arg(features, "features");
             if (mode == "classical")
                 options.features = search::AStarIwFeatures::Classical;
@@ -3789,8 +3814,10 @@ void bind_search(nb::module_& parent)
            StrArg evaluation, StrArg store, StrArg queue, StateArg start, bool reopen, bool lazy_requeue,
            bool preferred_operators, IntArg preferred_weight, IntArg standard_weight, bool witness_pruning,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval,
+           IntArg max_expanded_local) {
             search::AnytimeOptions options;
+            options.max_expanded_local = max_expanded_local_arg(max_expanded_local);
             options.weights.clear();
             for (nb::handle x : nb::iter(weights))
                 options.weights.push_back(float_arg(x, "weights", 1.0));
@@ -3810,7 +3837,7 @@ void bind_search(nb::module_& parent)
         "cost_bound"_a = nb::none(), "costs"_a = "auto", "evaluation"_a = "auto", "store"_a = "auto",
         "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
         "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
-        MYMYR_CONTROL_ARGS,
+        MYMYR_CONTROL_ARGS, "max_expanded_local"_a = nb::none(),
         paragraphs({"Anytime search: restarting weighted A* (Richter, Thayer and Ruml 2010, the "
                      "iterated searches of LAMA). Iteration k runs weighted A* (as astar with weight; lazy=True: "
                      "lazy A*) from the start state with the weight weights[min(k, len(weights) - 1)] and the cost "
@@ -3821,8 +3848,9 @@ void bind_search(nb::module_& parent)
                      "max_depth the plan is then proven optimal: `optimal`), when an eager iteration with weight 1 "
                      "and an admissible heuristic of the task's goal finds a plan with reopening (A*: `optimal`), or "
                      "when a budget, cancel or an observer stops an iteration.\n\nstatus is SOLVED when a plan was "
-                     "found (also when a budget ended the search later). max_seconds and max_expanded bound the "
-                     "whole search, max_states and max_depth each iteration. Observer: on_start once; the events of "
+                     "found (also when a budget ended the search later). max_seconds, max_states and max_expanded bound "
+                     "the whole search (an iteration gets what the earlier ones left), max_expanded_local the "
+                     "expansions of each iteration and max_depth the depth within each iteration. Observer: on_start once; the events of "
                      "every iteration (ids are the iteration's own); on_solution(plan, cost) for each improved plan "
                      "as it is found; on_pass(iteration, stats) after each iteration; on_end once. Invalid weights "
                      "raise ValueError. heuristic and the other options: as for astar. ",
@@ -4019,27 +4047,28 @@ void bind_search(nb::module_& parent)
            StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, Arg<ann::TreeRecord> tree) {
+           IntArg progress_interval, IntArg max_expanded_local, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::LiwOptions opts;
             static_cast<search::IwOptions&>(opts) =
-                iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, true, witness_pruning,
+                iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, true, witness_pruning,
                            canonical_order, start);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
             opts.threads = threads_arg(threads);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
             opts.tree = tree_record(tree);
+            opts.max_expanded_local = max_expanded_local_arg(max_expanded_local);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::liw(t, opts); });
             return PyIwResult{std::move(r), o};
         },
         "task"_a, nb::kw_only(), "max_width"_a = 2, MYMYR_LANDMARK_ARGS, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false, "canonical_order"_a = true,
-        "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
+        "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "max_expanded_local"_a = nb::none(), "tree"_a = nb::none(),
         paragraphs({"LIW(k): the width-0 pass, then "
                      "LIW(1..max_width) over (landmark coordinate, tuple of size <= k) novelty, each pass from the start "
                      "with a fresh table, until one solves the task (an exhausted ladder is EXHAUSTED). No optimized IW(1). The result is an IwResult with the per-pass statistics.",
@@ -4070,7 +4099,7 @@ void bind_search(nb::module_& parent)
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
                             prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
                             beam_chunk, threads, witness_pruning, canonical_order, start);
-            opts.width = int_arg<u32>(width, "width");
+            opts.width = int_arg<u32>(width, "width", 1, 3);
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
             opts.tree = tree_record(tree);
@@ -4197,13 +4226,13 @@ void bind_search(nb::module_& parent)
            bool witness_pruning, bool canonical_order, StateArg start, IntArg max_states,
            IntArg max_expanded,
            IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states,
-           ObserverArg observer, IntArg progress_interval, Arg<ann::TreeRecord> tree) {
+           ObserverArg observer, IntArg progress_interval, IntArg max_expanded_local, Arg<ann::TreeRecord> tree) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::ParallelRolloutOptions opts;
-            opts.iw = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1, witness_pruning,
+            opts.iw = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1, witness_pruning,
                                  canonical_order, start);
             opts.seeds = int_list_arg<u64>(seeds, "seeds");
             opts.threads = threads_arg(threads, "threads");
@@ -4212,6 +4241,7 @@ void bind_search(nb::module_& parent)
             opts.report_landing_states = report_landing_states;
             opts.report_co_occurrence = report_co_occurrence;
             opts.iw.tree = tree_record(tree);
+            opts.iw.max_expanded_local = max_expanded_local_arg(max_expanded_local);
             const Task& t = *o.core->task;
             search::ParallelRolloutsResult r = run_detached(cs, [&] { return search::find_rollouts_parallel(t, opts); });
             return PyParallelRollouts{std::make_shared<const search::ParallelRolloutsResult>(std::move(r)),
@@ -4220,13 +4250,15 @@ void bind_search(nb::module_& parent)
         "task"_a, "seeds"_a, nb::kw_only(), "max_width"_a = 2, "threads"_a = 1,
         "max_next_layer_states"_a = nb::none(), "report_landing_states"_a = false, "report_co_occurrence"_a = false,
         "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,
-        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "tree"_a = nb::none(),
+        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "max_expanded_local"_a = nb::none(),
+        "tree"_a = nb::none(),
         paragraphs({"Parallel IW rollouts: one IW(max_width) ladder per seed with a randomized layer order seeded by it, on "
                      "`threads` threads (0: one per hardware thread, capped at len(seeds)) over the one task. For a seed a "
                      "rollout's result is the same at every thread count. Per rollout: the ladder, the reached atoms, "
                      "the number of distinct states created and, when reported, the landing states (per fluent atom "
                      "the first created state holding it) and co-occurrence (per fluent atom the atoms of the created "
-                     "states holding it). max_seconds spans the whole batch, the other budgets apply per rollout.",
+                     "states holding it). max_seconds spans the whole batch, the other budgets apply to each rollout as to iw(): "
+                     "max_states and max_expanded to the rollout's whole ladder, max_expanded_local to each of its passes.",
                     k_tree_doc,
                     k_control_doc,
                     k_transition_doc,

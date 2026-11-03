@@ -34,8 +34,10 @@ metric, and its action cost otherwise. `costs="unit"` and `costs="real"` overrid
 and fractional costs with up to 6 decimal places (the relaxation counts them in units of 10^-k) and rounded down
 beyond; an action whose cost depends on the state, and every action under a metric over numeric fluents, costs 0 in
 the relaxation, and an action whose cost is undefined is never applicable and left out. So `max` and `h2` never
-overestimate the cost of reaching a goal (nor does `lmcut`), and A* with them finds an optimal plan. With `costs="unit"` on a task whose
-actions cost less than 1 they can overestimate, and A* need not find an optimal plan. The h² and set-additive
+overestimate the cost of reaching a goal (nor does `lmcut`), and A* with them finds an optimal plan. `costs="unit"` is
+not admissible on a task with zero-cost actions or actions that cost less than 1: unit costs count every action as 1, so
+a goal reached through zero-cost actions (true cost 0) gets a positive estimate, and A* need not find an optimal
+plan. The h² and set-additive
 implementations use grounded evaluation; they do not support `evaluation="lifted"`.
 
 The perfect heuristic stores goal distances from a complete `mymyr.datasets.StateSpace`. Use

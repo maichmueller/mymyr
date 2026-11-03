@@ -29,7 +29,8 @@
 // SearchControl: goal is the atomic goal (Task, AnyOf or Custom; the goal-directed orderings use its positive atoms,
 // see rollout_iw.hpp); budget.max_seconds spans the call; budget.max_expanded caps the expansions of all workers
 // together (one per popped IW node, one per materialized rollout node);
-// budget.max_depth applies to every worker; budget.max_states applies per worker (per IW pass, per rollout round);
+// budget.max_depth applies to every worker; budget.max_states applies to each worker as a whole (the certifier's pass,
+// all rounds of a rollout worker together);
 // cancel and blocked_states apply to every worker. coordination must be null (the portfolio coordinates its workers
 // itself). Observer (make_worker, search/control.hpp): SearchObserver::make_worker(k) is called for
 // k = 0..K on the calling thread, and worker k sends its hot events there (node ids are per worker); the root observer

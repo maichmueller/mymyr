@@ -12,7 +12,8 @@ plan, write the normalized task, or summarize a domain and problem.
 
 Exit codes of ``mymyr plan``: 0 a plan was found (by the anytime search also when a budget stopped it later), 1 the
 search proved the task unsolvable or exhausted its search space without a plan, 2 invalid usage, an unreadable file or
-PDDL mymyr cannot read (and any other error), 3 a budget (``--max-states``, ``--max-seconds``) stopped the search.
+PDDL mymyr cannot read (and any other error), 3 a budget (``--max-states``, ``--max-seconds``) stopped the search, 4 an
+incomplete search (iw, siw, astar_iw: novelty pruning can miss plans) ended without a plan.
 ``mymyr validate``: 0 the plan is valid, 1 it is not, 2 as above. Errors are one line on stderr; ``--debug`` adds the
 traceback.
 """
@@ -37,6 +38,7 @@ EXIT_SOLVED = 0
 EXIT_NO_PLAN = 1
 EXIT_ERROR = 2
 EXIT_BUDGET = 3
+EXIT_INCOMPLETE = 4
 EXIT_INTERRUPTED = 130
 
 SEARCHES = ("astar", "gbfs", "ehc", "anytime", "brfs", "iw", "siw", "astar_iw")
@@ -44,6 +46,8 @@ HEURISTICS = ("blind", "max", "add", "ff", "h2", "set_additive", "lmcut", "lmcou
 ADMISSIBLE = ("blind", "max", "h2", "lmcut", "perfect")
 DEFAULT_HEURISTIC = {"astar": "max", "gbfs": "ff", "ehc": "ff", "anytime": "ff", "astar_iw": "max"}
 WIDTH_SEARCHES = ("iw", "siw", "astar_iw")
+INCOMPLETE_SEARCHES = ("iw", "siw", "astar_iw")  # they prune by novelty: an exhausted search proves nothing
+MAX_WIDTH = 5
 
 
 class UsageError(Exception):
@@ -70,7 +74,8 @@ def _parser() -> argparse.ArgumentParser:
         help="find a plan",
         description="Search for a plan and write it in the IPC plan format (to stdout unless -o is given).",
         epilog="Exit codes: 0 solved; 1 proved unsolvable or search space exhausted without a plan; 2 invalid usage, "
-        "unreadable file or unsupported PDDL; 3 --max-states or --max-seconds stopped the search.",
+        "unreadable file or unsupported PDDL; 3 --max-states or --max-seconds stopped the search; 4 an incomplete "
+        "search (iw, siw, astar_iw) found no plan.",
     )
     plan.add_argument("domain", metavar="DOMAIN", help="the PDDL domain file")
     plan.add_argument("problem", metavar="PROBLEM", help="the PDDL problem file")
@@ -124,7 +129,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("--max-seconds", type=float, help="stop the search after this many seconds (exit code 3)")
     plan.add_argument(
-        "--max-states", type=int, help="stop the search after storing this many states (per IW pass; exit code 3)"
+        "--max-states", type=int, help="stop the search after storing this many states (exit code 3)"
     )
     plan.add_argument("-o", "--plan-file", metavar="FILE", help="write the plan to FILE instead of stdout")
     plan.add_argument(
@@ -214,6 +219,8 @@ def _check_options(a: argparse.Namespace) -> None:
         raise UsageError(f"--width applies to iw, siw and astar_iw, not to {a.search}")
     if a.width is not None and a.width < 0:
         raise UsageError("--width must be at least 0")
+    if a.width is not None and a.width > MAX_WIDTH:
+        raise UsageError(f"--width must be at most {MAX_WIDTH}")
     if a.threads != 1 and a.search != "brfs":
         raise UsageError(f"--threads applies to brfs; {a.search} runs on one thread")
     if a.threads < 0:
@@ -317,6 +324,9 @@ def _plan(a: argparse.Namespace) -> int:
         print("\n".join(lines), file=sys.stderr)
     if status == search.Status.SOLVED:
         return EXIT_SOLVED
+    if status == search.Status.EXHAUSTED and a.search in INCOMPLETE_SEARCHES:
+        print(f"mymyr: no plan found (the search is incomplete: {a.search} prunes by novelty) ({status})", file=sys.stderr)
+        return EXIT_INCOMPLETE
     if status in (search.Status.EXHAUSTED, search.Status.UNSOLVABLE):
         what = "the goal is unreachable" if status == search.Status.UNSOLVABLE else "the search space is exhausted"
         print(f"mymyr: no plan: {what} ({status})", file=sys.stderr)

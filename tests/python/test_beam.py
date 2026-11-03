@@ -125,23 +125,23 @@ def test_invalid_beam_arguments(gripper):
         search.brfs(gripper, **beam(4, "some"))
     with pytest.raises(ValueError, match="positive"):
         search.brfs(gripper, **beam(0))
-    with pytest.raises(ValueError, match="ordered layer kind"):
+    with pytest.raises(ValueError, match="ordered layer order"):
         search.brfs(gripper, beam_width=4)
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match="exclude each other"):
         search.brfs(gripper, max_next_layer_states=8, **beam(4))
-    with pytest.raises(ValueError, match="requires a beam"):
+    with pytest.raises(ValueError, match="needs a beam"):
         search.brfs(gripper, layer_order="goal_count", beam_novelty="survivors_only")
-    with pytest.raises(ValueError, match="randomize_ties requires"):
+    with pytest.raises(ValueError, match="randomize_ties needs"):
         search.brfs(gripper, layer_order="reverse", beam_width=4, randomize_ties=True)
     with pytest.raises(ValueError, match="flat or chunked"):
         search.brfs(gripper, store="compact", **beam(4))
     with pytest.raises(ValueError, match="positive"):
         search.iw_pass(gripper, 1, **beam(0))
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match="exclude each other"):
         search.siw(gripper, **beam(4, max_next_layer_states=3))
-    with pytest.raises(ValueError, match="randomize_ties requires"):
+    with pytest.raises(ValueError, match="randomize_ties needs"):
         search.projective_iw(gripper, layer_order="reverse", randomize_ties=True)
-    with pytest.raises(ValueError, match="AllTested"):
+    with pytest.raises(ValueError, match="all-tested"):
         search.liw(gripper, **beam(4, "survivors_only"))
 
 
@@ -208,9 +208,9 @@ def test_invalid_threads_and_relaxed_arguments(gripper):
             call()
     with pytest.raises(ValueError, match="beam_chunk must be positive"):
         search.iw(gripper, **beam(4, "relaxed_survivors_only", beam_chunk=0))
-    with pytest.raises(ValueError, match="requires Kind::GoalCount"):
+    with pytest.raises(ValueError, match="goal-count layer order"):
         search.iw(gripper, layer_order="reverse", beam_width=4, beam_novelty="relaxed_survivors_only")
-    with pytest.raises(ValueError, match="requires Kind::GoalCount"):
+    with pytest.raises(ValueError, match="goal-count layer order"):
         search.brfs(gripper, layer_order="in_order", beam_width=4, beam_novelty="relaxed_survivors_only")
     with pytest.raises(ValueError, match="observer"):
         search.brfs(gripper, observer=Expansions(), **beam(4, "relaxed_survivors_only"))
