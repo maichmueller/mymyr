@@ -284,3 +284,147 @@ def test_scored_layers_record_trees():
     assert ta.num_nodes == tb.num_nodes > 0
     assert np.array_equal(np.asarray(ta.rows), np.asarray(tb.rows))
     assert np.array_equal(np.asarray(ta.parent), np.asarray(tb.parent))
+
+
+# ------------------------------------------------------------------------------------------------ SharedEvaluator
+
+
+class PerTask:
+    """A per-row evaluator over several tasks: h of each row by its task's own heuristic (a row's value does not
+    depend on the other rows of the call)."""
+
+    def __init__(self, tasks, kind="max", encoder=None):
+        self.hs = [(t, search.Heuristic(t, kind)) for t in tasks]
+        self.calls = 0
+        self.sizes = []
+        if encoder is not None:
+            self.encoder = encoder
+
+    def heuristic_of(self, task):
+        return next(h for t, h in self.hs if t is task)
+
+    def evaluate_batch(self, batch):
+        self.calls += 1
+        self.sizes.append(len(batch))
+        if getattr(self, "encoder", None) is not None:
+            assert batch.encoded is not None
+        return np.array([self.heuristic_of(batch.tasks[i])(s) for i, s in zip(batch.task_ids, batch.states)])
+
+
+def run_threads(fn, items, threads=8):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(threads) as pool:
+        return list(pool.map(fn, items))
+
+
+def summary(r):
+    return (r.status, r.cost, plan_of(r), r.stats.expanded, r.evaluations)
+
+
+TEXT_TASKS = ["depot__p02", "logistics00__probLOGISTICS-6-1", "gripper__prob05", "blocks__probBLOCKS-8-0"]
+
+
+@pytest.mark.parametrize("k", [1, 16])
+def test_shared_evaluator_results_equal_the_searches_alone(k):
+    tasks = [text_task(n) for n in TEXT_TASKS] * 3
+    runs = [(t, algorithm) for i, t in enumerate(tasks) for algorithm in (("astar", "gbfs")[i % 2],)]
+
+    def alone(item):
+        t, algorithm = item
+        return summary(getattr(search, algorithm)(t, heuristic=PerTask([t]), expansion_batch=k, max_expanded=1500))
+
+    expected = [alone(item) for item in runs]
+    model = PerTask(list(dict.fromkeys(tasks)))
+    shared = search.SharedEvaluator(model, max_batch=512, max_wait=0.01)
+    got = run_threads(lambda item: summary(getattr(search, item[1])(item[0], heuristic=shared, expansion_batch=k,
+                                                                    max_expanded=1500)), runs)
+    assert got == expected
+    assert shared.calls == model.calls and shared.rows == sum(model.sizes) == sum(e[-1] for e in expected)
+    assert shared.largest_batch == max(model.sizes)
+    # the requests of several searches were coalesced
+    assert shared.calls < sum(e[-1] for e in expected)
+
+
+def test_shared_evaluator_over_a_table_encoder():
+    tasks = gripper_tasks()
+    table = rl.TaskTable(tasks)
+    model = PerTask(tasks, "ff", encoder=encoding.FlatRelationEncoder(table))
+    shared = search.SharedEvaluator(model, max_batch=256, max_wait=0.01)
+    expected = [summary(search.gbfs(t, heuristic=PerTask([t], "ff"), expansion_batch=8, max_expanded=2000))
+                for t in tasks]
+    got = run_threads(lambda t: summary(search.gbfs(t, heuristic=shared, expansion_batch=8, max_expanded=2000)), tasks,
+                      threads=3)
+    assert got == expected and shared.calls > 0
+
+
+def test_shared_scores_of_beam_layers():
+    tasks = [text_task(n) for n in TEXT_TASKS]
+    model = PerTask(tasks, kind="goal_count")
+    shared = search.SharedEvaluator(model, max_wait=0.01)
+
+    def beam(t, scorer):
+        r = search.iw(t, max_width=1, layer_order=scorer, beam_width=16)
+        return r.status, plan_of(r), r.stats.expanded
+
+    expected = [beam(t, PerTask([t], kind="goal_count")) for t in tasks]
+    assert run_threads(lambda t: beam(t, shared), tasks, threads=4) == expected
+    assert [beam(t, "goal_count") for t in tasks] == expected  # goal_count's ranking
+
+
+def test_shared_evaluator_errors_cancellation_and_deadlines():
+    tasks = [text_task(n) for n in TEXT_TASKS] * 2
+
+    class Failing(PerTask):
+        def evaluate_batch(self, batch):
+            if self.calls >= 3:
+                raise KeyError("model failure")
+            return super().evaluate_batch(batch)
+
+    shared = search.SharedEvaluator(Failing(list(dict.fromkeys(tasks))), max_wait=0.005)
+
+    def run(t):
+        try:
+            search.gbfs(t, heuristic=shared, max_expanded=1500)
+        except KeyError as e:
+            return str(e)
+        return "solved"
+
+    outcomes = run_threads(run, tasks)
+    assert "'model failure'" in outcomes  # no search hangs; the failing calls fail their searches
+    # cancellation and deadlines of some searches while others keep waiting on the evaluator
+    model = PerTask(list(dict.fromkeys(tasks)))
+    shared = search.SharedEvaluator(model, max_wait=0.002)
+    tokens = [search.CancelToken() for _ in tasks]
+    for token in tokens[::2]:
+        token.request()
+
+    def bounded(i):
+        r = search.astar(tasks[i], heuristic=shared, cancel=tokens[i], max_seconds=None if i % 4 else 0.05,
+                         max_expanded=1500)
+        return r.status
+
+    statuses = run_threads(bounded, range(len(tasks)))
+    assert all(s == Status.CANCELLED for s in statuses[::2])
+    assert all(s in (Status.SOLVED, Status.OUT_OF_TIME, Status.OUT_OF_STATES) for s in statuses[1::2])
+
+
+def test_shared_evaluator_arguments(task):
+    with pytest.raises(TypeError, match="calls evaluate_batch"):
+        search.SharedEvaluator(lambda s: 0.0)
+    model = Recording(task)
+    with pytest.raises(ValueError, match="max_batch must be positive"):
+        search.SharedEvaluator(model, max_batch=0)
+    with pytest.raises(ValueError, match="max_wait"):
+        search.SharedEvaluator(model, max_wait=-1)
+    shared = search.SharedEvaluator(model, max_batch=7, max_wait=0.5)
+    assert shared.evaluator is model and shared.max_batch == 7 and shared.max_wait == 0.5
+    with pytest.raises(TypeError, match="not another SharedEvaluator"):
+        search.SharedEvaluator(shared)
+    # one search alone never waits for max_wait: every search of the evaluator is waiting
+    import time
+
+    t0 = time.perf_counter()
+    r = search.gbfs(task, heuristic=shared)
+    elapsed = time.perf_counter() - t0
+    assert r.status == Status.SOLVED and shared.calls > 2 and elapsed < 0.5  # one wait of max_wait would take 0.5 s
