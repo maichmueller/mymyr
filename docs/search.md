@@ -612,6 +612,104 @@ assert sum(w.expanded for w in observer.workers) == result.stats.expanded
 print(len(result.plan), "steps;", len(set().union(*(w.threads for w in observer.workers))), "threads")
 ```
 
+## Learned heuristics and scores
+
+A heuristic written in Python is an *evaluator* (`mymyr._typing.Evaluator`): a callable `state -> float`, or an object
+with `evaluate(state)` and/or `evaluate_batch(batch)`. Wherever a search evaluates several states at once it calls
+`evaluate_batch` with a `search.StateBatch`, the states as arrays rather than State objects:
+
+| Field | Content |
+|---|---|
+| `batch.rows` | read-only `uint64 [N, words + numeric_words]`: the packed state rows (the layout of encoders, datasets and `rl`) |
+| `batch.task_ids`, `batch.tasks` | `int32 [N]`: the task of each row, `batch.tasks[batch.task_ids[i]]` |
+| `batch.encoded` | the rows encoded by the evaluator's `encoder`, or None |
+| `batch.states` | the rows as States, made on first use |
+
+`evaluate_batch` returns one value per row: a NumPy array, a CPU tensor (`[N]` or `[N, 1]`, any real or integer dtype)
+or a sequence. Heuristic values are `>= 0`, with `math.inf` for a dead end; NaN and negative values raise ValueError.
+An evaluator that sets `encoder` to a [`mymyr.encoding`](encoding.md) encoder (over the search's task, or over a
+`rl.TaskTable` holding it) receives `batch.encoded = encoder.encode(batch.rows, batch.task_ids, **encode_options)`,
+encoded natively from the rows; `encode_options` (a dict, optional) picks the framework of its arrays and the threads,
+and the arrays export to NumPy, torch or JAX without a copy. With a table encoder, `task_ids` are the instances of the
+table, so one model serves instances of every size.
+
+```python
+import numpy as np
+from mymyr import encoding
+
+
+class TupleCounts:
+    """A stand-in for a trained model: a linear function of each graph's tuple counts per relation."""
+
+    def __init__(self, task):
+        self.encoder = encoding.FlatRelationEncoder(task)
+        names = self.encoder.schema.relation_names
+        self.weights = np.array([1.0 if name.endswith("[g]") else -1.0 if name.endswith("[g][sat]") else 0.0
+                                 for name in names])
+
+    def evaluate_batch(self, batch):
+        counts = np.diff(np.asarray(batch.encoded.relation_offsets)).reshape(len(batch), -1)
+        return np.maximum(counts @ self.weights, 0.0)
+
+
+logistics = mymyr.Task.from_text("tests/data/tasks/logistics00__probLOGISTICS-6-1.txt")
+model = TupleCounts(logistics)
+greedy = search.gbfs(logistics, heuristic=model, expansion_batch=16)
+assert greedy.solved
+```
+
+**Batched expansions.** Eager A* and eager GBFS evaluate the new successors of one expansion per call; with
+`expansion_batch=k` they pop and expand up to `k` open states per round and evaluate the new successors of all of them
+in one call, so that a model sees hundreds of states per call. The transitions are then handled expansion by
+expansion as before. What changes with `k > 1`: the states of a round are popped before the successors of the earlier
+ones are known, so up to `k - 1` states per round are expanded that the one-expansion search would expand later or
+never; node order, plans among equal-cost ones and the counts (`expanded`, `generated`, `evaluations`) differ from
+`k = 1`. What holds: A* returns an optimal plan with an admissible heuristic as long as it reopens states (`reopen=True`,
+the default; a goal is accepted only before a round's first pop), weighted A* keeps its `w * C*` bound under the same
+condition, and GBFS stays complete on finite spaces; a consistent heuristic no longer makes reopening unnecessary.
+Budgets are checked before every pop (`max_expanded` is exact). Lazy searches and path-dependent heuristics
+(`lmcount`) refuse `k > 1`. Beam search already evaluates a whole layer per call.
+
+**Scored layers.** IW, SIW, `iw_pass`, `brfs` and the IW family take an evaluator as `layer_order`: every next layer is
+scored in one `evaluate_batch` call at the layer boundary and ranked by the scores, lower first (any number but NaN;
+`inf` ranks last), with ties as for `"goal_count"` (generation order, or random tokens with `randomize_ties`). The rest
+is the same as for `"goal_count"`: `beam_width`, `max_next_layer_states`, `beam_novelty="all_tested"` and
+`"survivors_only"`, `tree=` recording, and `threads` (the layer is generated on the threads, scored on the calling
+thread, with the single-threaded result). `"relaxed_survivors_only"` ranks per part during generation and refuses an
+evaluator.
+
+```python
+beam = search.brfs(logistics, layer_order=model, beam_width=32)
+assert beam.solved
+```
+
+**One model for many searches.** `search.SharedEvaluator(evaluator, max_batch=1024, max_wait=0.001)` is passed as
+`heuristic=` or `layer_order=` to searches running on several threads (free-threaded Python runs them in parallel;
+every search runs with the thread state detached). Each search hands over its batch and waits; one of the waiting
+searches calls `evaluate_batch` once on the batches of all of them (`batch.task_ids` tells the rows apart), in arrival
+order, never splitting a search's batch. A call is made when the waiting batches hold `max_batch` states, when every
+search using the evaluator is waiting, or when the oldest has waited `max_wait` seconds; `evaluate_batch` never runs on
+two threads at once. A search's result is the result it has alone whenever the model computes each row's value from
+that row alone; only the number and composition of the calls depend on the timing. An exception in a call fails every
+search with a batch in it (each re-raises it); a cancelled search or one past its deadline stops once its batch is
+answered, so waiting is bounded by `max_wait` plus the running call. `shared.calls`, `shared.rows` and
+`shared.largest_batch` count the calls.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+shared = search.SharedEvaluator(model, max_batch=2048, max_wait=0.002)
+with ThreadPoolExecutor(4) as pool:
+    results = list(pool.map(lambda seed: search.brfs(logistics, layer_order=shared, beam_width=32,
+                                                     randomize_ties=True, seed=seed), range(4)))
+assert all(r.solved for r in results) and shared.calls > 0
+```
+
+In C++ the same pieces are `BestFirstOptions::expansion_batch`, `LayerOrdering::Kind::Scored` with
+`LayerOrdering::scorer`, and `heuristics::SharedEvaluator` with a `heuristics::SharedHeuristic` per search
+(`mymyr/heuristics/shared.hpp`). [`examples/learned_search.py`](../examples/learned_search.py) runs a model in A* and
+over instances of three sizes on three threads.
+
 ## Encoding the states of a search
 
 The states a search meets, expanded or still on its frontier, encode into relational graphs for a learned heuristic or
