@@ -566,7 +566,8 @@ class BatchedEnv:
     ) -> "CapturedRollout":
         """``steps`` steps (actions from ``policy(self)``, or the random policy) captured into one CUDA graph: a
         :class:`CapturedRollout`, whose ``replay()`` runs them with one launch and returns their stacked outputs. Needs
-        ``capturable`` (a device environment on the fast path)."""
+        ``capturable`` (a device environment on the fast path). The capture checks the calls of this thread only
+        (torch's ``capture_error_mode="thread_local"``): other threads may use CUDA on their own streams meanwhile."""
         return CapturedRollout(self, steps, policy, next_task_ids=next_task_ids, final=final, pool=pool)
 
     def set_launch(self, launch: str) -> None:
