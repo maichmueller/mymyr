@@ -125,6 +125,7 @@ add_library(mymyr_core STATIC
     src/mymyr/rl/literal_index.cpp
     src/mymyr/rl/match.cpp
     # heuristics and best-first search
+    src/mymyr/heuristics/shared.cpp
     src/mymyr/heuristics/action_costs.cpp
     src/mymyr/heuristics/relaxed_task.cpp
     src/mymyr/heuristics/heuristics.cpp

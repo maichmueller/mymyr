@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <string>
 
@@ -319,114 +320,27 @@ void evaluate_parts(const std::shared_ptr<const Evaluator>& e, std::span<BatchPa
 
 // ------------------------------------------------------------------------------------------------ SharedEvaluator
 
-PySharedEvaluator::PySharedEvaluator(nb::handle obj, u64 max_batch_, double max_wait_)
-    : evaluator(std::make_shared<const Evaluator>(obj)), max_batch(max_batch_)
+PySharedEvaluator::PySharedEvaluator(nb::handle obj, u64 max_batch, double max_wait)
+    : evaluator(std::make_shared<const Evaluator>(obj))
 {
     if (!evaluator->batch.is_valid())
         raise(PyExc_TypeError, "mymyr: a SharedEvaluator calls evaluate_batch(batch); the evaluator has none");
     if (max_batch == 0)
         raise(PyExc_ValueError, "mymyr: SharedEvaluator max_batch must be positive");
-    if (!(max_wait_ >= 0) || !std::isfinite(max_wait_))
+    if (!(max_wait >= 0) || !std::isfinite(max_wait))
         raise(PyExc_ValueError, "mymyr: SharedEvaluator max_wait must be a finite number of seconds >= 0");
-    max_wait = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(max_wait_));
-}
-
-void PySharedEvaluator::enter()
-{
-    std::lock_guard lock(m_mutex);
-    ++m_active;
-}
-
-void PySharedEvaluator::leave()
-{
-    {
-        std::lock_guard lock(m_mutex);
-        --m_active;
-    }
-    m_cv.notify_all();  // the other searches may all be waiting now
-}
-
-bool PySharedEvaluator::due(Clock::time_point now) const
-{
-    return !m_queue.empty() &&
-           (m_queued_rows >= max_batch || m_waiting >= m_active || now >= m_queue.front()->since + max_wait);
-}
-
-PyObject* PySharedEvaluator::evaluate(const BatchPart& part)
-{
-    std::unique_lock lock(m_mutex);
-    Request r{&part, Clock::now()};
-    m_queue.push_back(&r);
-    m_queued_rows += part.states.size();
-    ++m_waiting;
-    m_cv.notify_all();
-    while (!r.done)
-    {
-        if (!m_calling && due(Clock::now()))
-            lead(lock);
-        else if (m_calling || m_queue.empty())
-            m_cv.wait(lock);
-        else
-            m_cv.wait_until(lock, m_queue.front()->since + max_wait);
-    }
-    return r.error;
-}
-
-void PySharedEvaluator::lead(std::unique_lock<std::mutex>& lock)
-{
-    m_calling = true;
-    std::vector<Request*> taken;
-    u64 rows = 0;
-    while (!m_queue.empty())
-    {
-        Request* q = m_queue.front();
-        const u64 k = q->part->states.size();
-        if (!taken.empty() && rows + k > max_batch)
-            break;  // requests are never split: one larger than max_batch is called alone
-        taken.push_back(q);
-        rows += k;
-        m_queue.pop_front();
-    }
-    m_queued_rows -= rows;
-    lock.unlock();
-    PyObject* error = nullptr;
-    {
-        nb::gil_scoped_acquire acquire;
-        try
+    using Clock = heuristics::SharedEvaluator::Clock;
+    core = std::make_unique<heuristics::SharedEvaluator>(
+        [e = evaluator](std::span<const heuristics::SharedEvaluator::Request> requests)
         {
+            nb::gil_scoped_acquire acquire;
             std::vector<BatchPart> parts;
-            parts.reserve(taken.size());
-            for (const Request* q : taken)
-                parts.push_back(*q->part);
-            evaluate_parts(evaluator, parts);
-        }
-        catch (nb::python_error& e)
-        {
-            error = e.value().inc_ref().ptr();
-        }
-        catch (const std::exception& e)
-        {
-            PyErr_SetString(PyExc_RuntimeError, e.what());
-            error = PyErr_GetRaisedException();
-        }
-        for (usize i = 1; error && i < taken.size(); ++i)
-            Py_INCREF(error);  // one reference per request
-    }
-    m_calls.fetch_add(1, std::memory_order_relaxed);
-    m_rows.fetch_add(rows, std::memory_order_relaxed);
-    u64 largest = m_largest.load(std::memory_order_relaxed);
-    while (rows > largest && !m_largest.compare_exchange_weak(largest, rows, std::memory_order_relaxed))
-    {
-    }
-    lock.lock();
-    for (Request* q : taken)
-    {
-        q->done = true;
-        q->error = error;
-    }
-    m_waiting -= static_cast<u32>(taken.size());
-    m_calling = false;
-    m_cv.notify_all();
+            parts.reserve(requests.size());
+            for (const heuristics::SharedEvaluator::Request& r : requests)
+                parts.push_back(*static_cast<const BatchPart*>(r.tag));
+            evaluate_parts(e, parts);
+        },
+        max_batch, std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(max_wait)));
 }
 
 // ------------------------------------------------------------------------------------------------ search adapters
@@ -442,7 +356,7 @@ PyEvaluatorHeuristic::PyEvaluatorHeuristic(nb::handle obj, Owner owner, Callback
         m_shared_obj = nb::borrow(obj);
         m_shared = shared;
         m_batched = true;
-        m_shared->enter();
+        m_shared->core->enter();
         return;
     }
     m_eval = std::make_shared<const Evaluator>(obj);
@@ -453,7 +367,7 @@ PyEvaluatorHeuristic::PyEvaluatorHeuristic(nb::handle obj, Owner owner, Callback
 PyEvaluatorHeuristic::~PyEvaluatorHeuristic()
 {
     if (m_shared)
-        m_shared->leave();
+        m_shared->core->leave();
     nb::gil_scoped_acquire acquire;
     m_eval.reset();
     m_shared_obj.reset();
@@ -513,19 +427,19 @@ void PyEvaluatorHeuristic::evaluate_batch(std::span<const StateView> states, std
     BatchPart part{states, &m_owner, m_instance, out, m_kind};
     if (m_shared)
     {
-        PyObject* error = nullptr;
+        std::exception_ptr error;
+        const heuristics::SharedEvaluator::Request request{states, out, &part};
         if (PyGILState_Check())
         {
             nb::gil_scoped_release release;  // the coalesced call may run on another thread
-            error = m_shared->evaluate(part);
+            error = m_shared->core->evaluate(request);
         }
         else
-            error = m_shared->evaluate(part);
+            error = m_shared->core->evaluate(request);
         if (error)
         {
             nb::gil_scoped_acquire acquire;
-            PyErr_SetRaisedException(error);
-            m_errors.record(nb::python_error());
+            record(error);
             std::ranges::fill(out, failed_value);
             return;
         }
@@ -545,6 +459,24 @@ void PyEvaluatorHeuristic::evaluate_batch(std::span<const StateView> states, std
         m_errors.record(std::move(e));
         std::ranges::fill(out, failed_value);
     }
+}
+
+void PyEvaluatorHeuristic::record(const std::exception_ptr& error)
+{
+    try
+    {
+        std::rethrow_exception(error);
+    }
+    catch (const nb::python_error& e)
+    {
+        // the exception object is shared by every search of the failed call: each raises its own reference
+        PyErr_SetRaisedException(Py_NewRef(e.value().ptr()));
+    }
+    catch (const std::exception& e)
+    {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+    }
+    m_errors.record(nb::python_error());
 }
 
 bool PyEvaluatorHeuristic::preferred(const ActionLabel& a) const
@@ -675,11 +607,14 @@ void bind_evaluators(nb::module_& m)
              "max_wait: seconds a request waits for others before it is called.")
         .def_prop_ro("evaluator", [](const PySharedEvaluator& s) { return nb::borrow<Arg<ann::Evaluator>>(s.evaluator->obj); },
                      "The wrapped evaluator.")
-        .def_prop_ro("max_batch", [](const PySharedEvaluator& s) { return s.max_batch; })
+        .def_prop_ro("max_batch", [](const PySharedEvaluator& s) { return s.core->max_batch(); })
         .def_prop_ro("max_wait",
-                     [](const PySharedEvaluator& s) { return std::chrono::duration<double>(s.max_wait).count(); })
-        .def_prop_ro("calls", &PySharedEvaluator::calls, "evaluate_batch calls made so far.")
-        .def_prop_ro("rows", &PySharedEvaluator::rows, "States evaluated so far, over all calls.")
-        .def_prop_ro("largest_batch", &PySharedEvaluator::largest, "The most states of one call so far.");
+                     [](const PySharedEvaluator& s) { return std::chrono::duration<double>(s.core->max_wait()).count(); })
+        .def_prop_ro("calls", [](const PySharedEvaluator& s) { return s.core->calls(); },
+                     "evaluate_batch calls made so far.")
+        .def_prop_ro("rows", [](const PySharedEvaluator& s) { return s.core->rows(); },
+                     "States evaluated so far, over all calls.")
+        .def_prop_ro("largest_batch", [](const PySharedEvaluator& s) { return s.core->largest(); },
+                     "The most states of one call so far.");
 }
 }  // namespace mymyr::python

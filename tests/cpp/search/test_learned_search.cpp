@@ -1,10 +1,13 @@
-// Searches for learned evaluators: batched expansions of eager A* and eager GBFS (BestFirstOptions::expansion_batch)
-// and scored layer orderings (LayerOrdering::Kind::Scored). A* with batched expansions stays optimal with an
+// Searches for learned evaluators: batched expansions of eager A* and eager GBFS (BestFirstOptions::expansion_batch),
+// scored layer orderings (LayerOrdering::Kind::Scored) and one evaluator shared by searches on many threads
+// (heuristics::SharedEvaluator). A* with batched expansions stays optimal with an
 // admissible heuristic and hands the evaluator larger batches; a scorer that computes GoalCount's key ranks exactly as
-// GoalCount does, in every beam mode, with random ties and with threads.
+// GoalCount does, in every beam mode, with random ties and with threads; searches sharing an evaluator get the results
+// they get alone, and a failing call, cancellation or deadlines never leave a search waiting.
 
 #include "../support/suite.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
+#include "mymyr/heuristics/shared.hpp"
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/search/iw.hpp"
@@ -21,6 +24,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace mymyr;
@@ -312,4 +316,142 @@ TEST(ScoredLayers, Refusals)
     o.layers.kind = LayerOrdering::Kind::Scored;
     o.layers.scorer = [](std::span<const StateView>, std::span<f64> out) { std::ranges::fill(out, std::nan("")); };
     EXPECT_THROW((void)iw(*task, o), std::invalid_argument);
+}
+
+// ------------------------------------------------------------------------------------------------ shared evaluator
+
+namespace
+{
+/// One search of a shared run: its task, its own h_max (the request's tag: the call evaluates each request with the
+/// heuristic of its search) and its result.
+struct SharedRun
+{
+    std::shared_ptr<const Task> task;
+    std::unique_ptr<heuristics::Heuristic> h;
+    bool astar = false;
+    CancelToken cancel;
+    BestFirstResult result;
+};
+
+BestFirstResult run_one(SharedRun& run, heuristics::Heuristic& evaluator, u32 k)
+{
+    BestFirstOptions o;
+    o.evaluator = &evaluator;
+    o.expansion_batch = k;
+    o.queue = BestFirstOptions::Queue::Heap;
+    o.control.cancel = run.cancel;
+    o.control.budget.max_expanded = 3000;
+    return run.astar ? astar_eager(*run.task, o) : gbfs_eager(*run.task, o);
+}
+
+std::vector<SharedRun> shared_runs(usize copies)
+{
+    std::vector<SharedRun> runs;
+    for (usize c = 0; c < copies; ++c)
+        for (const char* name : {"depot__p02", "philosophers__p03-phil4", "pegsol-08-strips__p22", "gripper__prob05"})
+        {
+            SharedRun r;
+            r.task = load(name);
+            heuristics::Options ho;
+            ho.kind = heuristics::Kind::Max;
+            r.h = heuristics::make_heuristic(*r.task, ho);
+            r.astar = runs.size() % 2 == 0;
+            runs.push_back(std::move(r));
+        }
+    return runs;
+}
+
+/// The call of a shared evaluator: every request by the heuristic of its search.
+void per_search(std::span<const heuristics::SharedEvaluator::Request> requests)
+{
+    for (const auto& r : requests)
+    {
+        auto* run = static_cast<SharedRun*>(const_cast<void*>(r.tag));
+        for (usize i = 0; i < r.states.size(); ++i)
+            r.out[i] = run->h->evaluate(r.states[i]);
+    }
+}
+
+void run_threads(std::vector<SharedRun>& runs, heuristics::SharedEvaluator& shared, u32 k)
+{
+    std::vector<std::thread> threads;
+    for (SharedRun& run : runs)
+        threads.emplace_back([&run, &shared, k] {
+            heuristics::SharedHeuristic h(shared, &run);
+            run.result = run_one(run, h, k);
+        });
+    for (std::thread& t : threads)
+        t.join();
+}
+}  // namespace
+
+TEST(SharedEvaluator, SearchesGetTheirResultsAlone)
+{
+    for (const u32 k : {1u, 8u})
+    {
+        std::vector<SharedRun> runs = shared_runs(2);
+        std::vector<BestFirstResult> alone;
+        for (SharedRun& run : runs)
+        {
+            heuristics::SharedEvaluator own(per_search);
+            heuristics::SharedHeuristic h(own, &run);
+            alone.push_back(run_one(run, h, k));
+        }
+        u64 requests = 0;
+        heuristics::SharedEvaluator shared(
+            [&](std::span<const heuristics::SharedEvaluator::Request> rs)
+            {
+                requests += rs.size();
+                per_search(rs);
+            },
+            256, std::chrono::milliseconds(5));
+        run_threads(runs, shared, k);
+        for (usize i = 0; i < runs.size(); ++i)
+        {
+            const std::string what = "search " + std::to_string(i) + " k=" + std::to_string(k);
+            EXPECT_EQ(runs[i].result.status, alone[i].status) << what;
+            EXPECT_EQ(runs[i].result.plan, alone[i].plan) << what;
+            EXPECT_EQ(runs[i].result.stats.expanded, alone[i].stats.expanded) << what;
+            EXPECT_EQ(runs[i].result.evaluations, alone[i].evaluations) << what;
+        }
+        EXPECT_EQ(shared.calls() > 0, true);
+        EXPECT_LE(shared.calls(), requests);
+        EXPECT_GE(shared.largest(), 1u);
+    }
+}
+
+TEST(SharedEvaluator, AFailingCallCancellationAndDeadlinesNeverHang)
+{
+    std::vector<SharedRun> runs = shared_runs(2);
+    std::atomic<u32> calls{0};
+    heuristics::SharedEvaluator failing(
+        [&](std::span<const heuristics::SharedEvaluator::Request> rs)
+        {
+            if (calls.fetch_add(1) >= 20)
+                throw std::runtime_error("model failure");
+            per_search(rs);
+        },
+        64, std::chrono::milliseconds(2));
+    run_threads(runs, failing, 4);
+    u32 failed = 0;
+    for (const SharedRun& run : runs)
+        if (run.result.status == SearchStatus::Failed)
+        {
+            ++failed;
+            EXPECT_EQ(run.result.message, "model failure");
+        }
+    EXPECT_GT(failed, 0u);
+
+    runs = shared_runs(2);
+    for (usize i = 0; i < runs.size(); i += 2)
+        runs[i].cancel.request();
+    heuristics::SharedEvaluator shared(per_search, 64, std::chrono::milliseconds(2));
+    run_threads(runs, shared, 4);
+    for (usize i = 0; i < runs.size(); ++i)
+        if (i % 2 == 0)
+            EXPECT_EQ(runs[i].result.status, SearchStatus::Cancelled) << i;
+        else
+            EXPECT_NE(runs[i].result.status, SearchStatus::Failed) << i;
+    EXPECT_THROW(heuristics::SharedEvaluator(per_search, 0), std::invalid_argument);
+    EXPECT_THROW(heuristics::SharedEvaluator({}), std::invalid_argument);
 }

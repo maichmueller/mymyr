@@ -10,15 +10,13 @@
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
+#include "mymyr/heuristics/shared.hpp"
 #include "mymyr/search/control.hpp"
 #include "mymyr/state/state.hpp"
 
 #include <nanobind/nanobind.h>
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -106,54 +104,17 @@ void evaluate_parts(const std::shared_ptr<const Evaluator>& e, std::span<BatchPa
 /// The float of a Python number as a value of `kind` (python_error for non-numbers and values outside the kind).
 [[nodiscard]] f64 value_of(PyObject* x, ValueKind kind);
 
-/// mymyr.search.SharedEvaluator: an evaluator shared by searches on any number of threads. Each search submits its
-/// batches and waits; one waiting search at a time calls evaluate_batch on the coalesced requests of all of them.
+/// mymyr.search.SharedEvaluator: an evaluator shared by searches on any number of threads, coalescing their batches
+/// into one evaluate_batch call (heuristics::SharedEvaluator; each request's tag is its BatchPart).
 class PySharedEvaluator
 {
 public:
-    using Clock = std::chrono::steady_clock;
-
     PySharedEvaluator(nb::handle evaluator, u64 max_batch, double max_wait);
     PySharedEvaluator(const PySharedEvaluator&) = delete;
     PySharedEvaluator& operator=(const PySharedEvaluator&) = delete;
 
     std::shared_ptr<const Evaluator> evaluator;
-    u64 max_batch;
-    Clock::duration max_wait;
-
-    /// A search starts or ends using the evaluator (thread state attached or not; never blocks long).
-    void enter();
-    void leave();
-    /// Evaluates `part` among the coalesced requests; call with the thread state detached. Returns the exception the
-    /// call raised (a new reference; nullptr on success), for the caller to record with an attached thread state.
-    [[nodiscard]] PyObject* evaluate(const BatchPart& part);
-
-    [[nodiscard]] u64 calls() const noexcept { return m_calls.load(std::memory_order_relaxed); }
-    [[nodiscard]] u64 rows() const noexcept { return m_rows.load(std::memory_order_relaxed); }
-    [[nodiscard]] u64 largest() const noexcept { return m_largest.load(std::memory_order_relaxed); }
-
-private:
-    struct Request
-    {
-        const BatchPart* part;
-        Clock::time_point since;
-        bool done = false;
-        PyObject* error = nullptr;
-    };
-    /// Whether the queue should be called now: a full batch, every active search waiting, or the oldest request
-    /// waited max_wait.
-    [[nodiscard]] bool due(Clock::time_point now) const;
-    /// Takes requests off the queue and calls the evaluator on them (m is unlocked during the call).
-    void lead(std::unique_lock<std::mutex>& lock);
-
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-    std::deque<Request*> m_queue;
-    u64 m_queued_rows = 0;
-    u32 m_active = 0;   // searches using the evaluator
-    u32 m_waiting = 0;  // searches whose request is not answered
-    bool m_calling = false;
-    std::atomic<u64> m_calls{0}, m_rows{0}, m_largest{0};
+    std::unique_ptr<heuristics::SharedEvaluator> core;
 };
 
 /// A search's view of a Python evaluator (heuristics::Kind::Custom): an evaluator object of its own or a
@@ -183,6 +144,8 @@ public:
 private:
     void count(heuristics::Value v);
     void load_preferred(nb::handle actions);
+    /// Records the exception of a shared call as this search's error (thread state attached).
+    void record(const std::exception_ptr& error);
 
     Owner m_owner;
     CallbackErrors& m_errors;
