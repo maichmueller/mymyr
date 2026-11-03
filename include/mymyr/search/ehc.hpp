@@ -35,7 +35,7 @@
 // status is the status of the plan up to it. A state reached again in a later lookahead gets the status of that path.
 //
 // SearchControl: budget.max_states bounds the stored states (every state of every lookahead: they share one store;
-// the fallback search has its own), max_expanded the expansions (hill-climbing and fallback together), max_depth the
+// the fallback search gets what they left), max_expanded the expansions (hill-climbing and fallback together), max_depth the
 // plan length of an expanded state, max_seconds the whole call (fallback included); cancel and on_progress returning
 // false give Cancelled. blocked_states are never entered. The goal: GoalSpec::Task, AnyOf or Custom, as for the
 // best-first searches (best_first.hpp), with the same requirements on the heuristic. Observer events: on_start,

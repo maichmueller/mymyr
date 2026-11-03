@@ -497,3 +497,66 @@ def test_grounded_and_lifted_relaxations_agree_on_contradictory_conditions(name,
                 assert (a == math.inf) == (b == math.inf), (kind, str(s))
             else:
                 assert a == b, (kind, str(s), a, b)
+
+
+# ------------------------------------------------------------------------------------------------ budgets of passes
+
+LOGISTICS = ("logistics00/domain.pddl", "logistics00/probLOGISTICS-6-1.pddl")
+
+
+@pytest.fixture(scope="module")
+def logistics():
+    from conftest import ROOT
+
+    d = ROOT / "tests" / "data" / "pddl"
+    return mymyr.Task.from_pddl(str(d / LOGISTICS[0]), str(d / LOGISTICS[1]))
+
+
+def iw_passes(r):
+    if hasattr(r, "subproblems"):
+        return [p.stats for s in r.subproblems for p in s.passes]
+    return [p.stats for p in r.passes]
+
+
+PASS_SEARCHES = [
+    ("iw", lambda t, **kw: [search.iw(t, **kw)], iw_passes),
+    ("siw", lambda t, **kw: [search.siw(t, **kw)], iw_passes),
+    ("liw", lambda t, **kw: [search.liw(t, **kw)], iw_passes),
+    ("find_rollouts_parallel", lambda t, **kw: list(search.find_rollouts_parallel(t, [1, 2], **kw).rollouts), iw_passes),
+    ("anytime_astar", lambda t, **kw: [search.anytime_astar(t, heuristic="blind", weights=(3, 2, 1), **kw)],
+     lambda r: [i.stats for i in r.iterations]),
+]
+
+
+@pytest.mark.parametrize("name,run,passes", PASS_SEARCHES, ids=[p[0] for p in PASS_SEARCHES])
+def test_budgets_bound_every_pass_together(logistics, name, run, passes):
+    for limit in [5, 17, 50]:
+        for r in run(logistics, max_expanded=limit):
+            assert r.stats.expanded <= limit and sum(p.expanded for p in passes(r)) == r.stats.expanded
+            assert r.status == Status.OUT_OF_STATES
+        for r in run(logistics, max_states=limit):
+            assert r.stats.states <= limit
+            assert r.status == Status.OUT_OF_STATES
+
+
+@pytest.mark.parametrize("name,run,passes", PASS_SEARCHES, ids=[p[0] for p in PASS_SEARCHES])
+def test_max_expanded_local_bounds_each_pass(logistics, name, run, passes):
+    unbounded = run(logistics, max_expanded_local=10**9)
+    for limit in [3, 12, 40]:
+        for r, free in zip(run(logistics, max_expanded_local=limit), unbounded):
+            per_pass = [p.expanded for p in passes(r)]
+            assert per_pass and max(per_pass) <= limit
+            # a pass that reached the limit ends the search; the passes before it ran as without a limit
+            assert per_pass[:-1] == [p.expanded for p in passes(free)][: len(per_pass) - 1]
+            if per_pass[-1] == limit and r.status != Status.SOLVED:
+                assert r.status == Status.OUT_OF_STATES
+        both = run(logistics, max_expanded_local=limit, max_expanded=limit + 5)
+        for r in both:
+            assert r.stats.expanded <= limit + 5 and max(p.expanded for p in passes(r)) <= limit
+
+
+def test_single_pass_searches_take_no_max_expanded_local(logistics):
+    for f in (search.astar, search.gbfs, search.brfs, search.iw_pass, search.astar_iw, search.ehc):
+        args = (logistics, 1) if f is search.iw_pass else (logistics,)
+        with pytest.raises(TypeError):
+            f(*args, max_expanded_local=5)

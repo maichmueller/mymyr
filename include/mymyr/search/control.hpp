@@ -57,8 +57,12 @@ inline constexpr u32 k_check_transitions = 1024;
 
 /// Limits. Unset members are unlimited.
 ///
-/// max_states bounds the states a search stores, the start state included (IW: the nodes of a pass's tree; rollout
-/// IW: the new nodes its rollouts register). The search stops with OutOfStates as soon as
+/// max_states and max_expanded bound the whole search: a search made of several passes (the IW and LIW ladders,
+/// SIW's subproblems, the iterations of anytime A*, EHC's fallback) hands each pass what the earlier ones left. The
+/// ladders and anytime A* also take a max_expanded_local that caps each pass alone.
+///
+/// max_states bounds the states a search stores, the start state included (IW: the nodes of the passes' trees;
+/// rollout IW: the new nodes its rollouts register). The search stops with OutOfStates as soon as
 /// it holds max_states states: the count is checked as each new state is stored, inside the expansion that finds it,
 /// so a search never stores more than max(max_states, 1) states (multi-threaded BrFS settles the layer that reaches
 /// it, search/brfs.hpp, and the GPU searches check between chunks; see
@@ -66,8 +70,8 @@ inline constexpr u32 k_check_transitions = 1024;
 /// expansion and every k_check_transitions transitions inside one.
 struct Budget
 {
-    u64 max_states = std::numeric_limits<u64>::max();    // stored states (per pass in IW ladders)
-    u64 max_expanded = std::numeric_limits<u64>::max();  // expanded states
+    u64 max_states = std::numeric_limits<u64>::max();    // stored states, all passes together
+    u64 max_expanded = std::numeric_limits<u64>::max();  // expanded states, all passes together
     u32 max_depth = std::numeric_limits<u32>::max();     // g-depth in actions (BrFS/IW layers)
     double max_seconds = std::numeric_limits<double>::infinity();  // wall time of the whole call
 };

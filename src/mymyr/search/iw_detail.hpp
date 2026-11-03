@@ -7,7 +7,9 @@
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/plan.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -102,6 +104,20 @@ private:
     std::vector<std::pair<u64, u32>> m_index;  // (hash, index), sorted
 };
 
+/// The budget of the next pass of a multi-pass search: what the budget of the whole search leaves after the
+/// earlier passes' `expanded` expansions and `states` stored states, with max_expanded at most `max_expanded_local`.
+[[nodiscard]] inline Budget pass_budget(const Budget& total, u64 max_expanded_local, u64 expanded, u64 states)
+{
+    constexpr u64 k_unlimited = std::numeric_limits<u64>::max();
+    Budget b = total;
+    b.max_expanded = max_expanded_local;
+    if (total.max_expanded != k_unlimited)
+        b.max_expanded = std::min(b.max_expanded, total.max_expanded - std::min(total.max_expanded, expanded));
+    if (total.max_states != k_unlimited)
+        b.max_states = total.max_states - std::min(total.max_states, states);
+    return b;
+}
+
 /// Everything a ladder needs besides the start state and the goal.
 class LayerOrderer;  // layer_order_detail.hpp
 class BeamTeam;      // beam_detail.hpp
@@ -118,6 +134,10 @@ struct Context
     std::unique_ptr<LayerOrderer> layers;  // IwOptions::layers when ordered, else null
     /// The members of the beam's layer step (beam_detail.hpp): with threads > 1 or a relaxed beam, on the fast path.
     std::unique_ptr<BeamTeam> team;
+    /// The budget of the running pass (pass_budget), and what the passes run so far on this context spent: SIW runs
+    /// every subproblem's ladder on one context, so the budget of the whole search spans them all.
+    Budget pass{};
+    u64 spent_expanded = 0, spent_states = 0;
 
     Context(const Task& t, const IwOptions& o, Successors& s);
     ~Context();

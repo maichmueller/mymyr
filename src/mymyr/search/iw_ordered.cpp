@@ -100,7 +100,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
     const auto t0 = Clock::now();
     const Task& task = c.task;
     const IwOptions& o = c.options;
-    const Budget& budget = o.control.budget;
+    const Budget& budget = c.pass;
     const CancelToken& cancel = o.control.cancel;
     SearchObserver* const obs = c.observer;
     Successors& succ = c.succ;

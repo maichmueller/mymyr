@@ -255,6 +255,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         env.obs = worker_obs[k] ? worker_obs[k].get() : root;
         env.root = nullptr;  // lifecycle events are replayed on the calling thread
         env.coord = nullptr;
+        env.max_expanded_local = o.iw.max_expanded_local;
         env.witness = o.iw.witness_pruning;
         env.tree = o.iw.tree;
         env.canonical = o.iw.canonical_order;

@@ -347,7 +347,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     const auto t0 = Clock::now();
     const Task& task = c.task;
     const IwOptions& o = c.options;
-    const Budget& budget = o.control.budget;
+    const Budget& budget = c.pass;
     const CancelToken& cancel = o.control.cancel;
     SearchObserver* const obs = c.observer;
     Successors& succ = c.succ;
@@ -1274,6 +1274,8 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
     {
         r.passes.push_back(p);
         add_pass(r.stats, p);
+        c.spent_expanded += p.expanded;
+        c.spent_states += p.stats().states;
         if (c.observer)
             c.observer->on_pass(p.width, p.stats());
     };
@@ -1310,6 +1312,13 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_wi
         }
         PassOut po;
         const PassSpec ps{.arity = k, .root_continuation = optimize && k == 1};
+        c.pass = pass_budget(o.control.budget, o.max_expanded_local, c.spent_expanded, c.spent_states);
+        if (c.spent_states > 0 && (c.pass.max_states == 0 || c.pass.max_expanded == 0))
+        {
+            // the earlier passes used up the budget: a pass would only store its root again
+            r.status = SearchStatus::OutOfStates;
+            return r;
+        }
         try
         {
             if (k == 1 && o.transition_ordering)

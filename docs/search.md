@@ -172,8 +172,9 @@ afresh; the heuristic is built once and shared.
 | `lazy` | `False` | lazy weighted A* iterations (with `lazy_requeue`, `preferred_operators` and the list weights of `astar`) |
 | `cost_bound` | `None` | the bound of the first iteration |
 
-The other options are those of `astar` and apply to every iteration. `max_seconds` and `max_expanded` bound the whole
-search, `max_states` and `max_depth` each iteration. The search ends when
+The other options are those of `astar` and apply to every iteration. `max_seconds`, `max_states` and `max_expanded`
+bound the whole search (an iteration gets what the earlier ones left), `max_expanded_local` the expansions of each
+iteration and `max_depth` the depth within each iteration. The search ends when
 
 - an iteration exhausts its search space: no plan is cheaper than the best one. With `reopen=True` (the default) and
   no `max_depth` this proves the plan optimal (`result.optimal`);
@@ -385,8 +386,10 @@ fact landmark can differ. To keep a computed index exactly, pickle the graph (or
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and
-`max_seconds=`. `max_states=` counts the states a search stores, the start state included (IW: the nodes of a
-pass): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
+`max_seconds=`. Budgets bound the whole search, every pass of an IW ladder, every SIW subproblem and every anytime
+iteration together; the searches made of several passes take `max_expanded_local=` for the expansions of each pass
+([API conventions](conventions.md)). `max_states=` counts the states a search stores, the start state included (IW:
+the nodes of the passes' trees): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
 never stores more ([API conventions](conventions.md)); the deadline and the cancellation are checked inside
 expansions as well (device BrFS and the numeric device A* and GBFS stop at the same state as the CPU's; the other
 GPU searches check `max_states`, the deadline and the cancellation between chunks, and stop once a chunk's new states

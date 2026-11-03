@@ -124,7 +124,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("--max-seconds", type=float, help="stop the search after this many seconds (exit code 3)")
     plan.add_argument(
-        "--max-states", type=int, help="stop the search after storing this many states (per IW pass; exit code 3)"
+        "--max-states", type=int, help="stop the search after storing this many states (exit code 3)"
     )
     plan.add_argument("-o", "--plan-file", metavar="FILE", help="write the plan to FILE instead of stdout")
     plan.add_argument(

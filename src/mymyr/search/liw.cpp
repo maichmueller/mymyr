@@ -61,6 +61,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const detail::GoalTest goal = detail::GoalTest::from_spec(task, o.control.goal);
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);
+    env.max_expanded_local = o.max_expanded_local;
     env.witness = o.witness_pruning;
     env.tree = o.tree;
     env.canonical = o.canonical_order;

@@ -12,6 +12,7 @@ option names, defaults and result shape. A function documents only where it depa
 | `seeds=` | a sequence of seeds, one run per seed | required |
 | `max_states=` | states a search stores, the start state included | `None` (no limit) |
 | `max_expanded=` | states a search expands | `None` |
+| `max_expanded_local=` | states each pass of a search made of passes expands | `None` |
 | `max_depth=` | the length of the paths a search explores, in actions | `None` |
 | `max_seconds=` | wall time of the whole call, in seconds | `None` |
 | `max_<noun>=` | any other limit (`max_width=`, `max_next_layer_states=`, `max_steps=`, ...) | `None` or a stated value |
@@ -25,7 +26,12 @@ option names, defaults and result shape. A function documents only where it depa
 The thread count never changes a result unless the function says so (the relaxed survivors-only beam does). Seeds are
 integers in `[0, 2**64)`. `max_states` and `max_expanded` end a search with `OUT_OF_STATES`, `max_seconds` with
 `OUT_OF_TIME`; `max_depth` leaves deeper states unexpanded, so a search that runs out of shallower ones ends with
-`EXHAUSTED`. A budget stops a search when it is reached, exactly: the new state that makes the store hold
+`EXHAUSTED`. `max_states`, `max_expanded` and `max_seconds` bound the whole search: a search made of passes (the
+ladders of `iw`, `liw` and each rollout of `find_rollouts_parallel`, the subproblems of `siw`, the iterations of
+`anytime_astar`, the fallback of `ehc`) hands each pass what the earlier passes left, and ends with `OUT_OF_STATES`
+when nothing is left. Those with several passes of their own (`iw`, `siw`, `liw`, `find_rollouts_parallel`,
+`anytime_astar`) also take `max_expanded_local=`, the expansions of each pass alone; `max_depth` applies within each
+pass. A budget stops a search when it is reached, exactly: the new state that makes the store hold
 `max_states` states stops the search inside its parent's expansion, so a stopped search holds exactly
 `max(max_states, 1)` states (the start state always counts), and `max_expanded` stops it before the expansion after
 that many, on every store, thread count and device. State-space generation follows the same rule: it fails with

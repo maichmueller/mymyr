@@ -246,6 +246,14 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         {
             const u32 bound_before = coord.get_incumbent_length();
             ro.control.budget.max_seconds = remaining_seconds();
+            if (control.budget.max_states != std::numeric_limits<u64>::max())
+            {
+                // the rounds of a worker share its state budget
+                const u64 spent = result.rollout_statistics[offset].generated;
+                if (spent >= control.budget.max_states)
+                    return;
+                ro.control.budget.max_states = control.budget.max_states - spent;
+            }
             const RolloutIwResult r = detail::run_rollout_iw(task, ro, hot, nullptr);
             accumulate(result.rollout_statistics[offset], r.rollout);
             result.rollout_statuses[offset] = r.status;

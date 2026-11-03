@@ -88,6 +88,22 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
                 b.max_seconds = std::max(0.0, budget.max_seconds - seconds_since(t0));
             if (budget.max_expanded != std::numeric_limits<u64>::max())
                 b.max_expanded = budget.max_expanded - std::min(budget.max_expanded, r.stats.expanded);
+            b.max_expanded = std::min(b.max_expanded, o.max_expanded_local);
+            if (budget.max_states != std::numeric_limits<u64>::max())
+                b.max_states = budget.max_states - std::min(budget.max_states, r.stats.states);
+            if (k > 0 && (b.max_states == 0 || b.max_expanded == 0))
+            {
+                // the earlier iterations used up the budget: the iteration ends before it stores its start state
+                AnytimeIteration rec;
+                rec.weight = w;
+                rec.cost_bound = incumbent;
+                rec.status = SearchStatus::OutOfStates;
+                r.iterations.push_back(rec);
+                if (obs)
+                    obs->on_pass(k, rec.stats);
+                last = rec.status;
+                break;
+            }
             BestFirstResult x = o.lazy ? astar_lazy(task, it) : astar_eager(task, it);
 
             r.stats.expanded += x.stats.expanded;

@@ -240,9 +240,12 @@ struct Env
     StateTracker* tracker = nullptr;
     LayerOrderer* layers = nullptr;  // ordered layers; null: the queued BrFS
     BeamTeam* team = nullptr;        // the beam's layer step (threads > 1 or a relaxed beam; fast path only)
+    u64 max_expanded_local = ~u64{0};  // the expansions of each pass of a ladder
+    Budget budget;                     // the running pass's budget (pass_budget; novelty_ladder sets it per pass)
 
     Env(const Task& t, Successors& s, const GoalTest& g, const BlockedSet& b, const SearchControl& c)
-        : task(t), succ(s), goal(g), blocked(b), control(c), obs(c.observer), root(c.observer), coord(c.coordination)
+        : task(t), succ(s), goal(g), blocked(b), control(c), obs(c.observer), root(c.observer), coord(c.coordination),
+          budget(c.budget)
     {
         const double secs = c.budget.max_seconds;
         timed = secs < 1e15;
@@ -484,7 +487,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
 {
     const auto t0 = Clock::now();
     const Task& task = env.task;
-    const Budget& budget = env.control.budget;
+    const Budget& budget = env.budget;
     SearchObserver* const obs = env.obs;
     Successors& succ = env.succ;
     IwPassStatistics& st = out.st;
@@ -1291,6 +1294,13 @@ IwResult novelty_ladder(Env& env, StateView root, u32 first, u32 top, bool place
             return r;
         }
         PassOut po;
+        env.budget = pass_budget(env.control.budget, env.max_expanded_local, r.stats.expanded, r.stats.states);
+        if (r.stats.states > 0 && (env.budget.max_states == 0 || env.budget.max_expanded == 0))
+        {
+            // the earlier passes used up the budget: a pass would only store its root again
+            r.status = SearchStatus::OutOfStates;
+            return r;
+        }
         try
         {
             run_pass(k, po);

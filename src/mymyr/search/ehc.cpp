@@ -474,6 +474,8 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
             b.max_seconds = std::max(0.0, b.max_seconds - seconds_since(t0));
         if (b.max_expanded != std::numeric_limits<u64>::max())
             b.max_expanded -= std::min(b.max_expanded, r.stats.expanded);
+        if (b.max_states != std::numeric_limits<u64>::max())
+            b.max_states -= std::min(b.max_states, out.states);
         BestFirstResult f = gbfs_eager(task, g);
         r.status = f.status;
         r.plan = std::move(f.plan);

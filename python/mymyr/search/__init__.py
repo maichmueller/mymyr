@@ -103,8 +103,11 @@ run at once on one task (free-threaded CPython). Common keyword arguments:
 
 - budgets ``max_states``, ``max_expanded``, ``max_depth``, ``max_seconds`` (unset: unlimited; brfs takes
   ``max_states`` and ``max_seconds``). ``max_states`` counts the states a search stores, the start state included
-  (IW: the nodes of a pass); the search stops with OUT_OF_STATES at the new state that fills them, inside its
-  parent's expansion, so it never stores more. The deadline and the cancellation are checked inside expansions too;
+  (IW: the nodes of the passes' trees); the search stops with OUT_OF_STATES at the new state that fills them, inside
+  its parent's expansion, so it never stores more. The deadline and the cancellation are checked inside expansions
+  too. Budgets bound the whole search: every pass of an IW or LIW ladder, every SIW subproblem and every anytime
+  iteration together; iw, siw, liw, find_rollouts_parallel and anytime_astar take ``max_expanded_local``, the
+  expansions of each pass alone;
 - ``cancel``: a :class:`CancelToken`; ``token.request()`` from any thread stops the search (status CANCELLED);
 - ``goal``: ``None`` (the task's goal), a callable ``state -> bool``, a :class:`mymyr.GroundCondition`, or a sequence
   of goals, each a GroundCondition or a sequence of ground literals and atoms (anything ``task.ground_condition``
