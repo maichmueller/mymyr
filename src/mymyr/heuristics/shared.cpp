@@ -31,7 +31,8 @@ void SharedEvaluator::leave()
 {
     {
         std::lock_guard lock(m_mutex);
-        --m_active;
+        if (--m_active == 0)
+            m_errors.clear();
     }
     m_cv.notify_all();  // the remaining searches may all be waiting now
 }
@@ -99,6 +100,8 @@ void SharedEvaluator::lead(std::unique_lock<std::mutex>& lock)
     {
     }
     lock.lock();
+    if (error)
+        m_errors.push_back(error);
     for (Waiting* q : taken)
     {
         q->done = true;

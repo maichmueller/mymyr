@@ -37,6 +37,7 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <vector>
 
 namespace mymyr::heuristics
 {
@@ -94,6 +95,9 @@ private:
     u32 m_active = 0;   // searches between enter() and leave()
     u32 m_waiting = 0;  // searches whose request is not answered
     bool m_calling = false;
+    // the exceptions of failed calls, shared by the searches they failed; released under the lock when no search is
+    // active, so that each is destroyed after every search has handled it
+    std::vector<std::exception_ptr> m_errors;
     std::atomic<u64> m_calls{0}, m_rows{0}, m_largest{0};
 };
 
