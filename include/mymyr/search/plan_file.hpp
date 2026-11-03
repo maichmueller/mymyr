@@ -39,8 +39,10 @@ namespace mymyr::search
 /// The actions of IPC plan text, replayed from `start` (default: the initial state). Blank lines and lines starting
 /// with ';' are skipped; names are compared without regard to case. A line names the PDDL action's own parameters
 /// or all of the schema's parameters; of the applicable actions that match it the first in canonical order is taken
-/// (several match when normalization added parameters or split the action into schemas of one name). Throws
-/// std::invalid_argument, naming the line, when no applicable action matches.
+/// (several match when normalization added parameters or split the action into schemas of one name). Every
+/// applicable binding is a candidate, also one that witness pruning would not enumerate (a binding differing from
+/// another only in parameters that occur in no effect). Throws std::invalid_argument, naming the line, when it names
+/// no action or object of the task, has the wrong number of arguments, or names no applicable action.
 [[nodiscard]] std::vector<Action> parse_plan(const Task& task, std::string_view text,
                                              const std::optional<State>& start = std::nullopt);
 }  // namespace mymyr::search

@@ -1,0 +1,1 @@
+Instances of a domain whose `work` action takes two hubs that only its precondition mentions, so that two bindings differing in the hubs have the same effects: domain.pddl, the problems `pNNN.pddl`, their plans (`pNNN.plan`, IPC plan text) and, per plan step, the plan lines of the actions symmetric to the step's (`pNNN.orbits.json`, one list per step). Files are unchanged.

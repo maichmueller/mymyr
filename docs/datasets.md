@@ -265,7 +265,8 @@ the expansion row by row. With `rl.expand(..., drop_noops=True)` the step's row 
 step's `index` (in the padded expansion, `exp.pad().canonical`; `pad().index` is the flat row), unless the step is a
 no-op in a state that has other actions. With `witness_pruning=True` the positions are those of the pruned expansion, as
 in an environment with that option; a step whose action the pruning leaves out is at its witness, the first row of its
-schema with the same successor. A step whose action is not applicable in its state, an action of another task and a task
+schema with the same successor. Which action a plan line names does not depend on the option: a line names its own
+binding, also where witness pruning enumerates only another binding with the same effects. A step whose action is not applicable in its state, an action of another task and a task
 with lazy atom slots raise `ValueError`, naming the step (replay a lazy task's plans on `task.frozen()`, its twin with
 fixed slots). Replaying costs one host expansion per step. `source` is the Task, TaskTable or TaskSuite the plan was
 replayed on.

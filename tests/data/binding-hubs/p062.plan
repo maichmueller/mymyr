@@ -1,0 +1,7 @@
+(pick a30 t54)
+(work a30 t54 h3 h48 x4)
+(pick a34 t128)
+(work a34 t128 h47 h4 x14)
+(pick a26 t150)
+(work a26 t150 h60 h20 x18)
+; cost 6 = 2 * 3 jobs (optimal)
