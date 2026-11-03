@@ -89,8 +89,10 @@ print(relaxed.status, len(relaxed.plan))
 
 `astar` and `gbfs` accept `lazy=True` for lazy successor scoring, a heuristic, and its costs: `costs="auto"` (the
 default: the task's objective), `"unit"` or `"real"` (see the heuristics guide). The
-best-first `beam` also takes a heuristic and `beam_width=`. IW and SIW support numeric tasks; the other best-first
-algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
+best-first `beam` also takes a heuristic and `beam_width=`. IW and SIW support numeric tasks, but their novelty
+counts atoms only: a successor that changes numeric fluents alone is not novel, so a goal that needs numeric progress
+without new atoms is out of their reach (they end `EXHAUSTED` where BrFS and the best-first searches find a plan). The
+other best-first algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
 
 ## Weighted A*, enforced hill-climbing and the anytime search
 

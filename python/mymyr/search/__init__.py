@@ -47,7 +47,9 @@ A* and eager GBFS then evaluate the new successors of an expansion in one call, 
 ``preferred_actions()``, the preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred
 list, EHC's helpful actions). It is called on the searching thread like the other callbacks below. Numeric tasks run
 in A*, GBFS, beam search, EHC and the anytime search; h_max, h_add and h_FF ignore their numeric conditions and effects
-(the delete relaxation), and g is the metric value.
+(the delete relaxation), and g is the metric value. IW and SIW run on numeric tasks too, but novelty counts atoms
+only: a successor that changes numeric fluents alone is not novel, so a goal that needs such progress ends them
+EXHAUSTED where brfs finds a plan. ``costs="unit"`` is not admissible on a task with zero-cost actions.
 
 IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (layer ordering
 strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), ``"in_order"``, ``"reverse"``,
