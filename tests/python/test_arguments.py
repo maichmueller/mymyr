@@ -134,7 +134,7 @@ def test_lists_and_constructors_name_the_argument(task):
         search.find_rollouts_parallel(task, [1, -2])
     with pytest.raises(ValueError, match=r"^mymyr: threads must be an int in \[0, \d+\], got -1$"):
         rl.ThreadPool(-1)
-    with pytest.raises(ValueError, match=r"^mymyr: num_envs must be an int in \[1, 4294967295\], got 0$"):
+    with pytest.raises(ValueError, match=r"^mymyr: num_envs must be an int in \[1, 2147483647\], got 0$"):
         rl.CpuEnvPool(task, 0)
     with pytest.raises(ValueError, match=r"^mymyr: max_steps must be None or an int in \[1, 4294967295\], got -1$"):
         rl.CpuEnvPool(task, 2, max_steps=-1)
