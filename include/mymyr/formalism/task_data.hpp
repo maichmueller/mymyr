@@ -100,6 +100,10 @@ struct Object
     bool constant = false;
 };
 
+/// The most parameters of a predicate or function, and the most variables of a schema (its parameters with those of
+/// one conditional effect) or an axiom. Binding enumeration recurses once per variable, so this bounds its depth.
+inline constexpr u32 k_max_parameters = 1024;
+
 struct Parameter
 {
     Str name;     // variable name without '?'

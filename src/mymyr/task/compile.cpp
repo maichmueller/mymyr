@@ -76,6 +76,7 @@ public:
             C.kinds[p] = T.predicates[p].kind;
             C.arity[p] = T.predicates[p].arity;
         }
+        check_parameters();
         setup_statics();
         setup_view();
         setup_numeric();
@@ -1102,6 +1103,27 @@ private:
             if (order[d] != first_free + d)
                 m.binds_in_order = false;
         return m;
+    }
+
+    /// Refuses a task whose schemas or axioms bind more variables than binding enumeration supports.
+    void check_parameters() const
+    {
+        auto refuse = [](const std::string& what, u32 n)
+        {
+            throw std::invalid_argument("mymyr: " + what + " has " + std::to_string(n) + " parameters; at most " +
+                                        std::to_string(formalism::k_max_parameters) + " are supported");
+        };
+        for (const Schema& s : T.schemas)
+        {
+            u32 extra = 0;
+            for (const ConditionalEffect& ce : T.effects_of(s))
+                extra = std::max(extra, ce.extra_params.count);
+            if (s.arity() + u64{extra} > formalism::k_max_parameters)
+                refuse("action " + std::string(T.str(s.name)), s.arity() + extra);
+        }
+        for (const Axiom& a : T.axioms)
+            if (a.params.count > formalism::k_max_parameters)
+                refuse("an axiom of " + std::string(T.str(T.predicates[a.head.pred.v].name)), a.params.count);
     }
 
     void compile_schemas()
