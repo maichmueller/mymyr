@@ -10,7 +10,11 @@
 #include "mymyr/successor/successors.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
+#include <functional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,7 +22,7 @@
 namespace mymyr::search::detail
 {
 /// The ordering state of one search: its kind, the beam, the generator (Randomized and random tie tokens; it
-/// persists across layers and passes) and the goal literals (GoalCount).
+/// persists across layers and passes), the goal literals (GoalCount) and the scorer (Scored).
 class LayerOrderer
 {
 public:
@@ -26,7 +30,7 @@ public:
     /// caller's reference. better() is a strict total order when the positions differ.
     struct Ranked
     {
-        u32 key;
+        u64 key;
         u64 tie;
         u64 pos;
         u32 entry;
@@ -44,7 +48,7 @@ public:
     LayerOrderer(const Task& task, const LayerOrdering& lo)
         : m_kind(lo.kind), m_prefer_more(lo.prefer_more_satisfied_goals), m_random_ties(lo.randomize_ties),
           m_novelty(lo.beam_novelty), m_chunk(lo.beam_chunk), m_limit(lo.max_next_layer_states), m_beam(lo.beam_width),
-          m_rng(lo.seed)
+          m_rng(lo.seed), m_scorer(lo.scorer)
     {
         if (lo.kind == LayerOrdering::Kind::GoalCount)
             m_goal = GoalTest::counter(task, 0);
@@ -63,7 +67,8 @@ public:
     /// BeamNovelty::RelaxedSurvivorsOnly.
     [[nodiscard]] bool relaxed() const noexcept { return beam() && m_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly; }
     [[nodiscard]] u32 beam_chunk() const noexcept { return m_chunk; }
-    /// GoalCount: entries are ranked by key().
+    /// GoalCount: entries are ranked by key(), a function of the state alone (computable on any thread). Scored ranks
+    /// too, but by one call of the scorer per layer in select().
     [[nodiscard]] bool scored() const noexcept { return m_kind == LayerOrdering::Kind::GoalCount; }
     [[nodiscard]] bool random_ties() const noexcept { return m_random_ties; }
 
@@ -78,10 +83,16 @@ public:
 
     /// Reorders a next layer of entries (node or state ids) and, with a beam, keeps its first beam_width entries.
     /// state_of(entry) -> StateView gives an entry's state (GoalCount scores it; the engine of `succ` is pointed at
-    /// it, so call this between expansions). Returns the number of entries the beam dropped.
+    /// it, so call this between expansions; Scored copies the states and scores them in one call of the scorer).
+    /// Returns the number of entries the beam dropped.
     template<class StateOf>
     usize select(std::vector<u32>& layer, Successors& succ, StateOf&& state_of)
     {
+        if (m_kind == LayerOrdering::Kind::Scored)
+        {
+            score(layer, state_of);
+            return rank(layer, m_wide_keys);
+        }
         if (scored())
         {
             m_keys.resize(layer.size());
@@ -91,35 +102,30 @@ public:
         return select_keyed(layer, m_keys);
     }
 
-    /// select() with the GoalCount keys given: keys[i] = key() of layer[i] (ignored by the other kinds).
+    /// select() with the GoalCount keys given: keys[i] = key() of layer[i] (ignored by the other kinds but Scored,
+    /// which select() ranks).
     usize select_keyed(std::vector<u32>& layer, std::span<const u32> keys)
     {
-        const usize keep = beam() ? std::min<usize>(m_beam, layer.size()) : layer.size();
         switch (m_kind)
         {
             case LayerOrdering::Kind::Queue:
-            case LayerOrdering::Kind::InOrder: break;
+            case LayerOrdering::Kind::InOrder:
+            case LayerOrdering::Kind::Scored: break;
             case LayerOrdering::Kind::Reverse: std::reverse(layer.begin(), layer.end()); break;
             case LayerOrdering::Kind::Randomized: m_rng.shuffle(std::span<u32>(layer)); break;
-            case LayerOrdering::Kind::GoalCount:
-            {
-                // ranked by (key, tie token, generation position): a strict total order, so sorting equals a
-                // stable sort (and the beam ranking), and a partial sort gives the same top entries
-                m_ranked.clear();
-                for (u32 i = 0; i < layer.size(); ++i)
-                    m_ranked.push_back({keys[i], m_random_ties ? m_rng.next() : 0, i, layer[i]});
-                if (keep < m_ranked.size())
-                    std::partial_sort(m_ranked.begin(), m_ranked.begin() + static_cast<std::ptrdiff_t>(keep), m_ranked.end(), better);
-                else
-                    std::sort(m_ranked.begin(), m_ranked.end(), better);
-                for (usize i = 0; i < keep; ++i)
-                    layer[i] = m_ranked[i].entry;
-                break;
-            }
+            case LayerOrdering::Kind::GoalCount: return rank(layer, keys);
         }
+        const usize keep = beam() ? std::min<usize>(m_beam, layer.size()) : layer.size();
         const usize dropped = layer.size() - keep;
         layer.resize(keep);
         return dropped;
+    }
+
+    /// The rank key of a score: the order of the doubles (-inf first, +inf last) as unsigned integers.
+    [[nodiscard]] static u64 score_key(f64 v) noexcept
+    {
+        const u64 bits = std::bit_cast<u64>(v == 0 ? 0.0 : v);  // -0 ranks as 0
+        return (bits >> 63) ? ~bits : bits | (u64{1} << 63);
     }
 
     /// RelaxedSurvivorsOnly: the tie tokens of a layer of n transitions, as n draws of the generator in generation
@@ -134,6 +140,66 @@ public:
     }
 
 private:
+    /// Ranks the layer by (key, tie token, generation position), a strict total order, so sorting equals a stable
+    /// sort (and the beam ranking), and a partial sort gives the same top entries; keeps the beam.
+    template<class Key>
+    usize rank(std::vector<u32>& layer, std::span<const Key> keys)
+    {
+        const usize keep = beam() ? std::min<usize>(m_beam, layer.size()) : layer.size();
+        m_ranked.clear();
+        for (u32 i = 0; i < layer.size(); ++i)
+            m_ranked.push_back({static_cast<u64>(keys[i]), m_random_ties ? m_rng.next() : 0, i, layer[i]});
+        if (keep < m_ranked.size())
+            std::partial_sort(m_ranked.begin(), m_ranked.begin() + static_cast<std::ptrdiff_t>(keep), m_ranked.end(), better);
+        else
+            std::sort(m_ranked.begin(), m_ranked.end(), better);
+        for (usize i = 0; i < keep; ++i)
+            layer[i] = m_ranked[i].entry;
+        const usize dropped = layer.size() - keep;
+        layer.resize(keep);
+        return dropped;
+    }
+    template<class Key>
+    usize rank(std::vector<u32>& layer, const std::vector<Key>& keys)
+    {
+        return rank(layer, std::span<const Key>(keys));
+    }
+
+    /// Scored: the keys of the layer's states (copied, as state_of may reuse its buffer) from one scorer call.
+    template<class StateOf>
+    void score(const std::vector<u32>& layer, StateOf& state_of)
+    {
+        const usize n = layer.size();
+        m_offsets.assign(n + 1, 0);
+        m_rows.clear();
+        m_counts.resize(n);
+        for (usize i = 0; i < n; ++i)
+        {
+            const StateView v = state_of(layer[i]);
+            m_rows.insert(m_rows.end(), v.w, v.w + v.nw);
+            if (v.nnum)
+                m_rows.insert(m_rows.end(), v.num, v.num + v.nnum);
+            m_counts[i] = {v.nw, v.nnum};
+            m_offsets[i + 1] = m_rows.size();
+        }
+        m_views.resize(n);
+        for (usize i = 0; i < n; ++i)
+        {
+            const u64* w = m_rows.data() + m_offsets[i];
+            m_views[i] = {w, m_counts[i].first, m_counts[i].second ? w + m_counts[i].first : nullptr, m_counts[i].second};
+        }
+        m_scores.assign(n, 0);
+        if (n)
+            m_scorer(m_views, m_scores);
+        m_wide_keys.resize(n);
+        for (usize i = 0; i < n; ++i)
+        {
+            if (std::isnan(m_scores[i]))
+                throw std::invalid_argument("mymyr: a layer score is NaN (LayerOrdering::scorer)");
+            m_wide_keys[i] = score_key(m_scores[i]);
+        }
+    }
+
     LayerOrdering::Kind m_kind = LayerOrdering::Kind::Queue;
     bool m_prefer_more = true;
     bool m_random_ties = false;
@@ -145,6 +211,12 @@ private:
     GoalTest m_goal;
     std::vector<Ranked> m_ranked;
     std::vector<u32> m_keys;
+    std::function<void(std::span<const StateView>, std::span<f64>)> m_scorer;
+    std::vector<u64> m_rows, m_wide_keys;
+    std::vector<usize> m_offsets;
+    std::vector<std::pair<u32, u32>> m_counts;
+    std::vector<StateView> m_views;
+    std::vector<f64> m_scores;
 };
 
 /// The parts of a relaxed selection over n transitions (LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly):

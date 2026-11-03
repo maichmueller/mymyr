@@ -1,6 +1,7 @@
 // A* and weighted A*, eager and lazy (best_first.hpp): eager and lazy A* on SoA nodes, shared
 // stores and bucket or heap open lists (best_first_detail.hpp).
 
+#include "best_first_batched.hpp"
 #include "best_first_detail.hpp"
 
 #include <limits>
@@ -428,6 +429,8 @@ struct AStarLazy
 
 BestFirstResult astar_eager(const Task& task, const BestFirstOptions& options)
 {
+    if (options.expansion_batch > 1)
+        return bf::astar_eager_batched(task, options);
     return bf::run<AStarEager>(task, options, "astar_eager", true);
 }
 

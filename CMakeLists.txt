@@ -133,6 +133,7 @@ add_library(mymyr_core STATIC
     src/mymyr/heuristics/landmark_count.cpp
     src/mymyr/heuristics/lifted_relaxation.cpp
     src/mymyr/search/best_first.cpp
+    src/mymyr/search/best_first_batched.cpp
     src/mymyr/search/astar_iw.cpp
     src/mymyr/novelty/minimum_g_table.cpp
     src/mymyr/search/astar.cpp

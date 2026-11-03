@@ -198,3 +198,89 @@ def test_evaluator_shape_errors(task):
         search.gbfs(task, heuristic=BadOptions())
     with pytest.raises(TypeError):
         search.gbfs(task, heuristic=42)
+
+
+# ------------------------------------------------------------------------------------------------ batched expansions
+
+
+@pytest.mark.parametrize("algorithm", ["astar", "gbfs"])
+def test_expansion_batch_gives_larger_batches(task, algorithm):
+    run = getattr(search, algorithm)
+    sizes = {}
+    for k in (1, 8, 64):
+        obj = Recording(task)
+        r = run(task, heuristic=obj, expansion_batch=k)
+        assert r.status == Status.SOLVED
+        sizes[k] = max(len(b) for b in obj.batches)
+        if algorithm == "astar":
+            assert r.cost == search.astar(task, heuristic="max").cost  # admissible, reopening: optimal
+    assert sizes[1] < sizes[8] < sizes[64]
+
+
+def test_expansion_batch_budgets_and_refusals(task):
+    r = search.gbfs(task, heuristic=Recording(task), expansion_batch=16, max_expanded=40)
+    assert r.status == Status.OUT_OF_STATES and r.stats.expanded == 40
+    with pytest.raises(ValueError, match="expansion_batch > 1 needs an eager search"):
+        search.astar(task, heuristic="max", lazy=True, expansion_batch=4)
+    with pytest.raises(ValueError):
+        search.gbfs(task, expansion_batch=0)
+    r = search.gbfs(task, heuristic="lmcount", expansion_batch=4)
+    assert r.status == Status.FAILED and "path-dependent" in r.message
+
+
+# ------------------------------------------------------------------------------------------------ scored layers
+
+
+class GoalScore:
+    """Unsatisfied goal atoms of each state: GoalCount's ranking as a learned score."""
+
+    def __init__(self, task):
+        self.h = search.Heuristic(task, "goal_count")
+        self.calls = 0
+
+    def evaluate_batch(self, batch):
+        self.calls += 1
+        return np.array([self.h(s) for s in batch.states])
+
+
+@pytest.mark.parametrize("novelty", ["all_tested", "survivors_only"])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_scored_layers_rank_like_goal_count(novelty, threads):
+    blocks = text_task("blocks__probBLOCKS-8-0")
+    for run in (lambda **kw: search.iw(blocks, max_width=1, **kw), lambda **kw: search.brfs(blocks, **kw)):
+        common = dict(beam_width=8, beam_novelty=novelty, threads=threads, randomize_ties=True, seed=3)
+        a = run(layer_order="goal_count", **common)
+        scorer = GoalScore(blocks)
+        b = run(layer_order=scorer, **common)
+        assert scorer.calls > 0
+        assert plan_of(a) == plan_of(b)
+        assert a.stats.expanded == b.stats.expanded if hasattr(a, "stats") else a.expanded == b.expanded
+
+
+def test_scored_layers_values_and_errors():
+    blocks = text_task("blocks__probBLOCKS-8-0")
+    h = search.Heuristic(blocks, "goal_count")
+    a = search.iw(blocks, max_width=1, layer_order="goal_count", prefer_more_satisfied_goals=False, beam_width=4)
+    # negative scores are fine: lower first
+    b = search.iw(blocks, max_width=1, layer_order=lambda s: -h(s), beam_width=4)
+    assert plan_of(a) == plan_of(b)
+    with pytest.raises(ValueError, match="layer score is nan"):
+        search.iw(blocks, max_width=1, layer_order=lambda s: math.nan, beam_width=4)
+    with pytest.raises(ZeroDivisionError):
+        search.brfs(blocks, layer_order=lambda s: 1 / 0)
+    with pytest.raises(ValueError, match="relaxed_survivors_only|RelaxedSurvivorsOnly"):
+        search.brfs(blocks, layer_order=lambda s: 0.0, beam_width=4, beam_novelty="relaxed_survivors_only")
+    with pytest.raises(ValueError, match="layer_order must be"):
+        search.iw(blocks, layer_order="best")
+
+
+def test_scored_layers_record_trees():
+    blocks = text_task("blocks__probBLOCKS-8-0")
+    h = search.Heuristic(blocks, "goal_count")
+    a = search.iw(blocks, max_width=1, layer_order="goal_count", beam_width=6, tree="nodes")
+    b = search.iw(blocks, max_width=1, layer_order=lambda s: h(s), beam_width=6, tree="nodes")
+    assert plan_of(a) == plan_of(b)
+    ta, tb = a.passes[-1].tree, b.passes[-1].tree
+    assert ta.num_nodes == tb.num_nodes > 0
+    assert np.array_equal(np.asarray(ta.rows), np.asarray(tb.rows))
+    assert np.array_equal(np.asarray(ta.parent), np.asarray(tb.parent))

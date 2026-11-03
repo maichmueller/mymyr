@@ -46,6 +46,21 @@
 // evaluate them in one call (GBFS up to the first goal state); beam search evaluates the new successors of a whole
 // layer in one call. The searches are otherwise unchanged.
 //
+// Batched expansions (BestFirstOptions::expansion_batch = k > 1, eager A* and eager GBFS): every round pops up to k
+// open states in key order and expands them, then goal-tests the new successors of all k expansions and evaluates
+// them in one call of the heuristic (Heuristic::evaluate_batch; GBFS up to the first goal state), then handles the
+// transitions expansion by expansion as the one-expansion search does (pushes, reopening, dead ends, observer
+// on_generate). A* accepts a goal state only before a round's first pop (the round's successors are pushed first). The
+// states of a round are popped before their predecessors' successors in the round are known, so the search expands
+// up to k - 1 states per round that the one-expansion search would not have expanded (yet), and node order, plans of
+// equal cost, `expanded`, `generated` and `evaluations` differ from k = 1. Guarantees with k > 1: A* returns an
+// optimal plan with an admissible heuristic when it reopens states (`reopen`, the default; a state expanded in a round
+// before its cheapest path was known is reopened when that path is found), but no longer with a consistent heuristic
+// without reopening; weighted A*'s bound w * C* holds under the same condition; GBFS stays complete on finite spaces.
+// Ties are broken as for k = 1 among the states in the open list when a round starts. Budgets are checked before
+// every pop (max_expanded is exact); a stop inside a round drops the round's unevaluated successors. Path-dependent
+// heuristics are refused (std::invalid_argument). k = 1 is the one-expansion search.
+//
 // Cost bound (BestFirstOptions::cost_bound, A* only): a plan costs less than the bound. A state whose g is at least
 // the bound is not opened, and with an admissible heuristic (Heuristic::admissible) and a goal of the task or AnyOf, a
 // state whose g + h is at least the bound neither (the lazy searches test g + h when they evaluate a state); a start
@@ -113,6 +128,7 @@ struct BestFirstOptions
     Store store = Store::Auto;
     Queue queue = Queue::Auto;
     bool witness_pruning = false;  // off: every applicable action is a transition
+    u32 expansion_batch = 1;       // eager A* and GBFS: expansions per round of batched evaluation (see above)
     bool canonical_order = true;   // successors per state in (schema, binding) order
     std::optional<State> start;    // default: the task's initial state
 
@@ -129,8 +145,8 @@ struct BestFirstOptions
     u32 beam_width = 1000;  // positive (std::invalid_argument otherwise)
 };
 // Option values a search does not take (a weight below 1 or not finite, a weight other than 1 or a finite cost bound
-// in GBFS or beam search, a NaN cost bound, a bucket queue with a weight that is not integral) throw
-// std::invalid_argument before the search starts.
+// in GBFS or beam search, a NaN cost bound, a bucket queue with a weight that is not integral, an expansion_batch of 0
+// or one above 1 outside eager A* and eager GBFS) throw std::invalid_argument before the search starts.
 
 struct BestFirstResult
 {

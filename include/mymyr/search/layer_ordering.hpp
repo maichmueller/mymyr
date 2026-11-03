@@ -37,6 +37,14 @@
 // The beam selects after the whole next layer was generated, unlike max_next_layer_states, which cuts the
 // generation; the two are mutually exclusive.
 //
+// Scored: every next layer is ranked by LayerOrdering::scorer, a caller's function (a learned model) that scores all
+// candidates of the layer in one call, in generation order, at the layer boundary, on the thread that runs the search;
+// lower scores first (any value but NaN; +inf ranks last and drops nothing), equal scores in generation order or, with
+// randomize_ties, by random tie tokens, exactly as GoalCount ranks its counts. Everything else (max_next_layer_states,
+// beam_width, AllTested and SurvivorsOnly, recorded trees) is the same as for GoalCount: the scorer only replaces
+// the count. With threads > 1 the layer's generation runs on the threads and the scorer on the calling thread, so the
+// result equals the single-threaded one. RelaxedSurvivorsOnly ranks per part while generating and refuses Scored.
+//
 // Threads (IwOptions::threads, AbstractedIwOptions::threads, BrfsOptions::threads): with threads > 1 a beam search
 // generates the successors of a layer's states on several threads, together with what can be computed from them
 // alone (the goal test of the states, the read-only part of the novelty test, the goal-count scores); the results
@@ -45,7 +53,10 @@
 // hook run the search on the calling thread alone.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/state/state.hpp"
 
+#include <functional>
+#include <span>
 #include <string>
 
 namespace mymyr::search
@@ -59,6 +70,7 @@ struct LayerOrdering
         Reverse,     // every next layer reversed
         Randomized,  // every next layer shuffled
         GoalCount,   // every next layer stably sorted by satisfied goal literals
+        Scored,      // every next layer sorted by the scores of `scorer` (lower first)
     };
     /// Which successors of a beam search mark the novelty table (see above).
     enum class BeamNovelty : u8
@@ -86,6 +98,10 @@ struct LayerOrdering
     bool randomize_ties = false;
     /// RelaxedSurvivorsOnly: the transitions per part of a layer's split.
     u32 beam_chunk = 1024;
+    /// Scored: writes the score of every state of a layer into the output (the same length), lower first. Called once
+    /// per layer on the searching thread; the views are valid during the call only. A NaN score makes the search throw
+    /// std::invalid_argument.
+    std::function<void(std::span<const StateView> states, std::span<f64> scores)> scorer{};
 
     [[nodiscard]] bool beam() const noexcept { return beam_width != ~u32{0}; }
 };
@@ -106,8 +122,10 @@ struct LayerOrdering
         return "LayerOrdering::beam_width and LayerOrdering::max_next_layer_states are mutually exclusive";
     if (!lo.beam() && lo.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
         return "LayerOrdering::beam_novelty other than AllTested requires a beam (beam_width)";
-    if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount)
-        return "LayerOrdering::randomize_ties requires Kind::GoalCount (the only kind with scores)";
+    if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount && lo.kind != LayerOrdering::Kind::Scored)
+        return "LayerOrdering::randomize_ties requires a kind with scores (GoalCount or Scored)";
+    if ((lo.kind == LayerOrdering::Kind::Scored) != static_cast<bool>(lo.scorer))
+        return "LayerOrdering::scorer is required by Kind::Scored and taken by no other kind";
     if (lo.beam_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly && lo.kind != LayerOrdering::Kind::GoalCount)
         return "LayerOrdering::beam_novelty RelaxedSurvivorsOnly requires Kind::GoalCount (it ranks by score)";
     if (lo.beam_chunk == 0)

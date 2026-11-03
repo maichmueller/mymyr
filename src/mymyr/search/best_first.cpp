@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <string_view>
 
 namespace mymyr::search::bf
 {
@@ -87,6 +88,10 @@ void check_options(const BestFirstOptions& o, const char* algorithm, bool astar)
         throw std::invalid_argument(who + "BestFirstOptions::weight applies to A* (astar_eager, astar_lazy)");
     if (!astar && o.cost_bound != std::numeric_limits<double>::infinity())
         throw std::invalid_argument(who + "BestFirstOptions::cost_bound applies to A* (astar_eager, astar_lazy)");
+    if (o.expansion_batch == 0 ||
+        (o.expansion_batch != 1 && std::string_view(algorithm) != "astar_eager" && std::string_view(algorithm) != "gbfs_eager"))
+        throw std::invalid_argument(who + "BestFirstOptions::expansion_batch must be positive, and above 1 only for "
+                                          "astar_eager and gbfs_eager");
     if (o.queue == BestFirstOptions::Queue::Bucket && o.weight != std::floor(o.weight))
         throw std::invalid_argument(who + "a bucket queue needs an integral weight (use Queue::Heap or Queue::Auto)");
 }

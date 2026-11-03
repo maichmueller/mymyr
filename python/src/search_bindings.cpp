@@ -1630,11 +1630,16 @@ search::ActionOrdering parse_ordering(nb::handle h)
 
 search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle max_next_layer_states,
                                    bool prefer_more_satisfied_goals, nb::handle beam_width, nb::handle beam_novelty,
-                                   bool randomize_ties, nb::handle beam_chunk)
+                                   bool randomize_ties, nb::handle beam_chunk, const Owner& o, CallbackErrors& errors)
 {
     search::LayerOrdering l;
-    const std::string k = str_arg(kind, "layer_order");
-    if (k == "queue")
+    const std::string k = is_evaluator(kind) ? std::string() : str_arg(kind, "layer_order");
+    if (k.empty())
+    {
+        l.kind = search::LayerOrdering::Kind::Scored;
+        l.scorer = layer_scorer(kind, o, errors);
+    }
+    else if (k == "queue")
         l.kind = search::LayerOrdering::Kind::Queue;
     else if (k == "in_order")
         l.kind = search::LayerOrdering::Kind::InOrder;
@@ -1646,7 +1651,8 @@ search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle 
         l.kind = search::LayerOrdering::Kind::GoalCount;
     else
         throw nb::value_error(
-            "mymyr: layer_order must be 'queue', 'in_order', 'reverse', 'randomized' or 'goal_count'");
+            "mymyr: layer_order must be 'queue', 'in_order', 'reverse', 'randomized', 'goal_count' or an evaluator "
+            "(scores, lower first)");
     l.seed = int_arg<u64>(seed, "seed");
     l.prefer_more_satisfied_goals = prefer_more_satisfied_goals;
     if (auto v = opt_int_arg<u32>(max_next_layer_states, "max_next_layer_states", 0))
@@ -1793,7 +1799,7 @@ using ActionList = nb::typed<nb::list, PyAction>;
 using TransitionArg = Arg<PyLandmarkOrdering>;
 using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, ann::LandmarkSource>>;
 using FluentAtomsArg = Arg<nb::typed<nb::iterable, AtomLike>>;
-using LayerArg = Arg<ann::LayerOrder>;
+using LayerArg = Arg<std::variant<ann::LayerOrder, ann::Evaluator>>;
 using WeightsArg = Arg<nb::typed<nb::sequence, double>>;
 using HelpfulArg = Arg<ann::HelpfulActions>;
 using FallbackArg = Arg<ann::EhcFallback>;
@@ -1804,6 +1810,15 @@ using OrderingsArg =
                                              nb::typed<nb::tuple, std::variant<search::ActionOrdering, std::string>, int>>>>;
 using RolloutsArg = Arg<std::variant<PyParallelRollouts, nb::typed<nb::sequence, PyRolloutResult>>>;
 using AtomList = nb::typed<nb::list, PyGroundAtom>;
+
+/// expansion_batch: a positive number, above 1 only for the eager searches.
+u32 expansion_batch_arg(nb::handle k, bool lazy)
+{
+    const u32 v = int_arg<u32>(k, "expansion_batch", 1);
+    if (v > 1 && lazy)
+        throw nb::value_error("mymyr: expansion_batch > 1 needs an eager search (lazy=False)");
+    return v;
+}
 
 /// The words of a status of a path-dependent heuristic, from its bytes (Heuristic.initial_status / progress).
 std::vector<u64> status_of(const PyHeuristic& self, nb::handle status, const char* what)
@@ -2032,7 +2047,7 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
     opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
     opts.preserve_landmark_atoms = preserve_landmark_atoms;
     opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
     opts.threads = threads_arg(threads);
     opts.witness_pruning = witness_pruning;
     opts.canonical_order = canonical_order;
@@ -2126,6 +2141,16 @@ const char* k_heuristic_doc =
     "called with the thread state attached (a SharedEvaluator: on one of the searching threads); an exception "
     "cancels the search and is re-raised.";
 
+const char* k_expansion_batch_doc =
+    "expansion_batch (eager searches): expand up to this many open states per round, then goal-test and evaluate the "
+    "new successors of all of them in one heuristic call (evaluate_batch of a Python evaluator), so that a learned "
+    "model sees a few hundred states per call. 1 (default) is the one-expansion search. With k > 1 the order of "
+    "expansions changes (up to k - 1 states per round that the one-expansion search would expand later or never), "
+    "and with it plans of equal cost and the counts; A* stays optimal with an admissible heuristic when it reopens "
+    "states (reopen=True), weighted A* keeps its bound under the same condition, and a consistent heuristic no longer "
+    "makes reopening unnecessary. Budgets are checked before every pop. Path-dependent heuristics ('lmcount') and lazy "
+    "searches refuse k > 1 (ValueError).";
+
 const char* k_tree_doc =
     "tree: None (default), 'nodes' or 'transitions'. Retains each pass as a SearchTree of read-only NumPy arrays. "
     "Node recording keeps the fast novelty path; transition recording materializes and deduplicates every successor. "
@@ -2160,11 +2185,14 @@ const char* k_layer_doc =
     "    layer_order: 'queue' (plain BrFS, the default), or layer by layer with each next layer reordered "
     "before it is expanded: 'in_order' (as generated), 'reverse', 'randomized' (seed: the SplitMix64 seed) or "
     "'goal_count' (stable, by the number of satisfied goal literals, most first; "
-    "prefer_more_satisfied_goals=False: fewest first).\n"
+    "prefer_more_satisfied_goals=False: fewest first), or an evaluator (mymyr._typing.Evaluator or a "
+    "SharedEvaluator): its values score the states of every next layer in one evaluate_batch call at the layer "
+    "boundary, on the searching thread, lower first (any number but NaN; inf ranks last), ties as for goal_count; "
+    "not with beam_novelty='relaxed_survivors_only'.\n"
     "    max_next_layer_states (ordered kinds only): once the next layer holds that many states, the rest of "
     "the current layer is not expanded.\n"
     "    beam_width (ordered kinds only, not with max_next_layer_states): the whole next layer is generated, "
-    "ordered, and only its first beam_width states are kept (goal_count: the best scores, ties in generation "
+    "ordered, and only its first beam_width states are kept (goal_count, an evaluator: the best scores, ties in generation "
     "order or, with randomize_ties, by random tokens drawn from seed); the others are never expanded.\n"
     "    beam_novelty (with beam_width): 'all_tested' (the novelty test marks every successor it admits, kept "
     "or not), 'survivors_only' (successors are tested read-only; the kept ones are replayed in rank order and "
@@ -3205,7 +3233,7 @@ void bind_search(nb::module_& parent)
             search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
                                                 witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
             opts.incremental_first_applicability = incremental_first_applicability;
@@ -3244,7 +3272,7 @@ void bind_search(nb::module_& parent)
                 iw_options(cs, o, k, width_zero, false, witness_pruning, canonical_order, start,
                 transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
             opts.incremental_first_applicability = incremental_first_applicability;
@@ -3274,7 +3302,7 @@ void bind_search(nb::module_& parent)
             search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
                                                  witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
             opts.threads = threads_arg(threads);
             opts.tree = tree_record(tree);
             const Task& t = *o.core->task;
@@ -3336,7 +3364,7 @@ void bind_search(nb::module_& parent)
             opts.stop_at_goal = stop_at_goal;
             opts.fingerprint = fingerprint;
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
             const Task& t = *o.core->task;
             BrfsResult r = run_detached(cs, [&] { return brfs(t, opts); });
             return PyBrfsResult{std::move(r), o};
@@ -3369,17 +3397,19 @@ void bind_search(nb::module_& parent)
         "astar",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, FloatArg weight, FloatArg cost_bound, StrArg costs,
            StrArg evaluation, StrArg store, StrArg queue, StateArg start, bool reopen, bool lazy_requeue,
-           bool preferred_operators, IntArg preferred_weight, IntArg standard_weight, bool witness_pruning,
-           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
-           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+           bool preferred_operators, IntArg preferred_weight, IntArg standard_weight, IntArg expansion_batch,
+           bool witness_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
+           CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const double w = float_arg(weight, "weight", 1.0);
             const double bound =
                 opt_float_arg(cost_bound, "cost_bound").value_or(std::numeric_limits<double>::infinity());
+            const u32 k = expansion_batch_arg(expansion_batch, lazy);
             const BfFn fn = lazy ? &search::astar_lazy : &search::astar_eager;
             return best_first([&](const Task& t, const search::BestFirstOptions& base) {
                 search::BestFirstOptions options = base;
                 options.weight = w;
                 options.cost_bound = bound;
+                options.expansion_batch = k;
                 return fn(t, options);
             }, task, heuristic, costs, evaluation, store, queue, start, reopen, lazy_requeue, preferred_operators,
                 int_arg<u32>(preferred_weight, "preferred_weight"), int_arg<u32>(standard_weight, "standard_weight", 1),
@@ -3389,10 +3419,10 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "weight"_a = 1.0, "cost_bound"_a = nb::none(),
         "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
-        "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
-        "max_states"_a = nb::none(), "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(),
-        "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(),
-        "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
+        "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "expansion_batch"_a = 1,
+        "witness_pruning"_a = false, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(),
+        "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(),
+        "blocked_states"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         paragraphs({"A*, eager or lazy. heuristic: a kind ('blind', 'goal_count', 'max', "
                      "'add', 'ff', 'set_additive', 'h2', 'lmcut', 'lmcount', as for Heuristic), 'perfect' (h* from the "
                      "task's state space, "
@@ -3412,6 +3442,7 @@ void bind_search(nb::module_& parent)
                      "with an admissible heuristic of the task's goal those with g + h >= cost_bound, are not "
                      "opened, so EXHAUSTED means that no plan is cheaper than the bound (a transition that lowers g "
                      "then gives FAILED). Invalid values raise ValueError. ",
+                    k_expansion_batch_doc,
                     k_heuristic_doc,
                     k_control_doc})
             .c_str());
@@ -3478,24 +3509,30 @@ void bind_search(nb::module_& parent)
         "gbfs",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
            StrArg queue, StateArg start, bool preferred_operators, IntArg preferred_weight, IntArg standard_weight,
-           bool witness_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           IntArg expansion_batch, bool witness_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
-            return bf_call(lazy ? &search::gbfs_lazy : &search::gbfs_eager, task, heuristic, costs, evaluation, store,
-                           queue, start, true, true, preferred_operators,
-                           int_arg<u32>(preferred_weight, "preferred_weight"),
-                           int_arg<u32>(standard_weight, "standard_weight", 1), 1000,
-                           witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
-                           blocked_states, observer, progress_interval);
+            const u32 k = expansion_batch_arg(expansion_batch, lazy);
+            const BfFn fn = lazy ? &search::gbfs_lazy : &search::gbfs_eager;
+            return best_first([&](const Task& t, const search::BestFirstOptions& base) {
+                search::BestFirstOptions options = base;
+                options.expansion_batch = k;
+                return fn(t, options);
+            }, task, heuristic, costs, evaluation, store, queue, start, true, true, preferred_operators,
+                int_arg<u32>(preferred_weight, "preferred_weight"), int_arg<u32>(standard_weight, "standard_weight", 1),
+                1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                blocked_states, observer, progress_interval);
         },
         "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "ff", "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "preferred_operators"_a = true,
-        "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false, "max_states"_a = nb::none(),
+        "preferred_weight"_a = 0, "standard_weight"_a = 1, "expansion_batch"_a = 1, "witness_pruning"_a = false,
+        "max_states"_a = nb::none(),
         "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
         paragraphs({"Greedy best-first search, eager or lazy (preferred and standard lists "
                      "alternating, 64:1 by default). heuristic: as for astar. ",
+                    k_expansion_batch_doc,
                     k_heuristic_doc,
                     k_control_doc})
             .c_str());
@@ -3808,7 +3845,7 @@ void bind_search(nb::module_& parent)
                 iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, true, witness_pruning,
                            canonical_order, start);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
-                                       beam_novelty, randomize_ties, beam_chunk);
+                                       beam_novelty, randomize_ties, beam_chunk, o, *cs.errors);
             opts.threads = threads_arg(threads);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
             opts.tree = tree_record(tree);

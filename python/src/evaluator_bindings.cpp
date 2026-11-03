@@ -3,7 +3,7 @@
 
 #include "py_evaluator.hpp"
 
-#include "arrays.hpp"
+#include "py_landmarks.hpp"
 #include "py_task.hpp"
 #include "typing.hpp"
 
@@ -30,7 +30,9 @@ constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 /// mymyr.search.StateBatch: the states of one evaluate_batch call as packed rows. Owns its arrays.
 struct PyStateBatch
 {
-    nb::object rows, task_ids, encoded;
+    nb::ndarray<nb::numpy, const u64> rows;
+    nb::ndarray<nb::numpy, const i32> task_ids;
+    nb::object encoded;
     std::shared_ptr<const Evaluator> evaluator;  // with an encoder: its table names the tasks
     std::vector<Owner> owners;                   // without an encoder: the tasks, in order of first appearance
     const u64* data = nullptr;
@@ -142,23 +144,17 @@ void read_values(nb::handle result, std::span<f64> out)
         out[static_cast<usize>(i)] = number_of(items[i]);  // checked by kind by the caller
 }
 
-/// A read-only NumPy array over a new block of `count` elements of T, and the block's memory.
+/// A new read-only NumPy array of `shape` (C order) and its memory, for the caller to fill.
 template<class T>
-std::pair<nb::object, T*> new_array(std::vector<i64> shape, rl::DType dtype, bool words)
+std::pair<nb::ndarray<nb::numpy, const T>, T*> new_array(std::initializer_list<usize> shape)
 {
-    u64 count = 1;
-    for (const i64 s : shape)
-        count *= static_cast<u64>(s);
-    std::shared_ptr<Block> block = Block::make(std::max<u64>(count, 1) * sizeof(T));
-    T* data = reinterpret_cast<T*>(block->data());
-    ArraySpec spec;
-    spec.owner = block;
-    spec.data = data;
-    spec.dtype = dtype;
-    spec.shape = std::move(shape);
-    spec.readonly = true;
-    spec.words = words;
-    return {export_array(std::move(spec), Framework::Numpy, default_words(Framework::Numpy)), data};
+    usize count = 1;
+    for (const usize d : shape)
+        count *= d;
+    auto* values = new std::vector<T>(std::max<usize>(count, 1));
+    nb::capsule owner(values, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+    T* data = values->data();
+    return {nb::ndarray<nb::numpy, const T>(data, shape, owner), data};
 }
 }  // namespace
 
@@ -278,8 +274,8 @@ void evaluate_parts(const std::shared_ptr<const Evaluator>& e, std::span<BatchPa
         for (const StateView& s : p.states)
             W = std::max(W, s.nw);
     const u32 stride = W + NN;
-    auto [rows, data] = new_array<u64>({static_cast<i64>(n), static_cast<i64>(stride)}, rl::DType::U64, true);
-    auto [ids, id_data] = new_array<i32>({static_cast<i64>(n)}, rl::DType::I32, false);
+    auto [rows, data] = new_array<u64>({n, stride});
+    auto [ids, id_data] = new_array<i32>({n});
     {
         u64 r = 0;
         for (usize p = 0; p < parts.size(); ++p)
@@ -297,8 +293,8 @@ void evaluate_parts(const std::shared_ptr<const Evaluator>& e, std::span<BatchPa
     if (e->has_encoder())
     {
         nb::object encode = e->encoder.attr("encode");
-        encoded = e->encode_options.is_valid() ? encode(rows, ids, **nb::borrow<nb::dict>(e->encode_options))
-                                               : encode(rows, ids);
+        nb::object r = nb::cast(rows), t = nb::cast(ids);
+        encoded = e->encode_options.is_valid() ? encode(r, t, **nb::borrow<nb::dict>(e->encode_options)) : encode(r, t);
     }
     PyStateBatch b;
     b.rows = rows;
@@ -606,17 +602,17 @@ void bind_evaluators(nb::module_& m)
         "evaluator declares an `encoder`. The batch owns its arrays: they stay valid after the call.")
         .def("__len__", [](const PyStateBatch& b) { return b.n; })
         .def_prop_ro(
-            "rows", [](const PyStateBatch& b) { return b.rows; },
+            "rows", [](const PyStateBatch& b) { return b.rows; }, nb::rv_policy::reference,
             "The state rows: a read-only NumPy uint64 array [N, words + numeric_words], the atom words (fluent slot i "
             "is bit i & 63 of word i >> 6; words past a state's own are zero) followed by the numeric words of a numeric "
             "task: the layout of state rows elsewhere in mymyr (encoders, datasets, rl).")
         .def_prop_ro(
-            "task_ids", [](const PyStateBatch& b) { return b.task_ids; },
+            "task_ids", [](const PyStateBatch& b) { return b.task_ids; }, nb::rv_policy::reference,
             "The task of each row: a read-only NumPy int32 array [N], an index into `tasks`. With an encoder it is "
             "the instance of the row in the encoder's table (the task_ids encoder.encode took).")
         .def_prop_ro(
             "tasks",
-            [](PyStateBatch& b) -> nb::object
+            [](PyStateBatch& b) -> nb::typed<nb::tuple, PyTask, nb::ellipsis>
             {
                 if (!b.tasks_cache.is_valid())
                 {
@@ -627,12 +623,12 @@ void bind_evaluators(nb::module_& m)
                         tasks.append(task_object(b.owner(t).obj));
                     b.tasks_cache = nb::tuple(tasks);
                 }
-                return b.tasks_cache;
+                return nb::borrow<nb::typed<nb::tuple, PyTask, nb::ellipsis>>(b.tasks_cache);
             },
             "The tasks the rows index (`tasks[task_ids[i]]` is the Task of row i): the instances of the encoder's "
             "table with an encoder, else the tasks of the batch in order of their first row.")
         .def_prop_ro(
-            "encoded", [](const PyStateBatch& b) { return b.encoded; },
+            "encoded", [](const PyStateBatch& b) { return nb::borrow<Arg<ann::Any>>(b.encoded); },
             "encoder.encode(rows, task_ids, **encode_options) when the evaluator declares an encoder (a FlatBatch for "
             "a FlatRelationEncoder; its arrays export to NumPy, torch or JAX without a copy), else None.")
         .def_prop_ro("words", [](const PyStateBatch& b) { return b.words; }, "Atom words per row.")
@@ -640,7 +636,7 @@ void bind_evaluators(nb::module_& m)
                      "Numeric words per row, after the atom words (0 for classical tasks).")
         .def_prop_ro(
             "states",
-            [](PyStateBatch& b) -> nb::object
+            [](PyStateBatch& b) -> nb::typed<nb::list, PyState>
             {
                 if (!b.states_cache.is_valid())
                 {
@@ -654,7 +650,7 @@ void bind_evaluators(nb::module_& m)
                     }
                     b.states_cache = std::move(states);
                 }
-                return b.states_cache;
+                return nb::borrow<nb::typed<nb::list, PyState>>(b.states_cache);
             },
             "The rows as a list of States (made on first use: the arrays are the fast path).");
 
@@ -677,7 +673,8 @@ void bind_evaluators(nb::module_& m)
              "evaluator: an object with evaluate_batch(batch) (mymyr._typing.Evaluator), with an optional encoder. "
              "max_batch: the states a call takes at most (requests are whole: a larger one is called alone). "
              "max_wait: seconds a request waits for others before it is called.")
-        .def_prop_ro("evaluator", [](const PySharedEvaluator& s) { return s.evaluator->obj; }, "The wrapped evaluator.")
+        .def_prop_ro("evaluator", [](const PySharedEvaluator& s) { return nb::borrow<Arg<ann::Evaluator>>(s.evaluator->obj); },
+                     "The wrapped evaluator.")
         .def_prop_ro("max_batch", [](const PySharedEvaluator& s) { return s.max_batch; })
         .def_prop_ro("max_wait",
                      [](const PySharedEvaluator& s) { return std::chrono::duration<double>(s.max_wait).count(); })

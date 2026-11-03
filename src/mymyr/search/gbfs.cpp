@@ -1,6 +1,7 @@
 // Greedy best-first search, eager and lazy (best_first.hpp): eager and lazy GBFS on the
 // SoA nodes, shared stores and bucket or heap open lists (best_first_detail.hpp).
 
+#include "best_first_batched.hpp"
 #include "best_first_detail.hpp"
 
 #include <limits>
@@ -251,6 +252,8 @@ struct GbfsLazy
 
 BestFirstResult gbfs_eager(const Task& task, const BestFirstOptions& options)
 {
+    if (options.expansion_batch > 1)
+        return bf::gbfs_eager_batched(task, options);
     return bf::run<GbfsEager>(task, options, "gbfs_eager");
 }
 
