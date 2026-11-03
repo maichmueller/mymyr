@@ -1,0 +1,5 @@
+(pick a30 t10)
+(work a30 t10 h52 h23 x11)
+(pick a19 t81)
+(work a19 t81 h40 h71 x13)
+; cost 4 = 2 * 2 jobs (optimal)

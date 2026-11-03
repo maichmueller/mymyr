@@ -209,14 +209,15 @@ def plan_rows(
 ) -> PlanRows:
     """The rows of the states a plan visits and its action labels, for behaviour cloning (see ``PlanRows``).
 
-    ``source`` is a Task (or TaskHandle), or a TaskTable or TaskSuite with the plan's instance ``task_id``; ``plan``
-    is IPC plan text (read by ``search.parse_plan``: of the applicable actions a line matches, the first in canonical
+    ``source`` is a Task (or TaskHandle), or a TaskTable or TaskSuite with the plan's instance ``task_id``; ``plan`` is
+    IPC plan text (read by ``search.parse_plan``: of the applicable actions a line matches, the first in canonical
     order) or a list of the task's Actions. Each step is located in the host expansion of its state, ``rl.expand(source,
     row, ...)`` with ``witness_pruning``, so ``index`` is the action an environment with the same option takes; under
     witness pruning a step without a row of its own is at its witness (its schema and successor), and its label stays
-    the plan's. ``goal_state=True`` appends the state the plan reaches. ``equivalent``, one list per step, names the
-    actions the caller regards as equivalent to the step's (each an Action, a label ``(schema, binding)`` or a plan
-    line, as from per-step symmetry orbits); they become ``equivalent`` canonical indices, without duplicates.
+    the plan's; which action a plan line names does not depend on ``witness_pruning``. ``goal_state=True`` appends the
+    state the plan reaches. ``equivalent``, one list per step, names the actions the caller regards as equivalent to the
+    step's (each an Action, a label ``(schema, binding)`` or a plan line, as from per-step symmetry orbits); they become
+    ``equivalent`` canonical indices, without duplicates.
 
     Raises ValueError, naming the step, when an action is not applicable in its state or belongs to another task, when
     an equivalent action is not applicable, and for a task with lazy atom slots. Cost: one host expansion per step

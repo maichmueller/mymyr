@@ -3928,7 +3928,10 @@ void bind_search(nb::module_& parent)
         "The actions of IPC plan text, replayed from `start` (default: the initial state). "
         "Blank lines and ';' comments are skipped and names compared without regard to case. A line names the PDDL "
         "action's own parameters or all of the schema's parameters; among the applicable actions that match, the first "
-        "in canonical order is taken. Raises ValueError, naming the line, when no applicable action matches.");
+        "in canonical order is taken. Every applicable binding is a candidate, also one that witness pruning would not "
+        "enumerate (one differing from another only in parameters no effect mentions). Raises ValueError, naming the "
+        "line, when it names no action or object of the task, has the wrong number of arguments, or names no "
+        "applicable action.");
 
     // plan validation ---------------------------------------------------------------------------------------------
     nb::enum_<search::PlanError>(m, "PlanError", "Why validate_plan rejected a plan.")

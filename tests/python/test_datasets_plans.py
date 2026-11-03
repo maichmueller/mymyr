@@ -1,6 +1,7 @@
 """mymyr.datasets.plan_rows and StateRows.from_plans: plans replayed into state rows and action labels."""
 
 import importlib.util
+import json
 import random
 
 import numpy as np
@@ -272,6 +273,65 @@ def test_equivalent_actions_map_to_canonical_indices():
         datasets.plan_rows(task, plan, equivalent=[["(no-such-action)"], *[[] for _ in plan[1:]]])
     with pytest.raises(TypeError, match="of plan step 1"):
         datasets.plan_rows(task, plan, equivalent=[[3.5], *[[] for _ in plan[1:]]])
+
+
+HUBS_DOMAIN = """(define (domain binding-hubs) (:requirements :strips :typing) (:types agent tool hub job)
+  (:predicates (link ?h - hub ?g - hub) (end ?t - tool ?h - hub) (free ?t - tool) (ready ?a - agent)
+               (holding ?a - agent ?t - tool) (open ?x - job) (done ?x - job))
+  (:action pick :parameters (?a - agent ?t - tool) :precondition (and (ready ?a) (free ?t))
+    :effect (and (holding ?a ?t) (not (ready ?a)) (not (free ?t))))
+  (:action work :parameters (?a - agent ?t - tool ?h - hub ?g - hub ?x - job)
+    :precondition (and (holding ?a ?t) (end ?t ?h) (end ?t ?g) (link ?h ?g) (open ?x))
+    :effect (and (done ?x) (free ?t) (not (open ?x)) (not (holding ?a ?t)))))"""
+HUBS_PROBLEM = """(define (problem p) (:domain binding-hubs) (:objects a - agent t - tool h1 h2 - hub x - job)
+  (:init (ready a) (free t) (end t h1) (end t h2) (link h1 h2) (link h2 h1) (open x)) (:goal (done x)))"""
+HUBS = ROOT / "tests/data/binding-hubs"
+
+
+@needs_frontend
+def test_plan_lines_name_bindings_that_witness_pruning_enumerates_once():
+    # work's hubs occur in its precondition only: witness pruning enumerates one of the two hub orders
+    task = mymyr.Task(mymyr.Domain.from_string(HUBS_DOMAIN).instantiate_string(HUBS_PROBLEM), atoms="dense")
+    table = rl.TaskTable([task])
+    lines = ["(work a t h1 h2 x)", "(work a t h2 h1 x)"]
+    replays = []
+    for line in lines:
+        text = f"(pick a t)\n{line}\n"
+        plan = search.parse_plan(task, text)
+        assert str(plan[1]) == line
+        assert search.validate_plan(task, text).valid
+        pr = datasets.plan_rows(table, text, goal_state=True)
+        assert pr.goal_reached
+        exp = rl.expand(table, pr.rows[1:2])
+        k = int(pr.index[1])
+        assert int(exp.schema[k]) == plan[1].schema and exp.binding[k].tolist() == list(plan[1].binding)
+        pruned = datasets.plan_rows(table, text, witness_pruning=True)
+        assert np.array_equal(pruned.binding, pr.binding)  # the same lines parse under either setting
+        assert int(rl.expand(table, pr.rows[1:2], witness_pruning=True).total) == int(pruned.num_actions[1]) == 1
+        replays.append(pr)
+    assert replays[0].index[1] != replays[1].index[1]
+    for own in lines:
+        eq = datasets.plan_rows(table, f"(pick a t)\n{own}\n", equivalent=[[], lines])
+        assert sorted(eq.equivalent[1].tolist()) == sorted(int(pr.index[1]) for pr in replays)
+
+
+@needs_frontend
+def test_binding_hubs_plans_replay_with_their_symmetric_actions():
+    plans = sorted(HUBS.glob("p*.plan"))
+    table = rl.TaskTable.from_pddl(HUBS / "domain.pddl", [p.with_suffix(".pddl") for p in plans], atoms="dense")
+    for i, plan in enumerate(plans):
+        text = plan.read_text()
+        orbits = json.loads(plan.with_suffix(".orbits.json").read_text())
+        pr = datasets.plan_rows(table, text, task_id=i, goal_state=True, equivalent=orbits)
+        assert pr.goal_reached and pr.num_steps == len(orbits), plan.name
+        assert search.validate_plan(table.tasks[i], text).valid, plan.name
+        for k, orbit in enumerate(orbits):
+            own = pr.equivalent[k][pr.equivalent[k] >= 0]
+            # every symmetric action is a binding of its own, at its own position
+            assert own[0] == pr.index[k] and len(own) == len({line.lower() for line in orbit}), (plan.name, k)
+            exp = rl.expand(table, pr.rows[k : k + 1], [i])
+            labels = {(int(exp.schema[j]), tuple(int(o) for o in exp.binding[j] if o >= 0)) for j in own}
+            assert len(labels) == len(own)
 
 
 @needs_frontend
