@@ -127,8 +127,8 @@ def test_threads_share_one_python_heuristic():
         return 0.0 if s.is_goal() else 1.0
 
     class Batch:
-        def evaluate_batch(self, states):
-            return [h(s) for s in states]
+        def evaluate_batch(self, batch):
+            return [h(s) for s in batch.states]
 
     batch = Batch()
 

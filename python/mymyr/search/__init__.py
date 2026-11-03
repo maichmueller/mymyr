@@ -40,14 +40,33 @@ atom identities by default. ``weight`` is finite and nonnegative. A successor mu
 popped state must still own one at its g; root goals may bypass novelty. The result extends ``BestFirstResult``
 with ``novelty`` statistics. Novelty pruning does not guarantee optimality.
 
-A heuristic written in Python (``heuristic=`` of astar, gbfs, beam, ehc and anytime_astar) is a callable
-``state -> float`` or an object (:class:`mymyr._typing.HeuristicObject`) with ``evaluate(state)``; ``math.inf`` marks a
-dead end. Optionally the object has ``evaluate_batch(states)`` returning one float per state (a list or an array; eager
-A* and eager GBFS then evaluate the new successors of an expansion in one call, beam search those of a layer) and
-``preferred_actions()``, the preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred
-list, EHC's helpful actions). It is called on the searching thread like the other callbacks below. Numeric tasks run
-in A*, GBFS, beam search, EHC and the anytime search; h_max, h_add and h_FF ignore their numeric conditions and effects
-(the delete relaxation), and g is the metric value.
+A heuristic written in Python (``heuristic=`` of astar, gbfs, beam, ehc and anytime_astar) is an evaluator
+(:class:`mymyr._typing.Evaluator`): a callable ``state -> float``, or an object with ``evaluate(state)`` and/or
+``evaluate_batch(batch)``; ``math.inf`` marks a dead end. ``batch`` is a :class:`StateBatch`, the states as arrays:
+``batch.rows`` (uint64 [N, W + NN], the packed state rows), ``batch.task_ids`` and ``batch.tasks``; ``batch.states``
+makes State objects on request. evaluate_batch returns one value per row (a NumPy array, a CPU tensor or a sequence).
+An evaluator that declares an ``encoder`` (a :mod:`mymyr.encoding` encoder over the task, or over a table holding it)
+gets the rows encoded natively as ``batch.encoded`` (``encode_options``: keywords of the encode call, e.g.
+``{"framework": "torch", "threads": 0}``):
+
+    class Linear:
+        def __init__(self, task):
+            self.encoder = mymyr.encoding.FlatRelationEncoder(task)
+
+        def evaluate_batch(self, batch):
+            counts = np.diff(batch.encoded.relation_offsets).reshape(len(batch), -1)
+            return counts @ weights
+
+    r = mymyr.search.gbfs(task, heuristic=Linear(task), expansion_batch=32)
+
+Eager A* and eager GBFS evaluate the new successors of an expansion in one call (``expansion_batch=k``: of k
+expansions), beam search those of a layer; the start state and the lazy searches use ``evaluate`` (or a batch of
+one). ``preferred_actions()``, when present, gives the preferred actions of the state of the last ``evaluate`` call
+(the lazy searches' preferred list, EHC's helpful actions). The evaluator is called on the searching thread like the
+other callbacks below. A :class:`SharedEvaluator` serves many searches on many threads with one evaluator, coalescing
+their batches into one call (see docs/search.md). Numeric tasks run in A*, GBFS, beam search, EHC and the anytime
+search; h_max, h_add and h_FF ignore their numeric conditions and effects (the delete relaxation), and g is the metric
+value.
 
 IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (layer ordering
 strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), ``"in_order"``, ``"reverse"``,
@@ -172,8 +191,10 @@ from mymyr._core._search import (
     RolloutIwStatistics,
     RolloutResult,
     SearchTree,
+    SharedEvaluator,
     SiwResult,
     SiwSubproblem,
+    StateBatch,
     Statistics,
     Status,
     TransitionOutcome,
@@ -243,8 +264,10 @@ __all__ = [
     "RolloutIwStatistics",
     "RolloutResult",
     "SearchTree",
+    "SharedEvaluator",
     "SiwResult",
     "SiwSubproblem",
+    "StateBatch",
     "Statistics",
     "Status",
     "TransitionOutcome",

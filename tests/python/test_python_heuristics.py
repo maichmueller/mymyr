@@ -1,5 +1,5 @@
 """Heuristics written in Python for A*, GBFS and beam search: callables, objects with evaluate / evaluate_batch /
-preferred_actions, dead ends, and errors raised by them."""
+preferred_actions, the StateBatch they receive (rows, tasks, encodings), dead ends, and errors raised by them."""
 
 import math
 import threading
@@ -65,9 +65,9 @@ class Batched:
         if single:
             self.evaluate = lambda s: self.h(s)
 
-    def evaluate_batch(self, states):
-        self.sizes.append(len(states))
-        return [self.h(s) for s in states]
+    def evaluate_batch(self, batch):
+        self.sizes.append(len(batch))
+        return [self.h(s) for s in batch.states]
 
 
 @pytest.mark.parametrize("single", [True, False])
@@ -97,8 +97,8 @@ def test_batch_results_may_be_numpy_arrays(task):
     h = search.Heuristic(task, "max")
 
     class Arr:
-        def evaluate_batch(self, states):
-            return np.array([h(s) for s in states], dtype=np.float32)
+        def evaluate_batch(self, batch):
+            return np.array([h(s) for s in batch.states], dtype=np.float32)
 
     assert search.astar(task, heuristic=Arr()).cost == search.astar(task, heuristic="max").cost
 
@@ -149,7 +149,7 @@ def test_errors_propagate(task):
     assert token.requested and len(calls) == 50  # no Python call after the error
 
     class Short:
-        def evaluate_batch(self, states):
+        def evaluate_batch(self, batch):
             return [0.0]
 
     with pytest.raises(ValueError, match="evaluate_batch returned"):
@@ -158,9 +158,9 @@ def test_errors_propagate(task):
         search.astar(task, heuristic=lambda s: math.nan)
     with pytest.raises(ValueError, match=r"a Python heuristic returned -1.0; heuristic values are >= 0"):
         search.astar(task, heuristic=lambda s: -1.0)
-    with pytest.raises(TypeError, match="a Python heuristic returned a str"):
+    with pytest.raises(TypeError, match="a Python evaluator returned a str"):
         search.astar(task, heuristic=lambda s: "far")
-    with pytest.raises(TypeError, match="a Python heuristic returned a NoneType"):
+    with pytest.raises(TypeError, match="a Python evaluator returned a NoneType"):
         search.astar(task, heuristic=lambda s: None)
     with pytest.raises(TypeError):
         search.astar(task, heuristic=object())

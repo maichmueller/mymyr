@@ -130,8 +130,8 @@ def test_callable_and_batch_only_heuristics(gap):
     same(search.astar_iw(gap, width=2), search.astar_iw(gap, width=2, heuristic=lambda s: h(s)))
 
     class Batch:
-        def evaluate_batch(self, states):
-            return [h(s) for s in states]
+        def evaluate_batch(self, batch):
+            return [h(s) for s in batch.states]
 
     assert search.astar_iw(gap, width=2, heuristic=Batch()).solved
     assert search.astar_iw(gap, heuristic=lambda s: math.inf).status == Status.UNSOLVABLE

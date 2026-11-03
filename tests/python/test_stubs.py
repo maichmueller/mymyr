@@ -37,7 +37,7 @@ def test_stubs_parse_and_are_typed():
     assert "max_seconds: float | None = None" in search
     assert "cancel: CancelToken | None = None" in search
     assert (
-        "heuristic: str | Heuristic | Callable[[mymyr._core.State], float] | mymyr._typing.HeuristicObject = 'max'"
+        "heuristic: str | Heuristic | Callable[[mymyr._core.State], float] | mymyr._typing.Evaluator | SharedEvaluator = 'max'"
         in search
     )
     assert "def perfect(space: mymyr._core._datasets.StateSpace, *, costs: str = 'auto') -> Heuristic:" in search

@@ -12,6 +12,7 @@
 // own object, called from that worker's thread; without it the batch runs on the calling thread alone.
 
 #include "py_datasets.hpp"
+#include "py_evaluator.hpp"
 #include "py_formula.hpp"
 #include "py_landmarks.hpp"
 #include "py_task.hpp"
@@ -194,37 +195,6 @@ nb::gil_scoped_acquire acquire_callback()
     }
     return {};
 }
-
-/// Collects the first exception of any callback, and cancels the search when one occurs.
-struct CallbackErrors
-{
-    search::CancelToken cancel;
-    std::mutex m;
-    std::unique_ptr<nb::python_error> first;  // touched with an attached thread state only
-    std::atomic<bool> failed{false};
-
-    /// Call with an attached thread state, inside the catch of a python_error.
-    void record(nb::python_error&& e)
-    {
-        {
-            std::lock_guard lock(m);
-            if (!first)
-                first = std::make_unique<nb::python_error>(std::move(e));
-        }
-        failed.store(true, std::memory_order_relaxed);
-        cancel.request();
-    }
-
-    /// Call with an attached thread state after the search: re-raises the first error.
-    void rethrow()
-    {
-        if (first)
-        {
-            std::unique_ptr<nb::python_error> e = std::move(first);
-            throw nb::python_error(std::move(*e));
-        }
-    }
-};
 
 /// A SearchObserver forwarding to the on_* methods a Python object defines (the others are skipped for free), and to
 /// its make_worker(k) for the parallel searches. The methods of mymyr.search.Observer that a subclass does not
@@ -1802,202 +1772,6 @@ struct PyHeuristic
     }
 };
 
-/// A heuristic written in Python (heuristics::Kind::Custom): a callable h(state) -> float, or an object with
-/// evaluate(state) -> float and/or evaluate_batch(states) -> sequence of floats, and optionally preferred_actions()
-/// -> iterable of actions (the preferred operators of the state of the last single evaluation). +inf marks a dead
-/// end. Every call attaches the thread state. The first exception is recorded in `errors`, which cancels the search
-/// and re-raises it afterwards; evaluations after it return +inf without calling Python.
-class PyCallbackHeuristic final : public heuristics::Heuristic
-{
-public:
-    PyCallbackHeuristic(nb::handle obj, Owner owner, CallbackErrors& errors) : m_owner(std::move(owner)), m_errors(errors)
-    {
-        const bool one = nb::hasattr(obj, "evaluate"), batch = nb::hasattr(obj, "evaluate_batch");
-        if (one || batch)
-        {
-            if (one)
-                m_one = nb::getattr(obj, "evaluate");
-            if (batch)
-                m_batch = nb::getattr(obj, "evaluate_batch");
-            if (nb::hasattr(obj, "preferred_actions"))
-                m_preferred = nb::getattr(obj, "preferred_actions");
-        }
-        else if (PyCallable_Check(obj.ptr()))
-            m_one = nb::borrow(obj);
-        else
-            throw nb::type_error("mymyr: heuristic must be a kind name, a mymyr.search.Heuristic, a callable "
-                                 "state -> float or an object with evaluate(state) or evaluate_batch(states)");
-    }
-    PyCallbackHeuristic(const PyCallbackHeuristic&) = delete;
-    PyCallbackHeuristic& operator=(const PyCallbackHeuristic&) = delete;
-    ~PyCallbackHeuristic() override
-    {
-        nb::gil_scoped_acquire acquire;
-        m_one.reset();
-        m_batch.reset();
-        m_preferred.reset();
-        m_owner.obj.reset();
-    }
-
-    [[nodiscard]] heuristics::Kind kind() const noexcept override { return heuristics::Kind::Custom; }
-
-    heuristics::Value evaluate(StateView s) override
-    {
-        if (m_errors.failed.load(std::memory_order_relaxed))
-            return inf();
-        nb::gil_scoped_acquire acquire;
-        try
-        {
-            heuristics::Value v = 0;
-            if (m_one.is_valid())
-                v = to_value(m_one(make_state(m_owner, State(s))).ptr());
-            else
-            {
-                nb::list states;
-                states.append(make_state(m_owner, State(s)));
-                values(m_batch(states), std::span<heuristics::Value>(&v, 1));
-            }
-            if (m_preferred.is_valid())
-                load_preferred(m_preferred());
-            count(v);
-            return v;
-        }
-        catch (nb::python_error& e)
-        {
-            m_errors.record(std::move(e));
-            m_pref.clear();
-            return inf();
-        }
-    }
-
-    /// The goals of GoalSpec::AnyOf are not passed on: a Python heuristic estimates whatever it estimates.
-    heuristics::Value evaluate(StateView s, std::span<const search::GoalSpec::AtomGoal> /*goals*/) override { return evaluate(s); }
-
-    void evaluate_batch(std::span<const StateView> states, std::span<heuristics::Value> out) override
-    {
-        if (!m_batch.is_valid())
-        {
-            for (usize i = 0; i < states.size(); ++i)
-                out[i] = evaluate(states[i]);
-            return;
-        }
-        if (m_errors.failed.load(std::memory_order_relaxed))
-        {
-            std::ranges::fill(out, inf());
-            return;
-        }
-        nb::gil_scoped_acquire acquire;
-        try
-        {
-            nb::list list;
-            for (StateView s : states)
-                list.append(make_state(m_owner, State(s)));
-            values(m_batch(list), out);
-            for (heuristics::Value v : out)
-                count(v);
-        }
-        catch (nb::python_error& e)
-        {
-            m_errors.record(std::move(e));
-            std::ranges::fill(out, inf());
-        }
-    }
-
-    [[nodiscard]] bool batched() const noexcept override { return m_batch.is_valid(); }
-    [[nodiscard]] bool provides_preferred() const noexcept override { return m_preferred.is_valid(); }
-    [[nodiscard]] bool preferred(const ActionLabel& a) const override
-    {
-        const auto less = [](const Action& x, const ActionLabel& y) {
-            if (x.schema != y.schema)
-                return x.schema < y.schema;
-            return std::lexicographical_compare(x.binding.begin(), x.binding.end(), y.binding.begin(), y.binding.end());
-        };
-        const auto it = std::lower_bound(m_pref.begin(), m_pref.end(), a, less);
-        return it != m_pref.end() && it->schema == a.schema && std::ranges::equal(it->binding, a.binding);
-    }
-
-private:
-    static heuristics::Value inf() { return std::numeric_limits<heuristics::Value>::infinity(); }
-
-    void count(heuristics::Value v)
-    {
-        ++m_stats.evaluations;
-        if (std::isinf(v) && v > 0)
-            ++m_stats.dead_ends;
-    }
-
-    /// The float of a Python number (anything with __float__); raises (as a python_error) for non-numbers and for
-    /// values that are no heuristic values: NaN and negative numbers (inf marks a dead end).
-    static heuristics::Value to_value(PyObject* x)
-    {
-        const double v = PyFloat_AsDouble(x);
-        if (v == -1.0 && PyErr_Occurred())
-        {
-            if (!PyErr_ExceptionMatches(PyExc_TypeError))
-                throw nb::python_error();
-            PyErr_Clear();
-            const std::string text = "mymyr: a Python heuristic returned a " +
-                                     nb::cast<std::string>(nb::str(nb::handle(x).type().attr("__name__"))) +
-                                     "; heuristic values are numbers >= 0 (inf: a dead end)";
-            PyErr_SetString(PyExc_TypeError, text.c_str());
-            throw nb::python_error();
-        }
-        if (std::isnan(v) || v < 0)
-        {
-            const std::string text = "mymyr: a Python heuristic returned " + nb::cast<std::string>(nb::repr(nb::float_(v))) +
-                                     "; heuristic values are >= 0 (inf: a dead end)";
-            PyErr_SetString(PyExc_ValueError, text.c_str());
-            throw nb::python_error();
-        }
-        return v;
-    }
-
-    static void values(nb::handle result, std::span<heuristics::Value> out)
-    {
-        nb::object seq = nb::steal(PySequence_Fast(result.ptr(), "mymyr: evaluate_batch must return a sequence of floats"));
-        if (!seq.is_valid())
-            throw nb::python_error();
-        const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq.ptr());
-        if (static_cast<usize>(n) != out.size())
-        {
-            PyErr_Format(PyExc_ValueError, "mymyr: evaluate_batch returned %zd values for %zu states", n, out.size());
-            throw nb::python_error();
-        }
-        PyObject** items = PySequence_Fast_ITEMS(seq.ptr());
-        for (Py_ssize_t i = 0; i < n; ++i)
-            out[static_cast<usize>(i)] = to_value(items[i]);
-    }
-
-    void load_preferred(nb::handle actions)
-    {
-        m_pref.clear();
-        for (nb::handle a : actions)
-        {
-            if (!nb::isinstance<PyAction>(a))
-            {
-                PyErr_SetString(PyExc_TypeError, "mymyr: preferred_actions must return mymyr Actions");
-                throw nb::python_error();
-            }
-            const PyAction& p = *nb::inst_ptr<PyAction>(a);
-            if (p.core != m_owner.core)
-            {
-                PyErr_SetString(PyExc_ValueError, "mymyr: preferred_actions returned an action of another task");
-                throw nb::python_error();
-            }
-            std::vector<ObjectId> binding(p.binding.size());
-            for (usize i = 0; i < binding.size(); ++i)
-                binding[i] = ObjectId{p.binding[i]};
-            m_pref.emplace_back(SchemaId{p.schema}, std::move(binding));
-        }
-        std::ranges::sort(m_pref);
-    }
-
-    Owner m_owner;
-    CallbackErrors& m_errors;
-    nb::object m_one, m_batch, m_preferred;
-    std::vector<Action> m_pref;  // sorted
-};
-
 // ------------------------------------------------------------------------------------------------ parameter types
 
 // Parameter types for signatures and the stubs (Arg: typing.hpp).
@@ -2014,7 +1788,7 @@ using GoalArg = Arg<std::variant<nb::typed<nb::callable, bool(PyState)>, PyGroun
 using StatesArg = Arg<nb::typed<nb::iterable, PyState>>;
 using ObserverArg = Arg<ann::Observer>;  // duck-typed: every on_* method is optional
 using HeuristicArg =
-    Arg<std::variant<std::string, PyHeuristic, nb::typed<nb::callable, double(PyState)>, ann::HeuristicObject>>;
+    Arg<std::variant<std::string, PyHeuristic, nb::typed<nb::callable, double(PyState)>, ann::Evaluator>>;
 using ActionList = nb::typed<nb::list, PyAction>;
 using TransitionArg = Arg<PyLandmarkOrdering>;
 using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, ann::LandmarkSource>>;
@@ -2103,7 +1877,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     search::BestFirstOptions opts;
     opts.control = cs.control;
     std::unique_ptr<heuristics::Heuristic> own;  // the search's evaluator of a Heuristic object
-    std::unique_ptr<PyCallbackHeuristic> callback;
+    std::unique_ptr<PyEvaluatorHeuristic> callback;
     std::unique_ptr<heuristics::Heuristic> perfect;
     if (nb::isinstance<nb::str>(heuristic) && nb::cast<std::string>(heuristic) == "perfect")
     {
@@ -2125,7 +1899,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
         opts.heuristic.kind = parse_kind(heuristic);
     else
     {
-        callback = std::make_unique<PyCallbackHeuristic>(heuristic, o, *cs.errors);
+        callback = std::make_unique<PyEvaluatorHeuristic>(heuristic, o, *cs.errors);
         opts.evaluator = callback.get();
     }
     opts.heuristic.costs = parse_costs(costs);
@@ -2340,13 +2114,17 @@ const char* k_control_doc =
     "the search and is re-raised.";
 
 const char* k_heuristic_doc =
-    "Python heuristics: a callable state -> float or an object with evaluate(state) -> float "
-    "(mymyr._typing.HeuristicObject); math.inf marks a dead end. Optional methods: evaluate_batch(states) -> "
-    "one float per state (eager A* and eager GBFS then evaluate the new successors of an expansion in one "
-    "call, beam search those of a layer; an object may have evaluate_batch alone) and preferred_actions() -> "
-    "the preferred actions of the state of the last evaluate call (the lazy searches' preferred list). It is "
-    "called on the thread running the search, with the thread state attached; an exception cancels the search "
-    "and is re-raised.";
+    "Python heuristics (mymyr._typing.Evaluator): a callable state -> float, or an object with evaluate(state) -> "
+    "float and/or evaluate_batch(batch) -> one value per state (an array or a sequence); math.inf marks a dead end. "
+    "batch is a mymyr.search.StateBatch: the states as packed rows (batch.rows, batch.task_ids) and, when the object "
+    "has an `encoder` (a mymyr.encoding encoder over the task or a table holding it; `encode_options`: the keywords of "
+    "its encode call), their encoding (batch.encoded). With evaluate_batch, eager A* and eager GBFS evaluate the new "
+    "successors of an expansion (of expansion_batch expansions) in one call and beam search those of a layer; the "
+    "other searches and the start state use evaluate, or evaluate_batch with one state. Optional: "
+    "preferred_actions() -> the preferred actions of the state of the last evaluate call (the lazy searches' "
+    "preferred list). A mymyr.search.SharedEvaluator coalesces the batches of many searches into one call. It is "
+    "called with the thread state attached (a SharedEvaluator: on one of the searching threads); an exception "
+    "cancels the search and is re-raised.";
 
 const char* k_tree_doc =
     "tree: None (default), 'nodes' or 'transitions'. Retains each pass as a SearchTree of read-only NumPy arrays. "
@@ -2406,6 +2184,7 @@ const char* k_layer_doc =
 void bind_search(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_search", "The search family and heuristics (mymyr.search)");
+    bind_evaluators(m);
 
     nb::enum_<SearchStatus>(m, "Status", "Outcome of a search.")
         .value("SOLVED", SearchStatus::Solved)

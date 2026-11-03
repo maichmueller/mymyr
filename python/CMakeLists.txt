@@ -20,6 +20,7 @@ nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/rl_jax_bindings.cpp
     src/rl_ops_bindings.cpp
     src/search_bindings.cpp
+    src/evaluator_bindings.cpp
     src/landmarks_bindings.cpp
     src/datasets_bindings.cpp
     src/encoding_bindings.cpp

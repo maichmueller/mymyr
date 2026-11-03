@@ -65,8 +65,9 @@ struct EhcFallback  // EhcOptions::Fallback
 struct Observer
 {
 };
-/// A heuristic object written in Python (mymyr._typing.HeuristicObject): evaluate(state) and/or evaluate_batch(states).
-struct HeuristicObject
+/// An evaluator written in Python (mymyr._typing.Evaluator): evaluate(state) and/or evaluate_batch(batch), or a
+/// mymyr.search.SharedEvaluator.
+struct Evaluator
 {
 };
 /// A plan to validate: IPC plan text, the path of a plan file, or a sequence of Actions.
@@ -185,9 +186,9 @@ struct type_caster<mymyr::python::ann::Observer>
     static constexpr auto Name = const_name("mymyr.search.Observer");
 };
 template<>
-struct type_caster<mymyr::python::ann::HeuristicObject>
+struct type_caster<mymyr::python::ann::Evaluator>
 {
-    static constexpr auto Name = const_name("mymyr._typing.HeuristicObject");
+    static constexpr auto Name = const_name("mymyr._typing.Evaluator | SharedEvaluator");
 };
 template<>
 struct type_caster<mymyr::python::ann::PlanSource>

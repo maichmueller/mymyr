@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from mymyr import State
+    from mymyr.search import StateBatch
     from mymyr._core._rl_ops import TensorViewMarker
     from mymyr.encoding import DeviceFlatBatch as DeviceFlatBatch
     from mymyr.encoding import DeviceFlatStream as DeviceFlatStream
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mymyr.rl import DeviceGoalTemplates as DeviceGoalTemplates
     from mymyr.rl import InstanceSampler as InstanceSampler
 
-__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows",
+__all__ = ["Evaluator", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView", "DeviceActionRows",
            "TensorView"]
 
 
@@ -42,16 +42,22 @@ class SupportsCudaStream(Protocol):
     def cuda_stream(self) -> int: ...
 
 
-class HeuristicObject(Protocol):
-    """A heuristic written in Python for mymyr.search.astar, gbfs and beam (``heuristic=``).
+class Evaluator(Protocol):
+    """An evaluator written in Python: a heuristic of mymyr.search.astar, gbfs, beam, ehc and anytime_astar
+    (``heuristic=``) or the scores of a scored layer ordering (``layer_order=`` of iw, siw, iw_pass, brfs and the IW
+    family).
 
-    evaluate(state) returns h of the state (``math.inf`` marks a dead end). Optional methods the searches use when
-    present: evaluate_batch(states) -> sequence of floats, one per state (then eager A* and eager GBFS hand over the new
-    successors of each expansion in one call, beam search those of a layer; an object may have evaluate_batch alone),
-    and preferred_actions() -> iterable of actions, the preferred operators of the state of the last evaluate call
-    (the lazy searches' preferred list). A plain callable state -> float is accepted as well."""
+    evaluate(state) returns the value of one state. evaluate_batch(batch) returns one value per row of a
+    :class:`mymyr.search.StateBatch` (the states as packed rows; ``batch.encoded`` their encoding when the object has an
+    ``encoder``): a NumPy array, a CPU tensor or a sequence of numbers. An object may have either method or both; the
+    searches call evaluate_batch where they evaluate several states at once. Heuristic values are >= 0 with
+    ``math.inf`` for a dead end; scores are any numbers but NaN, lower first. Optional attributes: ``encoder``, a
+    mymyr.encoding encoder (FlatRelationEncoder, SimpleEncoder, ...) over the search's task or a table holding it;
+    ``encode_options``, a dict of keywords for its encode call; and the method preferred_actions() -> iterable of
+    actions, the preferred operators of the state of the last evaluate call (the lazy searches' preferred list). A
+    plain callable state -> float is accepted as well."""
 
-    def evaluate(self, state: State) -> float: ...
+    def evaluate_batch(self, batch: StateBatch) -> Any: ...
 
 
 class SupportsHorizonView(Protocol):
