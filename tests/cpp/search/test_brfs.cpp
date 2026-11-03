@@ -163,6 +163,44 @@ TEST(Brfs, StopAtGoalReturnsAValidPlan)
         }
 }
 
+TEST(Brfs, BudgetsAndGoalsGiveTheSameResultOnEveryThreadCount)
+{
+    // the layer in which the goal or a budget stops the search is settled in id order: status, plan and counts do not
+    // depend on the thread count
+    for (const char* name : {"gripper__prob05", "blocks__probBLOCKS-8-0"})
+    {
+        const auto task = Task::from_text_file(task_path(name));
+        struct Budget
+        {
+            u64 max_states = ~u64{0}, max_expanded = ~u64{0};
+        };
+        for (const Budget b : {Budget{}, Budget{50, ~u64{0}}, Budget{333, ~u64{0}}, Budget{~u64{0}, 40}, Budget{~u64{0}, 257},
+                               Budget{120, 90}})
+        {
+            BrfsOptions bo;
+            bo.max_states = b.max_states;
+            bo.max_expanded = b.max_expanded;
+            bo.store = BrfsOptions::Store::Flat;
+            const BrfsResult ref = brfs(*task, bo);
+            bo.store = BrfsOptions::Store::Concurrent;
+            for (u32 T : {1u, 2u, 4u, 8u})
+                for (int repeat = 0; repeat < (T > 1 ? 5 : 1); ++repeat)
+                {
+                    bo.threads = T;
+                    const BrfsResult r = brfs(*task, bo);
+                    const std::string what = std::string(name) + " T=" + std::to_string(T) + " max_states " +
+                                             std::to_string(b.max_states) + " max_expanded " + std::to_string(b.max_expanded);
+                    EXPECT_EQ(r.status, ref.status) << what;
+                    EXPECT_EQ(r.plan.size(), ref.plan.size()) << what;
+                    EXPECT_EQ(r.states, ref.states) << what;
+                    EXPECT_EQ(r.expanded, ref.expanded) << what;
+                    EXPECT_EQ(r.generated, ref.generated) << what;
+                    EXPECT_EQ(r.num_goal_states, ref.num_goal_states) << what;
+                }
+        }
+    }
+}
+
 TEST(Brfs, MaxStatesStopsWhenTheStoreHoldsExactlyThatMany)
 {
     // the state that fills the store stops the search: every store on every thread count holds max_states states
