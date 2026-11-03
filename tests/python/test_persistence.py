@@ -101,8 +101,12 @@ def test_from_arrays_round_trips(case):
     assert (t.threads, t.layers, t.search_seconds, t.post_seconds) == (1, 0, 0.0, 0.0)
     for v in range(0, s.num_states, max(1, s.num_states // 5)):
         same_graph(datasets.tuple_graph(s, v, width=1), datasets.tuple_graph(t, v, width=1))
-    # DLPack arrays on the CPU work the same
+    # DLPack arrays on the CPU work the same, and NumPy takes them zero-copy
     same_arrays(datasets.StateSpace.from_arrays(task, s.arrays("dlpack")).arrays(), s.arrays())
+    host = s.arrays("dlpack")
+    same_arrays({k: np.asarray(v) for k, v in host.items()}, s.arrays())
+    assert np.asarray(host["forward_targets"]).ctypes.data == host["forward_targets"].data_ptr
+    assert np.asarray(host["unit_goal_distances"], dtype=np.int64).dtype == np.int64
 
 
 def test_from_arrays_of_a_text_task():

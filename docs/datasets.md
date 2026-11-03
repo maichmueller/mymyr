@@ -56,6 +56,11 @@ joins them into one graph, their disjoint union; the tasks must come from one do
 `DeviceStateSpace`; `to_host()` copies the same indexed space back, including CPU-encoded numeric values, costs
 and goal distances.
 
+Both spaces' `arrays(framework=None)` give the same keys, dtypes and shapes without copying, each by default in the
+form its memory allows: a `StateSpace` NumPy arrays, a `DeviceStateSpace` DLPack arrays (`DLArray`) in device
+memory, which NumPy cannot hold. Pass `"torch"` or `"jax"` (or `"dlpack"`) for the same framework from both;
+`np.asarray` of a device `DLArray` raises `TypeError` (use `to_host().arrays()` for NumPy).
+
 ## Task sets, knowledge bases and tuple graphs
 
 A task set is many problems of one domain: a `mymyr.rl.TaskTable`, the same type the RL entry points take.

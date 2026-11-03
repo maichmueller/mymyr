@@ -202,6 +202,9 @@ def test_device_arrays_frameworks_and_streams(ctx):
     assert t["forward_targets"].device.type == "cuda"
     with pytest.raises(TypeError, match="NumPy"):
         d.arrays("numpy")
+    with pytest.raises(TypeError, match="device memory, which NumPy cannot hold"):
+        np.asarray(raw["forward_targets"])  # not an object scalar
+    assert_same_arrays(d.to_host().arrays(), ca)
     # the arrays keep the space's memory alive
     keep = d.arrays("torch")["unit_goal_distances"]
     del d, raw, t

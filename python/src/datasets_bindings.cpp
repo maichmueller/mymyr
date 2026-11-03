@@ -819,7 +819,9 @@ void bind_datasets(nb::module_& parent)
             "forward_targets [E], label_schemas [E] and label_bindings [E, label_width] (unused positions 2^32 - 1; "
             "with labels), backward_offsets [N + 1], backward_sources and backward_edges [E] (per target, ascending "
             "forward edge indices), unit_goal_distances [N] (int32, -1: unsolvable), cost_goal_distances [N] (float64, "
-            "inf: unsolvable), costs [E] (float64; absent for unit costs), goal, unsolvable, alive [N] (bool).")
+            "inf: unsolvable), costs [E] (float64; absent for unit costs), goal, unsolvable, alive [N] (bool). "
+            "framework: 'numpy' (None), 'torch', 'jax' or 'dlpack' (DeviceStateSpace.arrays gives the same keys in "
+            "device memory, DLPack by default).")
         .def(
             "state",
             [](const PyStateSpace& s, i64 id) { return make_state(s.owner, State(s.space->state(state_id(s, id)))); },
