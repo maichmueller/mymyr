@@ -48,6 +48,7 @@ The exit code tells what happened:
 | 1 | the task is unsolvable, or the search exhausted its space without a plan |
 | 2 | invalid options, an unreadable file, PDDL mymyr cannot read, or another error |
 | 3 | `--max-seconds` or `--max-states` stopped the search |
+| 4 | `iw`, `siw` or `astar_iw` ended without a plan: they prune by novelty, so the task may still be solvable |
 
 Errors are one line on stderr, for example
 `mymyr: error: domain.pddl:5: durative actions are not supported (:durative-action move)`; see

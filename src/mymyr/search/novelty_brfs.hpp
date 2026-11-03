@@ -502,7 +502,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     const bool beam = ordered && env.layers->beam();
     const bool survivors = ordered && env.layers->survivors_only();
     if (survivors && !Peeking<Pruner>)
-        throw std::invalid_argument("mymyr: BeamNovelty::SurvivorsOnly needs a novelty pruner with a read-only test");
+        throw std::invalid_argument("mymyr: the survivors-only beam novelty needs a novelty pruner with a read-only test");
 
     std::optional<TreeSink> sink;
     if (env.tree != TreeRecord::None)

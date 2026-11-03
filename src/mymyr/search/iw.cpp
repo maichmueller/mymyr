@@ -40,7 +40,7 @@ GoalTest GoalTest::from_spec(const Task& task, const GoalSpec& spec)
             break;
         case GoalSpec::Kind::Custom:
             if (!spec.test)
-                throw std::invalid_argument("GoalSpec::Kind::Custom needs a test function");
+                throw std::invalid_argument("a custom goal needs a test function");
             g.m_kind = Kind::Custom;
             break;
     }
@@ -151,16 +151,16 @@ Context::Context(const Task& t, const IwOptions& o, Successors& s)
     if (o.layers.kind != LayerOrdering::Kind::Queue)
     {
         if (o.transition_ordering)
-            throw std::invalid_argument("IwOptions::layers cannot be combined with a transition ordering");
+            throw std::invalid_argument("an ordered layer order cannot be combined with a transition ordering");
         else
             layers = std::make_unique<LayerOrderer>(t, o.layers);
     }
     const u32 T = resolve_threads(o.threads);
     const bool slow = observer != nullptr || !blocked.empty() || static_cast<bool>(o.successor_order) || o.tree == TreeRecord::Transitions;
     if (T > 1 && !o.layers.beam())
-        throw std::invalid_argument("IwOptions::threads > 1 requires a beam (LayerOrdering::beam_width)");
+        throw std::invalid_argument("threads > 1 needs a beam (beam_width)");
     else if (layers && layers->relaxed() && slow)
-        throw std::invalid_argument("LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states, a "
+        throw std::invalid_argument("the relaxed survivors-only beam novelty cannot be combined with an observer, blocked states, a "
                                     "successor order or a transition tree (tree='transitions')");
     else if (layers && layers->beam() && !slow && (T > 1 || layers->relaxed()) &&
              (o.tree == TreeRecord::None || layers->relaxed()))

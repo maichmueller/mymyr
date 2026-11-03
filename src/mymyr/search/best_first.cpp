@@ -67,7 +67,7 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     if (path_dependent && o.control.goal.kind == GoalSpec::Kind::AnyOf)
         throw std::invalid_argument(std::string("mymyr best-first search: the path-dependent heuristic '") +
                                     heuristics::to_string(h->kind()) +
-                                    "' estimates the task's goal; GoalSpec::AnyOf is not supported");
+                                    "' estimates the task's goal; goal alternatives are not supported");
     for (const State& s : o.control.blocked_states)
     {
         if (s.numeric_words() != nn)
@@ -81,15 +81,15 @@ void check_options(const BestFirstOptions& o, const char* algorithm, bool astar)
 {
     const std::string who = std::string("mymyr ") + algorithm + ": ";
     if (!(std::isfinite(o.weight) && o.weight >= 1))
-        throw std::invalid_argument(who + "BestFirstOptions::weight must be finite and at least 1 (got " + std::to_string(o.weight) + ")");
+        throw std::invalid_argument(who + "the weight must be finite and at least 1 (got " + std::to_string(o.weight) + ")");
     if (std::isnan(o.cost_bound))
-        throw std::invalid_argument(who + "BestFirstOptions::cost_bound is NaN");
+        throw std::invalid_argument(who + "the cost bound is NaN");
     if (!astar && o.weight != 1)
-        throw std::invalid_argument(who + "BestFirstOptions::weight applies to A* (astar_eager, astar_lazy)");
+        throw std::invalid_argument(who + "a weight applies to A* only");
     if (!astar && o.cost_bound != std::numeric_limits<double>::infinity())
-        throw std::invalid_argument(who + "BestFirstOptions::cost_bound applies to A* (astar_eager, astar_lazy)");
+        throw std::invalid_argument(who + "a cost bound applies to A* only");
     if (o.queue == BestFirstOptions::Queue::Bucket && o.weight != std::floor(o.weight))
-        throw std::invalid_argument(who + "a bucket queue needs an integral weight (use Queue::Heap or Queue::Auto)");
+        throw std::invalid_argument(who + "a bucket queue needs an integral weight (use the heap or the automatic queue)");
 }
 
 Context::~Context()

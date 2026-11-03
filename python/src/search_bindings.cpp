@@ -3445,7 +3445,7 @@ void bind_search(nb::module_& parent)
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
+            search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1,
                                                 witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
@@ -3480,7 +3480,7 @@ void bind_search(nb::module_& parent)
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, Arg<ann::TreeRecord> tree, bool incremental_first_applicability, bool precheck_add_effects) {
             const Owner o = owner_of(task);
-            const u32 k = int_arg<u32>(width, "width");
+            const u32 k = int_arg<u32>(width, "width", 0, novelty::k_max_arity);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
@@ -3515,7 +3515,7 @@ void bind_search(nb::module_& parent)
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1,
+            search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1,
                                                  witness_pruning, canonical_order, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
@@ -3671,7 +3671,7 @@ void bind_search(nb::module_& parent)
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner owner = owner_of(task);
             search::AStarIwOptions options;
-            options.width = int_arg<u32>(width, "width");
+            options.width = int_arg<u32>(width, "width", 1, novelty::k_max_arity);
             const std::string mode = str_arg(features, "features");
             if (mode == "classical")
                 options.features = search::AStarIwFeatures::Classical;
@@ -4053,7 +4053,7 @@ void bind_search(nb::module_& parent)
                          observer, progress_interval);
             search::LiwOptions opts;
             static_cast<search::IwOptions&>(opts) =
-                iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, true, witness_pruning,
+                iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, true, witness_pruning,
                            canonical_order, start);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
@@ -4098,7 +4098,7 @@ void bind_search(nb::module_& parent)
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
                             prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
                             beam_chunk, threads, witness_pruning, canonical_order, start);
-            opts.width = int_arg<u32>(width, "width");
+            opts.width = int_arg<u32>(width, "width", 1, 3);
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
             opts.tree = tree_record(tree);
@@ -4231,7 +4231,7 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::ParallelRolloutOptions opts;
-            opts.iw = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1, witness_pruning,
+            opts.iw = iw_options(cs, o, int_arg<u32>(max_width, "max_width", 0, novelty::k_max_arity), width_zero, optimize_iw1, witness_pruning,
                                  canonical_order, start);
             opts.seeds = int_list_arg<u64>(seeds, "seeds");
             opts.threads = threads_arg(threads, "threads");

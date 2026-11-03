@@ -88,7 +88,7 @@ u32 StateSpace::source(u64 edge) const
 Action StateSpace::label(u64 edge) const
 {
     if (!m_has_labels)
-        throw std::logic_error("mymyr: this state space was generated without labels (StateSpaceOptions::labels)");
+        throw std::logic_error("mymyr: this state space was generated without labels");
     if (edge >= m_targets.size())
         throw std::out_of_range("mymyr: transition index out of range");
     const u32 s = m_schemas[edge];

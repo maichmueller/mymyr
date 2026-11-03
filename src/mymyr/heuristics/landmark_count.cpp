@@ -204,7 +204,7 @@ public:
     Value evaluate(StateView, std::span<const search::GoalSpec::AtomGoal>) override
     {
         throw std::invalid_argument("mymyr: landmark count estimates the task's goal only (its landmarks are the goal's); "
-                                    "GoalSpec::AnyOf is not supported");
+                                    "goal alternatives are not supported");
     }
 
     [[nodiscard]] bool preferred(const ActionLabel& a) const override

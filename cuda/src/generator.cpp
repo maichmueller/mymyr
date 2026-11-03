@@ -774,7 +774,7 @@ void ChunkGenerator::count_host()
         check(cudaMemcpyAsync(&error, m_numeric_error.data(), sizeof(u32), cudaMemcpyDeviceToHost, m_s), "numeric error");
         check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
         if (error)
-            throw std::overflow_error("mymyr: a numeric value is not an int32; build the task with TaskOptions::numeric_storage = F64");
+            throw std::overflow_error("mymyr: a numeric value is not an int32; build the task with 64-bit float numeric storage");
     }
     const u64 n = static_cast<u64>(m_parents.rows) * m_S + 1;
     auto* counts = static_cast<u32*>(m_counts.data());

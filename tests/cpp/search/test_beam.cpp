@@ -790,18 +790,18 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
         bad.push_back({lo, "beam_width must be positive"});
         lo = beam(4, Novelty::AllTested);
         lo.kind = LayerOrdering::Kind::Queue;
-        bad.push_back({lo, "beam_width requires an ordered layer kind"});
+        bad.push_back({lo, "beam_width needs an ordered layer order"});
         lo = beam(4, Novelty::AllTested);
         lo.max_next_layer_states = 10;
-        bad.push_back({lo, "mutually exclusive"});
+        bad.push_back({lo, "exclude each other"});
         lo = LayerOrdering{};
         lo.kind = LayerOrdering::Kind::GoalCount;
         lo.beam_novelty = Novelty::SurvivorsOnly;
-        bad.push_back({lo, "requires a beam"});
+        bad.push_back({lo, "needs a beam"});
         lo = beam(4, Novelty::AllTested);
         lo.kind = LayerOrdering::Kind::InOrder;
         lo.randomize_ties = true;
-        bad.push_back({lo, "randomize_ties requires Kind::GoalCount"});
+        bad.push_back({lo, "randomize_ties needs the goal-count layer order"});
     }
     for (const auto& [lo, msg] : bad)
     {

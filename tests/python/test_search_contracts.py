@@ -501,15 +501,9 @@ def test_grounded_and_lifted_relaxations_agree_on_contradictory_conditions(name,
 
 # ------------------------------------------------------------------------------------------------ budgets of passes
 
-LOGISTICS = ("logistics00/domain.pddl", "logistics00/probLOGISTICS-6-1.pddl")
-
-
 @pytest.fixture(scope="module")
 def logistics():
-    from conftest import ROOT
-
-    d = ROOT / "tests" / "data" / "pddl"
-    return mymyr.Task.from_pddl(str(d / LOGISTICS[0]), str(d / LOGISTICS[1]))
+    return text_task("logistics00__probLOGISTICS-6-1")
 
 
 def iw_passes(r):
@@ -560,3 +554,42 @@ def test_single_pass_searches_take_no_max_expanded_local(logistics):
         args = (logistics, 1) if f is search.iw_pass else (logistics,)
         with pytest.raises(TypeError):
             f(*args, max_expanded_local=5)
+
+
+# ------------------------------------------------------------------------------------------------ argument errors
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda t: search.iw(t, max_width=6),
+        lambda t: search.iw(t, max_width=100),
+        lambda t: search.siw(t, max_width=6),
+        lambda t: search.liw(t, max_width=6),
+        lambda t: search.find_rollouts_parallel(t, [1], max_width=6),
+        lambda t: search.iw_pass(t, 7),
+        lambda t: search.astar_iw(t, width=6),
+        lambda t: search.abstracted_iw(t, width=4),
+    ],
+)
+def test_novelty_widths_beyond_the_tables_raise(call):
+    with pytest.raises(ValueError, match="width"):
+        call(text_task("gripper__prob05"))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda t: search.brfs(t, layer_order="in_order", beam_width=0),
+        lambda t: search.brfs(t, beam_width=4),
+        lambda t: search.iw(t, layer_order="in_order", randomize_ties=True),
+        lambda t: search.iw(t, threads=2),
+        lambda t: search.anytime_astar(t, weights=[]),
+        lambda t: search.anytime_astar(t, weights=[1.5], queue="bucket"),
+        lambda t: search.astar(t, weight=1.5, queue="bucket"),
+    ],
+)
+def test_python_errors_name_no_cpp_types(call):
+    with pytest.raises(ValueError) as e:
+        call(text_task("gripper__prob05"))
+    assert "::" not in str(e.value), str(e.value)
+

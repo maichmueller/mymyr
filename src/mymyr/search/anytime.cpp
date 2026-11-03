@@ -22,7 +22,7 @@ using bf::seconds_since;
 void check(const AnytimeOptions& o)
 {
     if (o.weights.empty())
-        throw std::invalid_argument("mymyr anytime_astar: AnytimeOptions::weights is empty");
+        throw std::invalid_argument("mymyr anytime_astar: the weights are empty");
     for (usize i = 0; i < o.weights.size(); ++i)
     {
         const double w = o.weights[i];
@@ -31,12 +31,12 @@ void check(const AnytimeOptions& o)
         if (i > 0 && w > o.weights[i - 1])
             throw std::invalid_argument("mymyr anytime_astar: the weights must not increase");
         if (o.queue == BestFirstOptions::Queue::Bucket && w != std::floor(w))
-            throw std::invalid_argument("mymyr anytime_astar: a bucket queue needs integral weights (use Queue::Heap or Queue::Auto)");
+            throw std::invalid_argument("mymyr anytime_astar: a bucket queue needs integral weights (use the heap or the automatic queue)");
     }
     if (o.weight != 1)
-        throw std::invalid_argument("mymyr anytime_astar: BestFirstOptions::weight is not used (the schedule is AnytimeOptions::weights)");
+        throw std::invalid_argument("mymyr anytime_astar: the single weight is not used (the schedule is the weights)");
     if (std::isnan(o.cost_bound))
-        throw std::invalid_argument("mymyr anytime_astar: BestFirstOptions::cost_bound is NaN");
+        throw std::invalid_argument("mymyr anytime_astar: the cost bound is NaN");
 }
 }  // namespace
 

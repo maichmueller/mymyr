@@ -1816,7 +1816,7 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     if (beam && options.observer)
     {
         if (relaxed)
-            throw std::invalid_argument("mymyr brfs: LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer");
+            throw std::invalid_argument("mymyr brfs: the relaxed survivors-only beam novelty cannot be combined with an observer");
         T = 1;  // an observer runs the beam on the calling thread
     }
     if (ordered && !beam && T > 1)

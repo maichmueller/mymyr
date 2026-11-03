@@ -153,7 +153,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
             if (!f)
             {
                 safe = false;
-                result.message = "the custom goal test is not parallel-safe (GoalSpec::make_worker): ran on the calling thread";
+                result.message = "the custom goal test is not parallel-safe (make_worker returned an empty test): ran on the calling thread";
                 break;
             }
             worker_goals[k].kind = GoalSpec::Kind::Custom;
