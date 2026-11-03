@@ -493,8 +493,9 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
     }
     catch (const heuristics::Interrupted&)
     {
-        r.status = c->interrupted_status();
-        c->finish(r.stats.states, r.stats.memory_bytes);
+        r.status = interrupted_status(o.control);
+        if (c)
+            c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const std::exception& e)
     {

@@ -873,11 +873,6 @@ public:
     void solved(std::vector<Action> plan, f64 g, StateView goal, bool cheapest);
     /// Final bookkeeping: statistics, heuristic statistics, observer on_end.
     void finish(u64 states, u64 bytes);
-    /// The status of a search whose heuristic was interrupted (deadline or cancellation).
-    [[nodiscard]] SearchStatus interrupted_status() const
-    {
-        return o.control.cancel.requested() ? SearchStatus::Cancelled : SearchStatus::OutOfTime;
-    }
     [[nodiscard]] Action action(u32 schema, const ObjectId* b) const
     {
         return Action(SchemaId{schema}, std::vector<ObjectId>(b, b + succ.arity(schema)));
@@ -1057,6 +1052,12 @@ void dispatch(Context& c)
     }
 }
 
+/// The status of a search whose heuristic was interrupted (deadline or cancellation).
+[[nodiscard]] inline SearchStatus interrupted_status(const SearchControl& control)
+{
+    return control.cancel.requested() ? SearchStatus::Cancelled : SearchStatus::OutOfTime;
+}
+
 /// Throws std::invalid_argument for option values the search does not take (`astar`: A*, which takes a weight and a
 /// cost bound).
 void check_options(const BestFirstOptions& o, const char* algorithm, bool astar);
@@ -1083,9 +1084,11 @@ BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* alg
     }
     catch (const heuristics::Interrupted&)
     {
-        // a long evaluation (the lifted fallback) ran past the deadline or was cancelled
-        r.status = c->interrupted_status();
-        c->finish(r.stats.states, r.stats.memory_bytes);
+        // a long evaluation (the lifted fallback) ran past the deadline or was cancelled; the context exists unless
+        // its construction was interrupted
+        r.status = interrupted_status(o.control);
+        if (c)
+            c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const std::exception& e)
     {

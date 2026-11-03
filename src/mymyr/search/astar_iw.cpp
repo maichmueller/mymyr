@@ -315,7 +315,7 @@ AStarIwResult astar_iw(const Task& task, const AStarIwOptions& o)
     }
     catch (const heuristics::Interrupted&)
     {
-        r.status = c ? c->interrupted_status() : SearchStatus::OutOfTime;
+        r.status = interrupted_status(o.control);
         if (c)
             c->finish(r.stats.states, r.stats.memory_bytes);
     }
