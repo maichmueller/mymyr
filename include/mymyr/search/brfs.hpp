@@ -41,8 +41,8 @@
 // on_progress) come from the worker threads: the search calls observer->make_worker(t) for every thread t on the
 // calling thread first, and thread t sends them to the observer it got (with child = ~0: ids are assigned when the
 // layer ends; on_progress counts that thread's expansions). If make_worker returns null for some thread, the search
-// runs on the calling thread alone (BrfsResult::threads = 1) with every event on the root observer, and the same
-// result.
+// runs on the calling thread alone (BrfsResult::threads_used = 1, and BrfsResult::message says why) with every event
+// on the root observer, and the same result. A beam with an observer runs on the calling thread too.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/search/control.hpp"
@@ -131,7 +131,8 @@ struct BrfsResult
     u64 fingerprint = 0;
     u32 threads_used = 1;
     std::string store;  // "flat", "chunked", "compact" or "concurrent"
-    /// Why the search stopped early (empty when it ran to its end; options it does not take throw instead).
+    /// Why the search stopped early, and why a search given several threads ran on the calling thread alone (empty
+    /// when it ran to its end as asked; options it does not take throw instead).
     std::string message;
 };
 

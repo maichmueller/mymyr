@@ -670,7 +670,8 @@ constexpr const char* k_cost_doc = "The plan's cost under the task's metric (0.0
 constexpr const char* k_goal_state_doc = "The State the plan reaches (None without a plan).";
 constexpr const char* k_stats_doc = "The search's counts and time (Statistics).";
 constexpr const char* k_message_doc =
-    "Why the search stopped early or could not run (empty when it ran to its end).";
+    "Why the search stopped early or could not run, and why a search given several threads ran on the calling "
+    "thread alone (empty when it ran to its end as asked).";
 
 /// Binds status, solved, plan, cost, goal_state, stats and message on `c`: `get(x)` gives the C++ result (its status,
 /// plan, cost, goal_state and message), `stats(x)` its SearchStatistics.

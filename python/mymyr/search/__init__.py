@@ -142,7 +142,7 @@ exception a callback raises requests the search's CancelToken and is re-raised w
 searches (brfs with ``threads > 1``, find_rollouts_parallel, atomic_goal_portfolio) run their workers on their own
 threads only when the observer and a callable goal have a ``make_worker(k)`` method returning worker k's own object
 (the make_worker protocol; brfs takes no callable goal with ``threads > 1``); otherwise they run on the calling thread
-alone.
+alone, and the result's ``message`` says so.
 """
 
 from mymyr._core._search import (

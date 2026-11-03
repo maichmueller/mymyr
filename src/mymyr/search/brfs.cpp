@@ -1813,11 +1813,15 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
     const bool beam = ordered && options.layers.beam();
     const bool relaxed = beam && options.layers.beam_novelty == search::LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly;
+    // why a search asked for several threads runs on the calling thread alone (BrfsResult::message)
+    std::string serial;
     if (beam && options.observer)
     {
         if (relaxed)
             throw std::invalid_argument("mymyr brfs: the relaxed survivors-only beam novelty cannot be combined with an observer");
-        T = 1;  // an observer runs the beam on the calling thread
+        if (T > 1)
+            serial = "a beam with an observer runs on the calling thread";
+        T = 1;
     }
     if (ordered && !beam && T > 1)
         throw std::invalid_argument("mymyr brfs: ordered layers without a beam are single-threaded (threads == 1)");
@@ -1871,6 +1875,7 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
                 if (!owned.back())
                 {
                     T = 1;
+                    serial = "the observer is not parallel-safe (make_worker returned null): ran on the calling thread";
                     break;
                 }
                 workers.push_back(owned.back().get());
@@ -1917,6 +1922,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         r.goal_state = std::move(s);
     }
     r.fluent_slots = task.atoms().fluent_slots();
+    if (!serial.empty())
+        r.message = r.message.empty() ? serial : serial + "; " + r.message;
     ctl.finish(r);
     return r;
 }
