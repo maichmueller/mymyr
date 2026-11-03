@@ -2,13 +2,14 @@
 
 #include "mymyr/search/plan_file.hpp"
 
+#include "plan_line.hpp"
+
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <format>
 #include <stdexcept>
 
@@ -16,40 +17,6 @@ namespace mymyr::search
 {
 namespace
 {
-bool same_name(std::string_view a, std::string_view b)
-{
-    return std::ranges::equal(a, b, [](char x, char y) {
-        return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-    });
-}
-
-std::string_view trim(std::string_view s)
-{
-    const auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
-    while (!s.empty() && space(s.front()))
-        s.remove_prefix(1);
-    while (!s.empty() && space(s.back()))
-        s.remove_suffix(1);
-    return s;
-}
-
-std::vector<std::string_view> tokens(std::string_view s)
-{
-    std::vector<std::string_view> out;
-    usize i = 0;
-    while (i < s.size())
-    {
-        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
-            ++i;
-        const usize b = i;
-        while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
-            ++i;
-        if (i > b)
-            out.push_back(s.substr(b, i - b));
-    }
-    return out;
-}
-
 State start_state(const Task& task, const std::optional<State>& start)
 {
     if (!start)
@@ -94,6 +61,77 @@ std::string format_plan(const Task& task, std::span<const Action> plan, const st
     return out;
 }
 
+namespace detail
+{
+PlanLine resolve_plan_line(const formalism::TaskData& D, std::span<const std::string_view> t)
+{
+    PlanLine r;
+    const usize given = t.size() - 1;
+    for (u32 s = 0; s < D.schemas.size(); ++s)
+        if (same_name(D.str(D.schemas[s].name), t[0]))
+        {
+            r.named.push_back(s);
+            if (given == D.schemas[s].original_arity || given == D.schemas[s].arity())
+                r.fitting.push_back(s);
+        }
+    if (r.named.empty())
+    {
+        r.status = PlanLine::Status::UnknownAction;
+        return r;
+    }
+    if (r.fitting.empty())
+    {
+        r.status = PlanLine::Status::WrongArity;
+        return r;
+    }
+    for (usize k = 0; k < given; ++k)
+    {
+        u32 o = 0;
+        while (o < D.num_objects() && !same_name(D.str(D.objects[o].name), t[k + 1]))
+            ++o;
+        if (o == D.num_objects())
+        {
+            r.status = PlanLine::Status::UnknownObject;
+            r.unknown = k;
+            return r;
+        }
+        r.args.push_back(ObjectId{o});
+    }
+    return r;
+}
+
+std::optional<Action> match_plan_line(const formalism::TaskData& D, Successors& succ, StateView s,
+                                      std::span<const u32> schemas, std::span<const ObjectId> args)
+{
+    // ascending schemas, and per schema the first binding in canonical order: the first match is the least action
+    for (const u32 schema : schemas)
+    {
+        const u32 arity = D.schemas[schema].arity();
+        if (args.size() == arity)
+        {
+            if (succ.is_applicable(s, ActionLabel{SchemaId{schema}, args}))
+                return Action(SchemaId{schema}, std::vector<ObjectId>(args.begin(), args.end()));
+            continue;
+        }
+        if (args.size() > arity)
+            continue;
+        std::optional<Action> found;
+        succ.prepare(s);
+        succ.generate<true>(
+            [&](u32 x, const ObjectId* binding, const Delta&) -> bool {
+                if (!std::equal(args.begin(), args.end(), binding))
+                    return true;
+                found.emplace(SchemaId{x}, std::vector<ObjectId>(binding, binding + arity));
+                return false;
+            },
+            /*witness_pruning=*/false, /*canonical_order=*/true, schema, schema + 1);
+        if (found)
+            return found;
+    }
+    return std::nullopt;
+}
+}  // namespace detail
+
 std::vector<Action> parse_plan(const Task& task, std::string_view text, const std::optional<State>& start)
 {
     const formalism::TaskData& D = task.data();
@@ -105,7 +143,7 @@ std::vector<Action> parse_plan(const Task& task, std::string_view text, const st
     while (!text.empty())
     {
         const usize nl = text.find('\n');
-        const std::string_view line = trim(text.substr(0, nl));
+        const std::string_view line = detail::trim(text.substr(0, nl));
         text = nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
         ++line_no;
         if (line.empty() || line.front() == ';')
@@ -113,25 +151,33 @@ std::vector<Action> parse_plan(const Task& task, std::string_view text, const st
         const usize open = line.find('('), close = line.rfind(')');
         if (open == std::string_view::npos || close == std::string_view::npos || close < open)
             throw std::invalid_argument(std::format("mymyr plan: line {} is not an action '(name o1 ... on)'", line_no));
-        const std::vector<std::string_view> t = tokens(line.substr(open + 1, close - open - 1));
+        const std::vector<std::string_view> t = detail::tokens(line.substr(open + 1, close - open - 1));
         if (t.empty())
             throw std::invalid_argument(std::format("mymyr plan: line {} names no action", line_no));
-        const usize given = t.size() - 1;
-        std::optional<Action> found;
-        succ.for_each_applicable(s.view(), [&](const ActionLabel& a, const Delta&) {
-            const formalism::Schema& sc = D.schemas[a.schema.v];
-            if (!same_name(D.str(sc.name), t[0]) || (given != sc.original_arity && given != a.binding.size()))
-                return;
-            for (usize k = 0; k < given; ++k)
-                if (!same_name(D.str(D.objects[a.binding[k].v].name), t[k + 1]))
-                    return;
-            Action x(a);
-            if (!found || x < *found)
-                found = std::move(x);
-        });
+        const detail::PlanLine r = detail::resolve_plan_line(D, t);
+        switch (r.status)
+        {
+            case detail::PlanLine::Status::Ok: break;
+            case detail::PlanLine::Status::UnknownAction:
+                throw std::invalid_argument(
+                    std::format("mymyr plan: line {} '{}': the task has no action '{}'", line_no, line, t[0]));
+            case detail::PlanLine::Status::WrongArity:
+            {
+                const formalism::Schema& sc = D.schemas[r.named.front()];
+                throw std::invalid_argument(std::format("mymyr plan: line {} '{}': {} takes {} argument{}, the line has {}",
+                                                        line_no, line, D.str(sc.name), sc.original_arity,
+                                                        sc.original_arity == 1 ? "" : "s", t.size() - 1));
+            }
+            case detail::PlanLine::Status::UnknownObject:
+                throw std::invalid_argument(std::format("mymyr plan: line {} '{}': argument {} '{}' is no object of the task",
+                                                        line_no, line, r.unknown + 1, t[r.unknown + 1]));
+        }
+        std::optional<Action> found = detail::match_plan_line(D, succ, s.view(), r.fitting, r.args);
         if (!found)
-            throw std::invalid_argument(
-                std::format("mymyr plan: line {}: no applicable action matches '{}'", line_no, line));
+            throw std::invalid_argument(std::format(
+                "mymyr plan: line {} '{}': the action is not applicable in its state (validate_plan names the failing "
+                "precondition)",
+                line_no, line));
         s = succ.apply(s.view(), found->label());
         plan.push_back(std::move(*found));
     }

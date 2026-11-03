@@ -2,6 +2,8 @@
 
 #include "mymyr/search/validate.hpp"
 
+#include "plan_line.hpp"
+
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/successor/conditions.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -10,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <format>
 #include <stdexcept>
 
@@ -32,40 +33,6 @@ std::string ordinal(usize k)
     static constexpr std::array<const char*, 10> words{"first",   "second",  "third",  "fourth", "fifth",
                                                        "sixth",   "seventh", "eighth", "ninth",  "tenth"};
     return k < words.size() ? std::string(words[k]) : std::format("{}th", k + 1);
-}
-
-bool same_name(std::string_view a, std::string_view b)
-{
-    return std::ranges::equal(a, b, [](char x, char y) {
-        return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-    });
-}
-
-std::string_view trim(std::string_view s)
-{
-    const auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
-    while (!s.empty() && space(s.front()))
-        s.remove_prefix(1);
-    while (!s.empty() && space(s.back()))
-        s.remove_suffix(1);
-    return s;
-}
-
-std::vector<std::string_view> tokens(std::string_view s)
-{
-    std::vector<std::string_view> out;
-    usize i = 0;
-    while (i < s.size())
-    {
-        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
-            ++i;
-        const usize b = i;
-        while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
-            ++i;
-        if (i > b)
-            out.push_back(s.substr(b, i - b));
-    }
-    return out;
 }
 
 /// The text of a one-element ground condition without its "(and ...)".
@@ -372,7 +339,7 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
     while (!text.empty())
     {
         const usize nl = text.find('\n');
-        const std::string_view line = trim(text.substr(0, nl));
+        const std::string_view line = detail::trim(text.substr(0, nl));
         text = nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
         ++line_no;
         if (line.empty() || line.front() == ';')
@@ -380,38 +347,29 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
         const usize open = line.find('('), close = line.rfind(')');
         if (open != 0 || close != line.size() - 1)
             return v.fail(PlanError::Syntax, step, line_no, std::string(line), {}, "not an action '(name o1 ... ok)'");
-        const std::vector<std::string_view> t = tokens(line.substr(1, line.size() - 2));
+        const std::vector<std::string_view> t = detail::tokens(line.substr(1, line.size() - 2));
         if (t.empty())
             return v.fail(PlanError::Syntax, step, line_no, std::string(line), {}, "names no action");
         const std::string written(line);
         const usize given = t.size() - 1;
-        // the schemas of this name, and those of them that take `given` arguments
-        std::vector<u32> named, fitting;
-        for (u32 s = 0; s < D.schemas.size(); ++s)
-            if (same_name(D.str(D.schemas[s].name), t[0]))
-            {
-                named.push_back(s);
-                if (given == D.schemas[s].original_arity || given == D.schemas[s].arity())
-                    fitting.push_back(s);
-            }
-        if (named.empty())
-            return v.fail(PlanError::UnknownAction, step, line_no, written, {},
-                          std::format("the task has no action '{}'", t[0]));
-        if (fitting.empty())
-            return v.fail(PlanError::WrongArity, step, line_no, written, {},
-                          std::format("{} takes {}, the action has {}", D.str(D.schemas[named[0]].name),
-                                      arguments(D.schemas[named[0]].original_arity), given));
-        std::vector<ObjectId> args;
-        for (usize k = 0; k < given; ++k)
+        const detail::PlanLine r = detail::resolve_plan_line(D, t);
+        switch (r.status)
         {
-            u32 o = 0;
-            while (o < D.num_objects() && !same_name(D.str(D.objects[o].name), t[k + 1]))
-                ++o;
-            if (o == D.num_objects())
+            case detail::PlanLine::Status::Ok: break;
+            case detail::PlanLine::Status::UnknownAction:
+                return v.fail(PlanError::UnknownAction, step, line_no, written, {},
+                              std::format("the task has no action '{}'", t[0]));
+            case detail::PlanLine::Status::WrongArity:
+                return v.fail(PlanError::WrongArity, step, line_no, written, {},
+                              std::format("{} takes {}, the action has {}", D.str(D.schemas[r.named[0]].name),
+                                          arguments(D.schemas[r.named[0]].original_arity), given));
+            case detail::PlanLine::Status::UnknownObject:
                 return v.fail(PlanError::UnknownObject, step, line_no, written, {},
-                              std::format("the {} argument '{}' is no object of the task", ordinal(k), t[k + 1]));
-            args.push_back(ObjectId{o});
+                              std::format("the {} argument '{}' is no object of the task", ordinal(r.unknown),
+                                          t[r.unknown + 1]));
         }
+        const std::vector<u32>& fitting = r.fitting;
+        const std::vector<ObjectId>& args = r.args;
         // the declared types: the step is well typed when it is for one of the fitting schemas
         std::string type_error;
         bool typed = false;
@@ -426,19 +384,7 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
         if (!typed)
             return v.fail(PlanError::WrongType, step, line_no, written, type_error,
                           "the argument " + type_error + " is not of its parameter's type");
-        std::optional<Action> found;
-        v.succ().for_each_applicable(v.state(), [&](const ActionLabel& a, const Delta&) {
-            if (std::ranges::find(fitting, a.schema.v) == fitting.end())
-                return;
-            const formalism::Schema& sc = D.schemas[a.schema.v];
-            if (given != sc.original_arity && given != a.binding.size())
-                return;
-            if (!std::ranges::equal(args, a.binding.subspan(0, given)))
-                return;
-            Action x(a);
-            if (!found || x < *found)
-                found = std::move(x);
-        });
+        const std::optional<Action> found = detail::match_plan_line(D, v.succ(), v.state(), fitting, args);
         if (!found)
         {
             // the reason: of the first schema the step names (canonical order), over the arguments it gives
