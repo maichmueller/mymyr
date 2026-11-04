@@ -543,6 +543,15 @@ __global__ void k_row_counts(const u32* counts, u32 S, u64 stride, const i32* of
         count[i] = static_cast<i32>(row_count(counts, S, stride, offsets, i));
 }
 
+__global__ void k_copy_words(u64* dst, u64 dst_stride, const u64* src, u64 src_stride, u32 words, u64 rows)
+{
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows * words; i += u64{gridDim.x} * blockDim.x)
+    {
+        const u64 r = i / words, w = i % words;
+        dst[r * dst_stride + w] = src[r * src_stride + w];
+    }
+}
+
 __global__ void k_philox(const u32* counters, const u32* keys, u64 n, u32* out)
 {
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < n; i += u64{gridDim.x} * blockDim.x)
@@ -724,6 +733,17 @@ cudaError_t launch_row_counts(const u32* counts, u32 num_schemas, u64 stride, co
         return cudaErrorInvalidValue;
     if (rows)
         k_row_counts<<<grid_for(rows), k_block, 0, s>>>(counts, num_schemas, stride, offsets, rows, count);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_copy_words(u64* dst, u64 dst_stride, const u64* src, u64 src_stride, u32 words, u64 rows,
+                              cudaStream_t s)
+{
+    if (rows == 0 || words == 0)
+        return cudaSuccess;
+    if (!dst || !src)
+        return cudaErrorInvalidValue;
+    k_copy_words<<<grid_for(rows * words), k_block, 0, s>>>(dst, dst_stride, src, src_stride, words, rows);
     return cudaGetLastError();
 }
 

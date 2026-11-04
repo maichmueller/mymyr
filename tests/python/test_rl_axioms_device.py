@@ -61,7 +61,7 @@ def caps():
 
 def per_domain(value):
     """An observation field as a tuple (one entry per domain batch over a suite)."""
-    return value if isinstance(value, tuple) else (value,)
+    return value if type(value) is tuple else (value,)  # (a row type may be a named tuple)
 
 
 def expect_rows_equal(a, b, where):
@@ -91,16 +91,17 @@ def test_captured_rollout_equals_eager_general_cpu_and_pool(name):
     dev = gpu_device()
     table = table_of(name)
     n, K, R = 48, 4, 3
+    ids = np.arange(n, dtype=np.int32) % len(table)  # every instance, kept through resets
     common = dict(seed=7, **CFG)
     # action rows on the device need the asynchronous device expansion, which runs tables of one instance with axioms
     actions = name == "linking-p03"
     obs = dict(observation=encoders(table), obs_actions=actions, obs_capacities=caps(), track_visited=True)
-    captured = rt.BatchedEnv(table, n, device=dev, **common, **obs)
-    eager = rt.BatchedEnv(table, n, device=dev, **common, **obs)
-    general = rt.BatchedEnv(table, n, device=dev, path="general", track_visited=True, **common)
-    cpu = rt.BatchedEnv(table, n, **common, **obs)
-    pool = rl.CpuEnvPool(table, n, threads=2, **common)
-    pool.reset()
+    captured = rt.BatchedEnv(table, n, device=dev, task_ids=ids, **common, **obs)
+    eager = rt.BatchedEnv(table, n, device=dev, task_ids=ids, **common, **obs)
+    general = rt.BatchedEnv(table, n, device=dev, path="general", task_ids=ids, track_visited=True, **common)
+    cpu = rt.BatchedEnv(table, n, task_ids=ids, **common, **obs)
+    pool = rl.CpuEnvPool(table, n, threads=2, sampler=None, track_visited=True, **common)
+    pool.reset(task_ids=ids)
     assert captured.capturable and not general.capturable
     graph = captured.capture(K, final=True)
     goals = revisits = 0
@@ -117,6 +118,7 @@ def test_captured_rollout_equals_eager_general_cpu_and_pool(name):
             assert np.array_equal(np.asarray(b.states)[order], want.states.numpy().view(np.uint64)), (r, k)
             assert np.array_equal(np.asarray(b.reward)[order], want.reward.numpy()), (r, k)
             assert np.array_equal(np.asarray(b.goal)[order], want.goal.numpy()), (r, k)
+            assert np.array_equal(np.asarray(b.revisited)[order], want.revisited.numpy()), (r, k)
             for f in STEP:
                 if f != "revisited":
                     assert torch.equal(getattr(out, f)[k].cpu(), getattr(want, f)), (r, k, f)

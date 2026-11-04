@@ -35,6 +35,7 @@
 #include <functional>
 #include <map>
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -47,7 +48,7 @@ struct NamedSuite
 {
     std::string name;
     rl::TaskSuitePtr suite;
-    bool fast = false;  // the fast path runs it (no domain with axioms or conditional effects)
+    bool fast = false;  // the fast path runs it (no domain with conditional effects or axioms beyond the device)
 };
 
 /// Suites of two and four domains, and one with conditional effects and goal axioms (the general path).
@@ -1074,6 +1075,49 @@ rl::TaskTablePtr fixture_table(const std::string& dir, TaskOptions::Atoms atoms)
     return rl::TaskTable::create(std::move(tasks));
 }
 
+/// Rows of the first `cap` states of each instance of the suite in breadth-first order (every state of the fixtures'
+/// instances: goal states among them), at the suite's width; ids[r] is row r's instance (global id).
+void reachable_rows(const rl::TaskSuite& S, u32 cap, std::vector<u64>& rows, std::vector<i32>& ids)
+{
+    const u32 W = S.words();
+    for (u32 d = 0; d < S.num_domains(); ++d)
+    {
+        const rl::TaskTable& T = *S.table(d);
+        const u32 Wd = T.words();
+        for (u32 i = 0; i < T.size(); ++i)
+        {
+            const Task& task = *T.task(i);
+            const WorkspaceLease lease = task.workspace();
+            Successors& succ = lease->successors();
+            std::vector<std::vector<u64>> queue{T.instance(i).init};
+            std::set<std::vector<u64>> seen{queue[0]};
+            std::vector<u64> tmp;
+            for (u64 k = 0; k < queue.size() && queue.size() < cap; ++k)
+            {
+                const std::vector<u64> cur = queue[k];
+                succ.prepare(StateView{cur.data(), Wd, nullptr, 0});
+                succ.generate<false>(
+                    [&](u32, const ObjectId*, const Delta& delta) -> bool
+                    {
+                        const u32 n = apply_delta(cur.data(), Wd, delta, tmp);
+                        std::vector<u64> row(Wd, 0);
+                        std::copy_n(tmp.begin(), std::min(n, Wd), row.begin());
+                        if (queue.size() < cap && seen.insert(row).second)
+                            queue.push_back(std::move(row));
+                        return true;
+                    },
+                    false, true);
+            }
+            for (const auto& q : queue)
+            {
+                rows.insert(rows.end(), q.begin(), q.end());
+                rows.insert(rows.end(), W - Wd, u64{0});
+                ids.push_back(static_cast<i32>(S.global_id(d, i)));
+            }
+        }
+    }
+}
+
 /// Suites with axioms: the linking and beacons tables, a table of one instance of each, the suite of both, and a suite
 /// with a domain without axioms.
 std::vector<NamedSuite> axiom_suites(TaskOptions::Atoms atoms)
@@ -1137,7 +1181,6 @@ TEST(DeviceTaskSuiteEnv, AxiomsEqualGeneralPathAndHost)
                 if (::testing::Test::HasFatalFailure())
                     return;
                 r.rearrange = false;
-                r.goals = true;
                 r.switch_stream = true;
                 r.grouped = true;
                 r.chunk_rows = 5;
@@ -1163,14 +1206,14 @@ TEST(DeviceTaskSuiteEnv, AxiomsCapturedStepsEqualEagerAndHost)
             rl::EnvConfig cfg = config(37);
             cfg.dead_end = rl::DeadEnd::NoSuccessors;
             cfg.dead_end_terminal = false;
-            run_graph(ctx, ns.suite, cfg, true, 4, grouped);
+            run_graph(ctx, ns.suite, cfg, false, 4, grouped);
             if (::testing::Test::HasFatalFailure())
                 return;
         }
 }
 
 // The goal query of the fast path closes the rows' derived atoms on the device: equal to the host's goal test on
-// walks of every instance, and to the at_goal flags of refresh().
+// the reachable states of every instance (up to 256 each), and to the at_goal flags of refresh().
 TEST(DeviceTaskSuiteEnv, AxiomGoalQueriesEqualHost)
 {
     SKIP_WITHOUT_GPU();
@@ -1181,7 +1224,7 @@ TEST(DeviceTaskSuiteEnv, AxiomGoalQueriesEqualHost)
         const rl::TaskSuite& S = *ns.suite;
         std::vector<u64> rows;
         std::vector<i32> ids;
-        suite_rows(S, 24, Order::Interleaved, rows, ids);
+        reachable_rows(S, 256, rows, ids);
         const u64 N = ids.size();
         std::vector<u8> want(N);
         rl::is_goal(S, rl::StateBatchView{rows.data(), N, S.words(), S.words(), 0}, ids.data(), want.data());
@@ -1204,7 +1247,7 @@ TEST(DeviceTaskSuiteEnv, AxiomsBeyondTheDeviceAreRefusedByName)
 {
     SKIP_WITHOUT_GPU();
     const std::string domain = R"((define (domain chain)
-  (:requirements :strips :derived-predicates)
+  (:requirements :strips :derived-predicates :existential-preconditions :negative-preconditions)
   (:predicates (step ?a ?b) (marked ?a) (long-chain))
   (:derived (long-chain)
     (exists (?a ?b ?c ?d ?e ?f ?g ?h ?i ?j ?k ?l ?m ?n ?o ?p ?q)

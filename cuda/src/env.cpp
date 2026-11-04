@@ -425,19 +425,14 @@ struct DeviceEnv::Impl
         if (n == 0)
             return;
         closure_of.run(states, W, W, n, ids, views, V, d, dctl() + k_axioms_refused, s);
-        check(cudaMemcpy2DAsync(views + VV, V * sizeof(u64), d, DW * sizeof(u64), DW * sizeof(u64), n,
-                                cudaMemcpyDeviceToDevice, s),
-              "cudaMemcpy2DAsync (derived words)");
+        check(envk::launch_copy_words(views + VV, V, d, DW, DW, n, s), "launch_copy_words (derived words)");
     }
 
     /// Axioms: der() [n, DW] := the derived words of the views cache's rows [0, n) (their tails), on s.
     void load_derived(const u64* views, u64 n)
     {
         auto* d = grow<u64>(ax_der, n * DW);
-        if (n)
-            check(cudaMemcpy2DAsync(d, DW * sizeof(u64), views + VV, V * sizeof(u64), DW * sizeof(u64), n,
-                                    cudaMemcpyDeviceToDevice, s),
-                  "cudaMemcpy2DAsync (derived words)");
+        check(envk::launch_copy_words(d, DW, views + VV, V, DW, n, s), "launch_copy_words (derived words)");
     }
 
     /// Views and count caches of domain P's rows among [0, n) of `states` (the fast path), in L2-sized chunks of
