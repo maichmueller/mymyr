@@ -151,7 +151,9 @@ class PlanningEnv(EnvBase):
         e = self._env
         self._action = torch.zeros(e.num_envs, dtype=torch.int64, device=e.device)
         self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
+        # thread_local: CUDA work that the process's other threads (a JAX runtime, a data loader) do meanwhile on
+        # their own streams cannot invalidate the capture; this thread's calls are still checked
+        with torch.cuda.graph(self._graph, capture_error_mode="thread_local"):
             self._static = self._outputs(self._action, copy=False)
 
     def _reset(self, tensordict: Optional[TensorDictBase] = None, **kwargs: Any) -> TensorDictBase:
