@@ -174,11 +174,11 @@ def test_capture_on_the_general_path_and_the_cpu_is_refused():
 def test_planning_env_graph_equals_eager(sets, name):
     """PlanningEnv steps replaying the captured step == eager steps (graph=False): rollouts with random actions and a
     policy, TorchRL's resets, a reset carrying task_id and goals, set_seed between rollouts; check_env_specs."""
+    dev = gpu_device()
     pytest.importorskip("torchrl")
     from tensordict import TensorDict
     from torchrl.envs.utils import check_env_specs
 
-    dev = gpu_device()
     if name in SETS:
         t, I = rl.TaskTable(sets[name]), len(sets[name])
     else:
@@ -467,13 +467,14 @@ def test_mctx_with_command_buffers_equals_without(policy, tmp_path):
             assert np.array_equal(a[k], runs["off"][k]), (mode, k)
 
 
+@pytest.mark.needs_gil
 def test_planning_env_capture_survives_cuda_work_of_other_threads(sets):
     """Another thread of the process synchronizes on its own stream while the PlanningEnv captures its step: that work
     is not part of the graph and does not invalidate the capture; the replayed steps equal eager ones."""
-    pytest.importorskip("torchrl")
     import threading
 
     dev = gpu_device()
+    pytest.importorskip("torchrl")
     t = rl.TaskTable(sets["gripper"])
     kw = dict(seed=3, max_steps=5, max_actions=6, device=dev)
     graphed, eager = (rt.PlanningEnv(t, 16, graph=g, **kw) for g in (True, False))
