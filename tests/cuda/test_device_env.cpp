@@ -499,8 +499,9 @@ TEST(DeviceEnvStep, Refusals)
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
     cuda::DeviceEnv general(ctx, rl::TaskTable::single(numeric), {});
     EXPECT_FALSE(general.fast());
+    // axioms the device evaluates run on the fast path (test_device_task_suite.cpp: the ones beyond it)
     const auto axioms = load("philosophers__p03-phil4", true);
-    EXPECT_NE(cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(axioms), {}).find("axioms"), std::string::npos);
+    EXPECT_EQ(cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(axioms), {}), "");
     const auto frozen = load("gripper__prob05", true);
     cuda::DeviceEnv fast(ctx, rl::TaskTable::single(frozen), {});
     ASSERT_TRUE(fast.fast());
@@ -575,7 +576,7 @@ TaskPtr visited_task(const std::string& name)
 
 // Every path keeps the host's tables word for word: the finish's inserts, autoresets, masked resets, invalid actions
 // that stay in place, absorbing rows, overflow (H = 8) and clear_visited with a mask, over tasks with dead ends,
-// axioms (the general path) and numeric fluents (the keys cover the numeric words).
+// axioms (closed on the device on the fast path) and numeric fluents (the keys cover the numeric words).
 TEST(DeviceEnvVisited, FinishInsertsEqualHost)
 {
     SKIP_WITHOUT_GPU();

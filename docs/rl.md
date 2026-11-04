@@ -1062,6 +1062,34 @@ step = env.step(final=True)
 print(env.states.shape, step.reward.shape)
 ```
 
+Derived predicates and the axioms that universal or disjunctive preconditions and quantified goals compile into run
+on the fast path too: the device closes the derived atoms of every reached state (the same evaluator as the device
+expansion and encoder), so derived preconditions of either sign, derived goals and the observations' derived
+relations need no host round trip, and the steps capture into CUDA graphs. State rows, their hashes and the visited
+tables hold the fluent atoms only, as on the CPU. Only axioms beyond the device's evaluator keep the general path: a
+body of more than 16 parameters, or numeric constraints in a body; `fast_unsupported(table)` then names the derived
+predicate of the first such axiom.
+
+```python skip-if-no-cuda needs-torch
+from pathlib import Path
+
+import mymyr
+import torch
+from mymyr import rl
+from mymyr.rl.torch import BatchedEnv, fast_unsupported
+
+data = Path("tests/data/pddl/linking")  # a universal precondition with an implication, a quantified goal
+table = rl.TaskTable([mymyr.Task.from_pddl(data / "domain.pddl", data / f"p0{i}.pddl", atoms="dense") for i in (1, 2, 3)])
+assert fast_unsupported(table) == ""
+env = BatchedEnv(table, 8, device="cuda", max_steps=6, seed=0, track_visited=True)
+cpu = BatchedEnv(table, 8, max_steps=6, seed=0, track_visited=True)
+graph = env.capture(4)  # four random steps, replayed without host synchronization
+rollout = graph.replay()
+cpu_steps = [cpu.step() for _ in range(4)]
+assert torch.equal(rollout.reward.cpu(), torch.stack([s.reward for s in cpu_steps]))
+assert torch.equal(env.states.cpu(), cpu.states) and torch.equal(env.visited.cpu(), cpu.visited)
+```
+
 ### Action masks and label steps on the device
 
 `rl.applicable_schemas`, `rl.applicable_objects` and `rl.is_applicable` take CUDA state arrays (torch or JAX, the

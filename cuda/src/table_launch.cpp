@@ -2,6 +2,7 @@
 
 #include "table_launch.hpp"
 
+#include "axiom_reads.hpp"
 #include "mymyr/cuda/generator.hpp"
 
 #include <algorithm>
@@ -23,7 +24,7 @@ DeviceBuffer upload(const ContextPtr& ctx, const std::vector<T>& v, cudaStream_t
 }
 }  // namespace
 
-std::string multi_unsupported(const rl::TaskTable& table)
+std::string multi_unsupported(const rl::TaskTable& table, bool device_axioms)
 {
     for (u32 i = 0; i < table.size(); ++i)
     {
@@ -33,8 +34,11 @@ std::string multi_unsupported(const rl::TaskTable& table)
             return at + why;
         if (task.numeric_slots())
             return at + "numeric states require per-instance kernels";
-        if (task.has_axioms())
+        if (task.has_axioms() && !device_axioms)
             return at + "axioms";
+        if (task.has_axioms())
+            if (std::string why = ChunkGenerator::axioms_unsupported(task); !why.empty())
+                return at + why;
         for (const bool witness : {true, false})
         {
             const SchemaPlacement pl = ChunkGenerator::place(task, witness);
@@ -233,5 +237,72 @@ void Fanout::join(cudaStream_t s, u32 n)
         m_done[i - 1].record(m_aux[i - 1]->get());
         m_done[i - 1].wait_on(s);
     }
+}
+AxiomClosure AxiomClosure::create(const ContextPtr& ctx, u32 n, const std::function<rl::dev::TaskView(u32)>& device_view,
+                                  const std::function<rl::dev::TaskView(u32)>& host_view,
+                                  const std::function<const Task&(u32)>& task, cudaStream_t s)
+{
+    AxiomClosure c;
+    c.instances = n;
+    std::vector<u64> reads;
+    std::vector<u64> at(n), len(n);
+    for (u32 g = 0; g < n; ++g)
+    {
+        const rl::dev::TaskView hv = host_view(g);
+        c.words = std::max<u32>({c.words, 1u, bits::words_for(hv.derived_slots)});
+        bool fc = false;
+        for (u32 a = 0; a < hv.n_axioms; ++a)
+            fc = fc || rl::dev::device_fc(rl::dev::axiom_matcher_flags(hv, a), rl::dev::MatchOrder::Free);
+        fc = fc && hv.ow <= lifted::k_max_fc_ow;
+        const auto it = std::ranges::find(c.ow, hv.ow);
+        if (it == c.ow.end())
+        {
+            c.ow.push_back(hv.ow);
+            c.fc.push_back(fc ? 1 : 0);
+        }
+        else if (fc)
+            c.fc[static_cast<usize>(it - c.ow.begin())] = 1;
+        at[g] = reads.size();
+        if (task(g).has_axioms())
+        {
+            const std::vector<u64> rd = axiom_reads(task(g).compiled());
+            reads.insert(reads.end(), rd.begin(), rd.end());
+            len[g] = rd.size();
+        }
+    }
+    c.reads = upload(ctx, reads, s);
+    std::vector<lifted::EncodingAxiomInstance> rec(n);
+    for (u32 g = 0; g < n; ++g)
+    {
+        rec[g].view = device_view(g);
+        rec[g].reads = len[g] ? static_cast<const u64*>(c.reads.data()) + at[g] : nullptr;
+        rec[g].modes = 1;  // evaluated under mode 0, run()'s
+    }
+    c.records = upload(ctx, rec, s);
+    return c;
+}
+
+void AxiomClosure::run(const u64* states, u64 stride, u32 row_words, u64 n, const i32* ids, u64* views, u64 view_words,
+                       u64* derived, u32* invalid, cudaStream_t s) const
+{
+    if (n == 0)
+        return;
+    lifted::EncodingAxioms a;
+    a.instances = static_cast<const lifted::EncodingAxiomInstance*>(records.data());
+    a.count = instances;
+    a.states = states;
+    a.stride = stride;
+    a.words = row_words;
+    a.rows = n;
+    a.task_ids = instances > 1 ? ids : nullptr;
+    a.views = views;
+    a.view_words = view_words;
+    a.derived = derived;
+    a.derived_words = words;
+    a.invalid = invalid;
+    a.class_ow = ow.data();
+    a.class_fc = fc.data();
+    a.launches = static_cast<u32>(ow.size());
+    check(lifted::launch_encoding_axioms(a, s), "launch_encoding_axioms");
 }
 }  // namespace mymyr::cuda::detail

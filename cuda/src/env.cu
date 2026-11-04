@@ -266,7 +266,8 @@ __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p
         }
         return true;
     }
-    return rl::dev::goal_holds(p.in.views ? p.in.views[instance] : task, row, p.words, nullptr, 0);
+    return rl::dev::goal_holds(p.in.views ? p.in.views[instance] : task, row, p.words,
+                               p.derived ? p.derived + row_id * p.derived_words : nullptr, p.derived_words);
 }
 
 __global__ void k_goal_rows(rl::dev::TaskView task, Finish p, u8* goal)
@@ -306,6 +307,8 @@ __device__ __forceinline__ u32 reset_row(const Instances& in, u32 k, u64 i, u64*
         const u64 vw = in.inst_view_words ? in.inst_view_words[k] : in.view_words;
         for (u64 w = 0; w < vw; ++w)
             views[i * in.view_words + w] = v[w];
+        for (u32 w = 0; w < in.derived_words; ++w)
+            views[i * in.view_words + in.derived_at + w] = v[in.derived_at + w];
     }
     if (goal_pos && !keep_goals)
         for (u32 w = 0; w < words; ++w)
@@ -540,6 +543,15 @@ __global__ void k_row_counts(const u32* counts, u32 S, u64 stride, const i32* of
         count[i] = static_cast<i32>(row_count(counts, S, stride, offsets, i));
 }
 
+__global__ void k_copy_words(u64* dst, u64 dst_stride, const u64* src, u64 src_stride, u32 words, u64 rows)
+{
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows * words; i += u64{gridDim.x} * blockDim.x)
+    {
+        const u64 r = i / words, w = i % words;
+        dst[r * dst_stride + w] = src[r * src_stride + w];
+    }
+}
+
 __global__ void k_philox(const u32* counters, const u32* keys, u64 n, u32* out)
 {
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < n; i += u64{gridDim.x} * blockDim.x)
@@ -657,7 +669,7 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         (p.goal_pos && (!p.goal_neg || !p.in.goal_pos || !p.in.fluent_slots)) ||
         (p.cache_counts && !p.in.init_cache) ||
         (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) || !visited_ok(p.visited) ||
-        (p.visited.capacity && p.autoreset && !p.in.init_hash))
+        (p.visited.capacity && p.autoreset && !p.in.init_hash) || (p.derived_words && !p.derived))
         return cudaErrorInvalidValue;
     const bool wide = p.restarts && p.visited.capacity && p.autoreset;
     Finish f = p;
@@ -675,7 +687,7 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
 
 cudaError_t launch_goal(const rl::dev::TaskView& task, const Finish& p, u8* goal, cudaStream_t stream)
 {
-    if (p.rows && p.goal_pos && (!p.goal_neg || !p.in.fluent_slots))
+    if (p.rows && ((p.goal_pos && (!p.goal_neg || !p.in.fluent_slots)) || (p.derived_words && !p.derived)))
         return cudaErrorInvalidValue;
     if (p.rows)
         k_goal_rows<<<grid_for(p.rows), k_block, 0, stream>>>(task, p, goal);
@@ -721,6 +733,17 @@ cudaError_t launch_row_counts(const u32* counts, u32 num_schemas, u64 stride, co
         return cudaErrorInvalidValue;
     if (rows)
         k_row_counts<<<grid_for(rows), k_block, 0, s>>>(counts, num_schemas, stride, offsets, rows, count);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_copy_words(u64* dst, u64 dst_stride, const u64* src, u64 src_stride, u32 words, u64 rows,
+                              cudaStream_t s)
+{
+    if (rows == 0 || words == 0)
+        return cudaSuccess;
+    if (!dst || !src)
+        return cudaErrorInvalidValue;
+    k_copy_words<<<grid_for(rows * words), k_block, 0, s>>>(dst, dst_stride, src, src_stride, words, rows);
     return cudaGetLastError();
 }
 

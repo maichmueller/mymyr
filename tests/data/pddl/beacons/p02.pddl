@@ -1,0 +1,5 @@
+(define (problem beacons-02)
+  (:domain beacons)
+  (:objects n0 n1 n2 n3 n4 n5 - node)
+  (:init (source n0) (source n5) (edge n0 n1) (edge n1 n2) (edge n2 n3) (edge n3 n1) (edge n5 n4) (edge n4 n3))
+  (:goal (and (powered n3) (not (powered n4)) (not (lit n5)))))

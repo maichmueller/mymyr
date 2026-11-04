@@ -130,18 +130,25 @@ void upload_vec(const ContextPtr& ctx, Scratch& dst, const std::vector<T>& v, cu
         check(cudaMemcpyAsync(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync (chunk upload)");
 }
 
-/// Why the axioms cannot run on the device (empty: they can).
-std::string axioms_reason(const plan::Compiled& C)
+/// Why the axioms cannot run on the device (empty: they can), naming the first axiom beyond the kernels by its head.
+std::string axioms_reason(const Task& task)
 {
-    for (const plan::Stratum& st : C.strata)
+    const formalism::TaskData& data = task.data();
+    const auto rule = [&](const plan::Axiom& x)
+    {
+        const std::string head = x.head.pred < data.predicates.size() ? std::string(data.str(data.predicates[x.head.pred].name))
+                                                                       : std::to_string(x.head.pred);
+        return "the axiom of derived predicate " + head;
+    };
+    for (const plan::Stratum& st : task.compiled().strata)
         for (const plan::Axiom& x : st.axioms)
         {
             const plan::Matcher& m = x.body;
             if (m.total > lifted::k_max_depth || m.steps.size() > lifted::k_max_depth)
-                return "an axiom body of " + std::to_string(m.total) + " parameters (the device kernels take at most " +
-                       std::to_string(lifted::k_max_depth) + ")";
+                return rule(x) + ": a body of " + std::to_string(std::max<usize>(m.total, m.steps.size())) +
+                       " parameters (the device kernels take at most " + std::to_string(lifted::k_max_depth) + ")";
             if (!m.npre.empty() || !m.nchecks.empty())
-                return "numeric constraints in an axiom body";
+                return rule(x) + ": numeric constraints in its body";
         }
     return {};
 }
@@ -187,6 +194,8 @@ std::string ChunkGenerator::unsupported(const Task& task)
                " words (the numeric kernels take at most " + std::to_string(lifted::k_max_words) + ")";
     return {};
 }
+
+std::string ChunkGenerator::axioms_unsupported(const Task& task) { return axioms_reason(task); }
 
 std::string ChunkGenerator::search_unsupported(const Task& task)
 {
@@ -300,7 +309,7 @@ ChunkGenerator::ChunkGenerator(ContextPtr ctx, TaskPtr task, cudaStream_t stream
     std::vector<u64> reads;
     if (m_task->has_axioms())
     {
-        m_host_axioms_reason = axioms_reason(C);
+        m_host_axioms_reason = axioms_reason(*m_task);
         m_device_axioms = m_host_axioms_reason.empty();
         if (m_device_axioms)
         {

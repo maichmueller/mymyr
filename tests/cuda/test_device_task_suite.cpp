@@ -14,9 +14,15 @@
 //     both dead-end modes, the batch's rows rearranged in the middle (a stale launch order), tiny chunks, a stream
 //     switch; interleaved and grouped batches;
 //   - the fast path over a suite captured into CUDA graphs and replayed equals the eager calls and the host;
-//   - which suites the fast path runs, and why not ("domain d (name): ...").
+//   - which suites the fast path runs, and why not ("domain d (name): ...");
+//   - axioms on the fast path (tests/data/pddl/linking: universal preconditions with implications and quantified goals,
+//     compiled into axioms; tests/data/pddl/beacons: a recursive :derived predicate in preconditions of both signs and
+//     in goals): the tables, tables of one instance and suites with them run on the fast path, step for step equal to
+//     the general path and the host, eagerly and captured; goal queries; axioms beyond the device's evaluator are
+//     refused by the name of their derived predicate.
 
 #include "env_harness.hpp"
+#include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -25,9 +31,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -40,7 +48,7 @@ struct NamedSuite
 {
     std::string name;
     rl::TaskSuitePtr suite;
-    bool fast = false;  // the fast path runs it (no domain with axioms or conditional effects)
+    bool fast = false;  // the fast path runs it (no domain with conditional effects or axioms beyond the device)
 };
 
 /// Suites of two and four domains, and one with conditional effects and goal axioms (the general path).
@@ -379,7 +387,8 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, const r
         for (u64 i = 0; i < N; ++i)
             crossed += S.domain_of(static_cast<u32>(before[i])) != S.domain_of(static_cast<u32>(h.v.task_ids[i])) ? 1 : 0;
     }
-    EXPECT_GT(crossed, 0u);  // some rows restarted in another domain
+    if (S.num_domains() > 1)
+        EXPECT_GT(crossed, 0u);  // some rows restarted in another domain
     other.synchronize();
 }
 
@@ -1042,4 +1051,231 @@ TEST(DeviceTaskSuiteEnv, CapturedStepsEqualEagerAndHost)
                 return;
         }
     }
+}
+
+// ------------------------------------------------------------------------------------------------ axioms
+
+namespace
+{
+/// The table of the problems p*.pddl (sorted) of fixture domain tests/data/pddl/<dir>.
+rl::TaskTablePtr fixture_table(const std::string& dir, TaskOptions::Atoms atoms)
+{
+    const std::filesystem::path d = std::filesystem::path(MYMYR_TEST_DATA_DIR) / "pddl" / dir;
+    std::vector<std::filesystem::path> problems;
+    for (const auto& e : std::filesystem::directory_iterator(d))
+        if (e.path().filename().string().rfind('p', 0) == 0 && e.path().extension() == ".pddl")
+            problems.push_back(e.path());
+    std::sort(problems.begin(), problems.end());
+    TaskOptions o;
+    o.atoms = atoms;
+    const auto domain = frontend::Domain::from_file(d / "domain.pddl");
+    std::vector<TaskPtr> tasks;
+    for (const auto& p : problems)
+        tasks.push_back(Task::create(*domain->instantiate_file(p), o));
+    return rl::TaskTable::create(std::move(tasks));
+}
+
+/// Rows of the first `cap` states of each instance of the suite in breadth-first order (every state of the fixtures'
+/// instances: goal states among them), at the suite's width; ids[r] is row r's instance (global id).
+void reachable_rows(const rl::TaskSuite& S, u32 cap, std::vector<u64>& rows, std::vector<i32>& ids)
+{
+    const u32 W = S.words();
+    for (u32 d = 0; d < S.num_domains(); ++d)
+    {
+        const rl::TaskTable& T = *S.table(d);
+        const u32 Wd = T.words();
+        for (u32 i = 0; i < T.size(); ++i)
+        {
+            const Task& task = *T.task(i);
+            const WorkspaceLease lease = task.workspace();
+            Successors& succ = lease->successors();
+            std::vector<std::vector<u64>> queue{T.instance(i).init};
+            std::set<std::vector<u64>> seen{queue[0]};
+            std::vector<u64> tmp;
+            for (u64 k = 0; k < queue.size() && queue.size() < cap; ++k)
+            {
+                const std::vector<u64> cur = queue[k];
+                succ.prepare(StateView{cur.data(), Wd, nullptr, 0});
+                succ.generate<false>(
+                    [&](u32, const ObjectId*, const Delta& delta) -> bool
+                    {
+                        const u32 n = apply_delta(cur.data(), Wd, delta, tmp);
+                        std::vector<u64> row(Wd, 0);
+                        std::copy_n(tmp.begin(), std::min(n, Wd), row.begin());
+                        if (queue.size() < cap && seen.insert(row).second)
+                            queue.push_back(std::move(row));
+                        return true;
+                    },
+                    false, true);
+            }
+            for (const auto& q : queue)
+            {
+                rows.insert(rows.end(), q.begin(), q.end());
+                rows.insert(rows.end(), W - Wd, u64{0});
+                ids.push_back(static_cast<i32>(S.global_id(d, i)));
+            }
+        }
+    }
+}
+
+/// Suites with axioms: the linking and beacons tables, a table of one instance of each, the suite of both, and a suite
+/// with a domain without axioms.
+std::vector<NamedSuite> axiom_suites(TaskOptions::Atoms atoms)
+{
+    const rl::TaskTablePtr linking = fixture_table("linking", atoms), beacons = fixture_table("beacons", atoms);
+    std::vector<NamedSuite> out;
+    const std::string an = atoms_name(atoms);
+    out.push_back({"linking" + an, rl::TaskSuite::of(linking), true});
+    out.push_back({"beacons" + an, rl::TaskSuite::of(beacons), true});
+    out.push_back({"linking #2" + an, rl::TaskSuite::of(rl::TaskTable::create({linking->task(2)})), true});
+    out.push_back({"beacons #1" + an, rl::TaskSuite::of(rl::TaskTable::create({beacons->task(1)})), true});
+    out.push_back({"linking+beacons" + an, rl::TaskSuite::create({linking, beacons}), true});
+    std::map<std::string, rl::TaskTablePtr> by;
+    for (Set& s : sets(atoms))
+        by[s.name] = s.table;
+    if (by.count("gripper"))
+        out.push_back({"beacons+gripper+linking" + an, rl::TaskSuite::create({beacons, by.at("gripper"), linking}), true});
+    return out;
+}
+}  // namespace
+
+TEST(DeviceTaskSuiteEnv, AxiomsRunOnTheFastPath)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+        for (const NamedSuite& ns : axiom_suites(atoms))
+        {
+            SCOPED_TRACE(ns.name);
+            bool axioms = false, derived_goal = false;
+            for (u32 g = 0; g < ns.suite->size(); ++g)
+            {
+                axioms = axioms || ns.suite->task(g)->has_axioms();
+                derived_goal = derived_goal || ns.suite->task(g)->compiled().goal.uses_derived;
+            }
+            EXPECT_TRUE(axioms);
+            EXPECT_TRUE(derived_goal);
+            const std::string why = cuda::DeviceEnv::fast_unsupported(*ns.suite, config(1));
+            EXPECT_TRUE(why.empty()) << why;
+            cuda::DeviceEnv env(ctx, ns.suite, config(1));
+            EXPECT_TRUE(env.fast());
+            EXPECT_TRUE(env.capture_unsupported().empty()) << env.capture_unsupported();
+            for (u32 g = 0; g < ns.suite->size(); ++g)
+                EXPECT_EQ(env.initial_count(g), rl::HostEnv(ns.suite, config(1)).initial_count(g));
+        }
+}
+
+TEST(DeviceTaskSuiteEnv, AxiomsEqualGeneralPathAndHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+        for (const NamedSuite& ns : axiom_suites(atoms))
+            for (const auto path : {cuda::DeviceEnv::Path::Fast, cuda::DeviceEnv::Path::General})
+            {
+                SCOPED_TRACE(ns.name + (path == cuda::DeviceEnv::Path::Fast ? " fast" : " general"));
+                RunOptions r;
+                r.rearrange = true;
+                r.steps = 40;
+                run_env(ctx, ns.suite, config(0xa1 + ns.suite->size()), path, r);
+                if (::testing::Test::HasFatalFailure())
+                    return;
+                r.rearrange = false;
+                r.switch_stream = true;
+                r.grouped = true;
+                r.chunk_rows = 5;
+                rl::EnvConfig cfg = config(0xa2);
+                cfg.dead_end_terminal = false;
+                run_env(ctx, ns.suite, cfg, path, r);
+                if (::testing::Test::HasFatalFailure())
+                    return;
+            }
+}
+
+TEST(DeviceTaskSuiteEnv, AxiomsCapturedStepsEqualEagerAndHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const NamedSuite& ns : axiom_suites(TaskOptions::Atoms::Dense))
+        for (const bool grouped : {false, true})
+        {
+            SCOPED_TRACE(ns.name + (grouped ? " grouped" : " interleaved"));
+            run_graph(ctx, ns.suite, config(0x9b + ns.suite->size()), false, 3, grouped);
+            if (::testing::Test::HasFatalFailure())
+                return;
+            rl::EnvConfig cfg = config(37);
+            cfg.dead_end = rl::DeadEnd::NoSuccessors;
+            cfg.dead_end_terminal = false;
+            run_graph(ctx, ns.suite, cfg, false, 4, grouped);
+            if (::testing::Test::HasFatalFailure())
+                return;
+        }
+}
+
+// The goal query of the fast path closes the rows' derived atoms on the device: equal to the host's goal test on
+// the reachable states of every instance (up to 256 each), and to the at_goal flags of refresh().
+TEST(DeviceTaskSuiteEnv, AxiomGoalQueriesEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const NamedSuite& ns : axiom_suites(TaskOptions::Atoms::Dense))
+    {
+        SCOPED_TRACE(ns.name);
+        const rl::TaskSuite& S = *ns.suite;
+        std::vector<u64> rows;
+        std::vector<i32> ids;
+        reachable_rows(S, 256, rows, ids);
+        const u64 N = ids.size();
+        std::vector<u8> want(N);
+        rl::is_goal(S, rl::StateBatchView{rows.data(), N, S.words(), S.words(), 0}, ids.data(), want.data());
+        EXPECT_GT(std::count(want.begin(), want.end(), u8{1}), 0);
+        cuda::DeviceEnv env(ctx, ns.suite, config(3), cuda::DeviceEnv::Path::Fast);
+        DeviceEnvs d(ctx, env, ids, false);
+        upload(d.states.data(), rows, d.s);
+        cuda::DeviceBuffer got(ctx, N, d.s);
+        env.goal(d.b, static_cast<u8*>(got.data()));
+        EXPECT_EQ(to_host<u8>(got.data(), N, d.s), want);
+        env.refresh(d.b, d.out.count);
+        env.check_errors();
+        EXPECT_EQ(to_host<u8>(d.at_goal.data(), N, d.s), want);
+    }
+}
+
+// Axioms the device does not evaluate (a body beyond the kernels' matcher depth) keep the general path, and the
+// reason names the derived predicate.
+TEST(DeviceTaskSuiteEnv, AxiomsBeyondTheDeviceAreRefusedByName)
+{
+    SKIP_WITHOUT_GPU();
+    const std::string domain = R"((define (domain chain)
+  (:requirements :strips :derived-predicates :existential-preconditions :negative-preconditions)
+  (:predicates (step ?a ?b) (marked ?a) (long-chain))
+  (:derived (long-chain)
+    (exists (?a ?b ?c ?d ?e ?f ?g ?h ?i ?j ?k ?l ?m ?n ?o ?p ?q)
+      (and (step ?a ?b) (step ?b ?c) (step ?c ?d) (step ?d ?e) (step ?e ?f) (step ?f ?g) (step ?g ?h) (step ?h ?i)
+           (step ?i ?j) (step ?j ?k) (step ?k ?l) (step ?l ?m) (step ?m ?n) (step ?n ?o) (step ?o ?p) (step ?p ?q)
+           (marked ?a) (marked ?q))))
+  (:action mark :parameters (?x) :precondition (not (marked ?x)) :effect (marked ?x))))";
+    const std::string problem = R"((define (problem p) (:domain chain) (:objects x y)
+  (:init (step x y) (step y x)) (:goal (long-chain))))";
+    TaskOptions o;
+    o.atoms = TaskOptions::Atoms::Dense;
+    const auto task = Task::create(*frontend::Domain::from_string(domain)->instantiate_string(problem), o);
+    ASSERT_TRUE(task->has_axioms());
+    const std::string why = cuda::ChunkGenerator::axioms_unsupported(*task);
+    EXPECT_NE(why.find("the axiom of derived predicate long-chain"), std::string::npos) << why;
+    EXPECT_NE(why.find("parameters (the device kernels take at most " + std::to_string(cuda::lifted::k_max_depth) + ")"),
+              std::string::npos)
+        << why;
+    const auto table = rl::TaskTable::create({task});
+    EXPECT_EQ(cuda::DeviceEnv::fast_unsupported(*table, config(1)), why);
+    auto ctx = context();
+    cuda::DeviceEnv env(ctx, table, config(1));
+    EXPECT_FALSE(env.fast());
+    EXPECT_NE(env.capture_unsupported().find(why), std::string::npos) << env.capture_unsupported();
+    EXPECT_THROW(cuda::DeviceEnv(ctx, table, config(1), cuda::DeviceEnv::Path::Fast), std::invalid_argument);
+    // in a suite: "domain d (name): instance i: ..."
+    const auto suite = rl::TaskSuite::create({fixture_table("linking", TaskOptions::Atoms::Dense), table});
+    const std::string swhy = cuda::DeviceEnv::fast_unsupported(*suite, config(1));
+    EXPECT_EQ(swhy.rfind("domain 1 (chain): ", 0), 0u) << swhy;
+    EXPECT_NE(swhy.find("the axiom of derived predicate long-chain"), std::string::npos) << swhy;
 }

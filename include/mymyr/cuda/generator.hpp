@@ -125,6 +125,10 @@ public:
     /// The device searches' support check: classical rows have runtime width; numeric rows retain unsupported()'s
     /// whole-row limit.
     [[nodiscard]] static std::string search_unsupported(const Task& task);
+    /// Empty if the device evaluates the task's axioms (or it has none), otherwise why not, naming the first axiom
+    /// beyond the kernels by its derived predicate: a body of more than lifted::k_max_depth parameters, or numeric
+    /// constraints in a body. Such axioms run on the CPU evaluator (host_axioms_reason()).
+    [[nodiscard]] static std::string axioms_unsupported(const Task& task);
 
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }
     [[nodiscard]] const TaskPtr& task() const noexcept { return m_task; }

@@ -222,7 +222,7 @@ std::vector<Set> graph_sets()
     for (Set& s : sets(TaskOptions::Atoms::Dense))
     {
         if (!cuda::DeviceEnv::fast_unsupported(*s.table, config(0)).empty())
-            continue;  // miconic-simpleadl: axioms
+            continue;  // miconic-simpleadl: conditional effects
         for (const usize i : {usize{0}, s.tasks.size() - 1})
             out.push_back({s.name + " #" + std::to_string(i), {s.tasks[i]}, rl::TaskTable::create({s.tasks[i]})});
         out.push_back(std::move(s));

@@ -1,0 +1,5 @@
+(define (problem linking-01)
+  (:domain linking)
+  (:objects g0 g1 - gadget a0 a1 - cell)
+  (:init (cur g0) (next g0 g1) (terminal g1) (in a0 g0) (in a1 g0))
+  (:goal (and (done) (exists (?c - cell) (linked ?c)))))
