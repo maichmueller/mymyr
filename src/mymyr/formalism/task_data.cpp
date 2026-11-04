@@ -130,7 +130,8 @@ void validate(const TaskData& t)
             const CollapsedParameter& c = t.collapsed_params[s.collapsed.begin + k];
             if (c.position >= s.arity() + s.collapsed.count || (k > 0 && t.collapsed_params[s.collapsed.begin + k - 1].position >= c.position))
                 invalid("collapsed parameter positions must ascend within the schema's parameters before collapsing");
-            check_range(t.type_ids, c.param.types, "collapsed parameter types");
+            if (c.param >= t.params.size())
+                invalid("collapsed parameter out of range");
             if (c.representative.valid() && c.representative.v >= t.num_objects())
                 invalid("collapsed parameter representative out of range");
         }
@@ -524,7 +525,7 @@ void collapse_unused_parameters(TaskData& t, std::span<const u8> type_predicate)
                     fits[o] &= in[o];
             }
             CollapsedParameter c;
-            c.param = param;
+            c.param = s.params.begin + i;
             c.position = i;
             c.written = i < s.original_arity;
             if (auto it = std::find(fits.begin(), fits.end(), u8{1}); it != fits.end())
@@ -592,5 +593,33 @@ std::vector<ObjectId> full_binding(const TaskData& t, const Schema& s, std::span
     }
     out.insert(out.end(), binding.begin() + static_cast<std::ptrdiff_t>(next), binding.end());
     return out;
+}
+bool has_type(const TaskData& t, ObjectId o, Range types)
+{
+    if (types.count == 0)
+        return true;
+    std::vector<u8> wanted(t.types.size(), 0);
+    for (TypeId ty : TaskData::slice(t.type_ids, types))
+    {
+        if (t.str(t.types[ty.v].name) == "object")
+            return true;
+        wanted[ty.v] = 1;
+    }
+    std::vector<TypeId> todo(TaskData::slice(t.type_ids, t.objects[o.v].types).begin(),
+                             TaskData::slice(t.type_ids, t.objects[o.v].types).end());
+    std::vector<u8> seen(t.types.size(), 0);
+    while (!todo.empty())
+    {
+        const TypeId ty = todo.back();
+        todo.pop_back();
+        if (ty.v >= t.types.size() || seen[ty.v])
+            continue;
+        if (wanted[ty.v])
+            return true;
+        seen[ty.v] = 1;
+        for (TypeId b : TaskData::slice(t.type_ids, t.types[ty.v].bases))
+            todo.push_back(b);
+    }
+    return false;
 }
 }  // namespace mymyr::formalism

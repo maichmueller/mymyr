@@ -164,25 +164,30 @@ void bind_frontend(nb::module_& m)
             "text"_a, "Parse and normalize domain PDDL text.")
         .def(
             "instantiate",
-            [](const PyDomain& self, const std::filesystem::path& problem, bool fast_init) {
+            [](const PyDomain& self, const std::filesystem::path& problem, bool fast_init, bool collapse_unused_parameters) {
                 nb::gil_scoped_release release;
                 std::string text = read_problem(problem);
-                auto data = self.d->instantiate_file(problem, {.fast_init = fast_init});
+                auto data = self.d->instantiate_file(
+                    problem, {.fast_init = fast_init, .collapse_unused_parameters = collapse_unused_parameters});
                 return FormalismTask{std::move(data), pddl_source(self, std::move(text), problem.string())};
             },
-            "problem"_a, nb::kw_only(), "fast_init"_a = true,
+            "problem"_a, nb::kw_only(), "fast_init"_a = true, "collapse_unused_parameters"_a = true,
             "Instantiate a problem file. fast_init reads :init in one pass instead of through loki; the result is the "
-            "same.")
+            "same. collapse_unused_parameters removes the action parameters that nothing but their type mentions (no "
+            "precondition, effect or effect condition): one action stands for the actions with any object of the type, "
+            "written with the first object of the type. False binds them to every object of their type.")
         .def(
             "instantiate_string",
-            [](const PyDomain& self, std::string_view text, bool fast_init) {
+            [](const PyDomain& self, std::string_view text, bool fast_init, bool collapse_unused_parameters) {
                 std::string copy(text);
                 nb::gil_scoped_release release;
                 expect_pddl(copy, "problem", "");
-                auto data = self.d->instantiate_string(copy, "", {.fast_init = fast_init});
+                auto data = self.d->instantiate_string(
+                    copy, "", {.fast_init = fast_init, .collapse_unused_parameters = collapse_unused_parameters});
                 return FormalismTask{std::move(data), pddl_source(self, std::move(copy), "")};
             },
-            "text"_a, nb::kw_only(), "fast_init"_a = true, "Instantiate problem PDDL text.")
+            "text"_a, nb::kw_only(), "fast_init"_a = true, "collapse_unused_parameters"_a = true,
+            "Instantiate problem PDDL text (the options as for instantiate).")
         .def_prop_ro(
             "formalism",
             [](const PyDomain& self) {

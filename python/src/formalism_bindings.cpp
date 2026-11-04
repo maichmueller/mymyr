@@ -364,9 +364,28 @@ void bind_formalism(nb::module_& parent)
             .field("arity", [](const SchemaV& v) { return v.d().schemas[v.i].arity(); },
                    "The number of parameters, those normalization added included.")
             .field("original_arity", [](const SchemaV& v) { return v.d().schemas[v.i].original_arity; },
-                   "parameters written in the PDDL; the rest were introduced by normalization")
+                   "parameters written in the PDDL among `parameters` (the first ones); the rest were introduced by "
+                   "normalization")
             .field("parameters", [](const SchemaV& v) { return parameter_list(v.t, v.d().schemas[v.i].params); },
-                   "The Parameters.")
+                   "The Parameters: those an action binds (Action.objects), without the collapsed ones.")
+            .field("collapsed_parameters", [](const SchemaV& v) {
+                nb::list l;
+                for (const fm::CollapsedParameter& c : v.d().collapsed_of(v.d().schemas[v.i]))
+                {
+                    nb::object rep = nb::none();
+                    if (c.representative.valid())
+                        rep = nb::cast(ObjectV{{v.t, c.representative.v}});
+                    l.append(nb::make_tuple(ParameterV{{v.t, c.param}, c.position}, rep));
+                }
+                return l;
+            }, "The parameters that nothing but their type mentions, which normalization collapsed (Task.from_pddl's "
+               "collapse_unused_parameters): (Parameter, representative) pairs, the Parameter's position in the "
+               "parameter list before collapsing and the representative the first Object of its type (None when there "
+               "is none: the schema has no action). Every object of the type gives the same transitions; the written "
+               "action names the representative.")
+            .field("written_arity", [](const SchemaV& v) { return fm::written_arity(v.d(), v.d().schemas[v.i]); },
+                   "The number of parameters the PDDL action declares, collapsed ones included: the arguments of a "
+                   "plan line.")
             .field("precondition", [](const SchemaV& v) {
                 return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::precondition(v.d(), SchemaId{v.i})));
             }, "a ConjunctiveCondition over the parameters")

@@ -20,7 +20,7 @@ def fork_task(d, p):
     dom, prob = FORK_DATA / d / "domain.pddl", FORK_DATA / d / p
     if not prob.exists():
         pytest.skip(f"reference data missing: {prob} (set MYMYR_PARITY_DATA)")
-    return mymyr.Task.from_pddl(dom, prob, atoms="dense")
+    return mymyr.Task.from_pddl(dom, prob, atoms="dense", collapse_unused_parameters=False)
 
 
 def space_of(task, **options):

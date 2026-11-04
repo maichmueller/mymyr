@@ -1044,7 +1044,7 @@ std::vector<std::filesystem::path> problem_files(const std::variant<std::filesys
 /// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads
 /// (0: one per hardware thread).
 nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-                           const TaskOptions& options, u32 threads)
+                           const TaskOptions& options, u32 threads, bool collapse_unused_parameters)
 {
     PyDomain dom;
     if (nb::isinstance<PyDomain>(domain))
@@ -1077,7 +1077,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
                     source->domain_path = dom.path;
                     source->problem = read_problem(files[i]);
                     source->problem_path = files[i].string();
-                    data[i] = dom.d->instantiate_file(files[i]);
+                    data[i] = dom.d->instantiate_file(files[i], {.collapse_unused_parameters = collapse_unused_parameters});
                     tasks[i] = Task::create(formalism::TaskData(*data[i]), options);
                     sources[i] = std::move(source);
                 }
@@ -1662,18 +1662,18 @@ void bind_rl(nb::module_& parent)
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
                const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-               MYMYR_TASK_OPTION_PARAMS, IntArg threads) {
+               MYMYR_TASK_OPTION_PARAMS, IntArg threads, bool collapse_unused_parameters) {
                 const TaskOptions options = make_options(MYMYR_TASK_OPTION_VALUES);
                 return nb::typed<nb::object, PyTable>(
-                    table_from_pddl(domain, problems, options, threads_arg(threads)));
+                    table_from_pddl(domain, problems, options, threads_arg(threads), collapse_unused_parameters));
             },
-            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 1,
+            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 1, "collapse_unused_parameters"_a = true,
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
             "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
             "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; domain files in a "
             "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
-            "threads (0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
-            "with these options, except that under numeric_storage='auto' the numeric instances store their values "
+            "threads (0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i], "
+            "collapse_unused_parameters=collapse_unused_parameters)) with these options, except that under numeric_storage='auto' the numeric instances store their values "
             "as 'f64' when one of them needs it (a table has one numeric storage). Raises ValueError when a directory "
             "or pattern has no problem files.")
 #endif

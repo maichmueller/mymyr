@@ -179,7 +179,7 @@ struct ConditionalEffect
 /// representative here.
 struct CollapsedParameter
 {
-    Parameter param;  // name and declared types
+    u32 param = 0;  // into params: its name and declared types
     /// Its index in the schema's parameter list before collapsing ([written..., introduced by normalization...]).
     u32 position = 0;
     /// Whether the PDDL action declares it (not a parameter that normalization introduced for an existential).
@@ -372,6 +372,10 @@ void collapse_unused_parameters(TaskData& t, std::span<const u8> type_predicate)
 /// representative inserted at its position. Its first written_arity(t, s) objects are the action's arguments as
 /// written in PDDL.
 [[nodiscard]] std::vector<ObjectId> full_binding(const TaskData& t, const Schema& s, std::span<const ObjectId> binding);
+
+/// Whether object o is of one of the types `types` (into type_ids): one of its declared types or a supertype of one is
+/// among them. Every object is of type `object`, and of an empty list of types.
+[[nodiscard]] bool has_type(const TaskData& t, ObjectId o, Range types);
 
 /// Structural validation (ranges in bounds, arities consistent, derived heads, ground goal). Throws on violation.
 void validate(const TaskData& t);

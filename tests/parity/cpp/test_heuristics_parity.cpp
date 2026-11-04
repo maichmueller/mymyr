@@ -462,7 +462,7 @@ void run_task(const fs::path& file, Tally& total)
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    const auto data = frontend::load_task(dom, prob);
+    const auto data = frontend::load_task(dom, prob, {.collapse_unused_parameters = false});
     const auto task = Task::create(*data);
     Workspace ws(*task);
     Successors& succ = ws.successors();

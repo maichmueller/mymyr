@@ -53,7 +53,8 @@ def load(path):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
     fixture = read(path)
-    task = mymyr.Task.from_pddl(ROOT / fixture["task"]["domain"], ROOT / fixture["task"]["problem"])
+    task = mymyr.Task.from_pddl(ROOT / fixture["task"]["domain"], ROOT / fixture["task"]["problem"],
+                                collapse_unused_parameters=False)
     return fixture, task
 
 

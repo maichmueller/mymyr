@@ -490,7 +490,7 @@ private:
         std::string exists = typed_vars(vars, s.original_arity, s.arity(), s.params, 0);
         for (const CollapsedParameter& c : T.collapsed_of(s))
             if (!c.written)  // an existential variable of its type alone
-                exists += (exists.empty() ? "" : " ") + typed(collapsed_name(c), c.param.types);
+                exists += (exists.empty() ? "" : " ") + typed(collapsed_name(c), T.params[c.param].types);
         if (!exists.empty())
             o = "(exists (" + exists + ") " + o + ")";
         return o;
@@ -515,8 +515,9 @@ private:
                 o += " ";
             if (c < collapsed.size() && collapsed[c].position == k)
             {
-                const std::string_view name = T.str(collapsed[c].param.name);
-                o += typed(name.empty() ? collapsed_name(collapsed[c]) : "?" + std::string(name), collapsed[c].param.types);
+                const Parameter& p = T.params[collapsed[c].param];
+                const std::string_view name = T.str(p.name);
+                o += typed(name.empty() ? collapsed_name(collapsed[c]) : "?" + std::string(name), p.types);
                 ++c;
                 continue;
             }

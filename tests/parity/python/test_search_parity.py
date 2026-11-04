@@ -61,7 +61,7 @@ def golden_task(name):
             pytest.skip(f"PDDL of {name} not found (set MYMYR_PARITY_DATA)")
         if not domain.is_file() or not problem.is_file():
             pytest.skip(f"PDDL of {name} not found ({problem})")
-        _TASKS[name] = mymyr.Task.from_pddl(domain, problem)
+        _TASKS[name] = mymyr.Task.from_pddl(domain, problem, collapse_unused_parameters=False)
     return _TASKS[name]
 
 

@@ -86,33 +86,11 @@ const formalism::Parameter& line_parameter(const formalism::TaskData& D, const f
     for (const formalism::CollapsedParameter& c : D.collapsed_of(sc))
     {
         if (c.position == k)
-            return c.param;
+            return D.params[c.param];
         if (c.position < k)
             --kept;
     }
     return D.params[sc.params.begin + kept];
-}
-
-bool of_type(const formalism::TaskData& D, ObjectId o, TypeId ty)
-{
-    if (D.str(D.types[ty.v].name) == "object")
-        return true;
-    std::vector<TypeId> todo(D.type_ids.begin() + D.objects[o.v].types.begin,
-                             D.type_ids.begin() + D.objects[o.v].types.end());
-    std::vector<bool> seen(D.types.size(), false);
-    while (!todo.empty())
-    {
-        const TypeId t = todo.back();
-        todo.pop_back();
-        if (t == ty)
-            return true;
-        if (t.v >= D.types.size() || seen[t.v])
-            continue;
-        seen[t.v] = true;
-        const formalism::Type& T = D.types[t.v];
-        todo.insert(todo.end(), D.type_ids.begin() + T.bases.begin, D.type_ids.begin() + T.bases.end());
-    }
-    return false;
 }
 
 std::string type_violation(const formalism::TaskData& D, const formalism::Schema& sc, std::span<const ObjectId> args,
@@ -121,12 +99,7 @@ std::string type_violation(const formalism::TaskData& D, const formalism::Schema
     for (u32 k = 0; k < count && k < args.size(); ++k)
     {
         const formalism::Parameter& p = line ? line_parameter(D, sc, k) : D.params[sc.params.begin + k];
-        if (p.types.count == 0)
-            continue;
-        bool ok = false;
-        for (u32 j = p.types.begin; j < p.types.end() && !ok; ++j)
-            ok = of_type(D, args[k], D.type_ids[j]);
-        if (ok)
+        if (formalism::has_type(D, args[k], p.types))
             continue;
         std::string ty;
         if (p.types.count == 1)

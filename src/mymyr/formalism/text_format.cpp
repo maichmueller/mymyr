@@ -148,7 +148,10 @@ public:
                     fail("collapsed parameter of an unknown schema");
                 CollapsedParameter c;
                 c.position = u();
-                c.param.name = t.intern_string("x" + std::to_string(c.position));
+                Parameter param;
+                param.name = t.intern_string("x" + std::to_string(c.position));
+                c.param = static_cast<u32>(t.params.size());
+                t.params.push_back(param);
                 c.written = u() != 0;
                 const i32 rep = i32v();
                 if (rep >= 0)

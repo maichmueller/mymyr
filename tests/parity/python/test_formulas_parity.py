@@ -30,7 +30,7 @@ def golden_task(g):
         d = WORK / "mimir-cs" / "Benchmark" / tag
     if not (d / prob).is_file():
         pytest.skip(f"PDDL of {g['task']} not found")
-    return mymyr.Task.from_pddl(d / dom, d / prob)
+    return mymyr.Task.from_pddl(d / dom, d / prob, collapse_unused_parameters=False)
 
 
 @pytest.mark.parametrize("name", golden_cases())

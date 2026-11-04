@@ -513,6 +513,31 @@ std::pair<u32, std::vector<u32>> action_label(PyTaskCore& core, nb::handle schem
     }
     if (out.first >= core.data->schemas.size())
         throw nb::index_error("mymyr: schema index out of range");
+    const formalism::Schema& sc = core.data->schemas[out.first];
+    if (sc.collapsed.count != 0 && out.second.size() == sc.arity() + sc.collapsed.count)
+    {
+        // the objects of every parameter before collapsing (as str() writes the action): a collapsed parameter takes
+        // any object of its type
+        std::vector<u32> bound;
+        usize c = 0;
+        const auto collapsed = core.data->collapsed_of(sc);
+        for (usize k = 0; k < out.second.size(); ++k)
+        {
+            if (c < collapsed.size() && collapsed[c].position == k)
+            {
+                const formalism::Parameter& p = core.data->params[collapsed[c].param];
+                if (!formalism::has_type(*core.data, ObjectId{out.second[k]}, p.types))
+                    throw nb::value_error(("mymyr: object '" + name_of(*core.data, core.data->objects[out.second[k]].name) +
+                                           "' is not of the type of parameter ?" + name_of(*core.data, p.name) + " of '" +
+                                           name_of(*core.data, sc.name) + "'")
+                                              .c_str());
+                ++c;
+                continue;
+            }
+            bound.push_back(out.second[k]);
+        }
+        out.second = std::move(bound);
+    }
     if (out.second.size() != core.data->schemas[out.first].arity())
         throw nb::value_error(("mymyr: schema '" + name_of(*core.data, core.data->schemas[out.first].name) + "' takes " +
                                std::to_string(core.data->schemas[out.first].arity()) + " objects")
@@ -535,7 +560,18 @@ Arg<PyAction> make_action(const Owner& o, u32 schema, const ObjectId* b, u32 ari
 std::string action_str(const PyAction& a)
 {
     const formalism::TaskData& D = *a.core->data;
-    std::string s = "(" + name_of(D, D.schemas[a.schema].name);
+    const formalism::Schema& sc = D.schemas[a.schema];
+    std::string s = "(" + name_of(D, sc.name);
+    if (sc.collapsed.count != 0 && formalism::has_representatives(D, sc))
+    {
+        // the collapsed parameters as their representatives
+        std::vector<ObjectId> b(a.binding.size());
+        for (usize i = 0; i < b.size(); ++i)
+            b[i] = ObjectId{a.binding[i]};
+        for (ObjectId o : formalism::full_binding(D, sc, b))
+            s += " " + name_of(D, D.objects[o.v].name);
+        return s + ")";
+    }
     for (u32 o : a.binding)
         s += " " + name_of(D, D.objects[o].name);
     return s + ")";
@@ -1889,7 +1925,7 @@ void bind_task_api(nb::class_<C>& cls)
 }
 
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,
-                        nb::tuple opts, u64 fingerprint, nb::tuple encoding);
+                        nb::tuple opts, u64 fingerprint, nb::tuple encoding, bool collapse_unused_parameters);
 
 /// The encoding part of a task pickle: (encoding_fingerprint, lazy slots as bytes; lazy_slots), so the restored task
 /// numbers its atoms as the pickled one did when it was pickled.
@@ -1920,8 +1956,10 @@ nb::object task_reduce(nb::handle self)
     const nb::tuple enc = encoding_state(*core.task);
     if (core.source && core.source->kind == TaskSource::Kind::Pddl)
         return nb::make_tuple(restore, nb::make_tuple("pddl", core.source->domain, core.source->problem, core.source->domain_path,
-                                                      core.source->problem_path, opts, fp, enc));
-    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data, true), "", "", "", opts, fp, enc));
+                                                      core.source->problem_path, opts, fp, enc,
+                                                      core.data->unused_parameters_collapsed));
+    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data, true), "", "", "", opts, fp, enc,
+                                                  core.data->unused_parameters_collapsed));
 }
 
 /// Gives the lazy slots of `T` the pickled numbering (encoding_state), then checks the encoding fingerprint.
@@ -1943,7 +1981,7 @@ void restore_encoding(const Task& T, nb::tuple encoding)
 }
 
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,
-                        nb::tuple opts, u64 fingerprint, nb::tuple encoding)
+                        nb::tuple opts, u64 fingerprint, nb::tuple encoding, bool collapse_unused_parameters)
 {
     const TaskOptions options = options_of_tuple(opts);
     std::shared_ptr<const formalism::TaskData> data;
@@ -1953,7 +1991,7 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
 #if defined(MYMYR_HAS_FRONTEND)
         nb::gil_scoped_release release;
         auto dom = frontend::Domain::from_string(a, apath);
-        data = dom->instantiate_string(b, bpath);
+        data = dom->instantiate_string(b, bpath, {.collapse_unused_parameters = collapse_unused_parameters});
         source->kind = TaskSource::Kind::Pddl;
         source->domain = std::move(a);
         source->problem = std::move(b);
@@ -2267,7 +2305,7 @@ void bind_task(nb::module_& m)
         .def_static(
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain, const std::filesystem::path& problem,
-               MYMYR_TASK_OPTION_PARAMS) {
+               MYMYR_TASK_OPTION_PARAMS, bool collapse_unused_parameters) {
                 const TaskOptions o = make_options(MYMYR_TASK_OPTION_VALUES);
                 PyDomain dom;
                 if (nb::isinstance<PyDomain>(domain))
@@ -2287,12 +2325,15 @@ void bind_task(nb::module_& m)
                     source->domain_path = dom.path;
                     source->problem = read_problem(problem);
                     source->problem_path = problem.string();
-                    data = dom.d->instantiate_file(problem);
+                    data = dom.d->instantiate_file(problem, {.collapse_unused_parameters = collapse_unused_parameters});
                 }
                 return PyTask{build_core(std::move(data), std::move(source), o)};
             },
-            "domain"_a, "problem"_a, MYMYR_TASK_OPTION_ARGS,
-            "Parse (domain: a path or a mymyr.Domain) and instantiate the problem file.")
+            "domain"_a, "problem"_a, MYMYR_TASK_OPTION_ARGS, "collapse_unused_parameters"_a = true,
+            "Parse (domain: a path or a mymyr.Domain) and instantiate the problem file.\n\n"
+            "collapse_unused_parameters: remove the action parameters that nothing but their type mentions (no "
+            "precondition, effect or effect condition), so that one action stands for the actions with any object of the "
+            "type; it is written with the first object of the type. False binds them to every object of their type.")
 #endif
         .def("local", [](nb::handle self) { return PyHandle{nb::inst_ptr<PyTask>(self)->core, nb::borrow(self)}; },
              "A per-thread handle: same methods, but the states and actions it creates reference the handle instead of "
@@ -2627,7 +2668,7 @@ void bind_task(nb::module_& m)
 
     // --- Action
     nb::class_<PyAction>(m, "Action",
-                         "An action label (schema, binding): the schema's full parameter list bound to objects. "
+                         "An action label (schema, binding): the schema's parameters bound to objects. "
                          "Equal to the labels of the same task with the same schema and binding.")
         .def_prop_ro("schema", [](const PyAction& a) { return a.schema; },
                      "The index of the action's schema in Task.formalism.schemas.")
@@ -2650,9 +2691,11 @@ void bind_task(nb::module_& m)
             for (u32 o : a.binding)
                 v.push_back(name_of(*a.core->data, a.core->data->objects[o].name));
             return v;
-        }, "Object names of the binding.")
+        }, "Object names of the binding (the collapsed parameters of the schema are not bound; str() writes their "
+           "representatives).")
         .def_prop_ro("arity", [](const PyAction& a) { return a.binding.size(); },
-                     "The number of bound parameters (the schema's arity, normalization's parameters included).")
+                     "The number of bound parameters (the schema's arity, normalization's parameters included, the "
+                     "collapsed ones not).")
         .def_prop_ro("original_arity", [](const PyAction& a) { return a.core->data->schemas[a.schema].original_arity; },
                      "Parameters written in the PDDL (the rest were introduced by normalization).")
         .def_prop_ro("task", [](const PyAction& a) { return task_object(a.owner); },

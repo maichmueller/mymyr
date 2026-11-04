@@ -60,6 +60,16 @@ class _Parser(argparse.ArgumentParser):
         self.exit(EXIT_ERROR, f"{self.prog}: error: {message} (see {self.prog} --help)\n")
 
 
+
+def _add_collapse_option(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--keep-unused-parameters",
+        dest="collapse_unused_parameters",
+        action="store_false",
+        help="bind the action parameters that nothing but their type mentions to every object of their type "
+        "(Task.from_pddl's collapse_unused_parameters=False); by default one action stands for all of them",
+    )
+
 def _parser() -> argparse.ArgumentParser:
     p = _Parser(
         prog="mymyr",
@@ -136,6 +146,7 @@ def _parser() -> argparse.ArgumentParser:
         "-v", "--verbose", action="store_true",
         help="print statistics (expanded, generated, stored and pruned states, time, memory, cost) to stderr"
     )
+    _add_collapse_option(plan)
     plan.add_argument("--debug", action="store_true", help="show the traceback of an error")
     plan.set_defaults(run=_plan)
 
@@ -153,6 +164,7 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "plan", metavar="PLAN", help="the plan in the IPC format: one '(action object ...)' per line, ';' comments"
     )
+    _add_collapse_option(validate)
     validate.add_argument("--debug", action="store_true", help="show the traceback of an error")
     validate.set_defaults(run=_validate)
 
@@ -174,6 +186,7 @@ def _parser() -> argparse.ArgumentParser:
         help="write files into DIR (created when missing): <problem>.txt per problem, or domain.pddl and "
         "<problem>.pddl; without it one problem's text, or its domain and problem, go to stdout",
     )
+    _add_collapse_option(write)
     write.add_argument("--debug", action="store_true", help="show the traceback of an error")
     write.set_defaults(run=_write)
 
@@ -186,6 +199,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     info.add_argument("domain", metavar="DOMAIN", help="the PDDL domain file")
     info.add_argument("problem", metavar="PROBLEM", nargs="?", help="a PDDL problem file of the domain")
+    _add_collapse_option(info)
     info.add_argument("--debug", action="store_true", help="show the traceback of an error")
     info.set_defaults(run=_info)
     return p
@@ -280,7 +294,8 @@ def _cancellable(run: Callable[[search.CancelToken], Any]) -> Any:
 def _plan(a: argparse.Namespace) -> int:
     _check_options(a)
     t0 = time.perf_counter()
-    task = mymyr.Task.from_pddl(a.domain, a.problem, atoms=a.atoms)
+    task = mymyr.Task.from_pddl(a.domain, a.problem, atoms=a.atoms,
+                                collapse_unused_parameters=a.collapse_unused_parameters)
     parse_s = time.perf_counter() - t0
     r = _cancellable(lambda token: _search(task, a, token))
     status = r.status
@@ -345,7 +360,7 @@ def _plan(a: argparse.Namespace) -> int:
 
 
 def _validate(a: argparse.Namespace) -> int:
-    task = mymyr.Task.from_pddl(a.domain, a.problem)
+    task = mymyr.Task.from_pddl(a.domain, a.problem, collapse_unused_parameters=a.collapse_unused_parameters)
     v = search.validate_plan(task, pathlib.Path(a.plan))
     if v.valid:
         n = len(v.plan)
@@ -361,7 +376,8 @@ def _validate(a: argparse.Namespace) -> int:
 def _write(a: argparse.Namespace) -> int:
     if a.output is None and len(a.problems) > 1:
         raise UsageError("several problems need --output DIR")
-    tasks = [mymyr.Task.from_pddl(a.domain, p) for p in a.problems]
+    tasks = [mymyr.Task.from_pddl(a.domain, p, collapse_unused_parameters=a.collapse_unused_parameters)
+             for p in a.problems]
     stems = [pathlib.Path(p).stem for p in a.problems]
     if len(set(stems)) < len(stems):
         raise UsageError("the problem files' names (without suffix) must differ")
@@ -406,7 +422,7 @@ def _info(a: argparse.Namespace) -> int:
             raise UsageError("this build has no PDDL front end")
         f = mymyr.Domain.from_file(a.domain).formalism
     else:
-        f = mymyr.Task.from_pddl(a.domain, a.problem).formalism
+        f = mymyr.Task.from_pddl(a.domain, a.problem, collapse_unused_parameters=a.collapse_unused_parameters).formalism
     out = [f"domain: {f.domain_name} ({a.domain})"]
     if a.problem is not None:
         out.append(f"problem: {f.problem_name} ({a.problem})")
@@ -443,9 +459,13 @@ def _info(a: argparse.Namespace) -> int:
     )
     for name, schemas in by_action.items():
         arities = sorted({s.arity for s in schemas})
-        line = f"  {name}/{schemas[0].original_arity}: {len(schemas)} schema" + ("s" if len(schemas) > 1 else "")
-        if arities != [schemas[0].original_arity]:
+        written = schemas[0].written_arity
+        line = f"  {name}/{written}: {len(schemas)} schema" + ("s" if len(schemas) > 1 else "")
+        if arities != [written]:
             line += f" (arity {', '.join(map(str, arities))} after normalization)"
+        collapsed = sorted({p.name for s in schemas for p, _ in s.collapsed_parameters})
+        if collapsed:
+            line += " (collapsed: " + ", ".join("?" + n for n in collapsed) + ")"
         out.append(line)
     conditional = sum(1 for s in f.schemas for e in s.effects if _is_conditional(e))
     with_conditional = sum(1 for s in f.schemas if any(_is_conditional(e) for e in s.effects))

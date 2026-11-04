@@ -112,6 +112,70 @@ Notes:
 - heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), whereas the unit-cost heuristics count
   every action 1.
 
+## Unused parameters
+
+An action parameter is *unused* when nothing but its type mentions it: it occurs in no literal of the precondition
+(equality and inequality included), in no numeric constraint, in no effect (add, delete, numeric and `total-cost`
+effects), and in no condition or effect of a conditional effect. Quantified conditions do not hide a use: a universal
+quantifier becomes a derived predicate over the free variables of its body, so a parameter used inside one is an
+argument of that predicate. Every object of the parameter's type gives the same transitions, so by default
+normalization *collapses* it: the schema loses the parameter, its actions bind the other parameters only, and one
+action stands for all objects of the type. A domain whose action has five unused parameters over twenty objects has
+one action per binding of its other parameters where it had 20^5 = 3.2 million duplicates; searches report
+`generated` over the collapsed actions.
+
+The option is `collapse_unused_parameters=True` of `Task.from_pddl`, `Domain.instantiate`,
+`Domain.instantiate_string` and `rl.TaskTable.from_pddl` (C++: `frontend::InstantiateOptions::collapse_unused_parameters`;
+CLI: `--keep-unused-parameters` switches it off). With `False` every parameter is bound to every object of its type,
+as the PDDL is written. `Domain.formalism` is the domain as parsed, without collapsing.
+
+- **Applicability.** A collapsed parameter needs an object of its type, as before: its *representative* is the first
+  object of the type in object order (the domain's constants, then the problem's objects in declaration order), the
+  same in every run and for any number of threads. When the problem has no object of the type, the schema has no
+  action.
+- **Written actions.** `str(action)`, `format_plan` and the plans of the CLI write an action with all its PDDL
+  arguments, a collapsed parameter as its representative, so external validators accept the plans.
+- **Reading plans.** `parse_plan`, `validate_plan`, `plan_rows` and the CLI accept any object of the parameter's type
+  in its place: it is the same action. An object of another type is refused with `PlanError.WRONG_TYPE` (a
+  `ValueError` from `parse_plan`) naming the object and the type. `task.action("(name o1 ... ok)")` reads the
+  written form the same way.
+- **Bindings.** `Action.binding`, `Action.objects` and `Schema.parameters` hold the bound parameters only;
+  `Schema.collapsed_parameters` lists the collapsed ones as `(Parameter, representative)` pairs (the `Parameter`'s
+  `position` is its place among the parameters as written), and `Schema.written_arity` counts the arguments of a
+  written action. The environments, expansions, masks and labels of `mymyr.rl` bind the same parameters, so an
+  action space has one action per collapsed action.
+- **Encodings.** An action relation holds the bound parameters (`(action entity, o_1, ..., o_k)` over them): a
+  collapsed parameter's object would be the same representative for every action and carry no information. The host,
+  the device and JAX read the bindings of the same expansions, so their outputs stay identical.
+- **Identity.** A task's `fingerprint` covers the setting (also when no parameter is collapsed), so datasets, state
+  spaces and pickles made with one setting do not load against a task made with the other. The text format
+  (`Task.to_text`, `Task.from_text`) records it, and pickles and saved datasets rebuild PDDL tasks with it.
+
+Witness pruning (`witness_pruning=True` of the searches and environments) is a different, broader reduction: it keeps
+one witness among the bindings of the parameters that the effects do not mention, also when the precondition does.
+
+```python
+import mymyr
+from mymyr import search
+
+lights = mymyr.Domain.from_string("""
+(define (domain lights) (:requirements :typing)
+  (:types switch room)
+  (:predicates (on) (lit))
+  (:action press :parameters (?s - switch ?r - room) :precondition (on) :effect (lit)))""")
+problem = """(define (problem p) (:domain lights) (:objects s1 s2 - switch r1 r2 r3 - room)
+  (:init (on)) (:goal (lit)))"""
+task = mymyr.Task(lights.instantiate_string(problem))
+press = task.formalism.schemas[0]
+assert press.arity == 0 and press.written_arity == 2
+assert [p.name for p, _ in press.collapsed_parameters] == ["s", "r"]
+assert [str(a) for a in task.applicable_actions(task.initial_state)] == ["(press s1 r1)"]
+assert search.parse_plan(task, "(press s2 r3)") == task.applicable_actions(task.initial_state)  # the same action
+full = mymyr.Task(lights.instantiate_string(problem, collapse_unused_parameters=False))
+assert len(full.applicable_actions(full.initial_state)) == 6
+assert full.fingerprint != task.fingerprint
+```
+
 ## Errors
 
 PDDL that mymyr cannot read raises `mymyr.PddlError`, a `ValueError`. Its message is one line that names the file, the

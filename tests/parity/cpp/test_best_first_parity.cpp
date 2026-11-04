@@ -140,7 +140,7 @@ TEST(AStarGolden, OptimalCostsEqualTheForks)
             continue;
         }
         SCOPED_TRACE(name);
-        const auto data = frontend::load_task(dom, prob);
+        const auto data = frontend::load_task(dom, prob, {.collapse_unused_parameters = false});
         const auto task = Task::create(*data);
         const double expected = a["optimal_cost"].num;
         const heuristics::Kind k = a["heuristic"].str == "blind" ? heuristics::Kind::Blind : heuristics::Kind::Max;
@@ -211,7 +211,7 @@ TEST(AStarProbe, CostsEqual0_13_60)
         if (!fs::exists(dom) || !fs::exists(prob))
             continue;
         SCOPED_TRACE(std::string(row.dir) + "/" + row.problem + "/" + heuristics::to_string(row.kind));
-        const auto data = frontend::load_task(dom, prob);
+        const auto data = frontend::load_task(dom, prob, {.collapse_unused_parameters = false});
         const auto task = Task::create(*data);
         for (const heuristics::Costs hc : {heuristics::Costs::Unit, heuristics::Costs::Real})
         {
