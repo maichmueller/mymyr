@@ -82,7 +82,7 @@ def test_jax_env_lists_the_host_actions():
         assert np.array_equal(np.asarray(flat.offsets), x.offsets)
         assert np.array_equal(np.asarray(flat.schema)[: x.total], x.schema)
         assert np.array_equal(np.asarray(flat.binding)[: x.total], x.binding)
-        assert int(x.offsets[1]) == 4  # move a b, move a c, look a, ... with one action each
+        assert int(x.offsets[1]) == 3  # move a b, move a c and look a: one action each
 
 
 def gpu():

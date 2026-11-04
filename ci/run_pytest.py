@@ -12,11 +12,12 @@ without them, so the floor depends on what the job installs:
   --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.14 and 3.15t jobs, the macOS job,
                    the wheel tests;
   --runtimes rl    ci/rl-requirements.txt installed (pytest_min_passed_rl): the Linux 3.14t job.
-Sixteen tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
-with RLIMIT_AS and read /proc (4 + 1 cases), two in test_block_cache.py that read the resident set from /proc, and in
-test_ci_scripts.py five that drive ci/build_state.sh, which needs GNU tar, coreutils and findutils, and four
-(3 + 1 cases) that run ci/run_until.py, which finds the build's Ninja processes through /proc. The floor on macOS is
-lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
+Seventeen tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
+with RLIMIT_AS and read /proc (4 + 1 cases), two in test_block_cache.py and one in test_unused_parameters.py that read
+the resident set from /proc, and in test_ci_scripts.py five that drive ci/build_state.sh, which needs GNU tar,
+coreutils and findutils, and four (3 + 1 cases) that run ci/run_until.py, which finds the build's Ninja processes
+through /proc. The floor on macOS is lower by that many; the platform defaults to the one running the check, as in
+check_ctest_log.py.
 On GIL builds, the floor is lower by the test that needs a free-threaded interpreter
 (pytest_free_threaded_only_tests): test_one_iterator_shared_by_threads in test_bindings.py.
 
