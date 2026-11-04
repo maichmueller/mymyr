@@ -2,7 +2,7 @@
 problems (tests/data/ipc) every batch of N rows, encoded exactly or with the bounds as its capacities, stays within the
 bounds for N graphs per relation and per field: with the instances' goals and with goals of the rows, with expansion
 rows and without, for two option sets. The environments take the bounds as obs_capacities (on the CPU here, on a
-device in test_rl_capacity_bounds_device.py)."""
+device in test_rl_capacity_bounds.py)."""
 
 import pickle
 

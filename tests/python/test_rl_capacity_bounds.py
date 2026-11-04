@@ -64,4 +64,4 @@ def test_rollouts_stay_within_the_bounds(name, device):
         assert int(out.actions.status.cpu().max()) == 0
         assert int(out.actions.offsets[-1]) <= bounds["successors"]
     assert tuples > 0
-    env.check_errors() if hasattr(env, "check_errors") else None
+    env.check_errors()
