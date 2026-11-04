@@ -7,6 +7,7 @@
 #include "rl_imports.hpp"
 
 #include "mymyr/core/threads.hpp"
+#include "mymyr/encoding/capacity.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/collate.hpp"
 #include "mymyr/encoding/hgraph.hpp"
@@ -3086,6 +3087,71 @@ void bind_encoding(nb::module_& parent)
         { new (self) PyFlatEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
         encoder_doc.c_str());
     define_encoder_common(encoder_class, "FlatRelationEncoder");
+    module.def(
+        "_capacity_counts",
+        [](const PyFlatEncoder& self, nb::handle table, u64 graphs, bool actions, u64 history)
+        {
+            nb::object source = nb::borrow(table);
+            if ((nb::isinstance<PyTask>(source) || nb::isinstance<PyHandle>(source)) &&
+                !owner_of(source).core->task->atoms().frozen())
+                source = frozen_task(source);
+            const TableRef reference = table_of(source);
+            const encoding::FlatEncoder& encoder = *self.encoder;
+            encoding::CapacityBounds b;
+            {
+                nb::gil_scoped_release release;
+                // another table of the domain gets a context of its own (EncodingContext::create checks the domain)
+                const auto context = reference.table.get() == &encoder.table()
+                                         ? encoder.context_ptr()
+                                         : encoding::EncodingContext::create(reference.table, encoder.schema_ptr());
+                b = encoding::capacity_bounds(*context, {graphs, actions, history});
+            }
+            const encoding::EncodingSchema& schema = encoder.schema();
+            auto value = [](u64 v) { return v == encoding::k_unbounded ? nb::none() : nb::object(nb::int_(v)); };
+            nb::dict out;
+            out["graphs"] = value(b.graphs);
+            out["entities"] = value(b.entities);
+            out["args"] = value(b.args);
+            if (schema.has_targets())
+                out["targets"] = value(b.targets);
+            if (schema.has_history())
+                out["history"] = value(b.history);
+            if (schema.stores_numeric_values())
+                out["numeric"] = value(b.numeric);
+            if (schema.shared_statics())
+            {
+                out["static_instances"] = value(b.static_instances);
+                out["static_args"] = value(b.static_args);
+            }
+            if (actions && schema.options().include_actions)
+                out["successors"] = value(b.successors);
+            nb::list tuples;
+            for (u64 v : b.relation_tuples)
+                tuples.append(value(v));
+            out["relation_tuples"] = tuples;
+            out["relation_exact"] = std::vector<bool>(b.relation_exact.begin(), b.relation_exact.end());
+            out["reason"] = b.unbounded_reason;
+            return out;
+        },
+        "encoder"_a, "table"_a, "graphs"_a, "actions"_a, "history"_a,
+        "The bounds of encoding::capacity_bounds for `encoder`'s schema over `table` (None: unbounded); "
+        "encoding.FlatRelationEncoder.capacity_bounds wraps them.");
+    encoder_class.def(
+        "capacity_bounds",
+        [](nb::handle self, nb::handle table_or_suite, nb::handle graphs, bool actions, bool drop_noops,
+           nb::handle history)
+        {
+            return nb::module_::import_("mymyr.encoding._capacity")
+                .attr("capacity_bounds")(self, table_or_suite, graphs, actions, drop_noops, history);
+        },
+        "table_or_suite"_a, "graphs"_a, nb::kw_only(), "actions"_a = true, "drop_noops"_a = false, "history"_a = 0,
+        "Capacities that no batch of `graphs` rows over `table_or_suite` (a Task, TaskHandle or TaskTable of this "
+        "encoder's domain, or a TaskSuite: its tables of this domain) exceeds, computed from the instances and the "
+        "schema alone: a mymyr.encoding.CapacityBounds, a dict usable as `capacities` of encode and as "
+        "BatchedEnv(obs_capacities=...), with the tuples of each relation in `relation_tuples` and which bounds are "
+        "exact in `exact`. actions: the rows bring expansion rows (obs_actions=True): the action relations get the "
+        "ground actions that the delete relaxation reaches, and the dict 'successors' with drop_noops "
+        "(obs_drop_noops=True). history: with history relations, the most steps of a row (0: history_max_steps).");
     encoder_class
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
              "goals"_a = nb::none(), "actions"_a = nb::none(), "subgoals"_a = nb::none(), "history"_a = nb::none(),

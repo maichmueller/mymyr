@@ -1278,6 +1278,62 @@ tight = fixed_encoder.encode([state] * 3, capacities=dict(graphs=8, entities=16,
 assert tight.sizes["capacity_overflow"] and not tight.relation_args.any()
 ```
 
+### Capacity bounds
+
+`encoder.capacity_bounds(table_or_suite, graphs, *, actions=True, drop_noops=False, history=0)` computes capacities
+that no batch of `graphs` rows exceeds, from the instances and the schema alone (no rollout, nothing encoded):
+`table_or_suite` is a `Task`, `TaskHandle` or `TaskTable` of the encoder's domain, or a `TaskSuite` (its tables whose
+catalog is the encoder's). The bounds of one graph are the largest over the instances, whether a row has its
+instance's goal or a goal of its own (`goals=` masks), and those of `graphs` rows are `graphs` times them. With
+`actions` the rows bring expansion rows (`actions=` of `encode`, `obs_actions=True`); `history` is the most steps a
+row's history has (0: `history_max_steps`, which a schema that encodes every step needs). Rows with constant literals
+of their own (`goal_constants`, `subgoal_constants`) are not covered.
+
+The result, a `CapacityBounds`, is a dict of the keys that `capacities` take (`graphs`, `entities`, `args`, and
+`targets`, `history`, `numeric`, `static_instances` and `static_args` where the schema has them), so it goes directly
+into `encode(..., capacities=...)` and `BatchedEnv(..., obs_capacities=...)`; with `drop_noops` it also has the
+`successors` that `obs_capacities` takes for `obs_drop_noops=True` (without the drop the kept rows are all the
+successors, which the entity capacity bounds already). `relation_tuples` holds the tuples of each relation by name, in
+catalog order, `exact` and `relation_exact` tell which bounds some batch reaches and which are upper bounds:
+
+| Bound | Per graph | Kind |
+|---|---|---|
+| `graphs` | the rows | exact |
+| a static relation | the instance's static tuples (none under `statics='shared'`) | exact |
+| a numeric relation, `numeric` | the instance's numeric slots | exact |
+| `history` | the steps of a row | exact |
+| `static_instances`, `static_args` | the largest static blocks, one per instance among the rows | exact |
+| a fluent or derived state relation | the atom slots of its predicate | upper bound |
+| a goal relation (any level and derivation) | the atom slots of its predicate, plus the instance goal's literals of fixed truth | upper bound |
+| a history relation | the steps times the atom slots of its predicate | upper bound |
+| an action relation | the ground actions of its schemas that the delete relaxation reaches and whose static preconditions hold | upper bound |
+| `successors` | those ground actions of every schema: the expansion rows of a state | upper bound |
+| `entities`, `args`, `targets` | counted from the relations as the encoder counts them | upper bound |
+
+The atom slots are the instance's (`atoms='reachable'` and `'auto'` give only the relaxed-reachable atoms one, which
+tightens every bound but the static ones). The action bounds come from a grounding of the delete relaxation; past its
+budget they are unknown: the value is None, `unbounded` names the keys and relations without a bound, `reason` says
+why, and such a dict is refused as capacities. A relation without tuples in every instance has the exact bound 0.
+
+relmo's per-relation capacities map by name: `FlatCapacities.for_relations(dict(zip(encoder.relation_names,
+encoder.relation_arities)), tuples=bounds.relation_tuples, nodes=bounds["entities"], graphs=bounds["graphs"])`.
+
+```python
+bounds = fixed_encoder.capacity_bounds(task, 8)
+assert set(bounds) == {"graphs", "entities", "args"} and bounds["graphs"] == 8
+assert bounds.exact == {"graphs": True, "entities": False, "args": False} and not bounds.unbounded
+walk = [task.initial_state]
+for _ in range(20):
+    walk.append(task.successor_states(walk[-1])[-1])
+for start in range(0, len(walk), 8):
+    batch = fixed_encoder.encode(walk[start : start + 8], capacities=bounds)
+    assert not batch.sizes["overflow"]
+    counts = batch.relation_counts.sum(axis=0)
+    assert all(n <= bounds.relation_tuples[r] for r, n in zip(fixed_encoder.relation_names, counts))
+lanes = dict(zip(fixed_encoder.relation_names, fixed_encoder.relation_lanes))
+assert all(bounds.relation_exact[r] == (lanes[r] == "static") for r in lanes if bounds.relation_tuples[r])
+```
+
 **`into=`** writes the encoding into an earlier batch instead of new memory: a `FlatBatch` that a call with the same
 capacities made for the same number of rows of this schema and table. Every array of the batch is rewritten as a fresh
 encode would make it (the Simple graph, the numeric values and the static blocks of the call's instances included), and
