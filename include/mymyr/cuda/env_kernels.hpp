@@ -135,6 +135,10 @@ struct Instances
     u64 cache_words = 0;           // the count cache's words that an autoreset copies (not the row-order columns)
     const u64* init_view = nullptr;
     u64 view_words = 0;
+    // axioms (the fast path): a views row ends in its state's derived words, words [derived_at, derived_at +
+    // derived_words) of the row, which an autoreset copies from init_view too
+    u64 derived_at = 0;
+    u32 derived_words = 0;
     const u64* goal_pos = nullptr;
     const u64* goal_neg = nullptr;
     const u32* fluent_slots = nullptr;  // [I], bounds of per-env goal masks
@@ -191,8 +195,11 @@ struct Finish
     u64 count_stride = 0;  // 0: num_schemas
     const i32* offsets = nullptr;
     // goal flags of the reached states: per-env goal masks (goal_pos / goal_neg, rl::EnvBatch), else given (flat
-    // path), else tested with goal_holds of the row's instance (no derived goal literals)
+    // path), else the instance's goal masks (Instances::goal_off), else goal_holds of the row's instance over its
+    // derived words (derived [rows, derived_words]; null: none, for goals without derived literals)
     const u8* goal_flag = nullptr;
+    const u64* derived = nullptr;
+    u32 derived_words = 0;
     u64* goal_pos = nullptr;  // [rows, words]
     u64* goal_neg = nullptr;
     f32 step_reward = 0, goal_reward = 0, dead_end_reward = 0;

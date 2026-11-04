@@ -21,14 +21,21 @@
 //     batch rearranged since then is detected and runs in batch order: the same results, slower). A step's select also
 //     finds where each instance's rows start in that order, so the step's launches take the positions of their own
 //     groups' rows only (range launches, lifted::Multi::starts). Needs: every
-//     instance runs completely on the fast kernels (no numeric fluents, axioms, CPU-fallback schemas or conditional effects),
-//     frozen atom slots, and packed canonical-order keys within 64 bits (lifted::pick_keys_fit). Over a suite of
+//     instance runs completely on the fast kernels (no numeric fluents, CPU-fallback schemas or conditional effects, and
+//     axioms only where the device evaluates them: ChunkGenerator::axioms_unsupported), frozen atom slots, and packed
+//     canonical-order keys within 64 bits (lifted::pick_keys_fit). Axioms: the views of a state hold its derived atoms
+//     too, and each row of the views cache ends in the state's derived words (cache_view_words() counts them): the
+//     reached states' views and derived words come from the device's axiom evaluation (lifted::launch_encoding_axioms,
+//     every row in batch order before the counts), the picks' and counts' matchers read the derived words, and goals
+//     with derived literals are tested over them. State rows, hashes and visited tables hold the fluent atoms only (the
+//     derived atoms are a function of them). Over a suite of
 //     several domains every domain runs the multi-instance kernels of its table (detail::multi_unsupported
 //     empty): the launch order groups the rows by domain, then as each table's; each domain's picks and counts take its
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms, and instances the
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms beyond the device's
+//     evaluator, and instances the
 //     device kernels cannot run at all (ChunkGenerator::unsupported: their rows are expanded on the host, the
 //     DeviceExpander's Host parts; the other instances stay on the device). A step expands the current states into
 //     internal flat buffers with SuiteExpander (a table's DeviceExpander, or one per domain; canonical order, goal

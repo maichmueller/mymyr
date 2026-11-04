@@ -266,7 +266,8 @@ __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p
         }
         return true;
     }
-    return rl::dev::goal_holds(p.in.views ? p.in.views[instance] : task, row, p.words, nullptr, 0);
+    return rl::dev::goal_holds(p.in.views ? p.in.views[instance] : task, row, p.words,
+                               p.derived ? p.derived + row_id * p.derived_words : nullptr, p.derived_words);
 }
 
 __global__ void k_goal_rows(rl::dev::TaskView task, Finish p, u8* goal)
@@ -306,6 +307,8 @@ __device__ __forceinline__ u32 reset_row(const Instances& in, u32 k, u64 i, u64*
         const u64 vw = in.inst_view_words ? in.inst_view_words[k] : in.view_words;
         for (u64 w = 0; w < vw; ++w)
             views[i * in.view_words + w] = v[w];
+        for (u32 w = 0; w < in.derived_words; ++w)
+            views[i * in.view_words + in.derived_at + w] = v[in.derived_at + w];
     }
     if (goal_pos && !keep_goals)
         for (u32 w = 0; w < words; ++w)
@@ -657,7 +660,7 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         (p.goal_pos && (!p.goal_neg || !p.in.goal_pos || !p.in.fluent_slots)) ||
         (p.cache_counts && !p.in.init_cache) ||
         (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal) || !visited_ok(p.visited) ||
-        (p.visited.capacity && p.autoreset && !p.in.init_hash))
+        (p.visited.capacity && p.autoreset && !p.in.init_hash) || (p.derived_words && !p.derived))
         return cudaErrorInvalidValue;
     const bool wide = p.restarts && p.visited.capacity && p.autoreset;
     Finish f = p;
@@ -675,7 +678,7 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
 
 cudaError_t launch_goal(const rl::dev::TaskView& task, const Finish& p, u8* goal, cudaStream_t stream)
 {
-    if (p.rows && p.goal_pos && (!p.goal_neg || !p.in.fluent_slots))
+    if (p.rows && ((p.goal_pos && (!p.goal_neg || !p.in.fluent_slots)) || (p.derived_words && !p.derived)))
         return cudaErrorInvalidValue;
     if (p.rows)
         k_goal_rows<<<grid_for(p.rows), k_block, 0, stream>>>(task, p, goal);

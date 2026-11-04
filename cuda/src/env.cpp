@@ -49,7 +49,8 @@ constexpr usize k_deep = 4;
 constexpr usize k_rank_steps = 3;
 
 // control words (device and pinned host)
-constexpr u32 k_err = 0, k_words_needed = 1, k_order_bad = 2, k_ctl_words = 3;
+// (k_axioms_refused: the axiom kernels' flag for instances they cannot evaluate; the fast path has none)
+constexpr u32 k_err = 0, k_words_needed = 1, k_order_bad = 2, k_axioms_refused = 3, k_ctl_words = 4;
 
 rl::ExpandOptions expand_options(const rl::EnvConfig& c)
 {
@@ -77,7 +78,8 @@ std::string fast_why(const Task& task, const rl::EnvConfig& config)
     if (task.numeric_slots())
         return "numeric applicability and effects require the general expansion path";
     if (task.has_axioms())
-        return "axioms (their derived atoms are evaluated on the CPU)";
+        if (std::string why = ChunkGenerator::axioms_unsupported(task); !why.empty())
+            return why;
     const plan::Compiled& C = task.compiled();
     const u32 wi = config.witness_pruning ? 0 : 1;
     for (const plan::Schema& ps : C.schemas)
@@ -179,7 +181,14 @@ struct DeviceEnv::Impl
     DeviceBuffer label_views;
     u32 I = 1, D = 1, W = 1, L = 1, S = 0;  // instances (global), domains, row words, label width, segments per state
     u32 NN = 0;
-    u64 V = 0;
+    u64 V = 0;   // words of a row of the views cache: the widest instance's view (VV words), then DW derived words
+    u64 VV = 0;
+    // axioms (fast path): the device's evaluator over the instances, the derived words of a row (the widest
+    // instance's), and the derived words of a call's rows ([rows, DW], scratch) and scratch views (goal queries)
+    bool ax = false;
+    u32 DW = 0;
+    detail::AxiomClosure closure_of;
+    DeviceBuffer ax_der, ax_views;
     u64 C0 = 0;  // words of the count cache proper (the most any domain's layout takes)
     u64 C = 0;   // columns of EnvBatch::counts: C0, then the launch order's two over several instances
     u64 chunk_rows = 0;
@@ -239,7 +248,7 @@ struct DeviceEnv::Impl
                                      &pick_row,    &status,      &goal_flag,   &order_temp, &part_ids,  &f_succ,
                                      &f_schema,    &f_binding,   &f_goal,      &f_offsets,  &f_offsets2,
                                      &label_views, &init_hash,   &inst_numeric, &restarts, &smp_thresholds,
-                                     &smp_indices};
+                                     &smp_indices, &closure_of.records, &closure_of.reads, &ax_der, &ax_views};
         for (Part& P : parts)
             for (DeviceBuffer* b : {&P.region, &P.rank, &P.rank_table, &P.sets, &P.fc_of})
                 v.push_back(b);
@@ -402,6 +411,35 @@ struct DeviceEnv::Impl
         return chunk_rows ? chunk_rows : std::max<u64>(1024, k_view_chunk_bytes / std::max<u64>(8, V * 8));
     }
 
+    /// The derived words of the rows of the current call (axioms: closure() or load_derived(); else null).
+    [[nodiscard]] const u64* der() const { return ax ? static_cast<const u64*>(ax_der.data()) : nullptr; }
+    [[nodiscard]] u32 dw() const { return ax ? DW : 0; }
+
+    /// Axioms: rows [0, n) of `states` (task ids `ids`; one instance: null) closed under their instances' axioms
+    /// (lifted::launch_encoding_axioms, the device's evaluator of the axiom strata): their derived words into der()
+    /// [n, DW] and the tails of their `views` rows (words VV to V), and their matcher views (fluent and derived atoms)
+    /// into the rows' first words, on s.
+    void closure(const u64* states, u64 n, const i32* ids, u64* views)
+    {
+        auto* d = grow<u64>(ax_der, n * DW);
+        if (n == 0)
+            return;
+        closure_of.run(states, W, W, n, ids, views, V, d, dctl() + k_axioms_refused, s);
+        check(cudaMemcpy2DAsync(views + VV, V * sizeof(u64), d, DW * sizeof(u64), DW * sizeof(u64), n,
+                                cudaMemcpyDeviceToDevice, s),
+              "cudaMemcpy2DAsync (derived words)");
+    }
+
+    /// Axioms: der() [n, DW] := the derived words of the views cache's rows [0, n) (their tails), on s.
+    void load_derived(const u64* views, u64 n)
+    {
+        auto* d = grow<u64>(ax_der, n * DW);
+        if (n)
+            check(cudaMemcpy2DAsync(d, DW * sizeof(u64), views + VV, V * sizeof(u64), DW * sizeof(u64), n,
+                                    cudaMemcpyDeviceToDevice, s),
+                  "cudaMemcpy2DAsync (derived words)");
+    }
+
     /// Views and count caches of domain P's rows among [0, n) of `states` (the fast path), in L2-sized chunks of
     /// launch positions, on stream `ls`. The sets cover every schema (the fast path has no CPU-fallback schema), so
     /// every count is written. Several instances: row i is of instance inst[i] of the domain (0xFFFFFFFF: another
@@ -422,10 +460,11 @@ struct DeviceEnv::Impl
             if (!P.multi)
             {
                 const rl::dev::TaskView& t = P.dt->view(0);
-                const lifted::Parents p{states + b * W, W, W, static_cast<u32>(m), nullptr, 0};
+                const lifted::Parents p{states + b * W, W, W, static_cast<u32>(m), ax ? der() + b * DW : nullptr, dw()};
                 const lifted::Views v{views + b * V, V};
                 const lifted::CountCache c = cache(P, counts + b * stride, stride);
-                check(lifted::launch_view(t, p, v, ls), "launch_view");
+                if (!ax)
+                    check(lifted::launch_view(t, p, v, ls), "launch_view");
                 // the first launch writes the fingerprints (a task without schemas still needs one launch for them)
                 if (fixed.count || !fc.count)
                     check(lifted::launch_count_keys(t, p, v, fixed, c, true, ls), "launch_count_keys");
@@ -437,9 +476,10 @@ struct DeviceEnv::Impl
             mm.first = b;
             if (ranged)
                 range(P, mm, detail::TableLaunch::Keys{0, P.plan.instances});
-            check(lifted::launch_view_multi(mm, lifted::Parents{states, W, W, static_cast<u32>(m), nullptr, 0},
-                                            lifted::Views{views, V}, ls),
-                  "launch_view_multi");
+            if (!ax)
+                check(lifted::launch_view_multi(mm, lifted::Parents{states, W, W, static_cast<u32>(m), nullptr, 0},
+                                                lifted::Views{views, V}, ls),
+                      "launch_view_multi");
             P.fan.fork(ls, groups);
             for (u32 gi = 0; gi < groups; ++gi)
                 group_counts(P, gi, P.fan.lane(ls, gi), states, b, m, views, counts, stride, inst, ordered, ranged);
@@ -459,7 +499,7 @@ struct DeviceEnv::Impl
         mm.ow = P.plan.ows[gi];
         if (ranged)
             range(P, mm, P.plan.ow_keys[gi]);
-        const lifted::Parents p{states, W, W, static_cast<u32>(m), nullptr, 0};
+        const lifted::Parents p{states, W, W, static_cast<u32>(m), der(), dw()};
         const lifted::Views v{views, V};
         const lifted::CountCache c = cache(P, counts, stride);
         if (fixed.count || !fc.count)
@@ -478,6 +518,9 @@ struct DeviceEnv::Impl
     void views_and_counts(const u64* states, u64 n, u64* views, u32* counts, u64 stride, const u32* ids,
                           const u32* dom_ids, u64 dom_stride, bool ordered, bool ranged)
     {
+        // axioms: the views and derived words of every row in batch order first (the counts read both)
+        if (ax)
+            closure(states, n, reinterpret_cast<const i32*>(ids), views);
         if (!several())
         {
             part_views_and_counts(parts[0], s, states, n, views, counts, stride, ids, ordered, ranged);
@@ -498,9 +541,10 @@ struct DeviceEnv::Impl
             }
             mm.first = b;
             mm.instances = I;
-            check(lifted::launch_view_multi(mm, lifted::Parents{states, W, W, static_cast<u32>(m), nullptr, 0},
-                                            lifted::Views{views, V}, s),
-                  "launch_view_multi");
+            if (!ax)
+                check(lifted::launch_view_multi(mm, lifted::Parents{states, W, W, static_cast<u32>(m), nullptr, 0},
+                                                lifted::Views{views, V}, s),
+                      "launch_view_multi");
             lanes.fork(s, D);
             for (u32 d = 0; d < D; ++d)
             {
@@ -547,7 +591,7 @@ struct DeviceEnv::Impl
     void part_picks(Part& P, cudaStream_t ls, rl::EnvBatch& b, const u32* inst, const lifted::Picks& pk0,
                     const lifted::Labels& lab, const lifted::SuccessorRows& rows)
     {
-        const lifted::Parents p{b.states, W, W, static_cast<u32>(b.rows), nullptr, 0};
+        const lifted::Parents p{b.states, W, W, static_cast<u32>(b.rows), der(), dw()};
         const lifted::Views v{b.views, V};
         lifted::Picks pk = pk0;
         pk.cache = cache(P, b.counts, C);
@@ -578,7 +622,7 @@ struct DeviceEnv::Impl
                       const lifted::SuccessorRows& rows)
     {
         Part& P = parts[0];
-        const lifted::Parents p{b.states, W, W, static_cast<u32>(b.rows), nullptr, 0};
+        const lifted::Parents p{b.states, W, W, static_cast<u32>(b.rows), der(), dw()};
         const lifted::Views v{b.views, V};
         lifted::Picks pk = pk0;
         pk.fc_of = static_cast<const u8*>(P.fc_of.data());
@@ -597,9 +641,10 @@ struct DeviceEnv::Impl
         envk::Instances in;
         in.count = I;
         in.inst = inst;
-        in.views = label                            ? masks->device_views()
-                   : fast && multi() && !several() ? parts[0].dt->device_views()
-                                                   : nullptr;
+        in.views = label                ? masks->device_views()
+                   : fast && several() ? static_cast<const rl::dev::TaskView*>(all_views.data())
+                   : fast && multi()   ? parts[0].dt->device_views()
+                                       : nullptr;
         in.init_row = static_cast<const u64*>(init_row.data());
         in.init_count = static_cast<const u32*>(init_counts.data());
         in.init_goal = static_cast<const u8*>(init_goal.data());
@@ -610,6 +655,8 @@ struct DeviceEnv::Impl
             in.init_view = static_cast<const u64*>(init_view.data());
             in.view_words = V;
             in.inst_view_words = static_cast<const u64*>(inst_view_words.data());
+            in.derived_at = VV;
+            in.derived_words = dw();
             if (mask_goals)
             {
                 in.goal_off = static_cast<const u32*>(goal_off.data());
@@ -659,7 +706,9 @@ struct DeviceEnv::Impl
         return v;
     }
 
-    void goals(const rl::EnvBatch& batch, u8* goal)
+    /// The goal flags of the batch's rows into goal (device). Goals with derived literals read the rows' derived words:
+    /// `derived` (der() after a closure of these rows), or a closure of the rows into scratch views.
+    void goals(const rl::EnvBatch& batch, u8* goal, const u64* derived = nullptr)
     {
         envk::Finish query;
         query.rows = batch.rows;
@@ -672,6 +721,16 @@ struct DeviceEnv::Impl
         query.error = dctl() + k_err;
         if (fast || batch.goals())
         {
+            if (fast && ax && !mask_goals && !batch.goals())
+            {
+                if (!derived)
+                {
+                    closure(batch.states, batch.rows, batch.task_ids, grow<u64>(ax_views, batch.rows * V));
+                    derived = der();
+                }
+                query.derived = derived;
+                query.derived_words = DW;
+            }
             const rl::dev::TaskView task = fast && !label && !several() ? parts[0].dt->view(0) : rl::dev::TaskView{};
             check(envk::launch_goal(task, query, goal, s), "launch_goal");
             return;
@@ -734,7 +793,8 @@ struct DeviceEnv::Impl
     }
 
     /// The instances' goals as the words of their masks that are not zero (envk::Instances: goal_off, goal_word, ...),
-    /// for goals without derived literals (the fast path and label mode have no axioms).
+    /// unless a goal has derived literals: then every row's goal test is goal_holds of its instance, over its derived
+    /// words (mask_goals false).
     void goal_words()
     {
         std::vector<u64> wpos, wneg;
@@ -756,7 +816,7 @@ struct DeviceEnv::Impl
             off.push_back(static_cast<u32>(word.size()));
         }
         if (!mask_goals)
-            throw std::logic_error("mymyr: device env: a goal with derived literals on the fast path (internal error)");
+            return;
         goal_off = upload(ctx, off, s);
         goal_word = upload(ctx, word, s);
         goal_wpos = upload(ctx, wpos, s);
@@ -802,6 +862,17 @@ struct DeviceEnv::Impl
         masks->any(rows, skip, counts, C, grow<u64>(label_views, std::max<u64>(1, n * masks->view_words())), s);
     }
 
+    /// The fast path's axiom evaluator over the suite's instances (global ids) and the derived words of a row.
+    void setup_axioms()
+    {
+        const auto ref = [&](u32 g) { return suite->ref(g); };
+        closure_of = detail::AxiomClosure::create(
+            ctx, I, [&](u32 g) { return parts[ref(g).domain].dt->view(ref(g).local); },
+            [&](u32 g) { return rl::task_view(parts[ref(g).domain].dt->bundle(ref(g).local)); },
+            [&](u32 g) -> const Task& { return *suite->task(g); }, s);
+        DW = closure_of.words;
+    }
+
     /// The fast path's constants: per domain its device table, launch plan, schema sets and recorded regions; per
     /// instance its view words, goal words and initial cache (checked against the host's initial counts).
     void setup_fast()
@@ -823,9 +894,13 @@ struct DeviceEnv::Impl
             const rl::TaskSuite::Ref r = suite->ref(g);
             const rl::dev::TaskView& tv = parts[r.domain].dt->view(r.local);
             ivw[g] = u64{tv.view_rows} * tv.ow;
-            V = std::max<u64>(V, ivw[g]);
+            VV = std::max<u64>(VV, ivw[g]);
+            ax = ax || suite->task(g)->has_axioms();
         }
         inst_view_words = upload(ctx, ivw, s);
+        if (ax)
+            setup_axioms();
+        V = VV + dw();
         goal_words();
         // the recorded schemas of each instance: those whose segments the device sorts (their picks would search every
         // binding), where the region holds their rank bitmap, or their keys pay for the region's traffic
@@ -977,7 +1052,7 @@ std::string DeviceEnv::fast_unsupported(const rl::TaskSuite& suite, const rl::En
     {
         std::string why = table_fast_why(*suite.table(d), config);
         if (why.empty())
-            why = detail::multi_unsupported(*suite.table(d));
+            why = detail::multi_unsupported(*suite.table(d), true);
         if (!why.empty())
             return "domain " + std::to_string(d) + " (" + suite.domain_name(d) + "): " + why;
     }
@@ -1181,6 +1256,12 @@ void DeviceEnv::reserve(u64 rows)
             (void)I.grow<u8>(I.order_temp, lifted::order_temp_bytes(rows));
         if (I.several())
             (void)I.grow<u32>(I.part_ids, u64{I.D} * rows);
+        if (I.ax)
+        {
+            (void)I.grow<u64>(I.ax_der, rows * I.DW);
+            if (!I.mask_goals)
+                (void)I.grow<u64>(I.ax_views, rows * I.V);
+        }
         return;
     }
     (void)I.grow<i64>(I.pick_row, rows);
@@ -1279,7 +1360,7 @@ void DeviceEnv::refresh(rl::EnvBatch& b, i32* count)
         }
         if (count)
             check(envk::launch_row_counts(b.counts, I.S, I.C, nullptr, b.rows, count, I.s), "launch_row_counts");
-        I.goals(b, b.at_goal);
+        I.goals(b, b.at_goal, I.der());
         return;
     }
     I.no_capture("refresh");
@@ -1395,6 +1476,9 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
         rows.words = b.states;
         rows.out_words = I.W;
         rows.words_needed = ctl + k_words_needed;
+        // axioms: the picks' matchers read the parents' derived words (the cache's)
+        if (I.ax)
+            I.load_derived(b.views, N);
         if (!I.multi())
         {
             I.single_picks(b, pk, lab, rows);
@@ -1427,6 +1511,8 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
         f.count_stride = I.C;
         f.cache_counts = b.counts;
         f.views = b.views;
+        f.derived = I.der();  // the reached states' (the closure of step 3)
+        f.derived_words = I.dw();
         if (I.multi())
             f.order_bad = ctl + k_order_bad;
         check(envk::launch_finish(I.several() ? rl::dev::TaskView{} : I.parts[0].dt->view(0), f, s), "launch_finish");

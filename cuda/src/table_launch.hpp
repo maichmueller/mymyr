@@ -13,6 +13,7 @@
 #include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/runtime.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,9 +21,10 @@
 namespace mymyr::cuda::detail
 {
 /// Empty if the multi-instance kernels run every instance of the table completely under both witness settings (every
-/// schema on the device without conditional effects, no axioms, frozen slots); else why not, for the first instance
-/// that does not ("instance i: ...").
-[[nodiscard]] std::string multi_unsupported(const rl::TaskTable& table);
+/// schema on the device without conditional effects, frozen slots, and no axioms, or with `device_axioms` axioms the
+/// device evaluates: ChunkGenerator::axioms_unsupported, for callers that close the derived atoms themselves); else
+/// why not, for the first instance that does not ("instance i: ...").
+[[nodiscard]] std::string multi_unsupported(const rl::TaskTable& table, bool device_axioms = false);
 
 struct TableLaunch
 {
@@ -87,6 +89,34 @@ struct TableLaunch
 /// nothing while s captures a graph). Release builds: nothing.
 void check_order(const ContextPtr& ctx, const u32* inst, u32 instances, lifted::OrderKeys keys, u64 n, const u32* order,
                  const u32* pos, u64 stride, cudaStream_t s);
+
+/// The device's axiom evaluation over the rows of a set of instances (lifted::launch_encoding_axioms, the evaluator of
+/// the device expansion and encoder): per instance its device view and the semi-naive skipping data of its axioms
+/// (axiom_reads), the launch classes by object-bitset width (forward checking where a body of the class forward checks
+/// on the device), and the derived words of a row (the widest instance's, at least 1). Its instances' axioms must be
+/// within the device's evaluator (ChunkGenerator::axioms_unsupported empty).
+struct AxiomClosure
+{
+    DeviceBuffer records, reads;  // [instances] lifted::EncodingAxiomInstance, and their reads
+    std::vector<u32> ow;
+    std::vector<u8> fc;
+    u32 instances = 0;
+    u32 words = 0;
+
+    /// The instances g in [0, n): `device_view(g)` (device pointers) and `host_view(g)` (host pointers) of the arrays of
+    /// task `task(g)`. Uploads on stream s.
+    [[nodiscard]] static AxiomClosure create(const ContextPtr& ctx, u32 n,
+                                             const std::function<rl::dev::TaskView(u32)>& device_view,
+                                             const std::function<rl::dev::TaskView(u32)>& host_view,
+                                             const std::function<const Task&(u32)>& task, cudaStream_t s);
+    /// Rows [0, n) of `states` (rows `stride` words apart, `row_words` atom words; task ids `ids`, null: instance 0)
+    /// closed under their instances' axioms: their derived words into derived [n, words], their matcher views (fluent
+    /// and derived atoms; the instance's view words of each row) into views (rows `view_words` apart). Rows with a task
+    /// id outside the instances are left as they are. `invalid` (one device word) is the evaluator's flag for instances
+    /// it refuses (never set here). Stream-ordered on s, no synchronization: capturable.
+    void run(const u64* states, u64 stride, u32 row_words, u64 n, const i32* ids, u64* views, u64 view_words,
+             u64* derived, u32* invalid, cudaStream_t s) const;
+};
 
 /// Concurrent launches over disjoint row groups (the OW groups and row-width buckets of a plan): group 0 runs on the
 /// caller's stream, groups 1.. on auxiliary streams forked from it and joined back. The groups' kernels are
