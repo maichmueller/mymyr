@@ -122,6 +122,16 @@ struct Domain::Impl
         lap("translate");
         detail::record_encoding_goal(*state, parsed, data);
         lap("encoding goal");
+        if (options.collapse_unused_parameters)
+        {
+            // the type predicates: the domain's, and the static predicates the problem adds (unions of types)
+            std::vector<u8> type_predicate(data.predicates.size(), 0);
+            for (u32 p = 0; p < type_predicate.size(); ++p)
+                type_predicate[p] = p < state->pred_type.size() ? state->pred_type[p] != ~0u
+                                                                 : data.predicates[p].kind == formalism::PredKind::Static;
+            formalism::collapse_unused_parameters(data, type_predicate);
+            lap("collapse");
+        }
         return std::make_shared<const formalism::TaskData>(std::move(data));
     }
 };

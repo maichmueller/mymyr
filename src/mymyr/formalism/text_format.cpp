@@ -134,6 +134,31 @@ public:
             }
             more = static_cast<bool>(m_in >> tag);
         }
+        if (more && tag == "C")
+        {
+            // collapsed parameters: "C <k>", then k lines "<schema> <position> <written> <representative or -1>",
+            // ascending in (schema, position)
+            t.unused_parameters_collapsed = true;
+            const u32 k = u();
+            std::vector<std::vector<CollapsedParameter>> per(t.schemas.size());
+            for (u32 i = 0; i < k; ++i)
+            {
+                const u32 s = u();
+                if (s >= t.schemas.size())
+                    fail("collapsed parameter of an unknown schema");
+                CollapsedParameter c;
+                c.position = u();
+                c.param.name = t.intern_string("x" + std::to_string(c.position));
+                c.written = u() != 0;
+                const i32 rep = i32v();
+                if (rep >= 0)
+                    c.representative = ObjectId{static_cast<u32>(rep)};
+                per[s].push_back(c);
+            }
+            for (u32 s = 0; s < t.schemas.size(); ++s)
+                t.schemas[s].collapsed = TaskData::append<CollapsedParameter>(t.collapsed_params, per[s]);
+            more = static_cast<bool>(m_in >> tag);
+        }
         if (more && tag == "EG")
         {
             const bool complete = u() != 0;
@@ -530,6 +555,17 @@ public:
                 o << "\n";
                 condition(a.body);
             }
+        }
+        if (t.unused_parameters_collapsed)
+        {
+            u32 k = 0;
+            for (const auto& s : t.schemas)
+                k += s.collapsed.count;
+            o << "C " << k << "\n";
+            for (u32 s = 0; s < t.schemas.size(); ++s)
+                for (const auto& c : t.collapsed_of(t.schemas[s]))
+                    o << s << " " << c.position << " " << (c.written ? 1 : 0) << " "
+                      << (c.representative.valid() ? static_cast<i64>(c.representative.v) : i64{-1}) << "\n";
         }
         if (m_encoding_goal && t.encoding_goal_recorded)
         {

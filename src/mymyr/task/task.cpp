@@ -437,8 +437,16 @@ std::string Task::object_name(ObjectId o) const { return std::string(m_data.str(
 std::string Task::format(const ActionLabel& a) const
 {
     std::string out = "(" + schema_name(a.schema);
-    for (ObjectId o : a.binding)
-        out += " " + object_name(o);
+    const formalism::Schema& sc = m_data.schemas.at(a.schema.v);
+    if (sc.collapsed.count == 0)
+    {
+        for (ObjectId o : a.binding)
+            out += " " + object_name(o);
+        return out + ")";
+    }
+    // collapsed parameters are written as their representatives
+    for (ObjectId o : formalism::full_binding(m_data, sc, a.binding))
+        out += " " + (o.valid() ? object_name(o) : std::string("?"));
     return out + ")";
 }
 

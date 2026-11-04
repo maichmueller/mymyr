@@ -172,13 +172,33 @@ struct ConditionalEffect
     std::optional<NumericEffect> auxiliary;  // total-cost effect
 };
 
+/// A parameter of an action schema that nothing but its type mentions: no literal of the precondition (equality
+/// included), no effect, no condition or effect of a conditional effect, no numeric expression. Every object of its
+/// type gives the same transitions, so normalization removes it from the schema (collapse_unused_parameters) and
+/// keeps this record: the schema's actions bind the other parameters only, and the action as written names the
+/// representative here.
+struct CollapsedParameter
+{
+    Parameter param;  // name and declared types
+    /// Its index in the schema's parameter list before collapsing ([written..., introduced by normalization...]).
+    u32 position = 0;
+    /// Whether the PDDL action declares it (not a parameter that normalization introduced for an existential).
+    bool written = true;
+    /// The first object (in object order: constants first, then the problem's objects) that satisfies its type
+    /// literals. Invalid when no object does: then the schema has no action.
+    ObjectId representative;
+};
+
 struct Schema
 {
     Str name;
-    u32 original_arity = 0;  // parameters written in the PDDL; the rest came from normalization
-    Range params;            // into params (arity = params.count)
+    /// Parameters written in the PDDL among `params` (they come first); the rest came from normalization. The written
+    /// parameters that normalization collapsed are not counted (written_arity counts them).
+    u32 original_arity = 0;
+    Range params;  // into params (arity = params.count)
     Condition precondition;
     Range effects;  // into conditional_effects (an unconditional effect has an empty condition and no extras)
+    Range collapsed;  // into collapsed_params, ascending in position
     [[nodiscard]] u32 arity() const { return params.count; }
 };
 
@@ -226,6 +246,7 @@ struct TaskData
     std::vector<NumericConstraint> constraints;
     std::vector<NumericEffect> numeric_effects;
     std::vector<ConditionalEffect> conditional_effects;
+    std::vector<CollapsedParameter> collapsed_params;
 
     // entities
     std::vector<Type> types;
@@ -237,6 +258,9 @@ struct TaskData
     std::vector<Function> functions;
     std::vector<Schema> schemas;
     std::vector<Axiom> axioms;
+    /// Whether normalization collapsed the unused parameters of the schemas (collapse_unused_parameters). A task with
+    /// it set and one without are different tasks even when no schema has such a parameter: their fingerprints differ.
+    bool unused_parameters_collapsed = false;
 
     // problem
     std::vector<GroundAtom> static_init, fluent_init;
@@ -281,6 +305,10 @@ struct TaskData
     {
         return slice(conditional_effects, s.effects);
     }
+    [[nodiscard]] std::span<const CollapsedParameter> collapsed_of(const Schema& s) const
+    {
+        return slice(collapsed_params, s.collapsed);
+    }
     [[nodiscard]] std::span<const Literal> encoding_goal_literals() const { return slice(literals, encoding_goal); }
     [[nodiscard]] std::span<const ObjectId> objects_of(const GroundAtom& a) const { return slice(object_ids, a.objects); }
     [[nodiscard]] const Predicate& predicate(PredicateId p) const { return predicates[p.v]; }
@@ -324,6 +352,26 @@ void set_encoding_goal_from_normalized(TaskData& t);
 /// Whether the encoding goal of `t` is the one set_encoding_goal_from_normalized would give (true if none is
 /// recorded).
 [[nodiscard]] bool has_default_encoding_goal(const TaskData& t);
+
+/// Collapses the unused parameters of every schema (CollapsedParameter): removes them from the schema's parameters
+/// (the terms of the other parameters and of the forall parameters are renumbered) and their type literals from its
+/// precondition, records them with their representatives in `collapsed`, and sets `unused_parameters_collapsed`.
+/// `type_predicate[p]` tells whether predicate p is a type predicate: a positive literal of one over a parameter alone
+/// is a type literal of that parameter and does not count as a mention. A schema whose collapsed parameter has no
+/// object of its type has no action (has_representatives). Parameters that only a schema's own type literals mention
+/// are collapsed whether written or introduced by normalization. A task with `unused_parameters_collapsed` set is left as it is.
+void collapse_unused_parameters(TaskData& t, std::span<const u8> type_predicate);
+
+/// Whether every collapsed parameter of `s` has a representative; a schema without has no action.
+[[nodiscard]] bool has_representatives(const TaskData& t, const Schema& s);
+
+/// The number of parameters the PDDL action of `s` declares: original_arity plus its written collapsed parameters.
+[[nodiscard]] u32 written_arity(const TaskData& t, const Schema& s);
+
+/// The binding of the action of `s` before collapsing: `binding` (arity() objects) with each collapsed parameter's
+/// representative inserted at its position. Its first written_arity(t, s) objects are the action's arguments as
+/// written in PDDL.
+[[nodiscard]] std::vector<ObjectId> full_binding(const TaskData& t, const Schema& s, std::span<const ObjectId> binding);
 
 /// Structural validation (ranges in bounds, arities consistent, derived heads, ground goal). Throws on violation.
 void validate(const TaskData& t);

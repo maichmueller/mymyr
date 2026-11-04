@@ -1168,6 +1168,17 @@ private:
                 c.pre_lits.push_back(check(l));
             for (const NumericConstraint& nc : pre_cons)
                 c.pre_nums.push_back(compile_check(nc));
+            if (!formalism::has_representatives(T, s))
+            {
+                // A collapsed parameter without an object of its type: the schema has no action. Its matchers never
+                // match, and a check that never holds (a key outside every static relation) refuses a given binding.
+                c.pre[0].never = c.pre[1].never = true;
+                plan::Check none;
+                none.pat.kind = plan::LitKind::Static;
+                none.pat.base = plan::StaticRelation::k_outside;
+                if (!T.predicates.empty())
+                    c.pre_lits.push_back(none);
+            }
             for (const auto& ce : T.effects_of(s))
             {
                 const auto effs = TaskData::slice(T.literals, ce.effects);

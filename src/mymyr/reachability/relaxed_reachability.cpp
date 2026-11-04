@@ -266,7 +266,7 @@ std::shared_ptr<Program> build_program(const Task& task, const Options& o, Stati
                 add_condition(T, *p->st, o, T.literals_of(s.precondition), r);
                 add_condition(T, *p->st, o, T.literals_of(ce.condition), r);
                 compile_rule(*p->st, r, declared_of({s.params, ce.extra_params}));
-                if (r.head.never || r.plans[0].never)
+                if (r.head.never || r.plans[0].never || !formalism::has_representatives(T, s))
                 {
                     ++stats.dropped_rules;
                     continue;

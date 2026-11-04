@@ -195,6 +195,8 @@ private:
         for (u32 s = 0; s < T.schemas.size(); ++s)
         {
             const Schema& sc = T.schemas[s];
+            if (!formalism::has_representatives(T, sc))
+                continue;  // no action
             const auto ces = T.effects_of(sc);
             for (u32 k = 0; k < ces.size(); ++k)
             {
