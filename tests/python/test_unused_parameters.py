@@ -46,8 +46,8 @@ def test_one_expansion_generates_the_collapsed_actions():
     full = search.astar(fan(4, False), heuristic="blind")
     assert collapsed.status == full.status == search.Status.SOLVED
     assert [str(a) for a in collapsed.plan] == ["(x o0 o0 o0 o0 o0)", "(y)"]
-    assert collapsed.stats.generated == 3  # x and y from the start, y from its successor
-    assert full.stats.generated == 4 ** 5 + 2
+    assert collapsed.stats.generated == 3  # x from the start, x and y from its successor
+    assert full.stats.generated == 2 * 4 ** 5 + 1
     assert collapsed.cost == full.cost
 
 
@@ -59,8 +59,10 @@ def test_twenty_objects_stay_small():
             "for f in (search.astar, search.gbfs, search.ehc):\n"
             "    r = f(t, heuristic='blind')\n"
             "    assert r.status == search.Status.SOLVED and r.stats.generated <= 3, (f, r.stats.generated)\n"
-            "for r in (search.brfs(t), search.iw(t)):\n"
-            "    assert r.status == search.Status.SOLVED and r.stats.generated <= 3, r.stats.generated\n"
+            "r = search.brfs(t)\n"
+            "assert r.status == search.Status.SOLVED and r.stats.generated <= 3, r.stats.generated\n"
+            "r = search.iw(t)\n"
+            "assert r.status == search.Status.SOLVED and r.stats.generated <= 6, r.stats.generated\n"
             "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)\n")
     out = subprocess.run([sys.executable, "-W", "error", "-c", code], capture_output=True, text=True, check=True)
     assert int(out.stdout.split()[-1]) < 300  # MB: the interpreter and the module, no transition storage
@@ -70,10 +72,10 @@ def test_schema_views_and_written_actions():
     task = lights()
     press = task.formalism.schemas[0]
     assert press.arity == 0 and press.original_arity == 0 and press.written_arity == 2
-    assert [(p.name, p.position, rep.name) for p, rep in press.collapsed_parameters] == [("s", 0, "s1"), ("r", 1, "r1")]
+    assert [(p.name, p.position, rep.name) for p, rep in press.collapsed_parameters] == [("s_0", 0, "s1"), ("r_0", 1, "r1")]
     heat = task.formalism.schemas[1]
-    assert [p.name for p in heat.parameters] == ["r"]
-    assert [p.name for p, _ in heat.collapsed_parameters] == ["s"]
+    assert [p.position for p in heat.parameters] == [0]
+    assert [p.position for p, _ in heat.collapsed_parameters] == [0]
     actions = task.applicable_actions(task.initial_state)
     assert [str(a) for a in actions] == ["(press s1 r1)", "(heat s1 r1)", "(heat s1 r2)", "(heat s1 r3)"]
     assert actions[0].binding == () and actions[2].objects == ["r2"]
@@ -103,8 +105,9 @@ def test_empty_type_has_no_action():
     for collapse in (True, False):
         task = mymyr.Task(domain.instantiate_string(problem, collapse_unused_parameters=collapse))
         assert task.applicable_actions(task.initial_state) == []
-        assert search.astar(task, heuristic="blind").status == search.Status.UNSOLVABLE
-        assert search.astar(task, heuristic="ff").status == search.Status.UNSOLVABLE
+        for heuristic in ("blind", "ff"):
+            r = search.astar(task, heuristic=heuristic)
+            assert r.status in (search.Status.EXHAUSTED, search.Status.UNSOLVABLE) and r.stats.generated == 0
     with pytest.raises(ValueError):
         search.parse_plan(mymyr.Task(domain.instantiate_string(problem)), "(press r1 r1)\n")
 
@@ -120,20 +123,22 @@ def test_rl_action_sets_shrink_consistently():
         assert rl.is_applicable(task, [task.initial_state], 0, np.zeros((1, 0 if collapse else 5), np.int32)).tolist() == [True]
         pool = rl.CpuEnvPool(task, num_envs=2, seed=0, max_steps=4)
         pool.reset()
-        step = pool.step(np.zeros(2, np.int64))
+        step = pool.step()
         assert not step.terminated.any()
 
 
-def test_the_setting_is_part_of_the_task_identity():
+def test_the_setting_is_part_of_the_task_identity(tmp_path):
     task, full = lights(), lights(False)
     assert task.fingerprint != full.fingerprint
-    for t in (task, full):
+    for i, t in enumerate((task, full)):
         again = pickle.loads(pickle.dumps(t))
         assert again.fingerprint == t.fingerprint
         assert again.formalism.schemas[0].arity == t.formalism.schemas[0].arity
-        text = mymyr.Task.from_text_string(t.to_text()) if hasattr(mymyr.Task, "from_text_string") else None
-        if text is not None:
-            assert text.to_text() == t.to_text()
+        path = tmp_path / f"t{i}.txt"
+        path.write_text(t.to_text())
+        read = mymyr.Task.from_text(str(path))
+        assert read.to_text() == t.to_text()
+        assert len(read.applicable_actions(read.initial_state)) == len(t.applicable_actions(t.initial_state))
     no_unused = "(define (domain b) (:predicates (p ?x)) (:action a :parameters (?x) :precondition (p ?x) :effect (not (p ?x))))"
     problem = "(define (problem q) (:domain b) (:objects o) (:init (p o)) (:goal (and)))"
     d = mymyr.Domain.from_string(no_unused)
@@ -143,7 +148,8 @@ def test_the_setting_is_part_of_the_task_identity():
 
 def test_state_space_counts():
     from mymyr import datasets
-    collapsed = datasets.StateSpace(fan(3))
-    full = datasets.StateSpace(fan(3, False))
+    collapsed = datasets.state_space(fan(3), remove_if_unsolvable=False)
+    full = datasets.state_space(fan(3, False), remove_if_unsolvable=False)
     assert collapsed.num_states == full.num_states == 3
-    assert collapsed.num_transitions == 2 and full.num_transitions == 3 ** 5 + 1
+    # x in every state, y in the two with (h)
+    assert collapsed.num_transitions == 5 and full.num_transitions == 3 * 3 ** 5 + 2

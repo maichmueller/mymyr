@@ -163,17 +163,17 @@ lights = mymyr.Domain.from_string("""
   (:types switch room)
   (:predicates (on) (lit))
   (:action press :parameters (?s - switch ?r - room) :precondition (on) :effect (lit)))""")
-problem = """(define (problem p) (:domain lights) (:objects s1 s2 - switch r1 r2 r3 - room)
+lights_problem = """(define (problem p) (:domain lights) (:objects s1 s2 - switch r1 r2 r3 - room)
   (:init (on)) (:goal (lit)))"""
-task = mymyr.Task(lights.instantiate_string(problem))
-press = task.formalism.schemas[0]
+lit = mymyr.Task(lights.instantiate_string(lights_problem))
+press = lit.formalism.schemas[0]
 assert press.arity == 0 and press.written_arity == 2
-assert [p.name for p, _ in press.collapsed_parameters] == ["s", "r"]
-assert [str(a) for a in task.applicable_actions(task.initial_state)] == ["(press s1 r1)"]
-assert search.parse_plan(task, "(press s2 r3)") == task.applicable_actions(task.initial_state)  # the same action
-full = mymyr.Task(lights.instantiate_string(problem, collapse_unused_parameters=False))
-assert len(full.applicable_actions(full.initial_state)) == 6
-assert full.fingerprint != task.fingerprint
+assert [(p.position, rep.name) for p, rep in press.collapsed_parameters] == [(0, "s1"), (1, "r1")]
+assert [str(a) for a in lit.applicable_actions(lit.initial_state)] == ["(press s1 r1)"]
+assert search.parse_plan(lit, "(press s2 r3)") == lit.applicable_actions(lit.initial_state)  # the same action
+lights_full = mymyr.Task(lights.instantiate_string(lights_problem, collapse_unused_parameters=False))
+assert len(lights_full.applicable_actions(lights_full.initial_state)) == 6
+assert lights_full.fingerprint != lit.fingerprint
 ```
 
 ## Errors

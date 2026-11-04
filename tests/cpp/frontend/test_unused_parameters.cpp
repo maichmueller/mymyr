@@ -28,7 +28,8 @@ namespace
 // numeric effect, ?r in an equality; nothing of tune collapses. flip: an `or` splits it; ?a is unused in the branch
 // that tests ?b, ?b in the one that tests ?a.
 constexpr const char* kDomain = R"((define (domain lights)
-  (:requirements :typing :conditional-effects :equality :disjunctive-preconditions :numeric-fluents)
+  (:requirements :typing :conditional-effects :equality :negative-preconditions :disjunctive-preconditions
+                 :numeric-fluents)
   (:types switch room knob)
   (:constants main - switch)
   (:predicates (on) (lit) (wired ?s - switch) (hot ?r - room) (bright))
@@ -104,7 +105,7 @@ TEST(UnusedParameters, OnlyParametersThatNothingButTheirTypeMentionsCollapse)
     // representatives: the first object of the type in object order, the domain's constants first
     EXPECT_EQ(D.str(D.objects[collapsed[0].representative.v].name), "main");
     EXPECT_EQ(D.str(D.objects[collapsed[1].representative.v].name), "r1");
-    EXPECT_EQ(D.str(D.params[collapsed[1].param].name), "r");
+    EXPECT_EQ(D.str(D.params[collapsed[1].param].name), "r_0");  // the front end numbers the variables
     EXPECT_EQ(D.collapsed_of(D.schemas[schema(*task, "tune")]).size(), 0u);
     // the branches of flip: ?b collapses in the branch that tests ?a and the other way round
     const formalism::Schema& f0 = D.schemas[schema(*task, "flip", 0)];
@@ -222,7 +223,7 @@ TEST(UnusedParameters, WrittenPddlDeclaresTheCollapsedParameters)
 {
     const auto task = make(kProblem, true);
     const formalism::PddlFiles f = formalism::write_pddl(task->data());
-    EXPECT_NE(f.domain.find(":parameters (?s - switch ?r - room)"), std::string::npos) << f.domain;
+    EXPECT_NE(f.domain.find(":parameters (?s_0 - switch ?r_0 - room)"), std::string::npos) << f.domain;
     // read back, it collapses to the same task
     const auto domain = frontend::Domain::from_string(f.domain, "d.pddl");
     const auto again = Task::create(*domain->instantiate_string(f.problems.at(0), "p.pddl"));

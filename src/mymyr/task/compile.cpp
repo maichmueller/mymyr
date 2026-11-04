@@ -1461,6 +1461,8 @@ private:
 
     void resolve(plan::Pattern& pt)
     {
+        if (pt.kind == plan::LitKind::Static && pt.base == plan::StaticRelation::k_outside && pt.terms.count == 0)
+            return;  // the check of a schema without actions: its key stays outside every relation
         const auto terms = TaskData::slice(T.terms, pt.terms);
         pt.var_begin = static_cast<u32>(C.pattern_vars.size());
         pt.var_count = 0;

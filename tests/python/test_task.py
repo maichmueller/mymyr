@@ -186,11 +186,11 @@ def test_fingerprint_mismatch_is_detected(blocks):
     assert reducer is _pickle._restore_state
     with pytest.raises(ValueError, match="fingerprint"):
         reducer(blocks, args[1] ^ 1, *args[2:])
-    kind, a, b, ap, bp, opts, fp, enc = blocks.__reduce__()[1]
+    kind, a, b, ap, bp, opts, fp, enc, collapse = blocks.__reduce__()[1]
     with pytest.raises(ValueError, match="fingerprint"):
-        _pickle._restore_task(kind, a, b.replace("(on a g)", "(on g a)"), ap, bp, opts, fp, enc)
+        _pickle._restore_task(kind, a, b.replace("(on a g)", "(on g a)"), ap, bp, opts, fp, enc, collapse)
     with pytest.raises(ValueError, match="encoding"):
-        _pickle._restore_task(kind, a, b, ap, bp, opts, fp, (enc[0] ^ 1, enc[1]))
+        _pickle._restore_task(kind, a, b, ap, bp, opts, fp, (enc[0] ^ 1, enc[1]), collapse)
 
 
 def test_pickles_keep_the_encoding():
