@@ -122,6 +122,19 @@ void validate(const TaskData& t)
     for (const auto& s : t.schemas)
     {
         check_range(t.params, s.params, "schema params");
+        check_range(t.collapsed_params, s.collapsed, "collapsed parameters");
+        if (s.original_arity > s.arity())
+            invalid("schema original_arity above its arity");
+        for (u32 k = 0; k < s.collapsed.count; ++k)
+        {
+            const CollapsedParameter& c = t.collapsed_params[s.collapsed.begin + k];
+            if (c.position >= s.arity() + s.collapsed.count || (k > 0 && t.collapsed_params[s.collapsed.begin + k - 1].position >= c.position))
+                invalid("collapsed parameter positions must ascend within the schema's parameters before collapsing");
+            if (c.param >= t.params.size())
+                invalid("collapsed parameter out of range");
+            if (c.representative.valid() && c.representative.v >= t.num_objects())
+                invalid("collapsed parameter representative out of range");
+        }
         const char* where = "schema";
         check_condition(t, s.precondition, s.arity(), where);
         check_range(t.conditional_effects, s.effects, "schema effects");
@@ -308,5 +321,305 @@ bool has_default_encoding_goal(const TaskData& t)
                 return false;
     }
     return true;
+}
+namespace
+{
+/// The schema parameters (terms < arity) that a part of a schema mentions.
+struct Mentions
+{
+    const TaskData& t;
+    u32 arity;
+    std::vector<u8> used;
+
+    void term(Term x)
+    {
+        if (!is_object(x) && term_parameter(x) < arity)
+            used[term_parameter(x)] = 1;
+    }
+    void terms(Range r)
+    {
+        for (Term x : TaskData::slice(t.terms, r))
+            term(x);
+    }
+    void expr(u32 e)
+    {
+        const Expr& x = t.exprs[e];
+        switch (x.op)
+        {
+        case ExprOp::Number: break;
+        case ExprOp::Function: terms(x.terms); break;
+        case ExprOp::Neg: expr(x.a); break;
+        default:
+            expr(x.a);
+            expr(x.b);
+        }
+    }
+    void condition(const Condition& c)
+    {
+        for (const Literal& l : t.literals_of(c))
+            terms(l.terms);
+        for (const NumericConstraint& n : t.constraints_of(c))
+        {
+            expr(n.lhs);
+            expr(n.rhs);
+        }
+    }
+    void numeric_effect(const NumericEffect& e)
+    {
+        terms(e.terms);
+        expr(e.expr);
+    }
+};
+
+/// Copies the parts of a schema into new pool entries with every parameter term renumbered.
+struct Renumber
+{
+    TaskData& t;
+    std::vector<Term> map;  // parameter index -> new index (for every schema and forall parameter)
+
+    Range terms(Range r)
+    {
+        std::vector<Term> out(TaskData::slice(t.terms, r).begin(), TaskData::slice(t.terms, r).end());
+        for (Term& x : out)
+            if (!is_object(x))
+                x = map[term_parameter(x)];
+        return TaskData::append<Term>(t.terms, out);
+    }
+    u32 expr(u32 e)
+    {
+        Expr x = t.exprs[e];
+        switch (x.op)
+        {
+        case ExprOp::Number: break;
+        case ExprOp::Function: x.terms = terms(x.terms); break;
+        case ExprOp::Neg: x.a = expr(x.a); break;
+        default:
+            x.a = expr(x.a);
+            x.b = expr(x.b);
+        }
+        t.exprs.push_back(x);
+        return static_cast<u32>(t.exprs.size() - 1);
+    }
+    Literal literal(Literal l)
+    {
+        l.terms = terms(l.terms);
+        return l;
+    }
+    Range literals(Range r, const std::vector<u8>* drop = nullptr)
+    {
+        std::vector<Literal> out;
+        for (u32 i = 0; i < r.count; ++i)
+            if (drop == nullptr || !(*drop)[i])
+                out.push_back(literal(t.literals[r.begin + i]));
+        return TaskData::append<Literal>(t.literals, out);
+    }
+    Condition condition(const Condition& c, const std::vector<u8>* drop = nullptr)
+    {
+        Condition out;
+        out.literals = literals(c.literals, drop);
+        std::vector<NumericConstraint> cs;
+        for (u32 i = 0; i < c.constraints.count; ++i)
+        {
+            NumericConstraint n = t.constraints[c.constraints.begin + i];
+            n.lhs = expr(n.lhs);
+            n.rhs = expr(n.rhs);
+            cs.push_back(n);
+        }
+        out.constraints = TaskData::append<NumericConstraint>(t.constraints, cs);
+        return out;
+    }
+    NumericEffect numeric_effect(NumericEffect e)
+    {
+        e.terms = terms(e.terms);
+        e.expr = expr(e.expr);
+        return e;
+    }
+};
+}  // namespace
+
+void collapse_unused_parameters(TaskData& t, std::span<const u8> type_predicate)
+{
+    if (t.unused_parameters_collapsed)
+        return;
+    t.unused_parameters_collapsed = true;
+    const u32 n_objects = t.num_objects();
+    // members[p]: the objects of static unary predicate p (filled on first use)
+    std::vector<std::vector<u8>> members(t.predicates.size());
+    auto member_table = [&](u32 p) -> const std::vector<u8>&
+    {
+        std::vector<u8>& m = members[p];
+        if (m.empty())
+        {
+            m.assign(n_objects, 0);
+            for (const GroundAtom& a : t.static_init)
+                if (a.pred.v == p && a.objects.count == 1)
+                    m[t.object_ids[a.objects.begin].v] = 1;
+        }
+        return m;
+    };
+    auto type_literal = [&](const Literal& l)
+    {
+        return l.positive && l.terms.count == 1 && !is_object(t.terms[l.terms.begin]) && l.pred.v < type_predicate.size() &&
+               type_predicate[l.pred.v] && t.predicates[l.pred.v].kind == PredKind::Static;
+    };
+    for (u32 si = 0; si < t.schemas.size(); ++si)
+    {
+        const Schema s = t.schemas[si];
+        const u32 n = s.arity();
+        if (n == 0)
+            continue;
+        Mentions m{t, n, std::vector<u8>(n, 0)};
+        std::vector<u8> is_type(s.precondition.literals.count, 0);
+        for (u32 i = 0; i < s.precondition.literals.count; ++i)
+        {
+            const Literal& l = t.literals[s.precondition.literals.begin + i];
+            if (type_literal(l) && term_parameter(t.terms[l.terms.begin]) < n)
+                is_type[i] = 1;
+            else
+                m.terms(l.terms);
+        }
+        for (const NumericConstraint& c : t.constraints_of(s.precondition))
+        {
+            m.expr(c.lhs);
+            m.expr(c.rhs);
+        }
+        u32 max_extra = 0;
+        for (const ConditionalEffect& ce : t.effects_of(s))
+        {
+            max_extra = std::max(max_extra, ce.extra_params.count);
+            m.condition(ce.condition);
+            for (const Literal& l : TaskData::slice(t.literals, ce.effects))
+                m.terms(l.terms);
+            for (const NumericEffect& e : TaskData::slice(t.numeric_effects, ce.numeric_effects))
+                m.numeric_effect(e);
+            if (ce.auxiliary)
+                m.numeric_effect(*ce.auxiliary);
+        }
+        const u32 n_collapsed = static_cast<u32>(std::count(m.used.begin(), m.used.end(), u8{0}));
+        if (n_collapsed == 0)
+            continue;
+
+        Renumber r{t, std::vector<Term>(n + max_extra, 0)};
+        std::vector<Parameter> kept;
+        std::vector<CollapsedParameter> collapsed;
+        u32 original_arity = 0;
+        for (u32 i = 0, next = 0; i < n; ++i)
+        {
+            const Parameter& param = t.params[s.params.begin + i];
+            if (m.used[i])
+            {
+                r.map[i] = static_cast<Term>(next++);
+                kept.push_back(param);
+                original_arity += i < s.original_arity ? 1 : 0;
+                continue;
+            }
+            // the representative: the first object that every type literal of the parameter holds for
+            std::vector<u8> fits(n_objects, 1);
+            for (u32 k = 0; k < is_type.size(); ++k)
+            {
+                const Literal& l = t.literals[s.precondition.literals.begin + k];
+                if (!is_type[k] || term_parameter(t.terms[l.terms.begin]) != i)
+                    continue;
+                const std::vector<u8>& in = member_table(l.pred.v);
+                for (u32 o = 0; o < n_objects; ++o)
+                    fits[o] &= in[o];
+            }
+            CollapsedParameter c;
+            c.param = s.params.begin + i;
+            c.position = i;
+            c.written = i < s.original_arity;
+            if (auto it = std::find(fits.begin(), fits.end(), u8{1}); it != fits.end())
+                c.representative = ObjectId{static_cast<u32>(it - fits.begin())};
+            collapsed.push_back(c);
+        }
+        for (u32 j = 0; j < max_extra; ++j)
+            r.map[n + j] = static_cast<Term>(n - n_collapsed + j);
+        // the type literals of the collapsed parameters leave the precondition
+        std::vector<u8> drop(is_type.size(), 0);
+        for (u32 k = 0; k < is_type.size(); ++k)
+            drop[k] = is_type[k] && !m.used[term_parameter(t.terms[t.literals[s.precondition.literals.begin + k].terms.begin])];
+
+        Schema out = s;
+        out.original_arity = original_arity;
+        out.params = TaskData::append<Parameter>(t.params, kept);
+        out.precondition = r.condition(s.precondition, &drop);
+        std::vector<ConditionalEffect> ces;
+        for (u32 e = 0; e < s.effects.count; ++e)
+        {
+            ConditionalEffect ce = t.conditional_effects[s.effects.begin + e];
+            ce.condition = r.condition(ce.condition);
+            ce.effects = r.literals(ce.effects);
+            std::vector<NumericEffect> nes;
+            for (u32 k = 0; k < ce.numeric_effects.count; ++k)
+                nes.push_back(r.numeric_effect(t.numeric_effects[ce.numeric_effects.begin + k]));
+            ce.numeric_effects = TaskData::append<NumericEffect>(t.numeric_effects, nes);
+            if (ce.auxiliary)
+                ce.auxiliary = r.numeric_effect(*ce.auxiliary);
+            ces.push_back(ce);
+        }
+        out.effects = TaskData::append<ConditionalEffect>(t.conditional_effects, ces);
+        out.collapsed = TaskData::append<CollapsedParameter>(t.collapsed_params, collapsed);
+        t.schemas[si] = out;
+    }
+}
+
+bool has_representatives(const TaskData& t, const Schema& s)
+{
+    for (const CollapsedParameter& c : t.collapsed_of(s))
+        if (!c.representative.valid())
+            return false;
+    return true;
+}
+
+u32 written_arity(const TaskData& t, const Schema& s)
+{
+    u32 n = s.original_arity;
+    for (const CollapsedParameter& c : t.collapsed_of(s))
+        n += c.written ? 1 : 0;
+    return n;
+}
+
+std::vector<ObjectId> full_binding(const TaskData& t, const Schema& s, std::span<const ObjectId> binding)
+{
+    const auto collapsed = t.collapsed_of(s);
+    std::vector<ObjectId> out;
+    out.reserve(binding.size() + collapsed.size());
+    usize next = 0;
+    for (const CollapsedParameter& c : collapsed)
+    {
+        while (out.size() < c.position && next < binding.size())
+            out.push_back(binding[next++]);
+        out.push_back(c.representative);
+    }
+    out.insert(out.end(), binding.begin() + static_cast<std::ptrdiff_t>(next), binding.end());
+    return out;
+}
+bool has_type(const TaskData& t, ObjectId o, Range types)
+{
+    if (types.count == 0)
+        return true;
+    std::vector<u8> wanted(t.types.size(), 0);
+    for (TypeId ty : TaskData::slice(t.type_ids, types))
+    {
+        if (t.str(t.types[ty.v].name) == "object")
+            return true;
+        wanted[ty.v] = 1;
+    }
+    std::vector<TypeId> todo(TaskData::slice(t.type_ids, t.objects[o.v].types).begin(),
+                             TaskData::slice(t.type_ids, t.objects[o.v].types).end());
+    std::vector<u8> seen(t.types.size(), 0);
+    while (!todo.empty())
+    {
+        const TypeId ty = todo.back();
+        todo.pop_back();
+        if (ty.v >= t.types.size() || seen[ty.v])
+            continue;
+        if (wanted[ty.v])
+            return true;
+        seen[ty.v] = 1;
+        for (TypeId b : TaskData::slice(t.type_ids, t.types[ty.v].bases))
+            todo.push_back(b);
+    }
+    return false;
 }
 }  // namespace mymyr::formalism

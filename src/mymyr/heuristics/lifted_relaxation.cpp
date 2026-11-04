@@ -453,6 +453,8 @@ void LiftedRelaxation::Impl::build()
     for (u32 si = 0; si < D.schemas.size(); ++si)
     {
         const Schema& sc = D.schemas[si];
+        if (!formalism::has_representatives(D, sc))
+            continue;  // no action
         const auto ces = D.effects_of(sc);
         for (u32 k = 0; k < ces.size(); ++k)
         {

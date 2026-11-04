@@ -129,7 +129,7 @@ def golden_task(name, src):
         d, p = root / src["domain"], root / src["problem"]
         if not d.is_file() or not p.is_file():
             pytest.skip(f"PDDL of {name} not found ({p})")
-        task = mymyr.Task.from_pddl(d, p)
+        task = mymyr.Task.from_pddl(d, p, collapse_unused_parameters=False)
     _TASKS[name] = task
     return task
 

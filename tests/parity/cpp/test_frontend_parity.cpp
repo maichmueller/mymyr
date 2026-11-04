@@ -106,6 +106,7 @@ void compare(const test::GoldenTask& gt, const TaskData& ours, bool fast, Outcom
         {
             frontend::InstantiateOptions io;
             io.fast_init = fast;
+            io.collapse_unused_parameters = false;  // the reference exports keep every action parameter
             const auto alt = frontend::Domain::from_file(gt.domain, opt)->instantiate_file(gt.problem, io);
             if (!test::first_difference(a, test::tokens(test::canonical_text(project(golden, *alt), type_preds))))
             {
@@ -141,6 +142,7 @@ void run_golden(const std::vector<test::GoldenTask>& tasks, const std::vector<st
         {
             frontend::InstantiateOptions opt;
             opt.fast_init = fast;
+            opt.collapse_unused_parameters = false;
             const auto task = domain->instantiate_file(gt.problem, opt);
             ASSERT_NO_THROW(validate(*task));
             texts[fast] = write_task_text(*task);

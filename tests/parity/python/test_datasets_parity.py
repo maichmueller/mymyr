@@ -17,7 +17,7 @@ def fork_task(d, p, **options):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
     options.setdefault("atoms", "dense")
-    return mymyr.Task.from_pddl(dom, prob, **options)
+    return mymyr.Task.from_pddl(dom, prob, collapse_unused_parameters=False, **options)
 
 
 # (dir, problem, states, transitions, goal, unsolvable, max goal distance, sum of finite cost goal distances)

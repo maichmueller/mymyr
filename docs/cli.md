@@ -31,6 +31,7 @@ and pruned states, search and parse time, the memory of the state store, plan le
 | `--threads` | threads of `brfs` (default 1, `0`: one per hardware thread); the other searches run on one thread |
 | `--atoms` | the task's atom slots: `lazy` (default), `auto`, `reachable` or `dense` ([State encodings](parsing-and-tasks.md#state-encodings)) |
 | `--max-seconds`, `--max-states` | budgets |
+| `--keep-unused-parameters` | bind the action parameters that nothing but their type mentions to every object of their type instead of collapsing them ([Unused parameters](parsing-and-tasks.md#unused-parameters)); also for `validate`, `write` and `info` |
 | `--debug` | show the traceback of an error |
 
 A* finds an optimal plan with an admissible heuristic: `blind`, `max`, `h2`, `lmcut` or `perfect`; with `--weight w` the

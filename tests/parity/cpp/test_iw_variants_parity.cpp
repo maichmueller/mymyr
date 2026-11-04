@@ -61,7 +61,7 @@ std::shared_ptr<const Task> load_task(const json::Value& src)
     const fs::path d = root / src["domain"].str, p = root / src["problem"].str;
     if (!fs::exists(d) || !fs::exists(p))
         return nullptr;
-    return Task::create(*frontend::load_task(d.string(), p.string()));
+    return Task::create(*frontend::load_task(d.string(), p.string(), {.collapse_unused_parameters = false}));
 }
 
 class Names

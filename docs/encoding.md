@@ -480,7 +480,9 @@ encodes exactly the rows it has.
 
 Every distinct action of the state is one tuple of the action relation of its schema `name`, and the tuple is always
 `(action entity, o_1, ..., o_k)`: the **action entity** (after the goal and subgoal entities) followed by the binding
-`(o_1, ..., o_k)`. A schema with no parameters has the unary tuple `(action entity)` and takes no auxiliary entity. A
+`(o_1, ..., o_k)`. The binding holds the parameters the schema binds: a parameter that normalization collapsed
+([Unused parameters](parsing-and-tasks.md#unused-parameters)) is not an argument, as its object would be the same
+representative in every tuple. A schema with no parameters has the unary tuple `(action entity)` and takes no auxiliary entity. A
 schema that the front end split in several (a disjunctive precondition) shares one relation, and an action that two of
 its schemas both give is one tuple: the relation lists each binding once. There is no limit on the schemas of a
 relation.

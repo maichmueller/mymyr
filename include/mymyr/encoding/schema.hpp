@@ -50,7 +50,8 @@ struct DomainSignature
     {
         std::string name;
         /// The parameters of the normalized schema: the written ones and those normalization adds for the variables of
-        /// an existential condition. An action relation holds all of them.
+        /// an existential condition, without the collapsed ones (formalism::CollapsedParameter). An action relation
+        /// holds all of them.
         u32 arity = 0;
     };
     enum class FunctionKind : u8

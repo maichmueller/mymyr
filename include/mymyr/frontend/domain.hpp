@@ -109,6 +109,11 @@ struct InstantiateOptions
     /// function values are read straight into the TaskData, merged with loki's type and equality atoms in loki's
     /// order. Produces exactly the TaskData of the full loki path (guarded by golden tests).
     bool fast_init = true;
+    /// Collapse the action parameters that nothing but their type mentions (formalism::collapse_unused_parameters):
+    /// the schemas lose them, each of their actions stands for the actions with any object of the type, and it is
+    /// written with the first object of the type. Off: every such parameter is bound to every object of its type, so
+    /// an expansion lists one transition per combination.
+    bool collapse_unused_parameters = true;
 };
 
 class Domain

@@ -55,6 +55,7 @@ int main(int argc, char** argv)
         const double domain_s = std::chrono::duration<double>(clock::now() - t0).count();
         mymyr::frontend::InstantiateOptions opt;
         opt.fast_init = !full;
+        opt.collapse_unused_parameters = false;  // the reference exports keep every action parameter
         double best = 1e300;
         mymyr::frontend::TaskPtr task;
         for (int r = 0; r < reps; ++r)

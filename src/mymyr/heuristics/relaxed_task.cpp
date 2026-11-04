@@ -138,6 +138,8 @@ TaskData make_explore_data(const TaskData& T)
             p.kind = PredKind::Fluent;
     R.static_init = T.static_init;
     R.fluent_init = T.fluent_init;
+    R.collapsed_params = T.collapsed_params;
+    R.unused_parameters_collapsed = T.unused_parameters_collapsed;
     auto positives = [&](Range r)
     {
         Range out{static_cast<u32>(R.literals.size()), 0};
@@ -155,6 +157,7 @@ TaskData make_explore_data(const TaskData& T)
         ns.name = s.name;
         ns.original_arity = s.original_arity;
         ns.params = s.params;
+        ns.collapsed = s.collapsed;
         ns.precondition.literals = positives(s.precondition.literals);
         std::vector<ConditionalEffect> ces;
         for (const ConditionalEffect& ce : T.effects_of(s))

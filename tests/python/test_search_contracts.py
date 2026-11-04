@@ -602,11 +602,14 @@ def test_python_errors_name_no_cpp_types(call):
 
 # ------------------------------------------------------------------------------------------------ parameter bounds
 
-def wide_action_task(n):
+def wide_action_task(n, collapse=False):
     params = " ".join(f"?v{i}" for i in range(n))
     domain = ("(define (domain wide) (:requirements :strips) (:predicates (g) (o ?x)) "
               f"(:action x :parameters ({params}) :precondition (o ?v0) :effect (g)))")
-    return pddl(domain, "(define (problem wide1) (:domain wide) (:objects a) (:init (o a)) (:goal (g)))")
+    problem = "(define (problem wide1) (:domain wide) (:objects a) (:init (o a)) (:goal (g)))"
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem, collapse_unused_parameters=collapse))
 
 
 def test_actions_with_more_parameters_than_binding_supports_are_refused():
@@ -614,6 +617,11 @@ def test_actions_with_more_parameters_than_binding_supports_are_refused():
         wide_action_task(1100)
     r = search.brfs(wide_action_task(1024))
     assert r.status == Status.SOLVED and len(r.plan) == 1
+    # collapsed, the action binds ?v0 alone
+    wide = wide_action_task(1100, collapse=True)
+    assert wide.formalism.schemas[0].arity == 1
+    r = search.brfs(wide)
+    assert r.status == Status.SOLVED and len(str(r.plan[0]).split()) == 1101
 
 
 def test_task_text_refuses_parameter_counts_beyond_the_maximum(tmp_path):

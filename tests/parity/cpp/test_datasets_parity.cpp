@@ -177,7 +177,7 @@ TEST(StateSpace, NumericTasksMatchTheFork)
     {
         TaskOptions to;
         to.atoms = TaskOptions::Atoms::Dense;
-        const TaskPtr task = Task::create(*frontend::load_task(dir + "domain.pddl", dir + c.problem), to);
+        const TaskPtr task = Task::create(*frontend::load_task(dir + "domain.pddl", dir + c.problem, {.collapse_unused_parameters = false}), to);
         ASSERT_GT(task->numeric_slots(), 0u);
         for (u32 T : {1u, 3u})
         {

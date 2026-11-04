@@ -10,7 +10,7 @@ Header (format "mymyr.datasets", version 1)::
     {"format": "mymyr.datasets", "version": 1, "mymyr": "<version that wrote it>",
      "kind": "state_space" | "generalized_state_space" | "knowledge_base" | "tuple_graph" | "tuple_graphs",
      "tasks": [{"source": "pddl", "domain": <member>, "problem": <member>, "domain_path": str, "problem_path": str,
-                "options": {<Task keyword arguments>}, "fingerprint": <16 hex digits>,
+                "options": {<Task keyword arguments>}, "collapse_unused_parameters": bool, "fingerprint": <16 hex digits>,
                 "encoding_fingerprint": <16 hex digits>, "atom_slots": <member> | null}
                | {"source": "text", "text": <member>, ...the same...}],
      "state_spaces": [{"task": <index into tasks>, "arrays": <member prefix>,
@@ -110,7 +110,7 @@ class _Writer:
         if id(task) in self.task_ids:
             return self.task_ids[id(task)]
         self.keep.append(task)
-        _, (kind, a, b, a_path, b_path, options, fingerprint, (encoding_fingerprint, lazy)) = task.__reduce__()
+        _, (kind, a, b, a_path, b_path, options, fingerprint, (encoding_fingerprint, lazy), collapse) = task.__reduce__()
         t = len(self.tasks)
         entry: dict[str, Any] = {"source": kind}
         if kind == "pddl":
@@ -121,6 +121,7 @@ class _Writer:
         else:
             entry["text"] = self.text(f"tasks/{t}/task.txt", a)
         entry["options"] = dict(zip(_TASK_OPTIONS, options, strict=True))
+        entry["collapse_unused_parameters"] = bool(collapse)
         entry["fingerprint"] = _hex(fingerprint)
         entry["encoding_fingerprint"] = _hex(encoding_fingerprint)
         entry["atom_slots"] = self.array(f"tasks/{t}/atom_slots.npy", np.frombuffer(lazy, dtype="<u8")) if lazy else None
@@ -292,12 +293,16 @@ class _Reader:
         encoding = (_unhex(entry["encoding_fingerprint"], "an encoding fingerprint"),
                     b"" if lazy is None else np.ascontiguousarray(lazy, dtype="<u8").tobytes())
         fingerprint = _unhex(entry["fingerprint"], "a fingerprint")
+        collapse = entry.get("collapse_unused_parameters")
+        if not isinstance(collapse, bool):
+            raise ValueError(f"mymyr: corrupt dataset file {self.name} (a task without collapse_unused_parameters)")
         if entry["source"] == "pddl":
             return _core._restore_task("pddl", self.text(entry["domain"]), self.text(entry["problem"]),
                                        entry.get("domain_path", ""), entry.get("problem_path", ""), options, fingerprint,
-                                       encoding)
+                                       encoding, collapse)
         if entry["source"] == "text":
-            return _core._restore_task("text", self.text(entry["text"]), "", "", "", options, fingerprint, encoding)
+            return _core._restore_task("text", self.text(entry["text"]), "", "", "", options, fingerprint, encoding,
+                                       collapse)
         raise ValueError(f"mymyr: corrupt dataset file {self.name} (task source {entry['source']!r})")
 
 

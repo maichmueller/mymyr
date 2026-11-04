@@ -14,8 +14,10 @@
 
 namespace mymyr::formalism
 {
-/// Reads either the plain lifted format (O P SI FI G A [X] [EG]) or the numeric one (O P N SI FI NI G NG M A X [EG], with
-/// NC / NE / NA blocks per condition and effect). Throws std::runtime_error on malformed input.
+/// Reads either the plain lifted format (O P SI FI G A [X] [C] [EG]) or the numeric one (O P N SI FI NI G NG M A X [C]
+/// [EG], with NC / NE / NA blocks per condition and effect). A section "C <k>" marks a task whose unused parameters were
+/// collapsed and lists its k collapsed parameters (schema, position, written, representative or -1).
+/// Throws std::runtime_error on malformed input.
 TaskData read_task_text(std::istream& in);
 TaskData read_task_text_file(const std::string& path);
 

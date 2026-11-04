@@ -252,6 +252,8 @@ public:
     // names (API, debugging)
     [[nodiscard]] std::string schema_name(SchemaId s) const;
     [[nodiscard]] std::string object_name(ObjectId o) const;
+    /// "(schema o1 ... ok)": the binding, with the representative of each collapsed parameter at its position
+    /// (formalism::full_binding).
     [[nodiscard]] std::string format(const ActionLabel& a) const;
     [[nodiscard]] std::string format(SlotId fluent_slot) const;
     /// The true fluent atoms of s, formatted, in slot order.

@@ -31,8 +31,8 @@ can store by reference (native nanobind functions cannot be pickled).
 from mymyr import _core
 
 
-def _restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding):
-    return _core._restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding)
+def _restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding, collapse_unused_parameters):
+    return _core._restore_task(kind, a, b, a_path, b_path, options, fingerprint, encoding, collapse_unused_parameters)
 
 
 def _restore_frozen_task(source, atoms):

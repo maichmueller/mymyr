@@ -96,7 +96,7 @@ def test_lifted_segments_equal_pymimir_rl_refine(seed, cap):
                            capture_output=True, text=True)
     if probe.returncode:
         pytest.skip("pymimir-rl reference is not importable")
-    task = mymyr.Task(mymyr.Domain.from_string(DOMAIN).instantiate_string(PROBLEM))
+    task = mymyr.Task(mymyr.Domain.from_string(DOMAIN).instantiate_string(PROBLEM, collapse_unused_parameters=False))
     fixed = rl.lifted_goal_templates(task, distinct="equality").conditions(0)
     assert len(fixed) == 1 and fixed[0].arity == 2 and not fixed[0].equalities
     templates = rl.GoalTemplates.from_conditions(task, [fixed])

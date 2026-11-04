@@ -60,58 +60,6 @@ GroundCondition only_constraint(const GroundCondition& g, usize i)
     return c;
 }
 
-/// Whether object o is of type `ty`: one of its declared types or a supertype of one is `ty`.
-bool of_type(const TaskData& D, ObjectId o, TypeId ty)
-{
-    if (D.str(D.types[ty.v].name) == "object")
-        return true;
-    std::vector<TypeId> todo(D.type_ids.begin() + D.objects[o.v].types.begin,
-                             D.type_ids.begin() + D.objects[o.v].types.end());
-    std::vector<bool> seen(D.types.size(), false);
-    while (!todo.empty())
-    {
-        const TypeId t = todo.back();
-        todo.pop_back();
-        if (t == ty)
-            return true;
-        if (t.v >= D.types.size() || seen[t.v])
-            continue;
-        seen[t.v] = true;
-        const formalism::Type& T = D.types[t.v];
-        todo.insert(todo.end(), D.type_ids.begin() + T.bases.begin, D.type_ids.begin() + T.bases.end());
-    }
-    return false;
-}
-
-/// The first parameter (of the first `count`) whose declared types the binding's object has none of: its text
-/// "o - t1" (or "o - (either t1 t2)"), else empty.
-std::string type_violation(const TaskData& D, const formalism::Schema& sc, std::span<const ObjectId> binding, u32 count)
-{
-    for (u32 k = 0; k < count && k < binding.size(); ++k)
-    {
-        const formalism::Parameter& p = D.params[sc.params.begin + k];
-        if (p.types.count == 0)
-            continue;
-        bool ok = false;
-        for (u32 j = p.types.begin; j < p.types.end() && !ok; ++j)
-            ok = of_type(D, binding[k], D.type_ids[j]);
-        if (ok)
-            continue;
-        std::string ty;
-        if (p.types.count == 1)
-            ty = std::string(D.str(D.types[D.type_ids[p.types.begin].v].name));
-        else
-        {
-            ty = "(either";
-            for (u32 j = p.types.begin; j < p.types.end(); ++j)
-                ty += " " + std::string(D.str(D.types[D.type_ids[j].v].name));
-            ty += ")";
-        }
-        return std::string(D.str(D.objects[binding[k].v].name)) + " - " + ty;
-    }
-    return {};
-}
-
 /// Why schema `schema` under `binding` (its first `bound` parameters; the others are the existential parameters
 /// normalization added) is not applicable in s: the first precondition literal, equality or numeric constraint that
 /// fails. Empty when every condition over the bound parameters holds.
@@ -174,7 +122,15 @@ std::string unsatisfied_precondition(const Task& task, StateView s, SchemaId sch
 
 std::string step_text(const TaskData& D, const Action& a, u32 count)
 {
-    std::string out = "(" + std::string(D.str(D.schemas[a.schema.v].name));
+    const formalism::Schema& sc = D.schemas[a.schema.v];
+    std::string out = "(" + std::string(D.str(sc.name));
+    if (sc.collapsed.count != 0 && a.binding.size() == sc.arity() && formalism::has_representatives(D, sc))
+    {
+        // the collapsed parameters as their representatives
+        for (ObjectId o : formalism::full_binding(D, sc, a.binding))
+            out += " " + std::string(D.str(D.objects[o.v].name));
+        return out + ")";
+    }
     for (u32 k = 0; k < count && k < a.binding.size(); ++k)
         out += " " + std::string(D.str(D.objects[a.binding[k].v].name));
     return out + ")";
@@ -322,7 +278,7 @@ PlanValidation validate_plan(const Task& task, std::span<const Action> plan, con
                               std::format("the {} argument is object {}, but the task has {} objects", ordinal(k),
                                           a.binding[k].v, D.num_objects()));
         const std::string text = step_text(D, a, sc.arity());
-        if (std::string t = type_violation(D, sc, a.binding, sc.arity()); !t.empty())
+        if (std::string t = detail::type_violation(D, sc, a.binding, sc.arity(), /*line=*/false); !t.empty())
             return v.fail(PlanError::WrongType, i, 0, text, t, "the argument " + t + " is not of its parameter's type");
         if (!v.succ().is_applicable(v.state(), a.label()))
             return v.not_applicable(i, 0, text, a.schema, a.binding, sc.arity());
@@ -362,7 +318,7 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
             case detail::PlanLine::Status::WrongArity:
                 return v.fail(PlanError::WrongArity, step, line_no, written, {},
                               std::format("{} takes {}, the action has {}", D.str(D.schemas[r.named[0]].name),
-                                          arguments(D.schemas[r.named[0]].original_arity), given));
+                                          arguments(formalism::written_arity(D, D.schemas[r.named[0]])), given));
             case detail::PlanLine::Status::UnknownObject:
                 return v.fail(PlanError::UnknownObject, step, line_no, written, {},
                               std::format("the {} argument '{}' is no object of the task", ordinal(r.unknown),
@@ -375,7 +331,7 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
         bool typed = false;
         for (const u32 s : fitting)
         {
-            std::string e = type_violation(D, D.schemas[s], args, static_cast<u32>(given));
+            std::string e = detail::type_violation(D, D.schemas[s], args, static_cast<u32>(given), /*line=*/true);
             if (e.empty())
                 typed = true;
             else if (type_error.empty())
@@ -389,7 +345,8 @@ PlanValidation validate_plan_text(const Task& task, std::string_view text, const
         {
             // the reason: of the first schema the step names (canonical order), over the arguments it gives
             const u32 s = fitting.front();
-            return v.not_applicable(step, line_no, written, SchemaId{s}, args, static_cast<u32>(given));
+            const std::vector<ObjectId> binding = detail::binding_of_line(D, D.schemas[s], args);
+            return v.not_applicable(step, line_no, written, SchemaId{s}, binding, static_cast<u32>(binding.size()));
         }
         v.apply(*found);
         ++step;

@@ -135,7 +135,7 @@ TEST(Fork, BindingCountsAlongTheWalks)
             ++skipped;
             continue;
         }
-        const auto data = frontend::load_task(it->second.domain, it->second.problem);
+        const auto data = frontend::load_task(it->second.domain, it->second.problem, {.collapse_unused_parameters = false});
         const auto task = Task::create(*data);
         const formalism::TaskData& D = task->data();
         Workspace ws(*task);

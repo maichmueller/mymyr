@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built with
 def test_untyped_task_equals_the_reference_export():
     # blocks is untyped, so the reference export is deterministic and must match token for token. The reference's lifted
     # exporter always writes an axiom section ("X 0"), ours only when needed; both sides go through read_task_text.
-    task = mymyr.Domain.from_file(BLOCKS / "domain.pddl").instantiate(BLOCKS / "probBLOCKS-8-0.pddl")
+    task = mymyr.Domain.from_file(BLOCKS / "domain.pddl").instantiate(BLOCKS / "probBLOCKS-8-0.pddl",
+                                                                     collapse_unused_parameters=False)
     golden = fm.read_task_text(str(DATA / "golden/suite/blocks__probBLOCKS-8-0.txt"))
     assert task.to_text().split() == golden.to_text().split()

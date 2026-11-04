@@ -28,7 +28,7 @@ DOMAINS = {
 def tasks():
     if not PDDL:
         pytest.skip("built without the loki front end")
-    return {name: mymyr.Task.from_pddl(domain, problem) for name, (domain, problem) in DOMAINS.items()}
+    return {name: mymyr.Task.from_pddl(domain, problem, collapse_unused_parameters=False) for name, (domain, problem) in DOMAINS.items()}
 
 
 def native_options(entry):

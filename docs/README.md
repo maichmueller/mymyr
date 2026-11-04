@@ -6,8 +6,8 @@ These pages describe the Python package, optional CUDA backend, plain-C API and 
 - [API conventions](conventions.md): the option names and defaults, the result fields and the status values every
   module shares.
 - [Command line](cli.md): the `mymyr plan`, `validate`, `write` and `info` commands, options and exit codes.
-- [Parsing and tasks](parsing-and-tasks.md): PDDL, task and state values, errors, formalism views, actions and binding
-  generators.
+- [Parsing and tasks](parsing-and-tasks.md): PDDL, task and state values, unused parameters, errors, formalism views,
+  actions and binding generators.
 - [Formula values](formulas.md): atoms, literals, conditions, state checks, pickling and search goals.
 - [Search](search.md): breadth-first search, the IW family, best-first search, heuristics, goals, budgets, observers,
   negative action costs and plan validation.

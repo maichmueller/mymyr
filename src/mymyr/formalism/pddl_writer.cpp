@@ -232,6 +232,8 @@ public:
         for (const Schema& s : T.schemas)
         {
             existential |= s.arity() > s.original_arity;
+            for (const CollapsedParameter& c : T.collapsed_of(s))
+                existential |= !c.written;
             for (const ConditionalEffect& e : T.effects_of(s))
                 conditional |= e.condition.literals.count + e.condition.constraints.count > 0 || e.extra_params.count > 0;
         }
@@ -485,8 +487,43 @@ private:
         const Vars vars = schema_vars(s);
         const std::vector<std::string> parts = condition(s.precondition, vars, 0, s.arity());
         std::string o = parts.empty() ? "(and)" : conjunction(parts);
-        if (s.arity() > s.original_arity)
-            o = "(exists (" + typed_vars(vars, s.original_arity, s.arity(), s.params, 0) + ") " + o + ")";
+        std::string exists = typed_vars(vars, s.original_arity, s.arity(), s.params, 0);
+        for (const CollapsedParameter& c : T.collapsed_of(s))
+            if (!c.written)  // an existential variable of its type alone
+                exists += (exists.empty() ? "" : " ") + typed(collapsed_name(c), T.params[c.param].types);
+        if (!exists.empty())
+            o = "(exists (" + exists + ") " + o + ")";
+        return o;
+    }
+
+    static std::string collapsed_name(const CollapsedParameter& c)
+    {
+        return "?collapsed" + std::to_string(c.position);
+    }
+
+    /// The parameters the action declares, collapsed ones included, typed.
+    std::string written_params(const Schema& s) const
+    {
+        const Vars vars = schema_vars(s);
+        const std::span<const CollapsedParameter> collapsed = T.collapsed_of(s);
+        std::string o;
+        usize c = 0;
+        u32 kept = 0;
+        for (u32 k = 0, n = written_arity(T, s); k < n; ++k)
+        {
+            if (!o.empty())
+                o += " ";
+            if (c < collapsed.size() && collapsed[c].position == k)
+            {
+                const Parameter& p = T.params[collapsed[c].param];
+                const std::string_view name = T.str(p.name);
+                o += typed(name.empty() ? collapsed_name(collapsed[c]) : "?" + std::string(name), p.types);
+                ++c;
+                continue;
+            }
+            o += typed(vars[kept], T.params[s.params.begin + kept].types);
+            ++kept;
+        }
         return o;
     }
 
@@ -513,15 +550,13 @@ private:
     std::string action(const std::vector<u32>& group) const
     {
         const Schema& s = T.schemas[group[0]];
-        const Vars vars = schema_vars(s);
-        const std::string params = typed_vars(vars, 0, s.original_arity, s.params, 0);
+        const std::string params = written_params(s);
         const std::string eff = effects(s);
         std::vector<std::string> pre;
         for (const u32 x : group)
         {
             const Schema& o = T.schemas[x];
-            if (o.original_arity != s.original_arity ||
-                typed_vars(schema_vars(o), 0, o.original_arity, o.params, 0) != params || effects(o) != eff)
+            if (written_params(o) != params || effects(o) != eff)
                 throw std::invalid_argument("mymyr write_pddl: the schemas named '" + std::string(T.str(s.name)) +
                                             "' differ in their parameters or effects: they are no split action");
             pre.push_back(precondition(o));
