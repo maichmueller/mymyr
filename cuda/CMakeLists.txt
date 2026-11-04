@@ -87,7 +87,7 @@ foreach(units mymyr_cuda_lifted_units mymyr_cuda_lifted_heavy)
     target_sources(mymyr_cuda PRIVATE $<TARGET_OBJECTS:${units}>)
 endforeach()
 # task tables on the device and the multi-instance launches of the kernels
-target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/lifted_multi.cu src/lifted_multi_write.cu src/lifted_multi_pick.cu)
+target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/expand_axioms.cu src/lifted_multi.cu src/lifted_multi_write.cu src/lifted_multi_pick.cu)
 # device state spaces, one task or the instances of a table in waves (cuda/state_space.hpp)
 target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
 # IW over task tables (cuda/multi_iw.hpp: the searches grouped by instance)

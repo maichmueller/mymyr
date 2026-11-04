@@ -110,7 +110,7 @@ on it, so the outputs are ready in that stream's order, and without `stream` the
 stays in `offsets[N]` (true counts), and `status[0]` gets bit 0 when the successors exceed the capacity and bit 1 when a
 row is invalid (a task id outside the table, bits its instance has no slot for, a successor wider than `succ`; nothing
 is written then); successor rows past the total are zero. The result holds only `capacity`, unless the table's
-expansion needs the host (instances expanded apart, CPU-fallback schemas or axioms, numeric rows, suites of several
+expansion needs the host (instances expanded apart, CPU-fallback schemas or axioms beyond the device's evaluator, numeric rows, suites of several
 domains, batches beyond one chunk of views), which waits as without `status` and returns the usual keys (`total`
 among them): then rows past the total keep what the destination held, and an invalid row raises `ValueError` instead
 of setting bit 1.

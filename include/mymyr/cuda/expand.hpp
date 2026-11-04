@@ -17,8 +17,10 @@
 //   - Multi: one pass of the multi-instance kernels over the mixed batch (each thread resolves its row's instance;
 //     launches per object-bitset width group, concurrently on the expander's auxiliary streams, and row-width bucket,
 //     set_launch; rows grouped by instance), when every
-//     instance runs completely on the multi-instance kernels (no numeric fluents, CPU-fallback schema, conditional effects or axioms:
-//     detail::multi_unsupported);
+//     instance runs completely on the multi-instance kernels (no numeric fluents, CPU-fallback schema or conditional
+//     effects, and axioms only within the device's evaluator: detail::multi_unsupported). With axioms, the parents' and
+//     the successors' derived atoms are closed on the device (the evaluator of the device environment and encoder);
+//     the successors' goal flags read their derived words;
 //   - PerInstance: otherwise each instance's rows are gathered and expanded apart by the single-instance path (below),
 //     and the results are scattered back into batch order (one synchronization per instance in count() and write()).
 // A table of one instance (Single) runs the single-instance path: the task's kernels, conditional effects and axioms on
@@ -39,9 +41,9 @@
 // compaction, so offsets[N] equals generated (the rows are unspecified). Capturable calls retain the scratch across replays.
 //
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
-// successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
-// words are zero; PerInstance parts are scattered at the caller's width. A mapped write in Multi mode does not write
-// out.derived: the caller zeroes those rows first.
+// successors' axioms on the device (on the CPU for axioms beyond the kernels), and so does a Multi table (the words of
+// instances without axioms are zero); PerInstance parts are scattered at the caller's width. A mapped write writes the
+// derived rows of its own successors only: the caller zeroes the others.
 //
 // Destination-passing: every array of `out` is device memory the caller owns (null: not written); nothing of the
 // caller's is allocated. The work runs on one stream (set_stream; null: the context's stream) in stream order after
@@ -123,7 +125,8 @@ public:
     /// counted row q goes to row map.batch_offsets[map.rows[q]] + k, its parent label is map.rows[q]. Multi mode puts
     /// the rows there itself (the successor kernel's destination map: no copy of the expansion); Single and PerInstance
     /// write into scratch and scatter it (their derived rows are scattered zero-padded to out.derived_words). Multi mode
-    /// does not write out.derived (its instances have no axioms): the caller zeroes those rows first, as SuiteExpander does.
+    /// writes the derived rows and goal flags of its successors at their batch rows and leaves the batch's other rows:
+    /// the caller zeroes their derived rows first, as SuiteExpander does.
     void write(rl::Expansion& out, const RowMap& map);
 
     /// Why expand_async() of a batch of `rows` rows would need the host (empty: it does not): an instance the kernels
@@ -139,7 +142,7 @@ public:
     /// out.words); an invalid batch writes no successor or label. Once the running total saturates at UINT32_MAX,
     /// successor widths past it are not counted: bit 1's width check is exact only while the batch fits; bit 0 is
     /// always exact. Successor rows past the total are zero, and goal flags and derived words cover every row below
-    /// the capacity (past the total: those of zero rows). out.total, out.generated and out.words_needed are not set,
+    /// the capacity (past the total: those of zero rows in Single mode, zero in Multi mode). out.total, out.generated and out.words_needed are not set,
     /// and a later write() needs a count() first. With rows_dev (device u32), only min(*rows_dev, in.rows) rows are
     /// present; padding contributes neither successors nor validation errors, and its offsets equal the live total.
     /// Needs async_unsupported() empty (std::invalid_argument otherwise).

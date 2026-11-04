@@ -154,7 +154,7 @@ const char* order_name(Order o)
 
 struct Flat
 {
-    std::vector<u64> succ, hashes;
+    std::vector<u64> succ, hashes, derived;
     std::vector<u8> noops;
     std::vector<i32> parent, schema, binding, offsets;
     std::vector<u8> goal;
@@ -162,7 +162,9 @@ struct Flat
     u32 words_needed = 0;
 };
 
-Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std::vector<i32>& ids, u64 cap, u32 L)
+/// rl::expand into buffers poisoned past what it writes; DW > 0: with derived rows of DW words.
+Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std::vector<i32>& ids, u64 cap, u32 L,
+                 u32 DW = 0)
 {
     const u32 W = S.words();
     const u64 N = ids.size();
@@ -175,6 +177,7 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
     f.offsets.assign(N + 1, 0);
     f.hashes.assign(std::max<u64>(cap, 1), 0x5A5A5A5A5A5A5A5Aull);
     f.noops.assign(std::max<u64>(cap, 1), 0x5A);
+    f.derived.assign(DW ? std::max<u64>(cap, 1) * DW : 0, 0x5A5A5A5A5A5A5A5Aull);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
@@ -187,6 +190,8 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
     x.offsets = f.offsets.data();
     x.succ_hash = f.hashes.data();
     x.noop = f.noops.data();
+    x.derived = DW ? f.derived.data() : nullptr;
+    x.derived_words = DW;
     rl::expand(S, rl::StateBatchView{rows.data(), N, W, 0}, ids.data(), x);
     f.total = x.total;
     f.generated = x.generated;
@@ -195,7 +200,7 @@ Flat host_expand(const rl::TaskSuite& S, const std::vector<u64>& rows, const std
 }
 
 /// write() of the counted batch into buffers poisoned like host_expand's.
-Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u32 W, u64 cap, u32 L)
+Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u32 W, u64 cap, u32 L, u32 DW = 0)
 {
     const cudaStream_t s = ex.stream();
     const u64 c = std::max<u64>(cap, 1);
@@ -207,6 +212,7 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     cuda::DeviceBuffer offsets(ctx, (N + 1) * sizeof(i32), s);
     cuda::DeviceBuffer hashes = to_device(ctx, std::vector<u64>(c, 0x5A5A5A5A5A5A5A5Aull), s);
     cuda::DeviceBuffer noops = to_device(ctx, std::vector<u8>(c, 0x5A), s);
+    cuda::DeviceBuffer derived = to_device(ctx, std::vector<u64>(DW ? c * DW : 1, 0x5A5A5A5A5A5A5A5Aull), s);
     rl::Expansion x;
     x.capacity = cap;
     x.words = W;
@@ -219,6 +225,8 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     x.binding = static_cast<i32*>(binding.data());
     x.goal = static_cast<u8*>(goal.data());
     x.offsets = static_cast<i32*>(offsets.data());
+    x.derived = DW ? static_cast<u64*>(derived.data()) : nullptr;
+    x.derived_words = DW;
     ex.write(x);
     Flat f;
     f.succ = to_host<u64>(succ.data(), c * W, s);
@@ -229,6 +237,8 @@ Flat device_write(const cuda::ContextPtr& ctx, cuda::SuiteExpander& ex, u64 N, u
     f.binding = to_host<i32>(binding.data(), c * L, s);
     f.goal = to_host<u8>(goal.data(), c, s);
     f.offsets = to_host<i32>(offsets.data(), N + 1, s);
+    if (DW)
+        f.derived = to_host<u64>(derived.data(), c * DW, s);
     f.total = x.total;
     f.generated = x.generated;
     f.words_needed = x.words_needed;
@@ -248,6 +258,7 @@ void expect_flat_equal(const Flat& d, const Flat& h)
     ASSERT_EQ(d.hashes, h.hashes);
     ASSERT_EQ(d.noops, h.noops);
     ASSERT_EQ(d.goal, h.goal);
+    ASSERT_EQ(d.derived, h.derived);
 }
 
 // ------------------------------------------------------------------------------------------------ envs
@@ -1239,6 +1250,95 @@ TEST(DeviceTaskSuiteEnv, AxiomGoalQueriesEqualHost)
         env.check_errors();
         EXPECT_EQ(to_host<u8>(d.at_goal.data(), N, d.s), want);
     }
+}
+
+// Tables of several instances with axioms within the device's evaluator expand in Multi mode (mapped at their batch
+// rows in a suite): the successors, labels, digests, derived words and goal flags (goals over derived atoms) equal the
+// host's on the reachable states of every instance, in chunks, clipped at a capacity and, for a table, without waiting
+// (expand_async: rows past the total zero).
+TEST(DeviceTaskSuiteExpand, AxiomTablesExpandInMultiModeEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+        for (const NamedSuite& ns : axiom_suites(atoms))
+        {
+            SCOPED_TRACE(ns.name);
+            const rl::TaskSuite& S = *ns.suite;
+            cuda::SuiteExpander ex(ctx, ns.suite);
+            for (u32 d = 0; d < S.num_domains(); ++d)
+                if (S.table(d)->size() > 1)
+                    EXPECT_EQ(ex.domain(d).mode(), cuda::DeviceExpander::Mode::Multi) << S.domain_name(d);
+            std::vector<u64> rows;
+            std::vector<i32> ids;
+            reachable_rows(S, 48, rows, ids);
+            const u32 W = S.words(), L = std::max<u32>(1, S.label_width()) + 1, DW = S.derived_words() + 1;
+            const u64 N = ids.size();
+            const cudaStream_t s = ex.stream();
+            const cuda::DeviceBuffer d_rows = to_device(ctx, rows, s);
+            const cuda::DeviceBuffer d_ids = to_device(ctx, ids, s);
+            const rl::StateBatchView in{static_cast<const u64*>(d_rows.data()), N, W, 0};
+            const Flat full = host_expand(S, rows, ids, 1, L, DW);
+            ASSERT_GT(full.total, 0u);
+            for (const u64 chunk : {u64{0}, u64{7}})
+                for (const u64 cap : {full.total, full.total / 3})
+                {
+                    SCOPED_TRACE("chunk " + std::to_string(chunk) + " capacity " + std::to_string(cap));
+                    ex.set_chunk_rows(chunk);
+                    const Flat h = host_expand(S, rows, ids, cap, L, DW);
+                    if (cap == full.total)
+                    {
+                        EXPECT_GT(std::count(h.goal.begin(), h.goal.end(), u8{1}), 0);
+                    }
+                    ASSERT_EQ(ex.count(in, static_cast<const i32*>(d_ids.data())), h.total);
+                    expect_flat_equal(device_write(ctx, ex, N, W, cap, L, DW), h);
+                    if (::testing::Test::HasFatalFailure())
+                        return;
+                }
+            ex.set_chunk_rows(0);
+            if (S.num_domains() != 1 || S.table(0)->size() == 1)
+                continue;
+            // without waiting: the capacity past the total
+            ASSERT_TRUE(ex.async_unsupported(N).empty()) << ex.async_unsupported(N);
+            const Flat h = host_expand(S, rows, ids, full.total, L, DW);
+            const u64 cap = full.total + 5;
+            cuda::DeviceBuffer succ(ctx, cap * W * 8, s), parent(ctx, cap * 4, s), schema(ctx, cap * 4, s),
+                binding(ctx, cap * L * 4, s), goal = to_device(ctx, std::vector<u8>(cap, 0x5A), s), offsets(ctx, (N + 1) * 4, s),
+                hashes(ctx, cap * 8, s), noops(ctx, cap, s),
+                derived = to_device(ctx, std::vector<u64>(cap * DW, 0x5A5A5A5A5A5A5A5Aull), s), status(ctx, 4, s);
+            rl::Expansion x;
+            x.capacity = cap;
+            x.words = W;
+            x.label_width = L;
+            x.succ = static_cast<u64*>(succ.data());
+            x.parent = static_cast<i32*>(parent.data());
+            x.schema = static_cast<i32*>(schema.data());
+            x.binding = static_cast<i32*>(binding.data());
+            x.goal = static_cast<u8*>(goal.data());
+            x.offsets = static_cast<i32*>(offsets.data());
+            x.succ_hash = static_cast<u64*>(hashes.data());
+            x.noop = static_cast<u8*>(noops.data());
+            x.derived = static_cast<u64*>(derived.data());
+            x.derived_words = DW;
+            ex.expand_async(in, static_cast<const i32*>(d_ids.data()), x, static_cast<u32*>(status.data()));
+            EXPECT_EQ(to_host<u32>(status.data(), 1, s)[0], 0u);
+            const u64 T = h.total;
+            auto head = []<class T>(std::vector<T> v, u64 n) { v.resize(n); return v; };
+            EXPECT_EQ(to_host<i32>(offsets.data(), N + 1, s), h.offsets);
+            const std::vector<u64> ds = to_host<u64>(succ.data(), cap * W, s), dd = to_host<u64>(derived.data(), cap * DW, s);
+            const std::vector<u8> dg = to_host<u8>(goal.data(), cap, s);
+            EXPECT_EQ(head(ds, T * W), h.succ);
+            EXPECT_EQ(head(dd, T * DW), h.derived);
+            EXPECT_EQ(head(dg, T), h.goal);
+            EXPECT_EQ(head(to_host<i32>(parent.data(), cap, s), T), h.parent);
+            EXPECT_EQ(head(to_host<i32>(schema.data(), cap, s), T), h.schema);
+            EXPECT_EQ(head(to_host<i32>(binding.data(), cap * L, s), T * L), h.binding);
+            EXPECT_EQ(head(to_host<u64>(hashes.data(), cap, s), T), h.hashes);
+            EXPECT_EQ(head(to_host<u8>(noops.data(), cap, s), T), h.noops);
+            EXPECT_TRUE(std::all_of(ds.begin() + static_cast<std::ptrdiff_t>(T * W), ds.end(), [](u64 w) { return w == 0; }));
+            EXPECT_TRUE(std::all_of(dd.begin() + static_cast<std::ptrdiff_t>(T * DW), dd.end(), [](u64 w) { return w == 0; }));
+            EXPECT_TRUE(std::all_of(dg.begin() + static_cast<std::ptrdiff_t>(T), dg.end(), [](u8 g) { return g == 0; }));
+        }
 }
 
 // Axioms the device does not evaluate (a body beyond the kernels' matcher depth) keep the general path, and the

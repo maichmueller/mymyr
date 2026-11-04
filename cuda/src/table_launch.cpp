@@ -283,7 +283,7 @@ AxiomClosure AxiomClosure::create(const ContextPtr& ctx, u32 n, const std::funct
 }
 
 void AxiomClosure::run(const u64* states, u64 stride, u32 row_words, u64 n, const i32* ids, u64* views, u64 view_words,
-                       u64* derived, u32* invalid, cudaStream_t s) const
+                       u64* derived, u32* invalid, cudaStream_t s, u32 derived_stride, const u64* live) const
 {
     if (n == 0)
         return;
@@ -298,8 +298,9 @@ void AxiomClosure::run(const u64* states, u64 stride, u32 row_words, u64 n, cons
     a.views = views;
     a.view_words = view_words;
     a.derived = derived;
-    a.derived_words = words;
+    a.derived_words = derived_stride ? derived_stride : words;
     a.invalid = invalid;
+    a.live = live;
     a.class_ow = ow.data();
     a.class_fc = fc.data();
     a.launches = static_cast<u32>(ow.size());

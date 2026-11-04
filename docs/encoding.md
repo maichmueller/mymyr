@@ -926,7 +926,7 @@ fanout.
 The transition encoders expand CUDA parent rows and encode them on the current stream; `actions=` a device expansion
 reuses its successor rows. With `capacities` the expansion is bounded by the entity capacity (every successor is a
 node with a state entity), and nothing waits for the device unless the table's expansion needs the host (instances
-expanded apart, CPU-fallback schemas or axioms, lazy atom slots, batches beyond one chunk of views; `expand_into` in
+expanded apart, CPU-fallback schemas or axioms beyond the device's evaluator, lazy atom slots, batches beyond one chunk of views; `expand_into` in
 [rl.md](rl.md)): an expansion past the capacity makes the batch report `capacity_overflow`, an invalid parent row
 `invalid_input`. That expansion is sized by `capacities["entities"]`, not by the successors the rows have: the
 successor rows, the builder's nodes and scratch and the encoder's horizon scratch each hold that many rows (about

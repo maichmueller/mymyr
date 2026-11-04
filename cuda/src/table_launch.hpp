@@ -110,12 +110,13 @@ struct AxiomClosure
                                              const std::function<rl::dev::TaskView(u32)>& host_view,
                                              const std::function<const Task&(u32)>& task, cudaStream_t s);
     /// Rows [0, n) of `states` (rows `stride` words apart, `row_words` atom words; task ids `ids`, null: instance 0)
-    /// closed under their instances' axioms: their derived words into derived [n, words], their matcher views (fluent
-    /// and derived atoms; the instance's view words of each row) into views (rows `view_words` apart). Rows with a task
-    /// id outside the instances are left as they are. `invalid` (one device word) is the evaluator's flag for instances
-    /// it refuses (never set here). Stream-ordered on s, no synchronization: capturable.
+    /// closed under their instances' axioms: their derived words into derived [n, derived_stride] (0: `words`; at
+    /// least `words`, the rest of a row zero), their matcher views (fluent and derived atoms; the instance's view words
+    /// of each row) into views (rows `view_words` apart). Rows with a task id outside the instances, and rows at or past
+    /// *live (device; null: none), are left as they are. `invalid` (one device word) is the evaluator's flag for
+    /// instances it refuses (never set here). Stream-ordered on s, no synchronization: capturable.
     void run(const u64* states, u64 stride, u32 row_words, u64 n, const i32* ids, u64* views, u64 view_words,
-             u64* derived, u32* invalid, cudaStream_t s) const;
+             u64* derived, u32* invalid, cudaStream_t s, u32 derived_stride = 0, const u64* live = nullptr) const;
 };
 
 /// Concurrent launches over disjoint row groups (the OW groups and row-width buckets of a plan): group 0 runs on the
