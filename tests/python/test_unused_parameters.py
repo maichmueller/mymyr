@@ -51,9 +51,10 @@ def test_one_expansion_generates_the_collapsed_actions():
     assert collapsed.cost == full.cost
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 def test_twenty_objects_stay_small():
     # Without collapsing, one expansion of this task generates 3.2 million transitions (about 400 MB).
-    code = ("import resource, mymyr; from mymyr import search\n"
+    code = ("import mymyr; from mymyr import search\n"
             f"d = mymyr.Domain.from_string({FAN!r})\n"
             f"t = mymyr.Task(d.instantiate_string({fan_problem(20)!r}))\n"
             "for f in (search.astar, search.gbfs, search.ehc):\n"
@@ -63,7 +64,8 @@ def test_twenty_objects_stay_small():
             "assert r.status == search.Status.SOLVED and r.stats.generated <= 3, r.stats.generated\n"
             "r = search.iw(t)\n"
             "assert r.status == search.Status.SOLVED and r.stats.generated <= 6, r.stats.generated\n"
-            "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)\n")
+            # the peak of this process (ru_maxrss would carry the parent's over exec)
+            "print(next(int(l.split()[1]) for l in open('/proc/self/status') if l.startswith('VmHWM')) // 1024)\n")
     out = subprocess.run([sys.executable, "-W", "error", "-c", code], capture_output=True, text=True, check=True)
     assert int(out.stdout.split()[-1]) < 300  # MB: the interpreter and the module, no transition storage
 
