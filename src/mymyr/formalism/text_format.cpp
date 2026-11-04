@@ -37,8 +37,9 @@ public:
         {
             const std::string kind = word();
             Predicate p;
-            p.kind = kind == "S" ? PredKind::Static : kind == "F" ? PredKind::Fluent : kind == "D" ? PredKind::Derived
+            p.kind = kind == "S" ? PredKind::Static : kind == "F" ? PredKind::Fluent : kind == "D" || kind == "C" ? PredKind::Derived
                                                                                                    : (fail("bad predicate kind " + kind), PredKind::Static);
+            p.compiled = kind == "C";
             p.arity = parameters(0);
             p.name = t.intern_string(word());
             p.params = anonymous_params(p.arity);
@@ -459,7 +460,7 @@ public:
     {
         o << "O " << t.objects.size() << "\nP " << t.predicates.size() << "\n";
         for (const auto& p : t.predicates)
-            o << (p.kind == PredKind::Static ? 'S' : p.kind == PredKind::Fluent ? 'F' : 'D') << " " << p.arity << " "
+            o << (p.kind == PredKind::Static ? 'S' : p.kind == PredKind::Fluent ? 'F' : p.compiled ? 'C' : 'D') << " " << p.arity << " "
               << t.str(p.name) << "\n";
         if (m_numeric)
         {

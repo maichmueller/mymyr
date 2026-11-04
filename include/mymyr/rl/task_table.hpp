@@ -109,6 +109,9 @@ public:
     [[nodiscard]] const std::vector<u32>& predicate_arities() const noexcept { return m_pred_arity; }
     [[nodiscard]] const std::vector<i32>& predicate_kinds() const noexcept { return m_pred_kind; }
     [[nodiscard]] const std::vector<i32>& predicate_instances() const noexcept { return m_pred_instance; }
+    /// Per table predicate, 1 for a derived predicate that normalization introduced (formalism::Predicate::compiled),
+    /// else 0. The instances agree on the domain predicates (domain_mismatch compares them).
+    [[nodiscard]] const std::vector<u8>& predicate_compiled() const noexcept { return m_pred_compiled; }
     /// The domain predicates: table predicate ids [0, num_domain_predicates()).
     [[nodiscard]] u32 num_domain_predicates() const noexcept { return m_domain_preds; }
 
@@ -134,6 +137,7 @@ private:
     std::vector<std::string> m_pred_names;
     std::vector<u32> m_pred_arity;
     std::vector<i32> m_pred_kind, m_pred_instance;
+    std::vector<u8> m_pred_compiled;
     u32 m_domain_preds = 0;
 };
 

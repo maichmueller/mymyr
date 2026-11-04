@@ -145,6 +145,25 @@ TEST(TextFormat, ParsedStructureIsConsistent)
             EXPECT_TRUE(is_object(x));
 }
 
+TEST(TextFormat, MarksTheDerivedPredicatesThatNormalizationIntroduced)
+{
+    // kind C: a derived predicate that normalization introduced; D: one the domain declares
+    const std::string text = "O 1\nP 3\nF 1 at\nD 1 near\nC 1 axiom_0\nSI 0\nFI 0\nG 0\nA 0\n";
+    std::istringstream in(text);
+    const TaskData t = read_task_text(in);
+    ASSERT_EQ(t.predicates.size(), 3u);
+    EXPECT_FALSE(t.predicates[0].compiled);
+    EXPECT_EQ(t.predicates[1].kind, PredKind::Derived);
+    EXPECT_FALSE(t.predicates[1].compiled);
+    EXPECT_EQ(t.predicates[2].kind, PredKind::Derived);
+    EXPECT_TRUE(t.predicates[2].compiled);
+    std::istringstream again(write_task_text(t));
+    const TaskData back = read_task_text(again);
+    EXPECT_TRUE(back.predicates[2].compiled);
+    EXPECT_FALSE(back.predicates[1].compiled);
+    EXPECT_EQ(write_task_text(back), write_task_text(t));
+}
+
 TEST(TextFormat, RejectsMalformedInput)
 {
     std::istringstream bad("O 2\nP 1\nF 1 at\nSI 0\nFI 1\n0 5\nG 0\nA 0\n");  // object 5 out of range

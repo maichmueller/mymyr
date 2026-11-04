@@ -60,7 +60,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `max_goal_level` | 0 to 3 | 0 | the [subgoal](#subgoals) levels beyond the goal |
 | `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"every"` | placement of literals listed at several goal levels |
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
-| `include_derived` | bool | `True` | the state relations of the derived predicates |
+| `include_derived` | bool or `'domain'` | `True` | the state relations of the derived predicates; `'domain'` keeps the declared ones and leaves out the [helpers](#the-relation-catalog) normalization introduces |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
 | `nullary` | `'auxiliary'`, `'arity0'`, `'omit'` | `'auxiliary'` | the relations of nullary predicates: tuples over the [auxiliary entity](#lanes), tuples without an argument, or none |
 | `equality` | bool | `False` | the relations of the equality predicate `=` |
@@ -116,13 +116,20 @@ instances of a table, so tables over one domain give the same relation ids to th
   action schema name, `[hist]`, a goal level (`[g]`, `[sg]`, `[ssg]`, `[sssg]`) and a derivation (`[sat]`, `[unsat]`,
   `[sat+]`, `[sat-]`). State relations carry the plain name, numeric relations the prefix `[num]`. The catalog is
   sorted by name, bytewise, with the numeric relations last; a relation's id is its position. `relation_lanes`,
-  `relation_signs`, `relation_levels`, `relation_derivations`, `relation_predicates` and `relation_schemas` describe
-  each relation, `relation_arities` the encoded arity of its tuples and `relation_slot_roles` each position of them.
+  `relation_signs`, `relation_levels`, `relation_derivations`, `relation_predicates`, `relation_compiled` and
+  `relation_schemas` describe each relation, `relation_arities` the encoded arity of its tuples and
+  `relation_slot_roles` each position of them.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
   (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`; the
   state relations of the static predicates (the types included) and of the derived predicates can be dropped
-  (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates have relations of
+  (`include_static`, `include_derived=False`); their goal and history relations stay. `include_derived='domain'`
+  keeps the derived predicates the domain declares (`:derived`) and leaves the helpers out altogether: the derived
+  predicates that normalization introduces for universal quantifiers, disjunctive goal parts and quantified effect
+  conditions. No instance goal lists a helper, so its goal relations would stay empty, and its state and history
+  relations would hold the truth of the condition it stands for (an action's applicability, say). The front end marks
+  the helpers where it creates them, whatever their names; `relation_compiled` tells their relations apart, and a task
+  read from the text format keeps the mark (predicate kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
   their relation (a state relation without predicate virtual nodes has arity 0); with `nullary='omit'` they have none.
   `slot_role_names` and `entity_role_names` always list all nine roles. An action relation holds the schema's full
@@ -137,6 +144,21 @@ instances of a table, so tables over one domain give the same relation ids to th
   `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit entity arrays); an encoding that
   stores every array has one fingerprint however it was asked for. It does not depend on declaration order, on
   predicate ids, on the process or on the build.
+
+The philosophers domain declares the derived predicates `blocked` and `blocked-trans`; its universal quantifiers
+become the helpers `axiom_0` and `axiom_1`:
+
+```python
+phil = mymyr.Task.from_pddl("tests/data/pddl/philosophers/domain.pddl", "tests/data/pddl/philosophers/p03-phil4.pddl")
+every = encoding.EncodingSchema(phil)
+declared = encoding.EncodingSchema(phil, include_derived="domain")
+derived = lambda s: [n for n, lane in zip(s.relation_names, s.relation_lanes) if lane == "derived"]
+assert derived(every) == ["axiom_0", "axiom_1", "blocked", "blocked-trans"]
+assert derived(declared) == ["blocked", "blocked-trans"]
+assert {n for n, c in zip(every.relation_names, every.relation_compiled) if c} == \
+    set(every.relation_names) - set(declared.relation_names)  # [+]axiom_0[g], axiom_0, [-]axiom_1[hist], ...
+assert declared.options["include_derived"] == "domain"
+```
 
 ## Encoding states
 

@@ -373,7 +373,7 @@ TEST(HGraphView, EdgesAreTheTuplesOfTheBatchForEveryConfiguration)
          [](FlatOptions& o)
          {
              o.include_static = false;
-             o.include_derived = false;
+             o.include_derived = DerivedRelations::None;
          }},
         {"implicit_entities_no_counts",
          [](FlatOptions& o)

@@ -44,6 +44,14 @@ TaskData without_numerics(TaskData t)
     return t;
 }
 
+/// The task as the reference exports write it: their derived predicates do not tell the generated ones apart.
+TaskData without_compiled_marks(TaskData t)
+{
+    for (auto& p : t.predicates)
+        p.compiled = false;
+    return t;
+}
+
 struct Outcome
 {
     int raw_equal = 0;        // token-equal to the file as written by the fork
@@ -83,7 +91,8 @@ std::vector<frontend::DomainOptions> argument_orders(const TaskData& t)
 void compare(const test::GoldenTask& gt, const TaskData& ours, bool fast, Outcome& out)
 {
     const auto type_preds = test::type_predicates(ours);
-    auto project = [](const TaskData& golden, const TaskData& t) { return !golden.has_numerics() && !golden.metric ? without_numerics(t) : t; };
+    auto project = [](const TaskData& golden, const TaskData& t)
+    { return without_compiled_marks(!golden.has_numerics() && !golden.metric ? without_numerics(t) : t); };
     for (const auto& g : gt.goldens)
     {
         const TaskData golden = read_task_text_file(g.string());

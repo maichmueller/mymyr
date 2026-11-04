@@ -160,7 +160,7 @@ TEST_P(EncodingLaneCorpus, EverySupportedOptionEqualsThePlainForms)
                 Config config{"options", {}, {}};
                 auto& o = config.options;
                 o.include_static = (flags & 1) != 0;
-                o.include_derived = (flags & 2) != 0;
+                o.include_derived = (flags & 2) != 0 ? encoding::DerivedRelations::All : encoding::DerivedRelations::None;
                 o.nullary = (flags & 4) != 0  ? encoding::Nullary::Auxiliary
                             : (targets & 1) ? encoding::Nullary::Arity0
                                             : encoding::Nullary::Omit;

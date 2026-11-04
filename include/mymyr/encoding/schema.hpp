@@ -45,6 +45,8 @@ struct DomainSignature
         std::string name;
         u32 arity = 0;
         PredicateKind kind = PredicateKind::Fluent;
+        /// A derived predicate that normalization introduced (formalism::Predicate::compiled); false for the others.
+        bool compiled = false;
     };
     struct ActionSchema
     {
@@ -176,6 +178,8 @@ struct Relation
     std::optional<GoalDerivation> derivation;   // none for plain goal relations and relations without a goal
     bool state_anchored = false;                // the `[state]` variant of a full horizon without its root
     i32 predicate = -1;                         // domain predicate id, or -1
+    bool compiled = false;                      // the predicate is a derived one that normalization introduced
+                                                // (DomainSignature::Predicate::compiled)
     i32 schema = -1;                            // first action schema of this name and arity, or -1
     i32 function = -1;                          // numeric function (DomainSignature::functions), or -1
     u32 arity = 0;                              // encoded arity: the slots of the other roles plus the arguments
