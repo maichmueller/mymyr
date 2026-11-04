@@ -74,8 +74,11 @@ inline constexpr i32 k_unsolvable_distance = -1;
 enum class ArraysCheck : u8
 {
     Full,       // all of create's checks: arrays from outside (files, pickles, user arrays)
-    Structure,  // sizes and index ranges only, what indexing the arrays relies on: arrays a mymyr generator made (the
-                // device state spaces), whose contents need no second check
+    Structure,  // sizes, ranges and single values, without goal tests, action applications or the cross-array
+                // checks: what reading the arrays and the task's use of the rows and labels rely on (no
+                // out-of-range access follows from arrays that pass). For arrays a mymyr generator made (the device
+                // state spaces) or files the caller trusts: whether the rows are distinct states of the task, the
+                // labels its actions and the distances its goal distances goes unchecked
 };
 
 /// The arrays of a state space: generated elsewhere (the device state spaces, cuda/state_space.hpp) or saved
@@ -105,14 +108,15 @@ class StateSpace
 {
 public:
     /// A state space from its arrays (moved in). The goal and unsolvable counts and the largest goal distance are
-    /// computed from them. Throws std::invalid_argument unless the arrays are a state space of their task (the first
-    /// two points only with ArraysCheck::Structure):
+    /// computed from them. Throws std::invalid_argument unless the arrays are a state space of their task (with
+    /// ArraysCheck::Structure, the points up to the labels of states except the backward CSR's order and pairing):
     ///   - sizes: every array has its accessor's size, and the offset arrays are CSRs over num_states (> 0) states;
     ///   - ranges: targets and sources are states, backward edges are transitions, and the backward CSR lists every
     ///     forward transition once, in the row of its target, ascending, with its source;
-    ///   - the task: the row layout is the task's (words() for frozen atom slots, at most max_words() for lazy ones,
-    ///     and numeric_words()), no row sets an atom slot the task has not assigned, and row 0 is the task's initial
-    ///     state; labels name schemas and objects of the task (unused binding positions ~0u);
+    ///   - the task: the row layout is the task's (words() for frozen atom slots, with ArraysCheck::Structure at
+    ///     least words(); at most max_words() for lazy ones; and numeric_words()), no row sets an atom slot the task
+    ///     has not assigned, and row 0 is the task's initial state; labels name schemas and objects of the task
+    ///     (unused binding positions ~0u);
     ///   - labels of states: flags are 0 or 1, goal states are exactly those at unit distance 0, unsolvable ones
     ///     exactly those at k_unsolvable_distance (cost distance +inf; finite and nonnegative otherwise), alive ones
     ///     those neither goal nor unsolvable, and every transition cost is nonnegative;
@@ -122,7 +126,7 @@ public:
     ///     cost (1 for the unit distances, and for the cost distances without costs) plus the target's distance, or
     ///     unsolvable when no transition leads to a solvable state (exact equality).
     /// Linear in the size of the arrays: one goal test per state and, with labels, one action application per
-    /// transition.
+    /// transition (ArraysCheck::Structure: a few scans, without goal tests or action applications).
     [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays,
                                                                   ArraysCheck check = ArraysCheck::Full);
     /// A copy of the arrays: create(to_arrays()) is an equal state space.
@@ -206,7 +210,13 @@ public:
 
 private:
     friend class StateSpaceBuilder;
-    static void check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need);
+    /// create's checks of single values: the row layout (ArraysCheck::Structure: rows at least the task's words wide),
+    /// atom slots and initial state of the task, label ranges, costs, and the flags against the distances.
+    static void check_values(const StateSpaceArrays& a, ArraysCheck check,
+                             const std::function<void(bool, const char*)>& need);
+    /// create's checks of arrays against each other: the backward CSR against the forward one, and the goal distances
+    /// against the transitions (ArraysCheck::Full).
+    static void check_relations(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need);
     static std::shared_ptr<const StateSpace> assemble(StateSpaceArrays&& a);
     /// Builds find()'s index; false if two rows are equal.
     bool build_index() const;

@@ -465,3 +465,36 @@ def test_mctx_with_command_buffers_equals_without(policy, tmp_path):
         assert a.keys() == runs["off"].keys() and len(a) == 4 * 5 + 1
         for k in a:
             assert np.array_equal(a[k], runs["off"][k]), (mode, k)
+
+
+def test_planning_env_capture_survives_cuda_work_of_other_threads(sets):
+    """Another thread of the process synchronizes on its own stream while the PlanningEnv captures its step: that work
+    is not part of the graph and does not invalidate the capture; the replayed steps equal eager ones."""
+    pytest.importorskip("torchrl")
+    import threading
+
+    dev = gpu_device()
+    t = rl.TaskTable(sets["gripper"])
+    kw = dict(seed=3, max_steps=5, max_actions=6, device=dev)
+    graphed, eager = (rt.PlanningEnv(t, 16, graph=g, **kw) for g in (True, False))
+    assert graphed.graph and graphed.batched.sampler is not None
+    during = []
+    outputs = graphed._outputs
+
+    def outputs_with_other_thread_work(action, copy=True):
+        capturing = torch.cuda.is_current_stream_capturing()
+
+        def work():
+            with torch.cuda.stream(torch.cuda.Stream(dev)):
+                during.append((capturing, float(torch.ones(1 << 16, device=dev).sum())))
+
+        worker = threading.Thread(target=work)
+        worker.start()
+        worker.join()
+        return outputs(action, copy)
+
+    graphed._outputs = outputs_with_other_thread_work
+    rollouts = [env.rollout(4, break_when_any_done=False, auto_reset=False, tensordict=env.reset())
+                for env in (graphed, eager)]
+    assert (True, float(1 << 16)) in during  # the other thread ran while the step was captured
+    assert (rollouts[0] == rollouts[1]).all()

@@ -319,6 +319,36 @@ def test_captured_obs_equal_eager_obs(gripper):
         assert torch.equal(out.obs[k].device_sizes, r.obs.device_sizes)
 
 
+def test_captured_rollout_survives_cuda_work_of_other_threads(gripper):
+    # another thread of the process (a data loader, a JAX runtime thread) synchronizes on its own stream while the
+    # rollout captures: that work is not part of the graph and does not invalidate the capture
+    import threading
+
+    device = gpu_device()
+    encoder = encoding.FlatRelationEncoder(gripper)
+    env = rt.BatchedEnv(gripper, 16, device=device, seed=4, max_steps=3, observation=encoder, obs_capacities=CAPS)
+    assert env.sampler is not None and env.multi  # the default sampler over a table of several instances
+    during = []
+
+    def policy(e):
+        capturing = torch.cuda.is_current_stream_capturing()
+
+        def work():
+            with torch.cuda.stream(torch.cuda.Stream(device)):
+                during.append((capturing, float(torch.ones(1 << 16, device=device).sum())))
+
+        worker = threading.Thread(target=work)
+        worker.start()
+        worker.join()
+        return e.random_actions()
+
+    rollout = env.capture(3, policy)
+    assert [x for x in during if x[0]] == [(True, float(1 << 16))] * 3
+    out = rollout.replay()
+    for k in range(3):
+        assert_same(out.obs[k], host(encoder, out.states[k], out.task_ids[k]))
+
+
 @pytest.mark.parametrize("dev", devices())
 def test_eager_step_obs_collate(gripper, dev):
     encoder = encoding.FlatRelationEncoder(gripper)

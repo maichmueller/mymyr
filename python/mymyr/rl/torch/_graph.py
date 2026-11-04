@@ -134,7 +134,9 @@ class CapturedRollout:
         self.graph = torch.cuda.CUDAGraph()
         K, n = self.steps, env.num_envs
         obs, final_obs, obs_actions, visited = [], [], [], []
-        with torch.cuda.graph(self.graph, pool=pool, stream=side):
+        # thread_local: CUDA work that the process's other threads (a JAX runtime, a data loader) do meanwhile on
+        # their own streams cannot invalidate the capture; this thread's calls are still checked
+        with torch.cuda.graph(self.graph, pool=pool, stream=side, capture_error_mode="thread_local"):
             # the steps write into slices of the stacked outputs (no stacking copies)
             b = torch.empty((K, n), dtype=torch.bool, device=dev)
             rows = n if final else 0

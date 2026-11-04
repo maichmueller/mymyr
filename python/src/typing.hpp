@@ -57,6 +57,10 @@ struct CudaStream
 struct TreeRecord
 {
 };
+/// What rebuilding a state space from arrays checks (datasets::ArraysCheck): "full" or "structure".
+struct ArraysCheck
+{
+};
 }  // namespace ann
 
 /// A CUDA stream: an int cudaStream_t (1 / 2: the legacy / per-thread default stream) or a stream object. With a None
@@ -263,5 +267,10 @@ template<>
 struct type_caster<mymyr::python::ann::TreeRecord>
 {
     static constexpr auto Name = const_name("typing.Literal['nodes', 'transitions']");
+};
+template<>
+struct type_caster<mymyr::python::ann::ArraysCheck>
+{
+    static constexpr auto Name = const_name("typing.Literal['full', 'structure']");
 };
 }  // namespace nanobind::detail
