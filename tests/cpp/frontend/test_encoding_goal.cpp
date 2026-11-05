@@ -265,7 +265,7 @@ TEST(EncodingGoal, TextWithoutTheGoalAsWrittenKeepsTheConjunctivePart)
         bool complete = true;
         for (const Literal& l : t->literals_of(t->goal))
         {
-            if (t->str(t->predicate(l.pred).name).starts_with("axiom_"))
+            if (t->predicate(l.pred).compiled())
                 complete = false;
             else
                 kept.insert(text(*t, l, true));
@@ -276,6 +276,29 @@ TEST(EncodingGoal, TextWithoutTheGoalAsWrittenKeepsTheConjunctivePart)
         EXPECT_EQ(back.encoding_goal_complete, complete);
         EXPECT_TRUE(has_default_encoding_goal(back));
     }
+}
+
+TEST(EncodingGoal, DeclaredPredicatesWithHelperLikeNamesStayInTheGoal)
+{
+    // a declared derived predicate named like loki's internal helpers is no helper: the goal keeps its literal, also
+    // after a text round trip, which derives the encoding goal from the planner's goal
+    const auto d = frontend::Domain::from_string(R"((define (domain h) (:requirements :adl :derived-predicates)
+ (:predicates (p ?x) (axiom_0) (axiom_1 ?x))
+ (:derived (axiom_0) (exists (?x) (p ?x)))
+ (:derived (axiom_1 ?x) (p ?x))
+ (:action act :parameters (?x) :precondition (forall (?y) (not (axiom_1 ?y))) :effect (p ?x))))");
+    const auto t = d->instantiate_string(R"((define (problem h1) (:domain h) (:objects a b)
+ (:goal (and (axiom_0) (axiom_1 a) (forall (?x) (p ?x))))))");
+    std::set<std::string> declared, helpers;
+    for (const Predicate& p : t->predicates)
+        (p.compiled() ? helpers : declared).insert(std::string(t->str(p.name)) + (p.helper == HelperKind::Problem ? " problem" : ""));
+    EXPECT_TRUE(declared.contains("axiom_0"));
+    EXPECT_TRUE(declared.contains("axiom_1"));
+    EXPECT_EQ(helpers, (std::set<std::string>{"@domain-0", "@problem-0 problem"}));
+    std::istringstream in(write_task_text(*t));
+    const TaskData back = read_task_text(in);
+    EXPECT_EQ(literal_set(back), (std::set<std::string>{"(axiom_0)", "(axiom_1 o0)"}));
+    EXPECT_FALSE(back.encoding_goal_complete);
 }
 
 TEST(EncodingGoal, FingerprintCoversTheEncodingGoalOnlyWhenItIsNotTheDefault)

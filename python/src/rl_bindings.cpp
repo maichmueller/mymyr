@@ -1765,7 +1765,7 @@ void bind_rl(nb::module_& parent)
             "'static', 'fluent' or 'derived' per table predicate.")
         .def_prop_ro("predicate_instances", [](const PyTable& t) { return t.table->predicate_instances(); },
                      "Per table predicate: -1 for a domain predicate, else the instance of a problem-local one (a "
-                     "derived predicate only the problem's axioms define, e.g. goal normalization's axiom_0).")
+                     "derived predicate only the problem's axioms define, e.g. the goal helper @problem-0).")
         .def_prop_ro("num_domain_predicates", [](const PyTable& t) { return t.table->num_domain_predicates(); },
                      "The domain predicates: table predicate ids [0, num_domain_predicates), a function of the domain "
                      "alone (every table over the domain gives them the same ids).")

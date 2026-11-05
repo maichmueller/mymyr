@@ -6,12 +6,12 @@
 //   - negation normal form (`imply` and `not` over compounds are pushed down to literals and comparisons; a negated
 //     comparison is the complementary one);
 //   - each universal quantifier (forall), also one that negation normal form makes of `not exists`, becomes the
-//     negated literal of a derived predicate `axiom_<k>` over the quantifier's free variables, whose rule is the
-//     existential quantification of the negated body (so a comparison with an undefined side, false under negation
-//     as well, does not falsify a universal quantifier);
+//     negated literal of a derived helper predicate (formalism::HelperKind) over the quantifier's free variables,
+//     whose rule is the existential quantification of the negated body (so a comparison with an undefined side, false
+//     under negation as well, does not falsify a universal quantifier);
 //   - disjunctions are distributed to the top and split: an action or a derived predicate rule into one copy per
 //     disjunct, a conditional effect into one effect per disjunct; a goal part that is not a literal becomes a nullary
-//     derived predicate `axiom_<k>` first;
+//     derived helper predicate first;
 //   - existential quantifiers move into the parameters of their action or rule (and turn a conditional effect into a
 //     `forall` effect).
 // The axioms are stratified by the compiled rules (task/compile.cpp), helpers included: a helper of a universal
@@ -22,7 +22,7 @@
 // Three parts complete it:
 //   - translate_loki_domain (here): loki keeps no scope for the variables of `forall` effects, so it cannot compile a
 //     universal quantifier over such a variable inside an effect condition. The condition of such a conditional
-//     effect becomes a derived predicate `axiom_<k>` over its free variables first, whose rule loki compiles like any
+//     effect becomes a derived helper predicate over its free variables first, whose rule loki compiles like any
 //     other rule body;
 //   - conjuncts (translate.cpp): loki's problem translation adds the type literals of a generated derived
 //     predicate's parameters in its last pass, as a conjunction around the rule body, so a body that is a conjunction

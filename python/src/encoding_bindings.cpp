@@ -547,7 +547,7 @@ constexpr const char* k_option_doc =
     "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates (their goal, subgoal and history relations stay); include_derived='domain' removes every relation "
-    "(state, goal, subgoal, history, horizon) of the helpers `axiom_<k>` that normalization introduces for "
+    "(state, goal, subgoal, history, horizon) of the helpers `@domain-<k>` that normalization introduces for "
     "quantified and disjunctive conditions and keeps all relations of the other predicates, the derived ones the "
     "domain declares included (relation_compiled tells the two kinds apart). include_numeric: one relation "
     "`[num]f` for each numeric function f of the domain that a state gives "
@@ -855,7 +855,7 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
             [schema_of](const Py& self)
             { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.compiled; }); },
             "Whether each relation's predicate is a derived predicate that normalization introduced (a helper "
-            "`axiom_<k>` of a quantified or disjunctive condition) rather than one the domain declares; False for "
+            "`@domain-<k>` of a quantified or disjunctive condition) rather than one the domain declares; False for "
             "relations without a predicate. include_derived='domain' leaves out every relation of these.")
         .def_prop_ro(
             "relation_schemas",

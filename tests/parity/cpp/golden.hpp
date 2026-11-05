@@ -56,9 +56,19 @@ std::set<std::string> type_predicates(const formalism::TaskData& t);
 /// The task's text (formalism::write_task_text) in the canonical form described above.
 std::string canonical_text(const formalism::TaskData& t, const std::set<std::string>& type_preds);
 
-/// A derived predicate that loki generated for a universal quantifier ("axiom_<k>") with two or more arguments: the
-/// fork's argument order depends on heap addresses (domain.hpp; tests replay it with DomainOptions).
+/// A derived predicate that loki generated for a universal quantifier with two or more arguments (a helper of mymyr's
+/// task, or the fork's "axiom_<k>"): the fork's argument order depends on heap addresses (domain.hpp; tests replay it
+/// with DomainOptions).
 bool is_generated_axiom_predicate(const formalism::TaskData& t, u32 p);
+
+/// The fork's name of each helper predicate of mymyr's task: the fork names them "axiom_<k>" by loki's counter, which
+/// numbers the domain's helpers and then the problem's from 0 in creation order, i.e. in predicate id order.
+/// Declared predicates keep their names.
+std::vector<std::string> fork_predicate_names(const formalism::TaskData& t);
+
+/// The task as the fork exports it: helpers under the fork's names (fork_predicate_names), without helper marks. A
+/// fork export has neither, so it is unchanged.
+formalism::TaskData with_fork_names(formalism::TaskData t);
 
 /// First difference between two token streams, or nullopt if equal.
 std::optional<std::string> first_difference(const std::vector<std::string>& a, const std::vector<std::string>& b);

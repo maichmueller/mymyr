@@ -120,7 +120,8 @@ instances of a table, so tables over one domain give the same relation ids to th
   `relation_schemas` describe each relation, `relation_arities` the encoded arity of its tuples and
   `relation_slot_roles` each position of them.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
-  (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
+  (`@domain-<k>`, see [helper predicates](parsing-and-tasks.md#helper-predicates)) included; the predicates only a
+  problem's axioms define (`@problem-<k>`) are not. Goal relations exist for every
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`; the
   state relations of the static predicates (the types included) and of the derived predicates can be dropped
   (`include_static`, `include_derived=False`); their goal and history relations stay. `include_derived='domain'`
@@ -132,9 +133,9 @@ instances of a table, so tables over one domain give the same relation ids to th
   becomes a derived predicate of the problem alone, which no catalog lists under any `include_derived`, and the
   instance's goal is its [encoding goal](#goals). A goal, subgoal layer or history step of a row (`goals=`,
   `subgoals=`, `history=`) that sets a helper's atom bit has no relation to hold that literal under `'domain'`, and the
-  literal is not encoded. The front end marks the helpers where it creates them, whatever their names;
-  `relation_compiled` tells their relations apart, and a task read from the text format keeps the mark (predicate
-  kind `C`). Nullary predicates have relations of
+  literal is not encoded. The front end marks the helpers where it creates them and names them `@domain-<k>`, a name
+  no declared predicate can have; `relation_compiled` tells their relations apart, and a task read from the text format
+  keeps the mark (predicate kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
   their relation (a state relation without predicate virtual nodes has arity 0); with `nullary='omit'` they have none.
   `slot_role_names` and `entity_role_names` always list all nine roles. An action relation holds the schema's full
@@ -151,17 +152,17 @@ instances of a table, so tables over one domain give the same relation ids to th
   predicate ids, on the process or on the build.
 
 The philosophers domain declares the derived predicates `blocked` and `blocked-trans`; its universal quantifiers
-become the helpers `axiom_0` and `axiom_1`:
+become the helpers `@domain-0` and `@domain-1`:
 
 ```python
 phil = mymyr.Task.from_pddl("tests/data/pddl/philosophers/domain.pddl", "tests/data/pddl/philosophers/p03-phil4.pddl")
 every = encoding.EncodingSchema(phil)
 declared = encoding.EncodingSchema(phil, include_derived="domain")
 derived = lambda s: [n for n, lane in zip(s.relation_names, s.relation_lanes) if lane == "derived"]
-assert derived(every) == ["axiom_0", "axiom_1", "blocked", "blocked-trans"]
+assert derived(every) == ["@domain-0", "@domain-1", "blocked", "blocked-trans"]
 assert derived(declared) == ["blocked", "blocked-trans"]
 assert {n for n, c in zip(every.relation_names, every.relation_compiled) if c} == \
-    set(every.relation_names) - set(declared.relation_names)  # [+]axiom_0[g], axiom_0, [-]axiom_1[hist], ...
+    set(every.relation_names) - set(declared.relation_names)  # [+]@domain-0[g], @domain-0, [-]@domain-1[hist], ...
 assert declared.options["include_derived"] == "domain"
 ```
 

@@ -11,7 +11,7 @@
 // the front end builds them from the domain file). Table predicate ids [0, num_domain_predicates()) are the domain
 // predicates' ids in that order, a function of the domain alone: a training table and an evaluation table over other
 // instances give the same ids to the same domain predicates. Predicates a problem introduces (problem-local: derived
-// predicates that only problem axioms define, e.g. goal normalization's "axiom_0") mean something else in every
+// predicates that only problem axioms define, e.g. the goal helper "@problem-0") mean something else in every
 // problem, so each gets its own table id after the domain's, in (instance, predicate) order, and
 // predicate_instances() names its instance. Instance::pred_map maps instance predicate ids to table ids. Objects stay
 // instance-local: a label's objects are instance i's; object offsets (the exclusive cumsum of the instances' object

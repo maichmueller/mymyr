@@ -137,7 +137,7 @@ TaskData make_explore_data(const TaskData& T)
         if (p.kind == PredKind::Derived)
         {
             p.kind = PredKind::Fluent;
-            p.compiled = false;
+            p.helper = formalism::HelperKind::None;
         }
     R.static_init = T.static_init;
     R.fluent_init = T.fluent_init;

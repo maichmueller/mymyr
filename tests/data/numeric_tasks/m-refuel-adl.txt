@@ -6,7 +6,7 @@ S 1 number
 S 1 vehicle
 S 1 object
 F 2 at
-D 0 axiom_0
+P 0 @problem-0
 N 2
 S 0 fuel-level-max
 F 1 fuel-level

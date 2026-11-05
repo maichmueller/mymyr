@@ -358,8 +358,9 @@ public:
             e->get_effect());
     }
 
-    /// A derived predicate `axiom_<k>` over the free variables of `c` (in the order of their first occurrence, typed
-    /// as the parameter of `scope` that binds them, the innermost first) whose rule is `c`; returns its literal.
+    /// A helper predicate over the free variables of `c` (in the order of their first occurrence, typed as the
+    /// parameter of `scope` that binds them, the innermost first) whose rule is `c`; returns its literal. It is named
+    /// `axiom_<k>` like loki's helpers, unique among the domain's predicate names; the translation renames every helper.
     loki::Condition lift(const loki::Condition& c, const loki::ParameterList& scope)
     {
         loki::ParameterList ps;

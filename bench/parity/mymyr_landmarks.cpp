@@ -19,8 +19,8 @@
 //            the same task (its admission order restricted to one parent, which agrees with its generation order on
 //            every tie the stable sort keeps)
 //   --atoms lazy|frozen|auto (default lazy: no pilot search) is passed to Task::create.
-//   --dump FILE appends the names behind every hash to FILE; atom names are "pred(o1,o2)", the objects of introduced
-//   derived predicates (axiom_<k>) sorted.
+//   --dump FILE appends the names behind every hash to FILE; atom names are "pred(o1,o2)", the helper predicates under
+//   the fork's names (axiom_<k>) and with their objects sorted.
 
 #include "status_names.hpp"
 #include "mymyr/formalism/task_data.hpp"
@@ -137,7 +137,17 @@ std::string set_hash(std::vector<std::string> v)
     return hex(h);
 }
 
-bool introduced(std::string_view pred) { return pred.starts_with("axiom_"); }
+/// The predicate's name as the fork writes it: a helper (formalism::HelperKind) is the fork's "axiom_<k>", numbered over
+/// the domain's helpers and then the problem's in predicate id order.
+std::string fork_predicate_name(const formalism::TaskData& d, PredicateId p)
+{
+    if (!d.predicate(p).compiled())
+        return std::string(d.str(d.predicate(p).name));
+    u32 k = 0;
+    for (u32 q = 0; q < p.v; ++q)
+        k += d.predicates[q].compiled() ? 1 : 0;
+    return "axiom_" + std::to_string(k);
+}
 
 struct Args
 {
@@ -173,11 +183,11 @@ void dump_lines(const Args& a, const std::string& header, const std::vector<std:
 std::string atom_name(const Task& task, PredicateId p, std::span<const u32> args)
 {
     const auto& d = task.data();
-    const std::string pred(d.str(d.predicate(p).name));
+    const std::string pred = fork_predicate_name(d, p);
     std::vector<std::string> objs;
     for (u32 o : args)
         objs.push_back(task.object_name(ObjectId{o}));
-    if (introduced(pred))
+    if (d.predicate(p).compiled())
         std::sort(objs.begin(), objs.end());
     std::string s = pred + "(";
     for (std::size_t i = 0; i < objs.size(); ++i)
@@ -252,8 +262,8 @@ GraphOut describe(const Task& task, const landmarks::FactLandmarkGraph& g)
         std::vector<std::string> objs;
         for (u32 x : l.binding)
             objs.push_back(x == landmarks::k_free ? std::string("?") : task.object_name(ObjectId{x}));
-        const std::string pred(d.str(d.predicate(l.predicate).name));
-        if (introduced(pred))
+        const std::string pred = fork_predicate_name(d, l.predicate);
+        if (d.predicate(l.predicate).compiled())
             std::sort(objs.begin(), objs.end());
         std::string s = pred + "(";
         for (std::size_t i = 0; i < objs.size(); ++i)

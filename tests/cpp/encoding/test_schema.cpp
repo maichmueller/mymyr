@@ -138,7 +138,7 @@ TEST(EncodingSchema, DomainDerivedRelationsLeaveOutTheCompiledHelpers)
 {
     DomainSignature d = blocks();
     d.predicates.push_back({"reachable", 1, PredicateKind::Derived});
-    d.predicates.push_back({"axiom_0", 1, PredicateKind::Derived, true});
+    d.predicates.push_back({"@domain-0", 1, PredicateKind::Derived, true});
     const auto every = EncodingSchema::create(d);
     FlatOptions options;
     options.include_derived = DerivedRelations::Domain;
@@ -158,9 +158,9 @@ TEST(EncodingSchema, DomainDerivedRelationsLeaveOutTheCompiledHelpers)
     // None keeps the goal and history relations of both kinds
     options.include_derived = DerivedRelations::None;
     const auto none = EncodingSchema::create(d, options);
-    for (const char* name : {"[+]reachable[g]", "[+]axiom_0[g]", "[+]axiom_0[hist]"})
+    for (const char* name : {"[+]reachable[g]", "[+]@domain-0[g]", "[+]@domain-0[hist]"})
         EXPECT_TRUE(has(*none, name)) << name;
-    EXPECT_FALSE(has(*none, "axiom_0"));
+    EXPECT_FALSE(has(*none, "@domain-0"));
     EXPECT_FALSE(has(*none, "reachable"));
     EXPECT_EQ(to_string(DerivedRelations::Domain), "domain");
     EXPECT_EQ(parse_derived_relations("none"), DerivedRelations::None);
@@ -458,13 +458,13 @@ TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)
     const auto table = rl::TaskTable::single(task);
     const DomainSignature domain = DomainSignature::of(*table);
     EXPECT_EQ(domain.predicates.size(), table->num_domain_predicates());
-    const auto it = std::ranges::find(domain.predicates, std::string("axiom_1"), &DomainSignature::Predicate::name);
+    const auto it = std::ranges::find(domain.predicates, std::string("@domain-1"), &DomainSignature::Predicate::name);
     ASSERT_NE(it, domain.predicates.end());
     EXPECT_EQ(it->kind, PredicateKind::Derived);
     EXPECT_EQ(it->arity, 3u);
     const auto schema = EncodingSchema::create(*table);
-    EXPECT_TRUE(has(*schema, "axiom_0"));
-    EXPECT_TRUE(has(*schema, "[+]axiom_1[g]"));
+    EXPECT_TRUE(has(*schema, "@domain-0"));
+    EXPECT_TRUE(has(*schema, "[+]@domain-1[g]"));
     EXPECT_EQ(schema->fingerprint(), EncodingSchema::create(domain)->fingerprint());
     ASSERT_EQ(domain.schemas.size(), table->num_schemas());
     for (u32 s = 0; s < table->num_schemas(); ++s)

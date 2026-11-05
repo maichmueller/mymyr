@@ -63,11 +63,11 @@ def test_delta_horizon_has_no_relations_for_static_predicates(tasks):
 @needs_pddl
 def test_helper_predicates_of_quantified_conditions_have_relations(tasks):
     schema = EncodingSchema(tasks["philosophers"])
-    for name in ("axiom_0", "axiom_1", "[+]axiom_1[g]"):
+    for name in ("@domain-0", "@domain-1", "[+]@domain-1[g]"):
         assert name in schema.relation_names
     lanes = dict(zip(schema.relation_names, schema.relation_lanes))
-    assert lanes["axiom_0"] == lanes["axiom_1"] == lanes["blocked"] == "derived"
-    assert dict(zip(schema.relation_names, schema.relation_arities))["axiom_1"] == 3
+    assert lanes["@domain-0"] == lanes["@domain-1"] == lanes["blocked"] == "derived"
+    assert dict(zip(schema.relation_names, schema.relation_arities))["@domain-1"] == 3
 
 
 @needs_pddl
@@ -91,7 +91,7 @@ def test_problem_local_helpers_of_a_forall_goal_are_not_part_of_the_schema():
         local = list(table.predicate_names)[table.num_domain_predicates :]
         assert local, "the forall goal compiles to a helper predicate of its problem"
     names = schemas[0].relation_names
-    assert any(n.startswith("axiom_") for n in names)  # the domain's own helper, for the quantified precondition
+    assert any(n.startswith("@domain-") for n in names)  # the domain's own helper, for the quantified precondition
     for task, schema in zip(tasks, schemas):
         table = rl.TaskTable([task])
         for local in list(table.predicate_names)[table.num_domain_predicates :]:
@@ -110,7 +110,7 @@ def test_helper_predicates_are_stable_with_quantified_actions_in_other_domains()
     problems = [small / "test_problem.pddl", generated / "simple-f3-p2-c.pddl",
                 generated / "simple-f6-p4-q.pddl"]  # fmt: skip
     schemas = [EncodingSchema(mymyr.Task.from_pddl(domain, p)) for p in problems]
-    assert any(n.startswith("axiom_") for n in schemas[0].relation_names)
+    assert any(n.startswith("@domain-") for n in schemas[0].relation_names)
     # the front end splits `stop` into one schema per disjunct and adds parameters for existential variables: one
     # relation per arity (1 to 3 parameters), holding all of them
     assert "stop" not in schemas[0].relation_names
@@ -163,14 +163,14 @@ def test_catalog_metadata_is_consistent():
 def test_nullary_and_derived_predicates_follow_the_options():
     task = text_task("philosophers__p03-phil4")
     default = EncodingSchema(task)
-    assert "axiom_0" in default.relation_names
-    row = default.relation_id("axiom_0")
+    assert "@domain-0" in default.relation_names
+    row = default.relation_id("@domain-0")
     assert default.relation_arities[row] == 1 and default.relation_logical_arities[row] == 0
     assert default.relation_slot_roles[row] == [8]  # the auxiliary slot: nullary atoms are tuples over the graph's one auxiliary entity
     assert default.slot_role_names[8] == "auxiliary_slot" and default.entity_role_names[8] == "auxiliary"
-    assert default.relation_slot_roles[default.relation_id("[+]axiom_0[hist]")] == [7, 8]
+    assert default.relation_slot_roles[default.relation_id("[+]@domain-0[hist]")] == [7, 8]
     without_nullary = EncodingSchema(task, nullary="omit")
-    assert "axiom_0" not in without_nullary.relation_names and "[+]axiom_0[g]" not in without_nullary.relation_names
+    assert "@domain-0" not in without_nullary.relation_names and "[+]@domain-0[g]" not in without_nullary.relation_names
     assert without_nullary.entity_role_names == default.entity_role_names
     assert without_nullary.slot_role_names == default.slot_role_names
     assert 8 not in {role for roles in without_nullary.relation_slot_roles for role in roles}
@@ -203,7 +203,7 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
-PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0xF3C870FB1B1D5A8F, 0x3E9AC82F6983223C, 0x069637BAFBF3C417
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x68D9BEBD7C7C132A, 0x3E9AC82F6983223C, 0x069637BAFBF3C417
 FINGERPRINT_VARIANTS = {
     "repeated_literals_lowest": {"max_goal_level": 1, "repeated_literals": "lowest"},
     "repeated_literals_highest": {"max_goal_level": 1, "repeated_literals": "highest"},
@@ -262,7 +262,7 @@ def test_fingerprint_values_are_pinned():
     philosophers = text_task("philosophers__p03-phil4")
     gripper = text_task("gripper__prob05")
     assert EncodingSchema(gripper).schema_fingerprint == 0xCEEE4F842EB5101F
-    assert EncodingSchema(philosophers).schema_fingerprint == 0xA80E980B3FE26CF6
+    assert EncodingSchema(philosophers).schema_fingerprint == 0xDFE3B1E02FEB3783
     delta = EncodingSchema(philosophers, horizon_mode="delta", goal_derivations=["added_satisfied"],
                            predicate_virtual_nodes=True)  # fmt: skip
     assert delta.schema_fingerprint == PIN_DELTA

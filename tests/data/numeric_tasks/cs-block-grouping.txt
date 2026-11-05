@@ -3,10 +3,10 @@ P 7
 S 1 block
 S 1 number
 S 1 object
-D 0 axiom_0
-D 0 axiom_1
-D 0 axiom_2
-D 0 axiom_3
+P 0 @problem-0
+P 0 @problem-1
+P 0 @problem-2
+P 0 @problem-3
 N 6
 S 0 max_x
 S 0 min_x

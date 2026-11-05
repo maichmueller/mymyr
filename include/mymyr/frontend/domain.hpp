@@ -18,9 +18,9 @@
 //     between standard libraries;
 //   - loki's ToEffectNormalForm sums the numeric effects per (operator, function) in an unordered_map keyed by
 //     pointers; each run of such effects is ordered by (function name, arguments, operator);
-//   - the arguments of the derived predicates that loki generates for universal quantifiers ("axiom_<k>") are the
-//     free variables in the iteration order of an unordered_set of variable pointers; they are sorted by variable
-//     name (DomainOptions::generated_argument_order overrides the order), and the type literals of those axioms'
+//   - the arguments of the helper predicates that loki generates for universal quantifiers (formalism::HelperKind)
+//     are the free variables in the iteration order of an unordered_set of variable pointers; they are sorted by
+//     variable name (DomainOptions::generated_argument_order overrides the order), and the type literals of those axioms'
 //     parameters are ordered by parameter;
 //   - conditional effects of one schema are grouped in an std::unordered_map keyed by a condition *pointer*; with
 //     at most two groups it iterates in reverse insertion order (libstdc++ and libc++ alike; kept), with three or
@@ -97,8 +97,9 @@ private:
 
 struct DomainOptions
 {
-    /// Argument order of the derived predicates that loki generates for universal quantifiers ("axiom_<k>"), as
-    /// variable names (with or without '?'), by predicate name. The default sorts their arguments by variable name;
+    /// Argument order of the helper predicates that normalization generates for universal quantifiers
+    /// ("@domain-<k>", "@problem-<k>"; formalism::HelperKind), as variable names (with or without '?'), by predicate
+    /// name. The default sorts their arguments by variable name;
     /// naming an order here overrides it for the predicate. Predicates not listed keep the default.
     std::map<std::string, std::vector<std::string>> generated_argument_order;
 };

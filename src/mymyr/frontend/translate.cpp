@@ -1630,12 +1630,10 @@ std::vector<u32> hierarchy_ranks(const formalism::TaskData& t, std::span<const T
 
 // ================================================================================================ domain
 
-std::vector<u32> generated_predicate_perm(const loki::Predicate& p, const PredicateOrigin& origin)
+std::vector<u32> generated_predicate_perm(const loki::Predicate& p, const std::string& name, const PredicateOrigin& origin)
 {
-    const std::string& name = p->get_name();
     const auto& ps = p->get_parameters();
-    if (ps.size() < 2 || origin.declared.contains(name) || name.size() <= 6 || name.compare(0, 6, "axiom_") != 0
-        || name.find_first_not_of("0123456789", 6) != std::string::npos)
+    if (ps.size() < 2 || name.empty())
         return {};
     std::vector<u32> perm(ps.size());
     std::iota(perm.begin(), perm.end(), 0u);
@@ -1722,9 +1720,19 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
     std::vector<loki::Predicate> by_kind[3];
     for (const auto& p : preds)
         by_kind[static_cast<int>(pred_kind(p->get_name()))].push_back(p);
+    // the helpers: the derived predicates the domain does not declare, numbered in id order
+    absl::flat_hash_map<const loki::PredicateImpl*, std::string> helper;
+    for (const auto& p : by_kind[static_cast<int>(PredKind::Derived)])
+        if (!origin.declared.contains(p->get_name()))
+            helper.emplace(p, helper_name(HelperKind::Domain, static_cast<u32>(helper.size())));
+    auto helper_of = [&](const loki::Predicate& p) -> std::string
+    {
+        const auto it = helper.find(p);
+        return it == helper.end() ? std::string() : it->second;
+    };
     auto canonical_params = [&](const loki::Predicate& p) -> loki::ParameterList
     {
-        const std::vector<u32> perm = generated_predicate_perm(p, origin);
+        const std::vector<u32> perm = generated_predicate_perm(p, helper_of(p), origin);
         if (perm.empty())
             return p->get_parameters();
         loki::ParameterList out;
@@ -1735,13 +1743,15 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
     for (int kind = 0; kind < 3; ++kind)
         for (const auto& p : by_kind[kind])
         {
+            // a helper gets its own name (loki's name stays the key of the by-name lookups)
+            const std::string name = helper_of(p);
             Predicate out;
-            out.name = t.intern_string(p->get_name());
+            out.name = t.intern_string(name.empty() ? p->get_name() : name);
             out.kind = static_cast<PredKind>(kind);
-            out.compiled = out.kind == PredKind::Derived && !origin.declared.contains(p->get_name());
+            out.helper = name.empty() ? HelperKind::None : HelperKind::Domain;
             out.arity = static_cast<u32>(p->get_parameters().size());
             out.params = loki_params(*ds, t, canonical_params(p));
-            if (auto perm = generated_predicate_perm(p, origin); !perm.empty())
+            if (auto perm = generated_predicate_perm(p, name, origin); !perm.empty())
                 ds->pred_perm.emplace(static_cast<u32>(t.predicates.size()), std::move(perm));
             ds->pred_of.emplace(p, static_cast<u32>(t.predicates.size()));
             ds->pred_by_name.emplace(p->get_name(), static_cast<u32>(t.predicates.size()));
@@ -1928,18 +1938,21 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
     absl::flat_hash_map<std::string, u32> problem_preds_by_name;
     absl::flat_hash_map<u32, std::vector<u32>> problem_perm;
     std::vector<loki::ParameterList> problem_pred_params;  // canonical argument order
+    u32 num_helpers = 0;
     for (const auto& p : pl->get_predicates())
     {
         if (ds.pred_by_name.contains(p->get_name()))
             fail("problem predicate " + p->get_name() + " shadows a domain predicate");
         const u32 id = static_cast<u32>(t.predicates.size());
+        // a helper (a derived predicate the problem does not declare) gets its own name, numbered in id order
+        const std::string name = origin.declared.contains(p->get_name()) ? std::string() : helper_name(HelperKind::Problem, num_helpers++);
         Predicate out;
-        out.name = t.intern_string(p->get_name());
+        out.name = t.intern_string(name.empty() ? p->get_name() : name);
         out.kind = PredKind::Derived;
-        out.compiled = !origin.declared.contains(p->get_name());
+        out.helper = name.empty() ? HelperKind::None : HelperKind::Problem;
         out.arity = static_cast<u32>(p->get_parameters().size());
         loki::ParameterList lps = p->get_parameters();
-        if (auto perm = generated_predicate_perm(p, origin); !perm.empty())
+        if (auto perm = generated_predicate_perm(p, name, origin); !perm.empty())
         {
             lps.clear();
             for (u32 j : perm)

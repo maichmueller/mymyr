@@ -123,7 +123,7 @@ enum class Nullary : u8
 
 /// Which derived predicates have relations. All: every derived predicate has a state relation. None: none has one
 /// (their goal, subgoal and history relations stay). Domain: the derived predicates that normalization introduced
-/// (formalism::Predicate::compiled: the helpers `axiom_<k>` of quantified and disjunctive conditions) have no relation
+/// (formalism::Predicate::compiled: the helpers `@domain-<k>` of quantified and disjunctive conditions) have no relation
 /// at all, neither state nor goal, subgoal, history or horizon ones; every other predicate, the derived ones the domain
 /// declares included, keeps every relation the other options ask for. An instance's goal never lists a helper of the
 /// domain (a quantified or disjunctive goal part becomes a derived predicate of the problem, which no catalog lists);
