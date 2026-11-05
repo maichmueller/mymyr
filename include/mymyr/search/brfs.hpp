@@ -103,8 +103,9 @@ struct BrfsOptions
 struct BrfsResult
 {
     /// Solved (a goal state was expanded; the plan reaches the first one), Exhausted (every state of depth below
-    /// max_depth was expanded), OutOfStates (max_states or max_expanded stopped it), OutOfTime or Cancelled (the
-    /// token, or an observer's on_progress).
+    /// max_depth was expanded), Unsolvable (under stop_at_goal, a compiled goal that no state satisfies: the start
+    /// state alone is stored and nothing is expanded), OutOfStates (max_states or max_expanded stopped it), OutOfTime
+    /// or Cancelled (the token, or an observer's on_progress).
     search::SearchStatus status = search::SearchStatus::Exhausted;
     u64 states = 0;     // stored states (at most max(max_states, 1))
     u64 expanded = 0;

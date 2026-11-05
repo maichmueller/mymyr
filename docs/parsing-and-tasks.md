@@ -124,6 +124,13 @@ action stands for all objects of the type. A domain whose action has five unused
 one action per binding of its other parameters where it had 20^5 = 3.2 million duplicates; searches report
 `generated` over the collapsed actions.
 
+The test applies to the normalized schemas, after the problem's static atoms have decided what they can: a
+subformula over static predicates that is true or false in the problem is gone, and a disjunctive precondition is a
+schema per disjunct. A parameter that only such a subformula mentions, or only some of the disjuncts, is unused in the
+schemas without it: `(:action a :parameters (?x) :precondition (or (p ?x) (g)) ...)` keeps `?x` in the schema of
+`(p ?x)` and collapses it in the schema of `(g)`, whose one action stands for `(a o)` with any object `o` while `(g)`
+holds.
+
 The option is `collapse_unused_parameters=True` of `Task.from_pddl`, `Domain.instantiate`,
 `Domain.instantiate_string` and `rl.TaskTable.from_pddl` (C++: `frontend::InstantiateOptions::collapse_unused_parameters`;
 CLI: `--keep-unused-parameters` switches it off). With `False` every parameter is bound to every object of its type,

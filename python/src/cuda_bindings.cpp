@@ -2587,11 +2587,8 @@ void bind_cuda(nb::module_& parent)
     nb::class_<PyDeviceBrfs>(m, "BrfsResult",
                              "The device BrFS's result (mymyr.search.BrfsResult's fields, plus per-phase statistics and "
                              "the state space, which stays on the device).")
-        .def_prop_ro("status", [](const PyDeviceBrfs& x) {
-            const BrfsResult& r = x.r.result;
-            return r.solved ? search::SearchStatus::Solved
-                            : (r.exhausted ? search::SearchStatus::Exhausted : search::SearchStatus::OutOfStates);
-        }, "How the search ended (mymyr.search.Status).")
+        .def_prop_ro("status", [](const PyDeviceBrfs& x) { return x.r.result.status; },
+                     "How the search ended (mymyr.search.Status).")
         .def_prop_ro("solved", [](const PyDeviceBrfs& x) { return x.r.result.solved; },
                      "True when status is Status.SOLVED (there is a plan).")
         .def_prop_ro("plan", [](const PyDeviceBrfs& x) {

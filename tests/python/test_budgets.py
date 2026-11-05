@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built with
 FANOUT = 4096  # successors of the initial state
 
 
-def fanout_task(objects, extra=""):
+def fanout_task(objects, extra="", collapse_unused_parameters=True):
     """The initial state has `objects` successors, each a dead end: objects + 1 states (plus `extra` actions)."""
     domain = mymyr.Domain.from_string(
         "(define (domain d) (:requirements :strips :typing) (:types item)"
@@ -27,7 +27,8 @@ def fanout_task(objects, extra=""):
     )
     names = " ".join(f"o{i}" for i in range(objects))
     problem = f"(define (problem p) (:domain d) (:objects {names} - item) (:init (free)) (:goal (p o{objects - 1})))"
-    return mymyr.Task(domain.instantiate_string(problem), atoms="lazy")
+    data = domain.instantiate_string(problem, collapse_unused_parameters=collapse_unused_parameters)
+    return mymyr.Task(data, atoms="lazy")
 
 
 @pytest.fixture(scope="module")
@@ -100,12 +101,14 @@ CHECK_TRANSITIONS = 1024  # the searches check the time and the cancellation eve
 
 
 # One expansion with WIDE_TRANSITIONS transitions (witness pruning off), almost all to one successor state: without
-# checks inside the expansion a stop waits for the whole expansion.
+# checks inside the expansion a stop waits for the whole expansion. touch mentions none of its parameters: kept, they
+# give it one action per binding.
 @pytest.fixture(scope="module")
 def wide():
     task = fanout_task(
         256,
         " (:action touch :parameters (?x ?y ?z - item) :precondition (free) :effect (and (done) (not (free))))",
+        collapse_unused_parameters=False,
     )
     r = search.brfs(task, witness_pruning=False, stop_at_goal=False)
     assert r.exhausted and r.stats.generated == WIDE_TRANSITIONS

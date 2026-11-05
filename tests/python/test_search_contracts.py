@@ -369,6 +369,21 @@ def test_statically_false_goals_are_unsolvable_at_once(problem):
     assert not any(task.is_goal(s) for s in [task.initial_state, *task.successor_states(task.initial_state)])
 
 
+def test_brfs_without_stop_at_goal_expands_the_space_of_a_statically_false_goal():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string(
+        "(define (domain bits) (:requirements :strips :negative-preconditions) (:predicates (p ?x) (q))"
+        " (:action set :parameters (?x) :precondition (not (p ?x)) :effect (p ?x)))")
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem bits) (:domain bits) (:objects a b c) (:init) (:goal (and (p a) (q))))"))
+    assert search.brfs(task).status == Status.UNSOLVABLE  # no action adds q
+    for kw in ({}, {"threads": 2}, {"store": "compact"}):
+        r = search.brfs(task, stop_at_goal=False, **kw)
+        assert r.status == Status.EXHAUSTED and r.exhausted, kw
+        assert (r.stats.states, r.stats.expanded, r.stats.generated) == (8, 8, 12), kw
+
+
 # ------------------------------------------------------------------------------------------------ derived goals
 
 DERIVED_GOAL_DOMAIN = """(define (domain dg) (:requirements :strips :typing :derived-predicates :negative-preconditions)

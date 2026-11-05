@@ -254,10 +254,11 @@ def ipc_task(domain):
 
 
 def switches_task():
-    """A task whose state after `set` has only no-op successors (the fallback keeps them all)."""
+    """A task whose state after `set` has only no-op successors (the fallback keeps them all); its actions keep their
+    parameter, so that their rows have an argument."""
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
-    return mymyr.Task(mymyr.Domain.from_string(SWITCHES).instantiate_string(SWITCHES_PROBLEM))
+    return mymyr.Task(mymyr.Domain.from_string(SWITCHES).instantiate_string(SWITCHES_PROBLEM, collapse_unused_parameters=False))
 
 
 def noop_rows(task):
@@ -725,10 +726,12 @@ IDLES_PROBLEM = """(define (problem idles) (:domain idles) (:objects o1 o2 o3 o4
 
 
 def idles_table():
-    """A table whose initial state has 216 no-op successors (idle) and 6 effective ones (mark)."""
+    """A table whose initial state has 216 no-op successors (idle, with its unused parameters kept) and 6 effective
+    ones (mark)."""
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
-    return rl.TaskTable([mymyr.Task(mymyr.Domain.from_string(IDLES).instantiate_string(IDLES_PROBLEM))])
+    data = mymyr.Domain.from_string(IDLES).instantiate_string(IDLES_PROBLEM, collapse_unused_parameters=False)
+    return rl.TaskTable([mymyr.Task(data)])
 
 
 def observe_idles(where, caps, drop):

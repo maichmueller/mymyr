@@ -251,9 +251,17 @@ def base_states(task):
     return seen
 
 
+def act_successors(task, s):
+    """The successors of s under the actions of act, as sets of atoms."""
+    return {frozenset(atom_key(x) for x in task.apply(s, a).atoms()) for a in task.applicable_actions(s)
+            if str(a).startswith("(act")}
+
+
 def check(shape, context):
     domain, problem, parts = build(shape, context)
-    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    # every object as act's argument: the reference evaluates the formula per binding, also where the parameter is
+    # unused after normalization (only in a statically decided subformula, or in one disjunct of a split precondition)
+    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem, collapse_unused_parameters=False))
     goal = parse(parts["goal"])
     derived_rule = None
     if parts["derived"]:
@@ -280,6 +288,18 @@ def check(shape, context):
             if context == "nested-when" and ref.holds(parse(NESTED_GUARD), {"?x": o}):
                 want |= {("m", (w,)) for w in a_objects if ref.holds(parse(fill(shape, w)), {})}
             assert {atom_key(x) for x in task.apply(s, a).atoms()} == want, (shape, context, str(a), sorted(fluents))
+    # collapsed unused parameters keep the transitions: the same goal states, derived atoms and successors
+    collapsed = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    full = {frozenset(atom_key(a) for a in s.atoms()): s for s in states}
+    collapsed_states = base_states(collapsed)
+    assert len(collapsed_states) == len(states)
+    for c in collapsed_states:
+        key = frozenset(atom_key(a) for a in c.atoms())
+        s = full[key]
+        assert collapsed.is_goal(c) == task.is_goal(s), (shape, context, sorted(key))
+        assert ({atom_key(a) for a in collapsed.derived_atoms(c)} == {atom_key(a) for a in task.derived_atoms(s)}), (
+            shape, context, sorted(key))
+        assert act_successors(collapsed, c) == act_successors(task, s), (shape, context, sorted(key))
 
 
 @pytest.mark.parametrize("context", CONTEXTS)

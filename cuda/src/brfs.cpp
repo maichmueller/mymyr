@@ -357,7 +357,10 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                                  : std::max<u64>({lifted::wide_row(W) ? 1u : 8192u, floor, std::max<u64>(static_cast<u64>(l2) / 2, 1) / per});
     }
     u64 count = 1, lb = 0, le = 1;
-    bool stop = false, budget_hit = false;
+    // under stop_at_goal, a compiled goal that no state satisfies ends the search before the first expansion: the start
+    // state alone, Unsolvable (the CPU BrFS)
+    const bool unsatisfiable = o.stop_at_goal && task->compiled().goal.unsatisfiable;
+    bool stop = unsatisfiable, budget_hit = false;
     // the last windowed state and its transitions (the cut back to the budget need not enumerate them again)
     u64 windowed_state = ~u64{0}, windowed_transitions = 0;
     u64 goal_id = 0;
@@ -1399,7 +1402,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     }
     if (r.solved)
         r.plan = plan_to(goal_id);
-    if (o.fingerprint)
+    r.status = unsatisfiable ? search::SearchStatus::Unsolvable
+               : r.solved    ? search::SearchStatus::Solved
+               : exhausted   ? search::SearchStatus::Exhausted
+                             : search::SearchStatus::OutOfStates;
+    if (o.fingerprint && !unsatisfiable)
     {
         std::vector<u64> all(count * W);
         check(cudaMemcpyAsync(all.data(), states->device_data(), count * W * sizeof(u64), cudaMemcpyDeviceToHost, s),
