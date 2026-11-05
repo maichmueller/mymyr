@@ -536,7 +536,8 @@ def generated(count):
         except OverflowError:
             seed += 1
             continue
-        task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+        # the reference writes one action per binding, also of parameters that nothing but their type mentions
+        task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem, collapse_unused_parameters=False))
         out.append((seed, t, task, ref))
         seed += 1
     return out
