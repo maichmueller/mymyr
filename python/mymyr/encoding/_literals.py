@@ -176,7 +176,10 @@ def goal_masks(source, goals, task_ids=None, *, fixed="decide", instance_constan
     leaves out a literal of fixed truth that holds and sets ``unsatisfiable`` of its row for one that fails, ``'raise'``
     raises ValueError for any, ``'encode'`` keeps them as constant literals (see the module). ``instance_constants``
     adds the constant part of each row's instance goal (its literals of fixed truth) to the row's constant literals, so
-    that a row goal of the instance's own literals encodes as the instance goal does."""
+    that a row goal of the instance's own literals encodes as the instance goal does. With an encoder of
+    ``include_derived='domain'`` as the source, a literal over a helper that normalization introduced raises
+    ValueError: the encoding has no relation for it (the same holds for ``subgoal_masks``, ``history_masks`` and
+    ``literal_masks``, and ``encode`` refuses such bits in the masks it is given)."""
     rows = _rows(goals, "goals", False)
     return _masks(GoalMasks, _named_literal_masks(source, rows, _task_ids(task_ids), False, _fixed(fixed),
                                                   bool(instance_constants)))

@@ -75,7 +75,8 @@ public:
           m_row_words(m_words + m_numeric_words), m_derived_words(encoder.context().max_derived_words()),
           m_label_width(encoder.table().label_width()), m_subgoals(encoder.schema().has_subgoals()),
           m_history(encoder.schema().has_history()), m_levels(encoder.schema().options().max_goal_level),
-          m_constant_width(detail::k_constant_objects + encoder.context().view().max_arity)
+          m_constant_width(detail::k_constant_objects + encoder.context().view().max_arity),
+          m_history_max_steps(encoder.schema().options().history_max_steps.value_or(0))
     {
     }
 
@@ -166,6 +167,11 @@ public:
                 if (!zero_tail(in.goal_derived_pos + at, in.goal_derived_words, m_derived_words) ||
                     !zero_tail(in.goal_derived_neg + at, in.goal_derived_words, m_derived_words))
                     invalid("the derived goal of state " + std::to_string(g) + " sets an atom bit its instance does not have");
+                if (const std::string literal = omitted_literal(m_encoder.context(), instance_id,
+                                                                in.goal_derived_pos + at, in.goal_derived_neg + at);
+                    in.goal_pos && !literal.empty())
+                    invalid("the goal of state " + std::to_string(g) + " lists the literal " + literal + ", which " +
+                            k_omitted_literal_reason);
             }
             if (const LayerInput& l = in.subgoals; l.layers != 0)
             {
@@ -176,6 +182,7 @@ public:
                 if (!zero_layer_tails(l, g, l.layers))
                     invalid("the subgoal layers of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
+                check_omitted(l, g, instance_id, 0, std::min(l.layers, m_levels), "subgoal layer");
             }
             if (const LayerInput& l = in.history.masks; l.layers != 0 || in.history.count)
             {
@@ -191,6 +198,9 @@ public:
                 if (!zero_layer_tails(l, g, static_cast<u32>(steps)))
                     invalid("the history steps of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
+                // the encoded steps: the newest history_max_steps of the valid ones
+                const u32 used = static_cast<u32>(std::min<i64>(steps, m_history_max_steps ? m_history_max_steps : steps));
+                check_omitted(l, g, instance_id, static_cast<u32>(steps) - used, static_cast<u32>(steps), "history step");
             }
             if (in.goal_pos && in.goal_constants.rows)
                 check_constants(in.goal_constants, g, instance_id, 1, "the goal of state " + std::to_string(g));
@@ -227,6 +237,21 @@ public:
     }
 
     /// Whether the first `layers` layers of row g of `l` are zero beyond the words (derived words) of the table.
+    /// Refuses a literal over a predicate that the encoding leaves out in the derived masks of layers [first, end)
+    /// of row g of `l` (literals.hpp omitted_literal), naming the layer `name` + its index.
+    void check_omitted(const LayerInput& l, u64 g, u32 instance, u32 first, u32 end, const std::string& name) const
+    {
+        for (u32 k = first; k < end && l.derived_pos; ++k)
+        {
+            const u64 at = g * l.derived_stride + u64{k} * l.derived_words;
+            if (const std::string literal =
+                    omitted_literal(m_encoder.context(), instance, l.derived_pos + at, l.derived_neg + at);
+                !literal.empty())
+                invalid(name + " " + std::to_string(k) + " of state " + std::to_string(g) + " lists the literal " +
+                        literal + ", which " + k_omitted_literal_reason);
+        }
+    }
+
     [[nodiscard]] bool zero_layer_tails(const LayerInput& l, u64 g, u32 layers) const noexcept
     {
         for (u32 k = 0; k < layers; ++k)
@@ -849,6 +874,7 @@ private:
     std::vector<std::vector<i32>> m_goal_constants, m_sub_constants;
     std::vector<i32> m_gather_goal_constants, m_gather_sub_constants;
     u32 m_constant_width;
+    u32 m_history_max_steps;  // the schema's history_max_steps, 0: all steps
     u64 m_layered_rows = 0;        // the live rows that do
     // the history arena: the steps of each slot's history one after the other (a slot's span), oldest first
     std::vector<Span> m_history_spans;

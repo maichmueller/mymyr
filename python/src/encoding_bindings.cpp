@@ -3165,6 +3165,8 @@ void bind_encoding(nb::module_& parent)
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them, or the "
              "GoalMasks of `mymyr.encoding.goal_masks` (goals from lists of literals); the "
              "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "Under include_derived='domain' a derived bit of a helper atom (in the goals, subgoal layers or encoded "
+             "history steps) raises ValueError naming the literal: the encoding has no relation for it. "
              "With subgoal layers, repeated_literals decides which levels hold these literals. "
              "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
              "call with them equals a call without `goals` only for an instance whose complete goal has no literal "

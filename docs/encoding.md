@@ -127,7 +127,8 @@ instances of a table, so tables over one domain give the same relation ids to th
   keeps the derived predicates the domain declares (`:derived`) and leaves the helpers out altogether: the derived
   predicates that normalization introduces for universal quantifiers, disjunctive goal parts and quantified effect
   conditions. No instance goal lists a helper, so its goal relations would stay empty, and its state and history
-  relations would hold the truth of the condition it stands for (an action's applicability, say). The front end marks
+  relations would hold the truth of the condition it stands for (an action's applicability, say); a row goal, subgoal
+  layer or history step that lists one is refused ([Goals](#goals)). The front end marks
   the helpers where it creates them, whatever their names; `relation_compiled` tells their relations apart, and a task
   read from the text format keeps the mark (predicate kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
@@ -425,7 +426,13 @@ index](#entities), and the batch lists the goal entities as targets of group 0.
 goal_neg, goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns
 them. The arrays are `[N, W]` (`[N, D]` for the derived pair), u64 words or u32 halves, or `[1, W]` for one goal that
 every row shares. These masks and the row's constant literals (below) define the row's whole goal, and its
-`goal_complete` is 1.
+`goal_complete` is 1. Under `include_derived='domain'` the helpers that normalization introduces have no relation, so
+a derived mask bit of a helper atom (in a row's goal, its subgoal layers or the history steps it encodes) would leave
+part of the goal out: the host raises `ValueError` naming the literal and saying that `'domain'` leaves the helpers
+out, the device and the JAX targets flag the row invalid (`invalid_input`); `goal_masks`, `subgoal_masks`,
+`history_masks` and `literal_masks` of such an encoder raise for the literal at once (CUDA `literal_masks` sets status
+4 and skips it). Masks built from a `Task` or `TaskTable` know no options and hold the helper's bit; under
+`include_derived=True` it is encoded.
 With subgoal layers, `repeated_literals` decides which [levels](#subgoals) hold these literals. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
 that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
 pair a row's derived goal part is empty. The masks of `rl.goal_masks` (`table.goal_masks()`) are the instance's goal

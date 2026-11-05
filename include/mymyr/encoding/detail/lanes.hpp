@@ -231,6 +231,8 @@ enum LiteralColumn : u32
     k_literal_static_end,
     k_literal_arity,
     k_literal_predicate_kind,  // k_literal_fluent_predicate, ...
+    k_literal_omitted,         // 1: the encoding has no relation for the predicate, a helper that normalization
+                               // introduced and include_derived='domain' leaves out (ContextView::omits_derived)
     k_literal_columns,
 };
 
@@ -417,6 +419,9 @@ struct ContextView
     // of its fluent slots, derived slots and static tuples (null: a view without the section).
     const u32* literal_ranges = nullptr;  // [num_instances, num_predicates, k_literal_columns]
     u32 num_predicates = 0;               // the table's domain predicates
+    // Whether a predicate has k_literal_omitted set: the masks of a row's goal, subgoal layers and history steps must
+    // then leave the derived slots of those predicates clear (has_omitted_bits).
+    bool omits_derived = false;
 };
 
 /// One instance of a context, resolved to pointers and counts.
@@ -456,6 +461,7 @@ struct InstanceView
     bool nullary_auxiliary = true;  // ContextView::nullary_auxiliary
     const u32* literal_ranges = nullptr;  // the instance's rows of ContextView::literal_ranges (null: none)
     u32 num_predicates = 0;
+    bool omits_derived = false;  // ContextView::omits_derived
 };
 
 /// Column `k` of the instance, one of the columns from k_ext_lists to k_instance_columns.
@@ -514,6 +520,7 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     if (c.literal_ranges)
         v.literal_ranges = c.literal_ranges + static_cast<u64>(instance) * c.num_predicates * k_literal_columns;
     v.num_predicates = c.num_predicates;
+    v.omits_derived = c.omits_derived && c.literal_ranges;
     return v;
 }
 
@@ -900,6 +907,9 @@ inline constexpr u32 k_graph_bad_action_label = 16u;  // a row has a schema or o
 inline constexpr u32 k_graph_bad_layers = 32u;   // a subgoal layer sets a bit at or beyond the instance's slots
 inline constexpr u32 k_graph_bad_history = 64u;  // the same in a history step
 inline constexpr u32 k_graph_bad_constants = 128u;  // the row's constant literals cannot be encoded (constant_fault)
+inline constexpr u32 k_graph_omitted_literal = 256u;  // the derived part of the row's goal, subgoal layers or history
+                                                      // steps lists a predicate the encoding leaves out
+                                                      // (has_omitted_bits)
 
 MYMYR_HD u32 popcount64(u64 x)
 {
@@ -1106,6 +1116,80 @@ MYMYR_HD bool has_foreign_goal_bits_group(const Group& grp, const InstanceView& 
     if (in.goal_derived_neg)
         found |= static_cast<u32>(any_bit_from_group(grp, in.goal_derived_neg, v.derived_words, v.derived_slots));
     return found != 0;
+}
+
+/// Whether `words` set a bit in [begin, end).
+MYMYR_HD bool any_bit_between(const u64* words, u32 begin, u32 end)
+{
+    for (u64 base = u64{begin} & ~u64{63}; base < end; base += 64)
+    {
+        u64 m = words[base >> 6];
+        if (base < begin)
+            m &= ~u64{0} << (begin - base);
+        if (end - base < 64)
+            m &= (u64{1} << (end - base)) - 1;
+        if (m != 0)
+            return true;
+    }
+    return false;
+}
+
+/// The derived slots [begin, end) of the instance's `predicate`-th domain predicate if the encoding leaves it out
+/// (k_literal_omitted), else an empty range.
+MYMYR_HD void omitted_range(const InstanceView& v, u32 predicate, u32& begin, u32& end)
+{
+    const u32* r = v.literal_ranges + static_cast<u64>(predicate) * k_literal_columns;
+    begin = r[k_literal_derived_begin];
+    end = r[k_literal_omitted] != 0 ? r[k_literal_derived_end] : begin;
+}
+
+/// Whether the derived masks `derived` of one row (goal, subgoal layer or history step; null: none) set a bit of a
+/// predicate that the encoding leaves out: a literal the graph would have no relation for. The predicates are those of
+/// the lane in a group.
+template<class Group>
+MYMYR_HD u32 omitted_bits_lane(const Group& grp, const InstanceView& v, const u64* derived)
+{
+    u32 found = 0;
+    if (derived)
+        for (u32 p = grp.lane(); p < v.num_predicates; p += grp.size())
+        {
+            u32 begin = 0, end = 0;
+            omitted_range(v, p, begin, end);
+            found |= static_cast<u32>(begin < end && any_bit_between(derived, begin, end));
+        }
+    return found;
+}
+
+/// Whether the derived parts of the row's own goal, of its subgoal layers or of its history steps set a bit of a
+/// predicate that the encoding leaves out (ContextView::omits_derived), over the lanes of a group.
+template<class Group>
+MYMYR_HD bool has_omitted_bits_group(const Group& grp, const InstanceView& v, const RowInput& in,
+                                     const MaskLayers* subgoals, const MaskLayers* history)
+{
+    if (!v.omits_derived)
+        return false;
+    u32 found = 0;
+    if (in.goal_pos)
+        found |= omitted_bits_lane(grp, v, in.goal_derived_pos) | omitted_bits_lane(grp, v, in.goal_derived_neg);
+    const MaskLayers* const lists[2] = {subgoals, history};
+    for (const MaskLayers* layers : lists)
+        if (layers)
+            for (u32 l = 0; l < layers->layers; ++l)
+            {
+                const u64 at = static_cast<u64>(l) * layers->derived_words;
+                if (layers->derived_pos)
+                    found |= omitted_bits_lane(grp, v, layers->derived_pos + at);
+                if (layers->derived_neg)
+                    found |= omitted_bits_lane(grp, v, layers->derived_neg + at);
+            }
+    return grp.bit_or(found) != 0;
+}
+
+/// has_omitted_bits_group for one thread.
+MYMYR_HD bool has_omitted_bits(const InstanceView& v, const RowInput& in, const MaskLayers* subgoals,
+                               const MaskLayers* history)
+{
+    return has_omitted_bits_group(SoloGroup{}, v, in, subgoals, history);
 }
 
 /// Whether the tuple `a` is lexicographically before `b` (`arity` object ids each).
@@ -1990,6 +2074,9 @@ MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInpu
         if (has_foreign_layer_bits_group(grp, v, in.layers->history.masks))
             t.flags |= k_graph_bad_history;
     }
+    if (has_omitted_bits_group(grp, v, in, Layered && in.layers ? &in.layers->subgoals : nullptr,
+                               Layered && in.layers ? &in.layers->history.masks : nullptr))
+        t.flags |= k_graph_omitted_literal;
 }
 
 /// Whether the context has predicate virtual nodes.

@@ -399,7 +399,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
             t = ed::count_graph_group<Layered>(grp, r.v, r.in, counts, virtual_scratch);
         }
         ok = (t.flags & (ed::k_graph_bad_row | ed::k_graph_bad_goal | ed::k_graph_bad_layers | ed::k_graph_bad_history |
-                         ed::k_graph_bad_constants)) == 0;
+                         ed::k_graph_bad_constants | ed::k_graph_omitted_literal)) == 0;
     }
     if (grp.lane() != 0)
         return;

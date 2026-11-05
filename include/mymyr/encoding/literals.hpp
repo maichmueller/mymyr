@@ -84,6 +84,18 @@ struct LiteralMasks
 [[nodiscard]] std::string constant_fault_text(const EncodingContext& context, u32 instance,
                                               const detail::ConstantRows& rows, u32 layers);
 
+/// Why a literal over a predicate that the context's encoding leaves out cannot be given (the helpers that
+/// normalization introduced, under include_derived='domain'): the end of the message that names such a literal.
+inline constexpr const char* k_omitted_literal_reason =
+    "is over a helper predicate that normalization introduced, and include_derived='domain' leaves the helpers out: "
+    "the encoding has no relation for it";
+
+/// The first literal over a predicate that the context's encoding leaves out (detail::ContextView::omits_derived) in
+/// the derived masks `pos` and `neg` of `instance` (one row goal, subgoal layer or history step; null: none), its
+/// positive literals first, written as literal_text writes it; empty if there is none.
+[[nodiscard]] std::string omitted_literal(const EncodingContext& context, u32 instance, const u64* pos,
+                                          const u64* neg);
+
 /// The literal `predicate(objects...)` of `instance` written with the names of its predicate and objects, as
 /// `(on a b)` or `(not (on a b))`; ids out of range are written as numbers.
 [[nodiscard]] std::string literal_text(const EncodingContext& context, i64 instance, i64 predicate,

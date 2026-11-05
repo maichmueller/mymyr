@@ -770,7 +770,7 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             {
                 // the rows' contents (a task id outside the table, a row, goal mask, subgoal layer or history step
                 // narrower than its instance, a bit its instance has no atom for, a history count outside the row's
-                // steps): a flag, as on the device
+                // steps, a derived literal over a predicate the encoding leaves out): a flag, as on the device
                 sizes = encoding::FlatSizes{};
                 sizes.overflow = encoding::k_overflow_input;
             }

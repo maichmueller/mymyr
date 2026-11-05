@@ -821,7 +821,8 @@ def _check_sizes(sizes: dict) -> None:
     if sizes["invalid_input"]:
         raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or history "
                      "step narrower than its instance, a history count outside [0, steps], a bit that its instance "
-                     "has no atom for, or a constant literal that it cannot encode")
+                     "has no atom for, a constant literal that it cannot encode, or a derived literal over a helper "
+                     "predicate that include_derived='domain' leaves out")
     if sizes["index_overflow"]:
         history = f", history {sizes['history']}" if "history" in sizes else ""
         raise OverflowError(

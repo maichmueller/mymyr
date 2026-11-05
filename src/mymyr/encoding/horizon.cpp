@@ -213,7 +213,7 @@ void count_range(const HPass& p, u32 t)
     m.totals.assign(hi - lo, GraphTotals{});
     m.entities = m.tuples = m.args = m.targets = m.history = 0;
     m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = m.bad_constants = k_none;
-    m.narrow_subgoals = m.bad_subgoal_bits = m.bad_edge = k_none;
+    m.narrow_subgoals = m.bad_subgoal_bits = m.bad_edge = m.omitted = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
     if (p.kin)
     {
@@ -326,6 +326,15 @@ void count_range(const HPass& p, u32 t)
         if (has_row_constants<true>(row) && has_bad_constants<true>(v, row))
         {
             m.bad_constants = std::min(m.bad_constants, g);
+            continue;
+        }
+        if (has_omitted_bits(v, row, row.layers ? &row.layers->subgoals : nullptr, nullptr))
+        {
+            if (g < m.omitted)
+            {
+                m.omitted = g;
+                m.omitted_fault = omitted_input_fault(p.context, instance, row, "graph " + std::to_string(g) + " of the horizon");
+            }
             continue;
         }
         const CellList list = p.cells_of(v, g);
@@ -641,9 +650,15 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     run(pool, members, [&pass](u32 t) { count_range(pass, t); });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, bad_edge = k_none, too_big = k_none,
-        bad_constants = k_none;
+        bad_constants = k_none, omitted = k_none;
+    const std::string* omitted_fault = nullptr;
     for (const Member& m : s.members)
     {
+        if (m.omitted < omitted)
+        {
+            omitted = m.omitted;
+            omitted_fault = &m.omitted_fault;
+        }
         if (m.kin)
             too_big = std::min(too_big, m.kin->overflow);
         bad_id = std::min(bad_id, m.bad_id);
@@ -702,6 +717,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     if (bad_constants != k_none)
         invalid(constant_input_fault(context, in, pass.instance_of(bad_constants), bad_constants,
                                      of_graph(bad_constants)));
+    if (omitted != k_none)
+        invalid(*omitted_fault);
 
     // 3. scan the members
     const FlatSizes sizes = scan_members(s, *m_schema, graphs);

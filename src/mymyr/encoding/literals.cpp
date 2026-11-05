@@ -77,6 +77,32 @@ std::string literal_text(const EncodingContext& context, i64 instance, i64 predi
     return positive ? atom : "(not " + atom + ")";
 }
 
+std::string omitted_literal(const EncodingContext& context, u32 instance, const u64* pos, const u64* neg)
+{
+    const detail::ContextView cv = context.view();
+    if (instance >= cv.num_instances)
+        return {};
+    const detail::InstanceView v = detail::instance_view(cv, instance);
+    if (!v.omits_derived)
+        return {};
+    for (const bool positive : {true, false})
+    {
+        const u64* words = positive ? pos : neg;
+        if (!words)
+            continue;
+        for (u32 p = 0; p < v.num_predicates; ++p)
+        {
+            u32 begin = 0, end = 0;
+            detail::omitted_range(v, p, begin, end);
+            for (u32 slot = begin; slot < end; ++slot)
+                if ((words[slot >> 6] >> (slot & 63u)) & 1u)
+                    return literal_text(context, instance, p,
+                                        {v.derived_args + u64{slot} * v.max_arity, v.max_arity}, positive);
+        }
+    }
+    return {};
+}
+
 void resolve_literals(const EncodingContext& context, const LiteralArrays& literals, std::span<const i32> instances,
                       std::span<LiteralKind> kinds, std::span<i32> slots)
 {
@@ -175,6 +201,11 @@ LiteralMasks literal_masks(const EncodingContext& context, const LiteralArrays& 
         case LiteralKind::Derived:
         {
             const bool derived = s.kind == LiteralKind::Derived;
+            if (derived && v.omits_derived &&
+                v.literal_ranges[(static_cast<u64>(instance) * v.num_predicates + static_cast<u64>(predicate)) *
+                                     detail::k_literal_columns +
+                                 detail::k_literal_omitted] != 0)
+                throw std::invalid_argument("mymyr: encoding: the literal " + text() + " " + k_omitted_literal_reason);
             std::vector<u64>& mask =
                 derived ? (positive ? out.derived_pos : out.derived_neg) : (positive ? out.pos : out.neg);
             mask[cell * (derived ? out.derived_words : out.words) + (s.slot >> 6)] |= u64{1} << (s.slot & 63u);
