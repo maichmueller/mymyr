@@ -419,7 +419,9 @@ and worker observers can see the events of those expansions past the stop (an ob
 search on one thread, with the same result and no such events). `max_depth=d`
 expands the states of depth below `d` and stores those of depth `d`. `stop_at_goal=False` goes on through the whole
 reachable space (for counts such as `num_goal_states`); a goal state reached on the way still makes it `SOLVED` with
-that plan, and `exhausted` tells whether every state was expanded.
+that plan, and `exhausted` tells whether every state was expanded. Under `stop_at_goal`, a task goal that no state can
+satisfy (statically false) makes the search `UNSOLVABLE` at once, with the start state alone and no expansion; without
+it the search still goes through the whole space.
 
 ## Negative action costs
 
