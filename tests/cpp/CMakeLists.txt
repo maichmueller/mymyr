@@ -60,6 +60,9 @@ target_link_libraries(mymyr_tests PRIVATE mymyr::core mymyr_warnings GTest::gtes
 target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
     $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
 include(GoogleTest)
+# Every test binary is listed when ctest runs, not after it links: a listing slowed by a loaded machine then delays
+# ctest instead of failing the build.
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
 add_executable(mymyr_encoding_tests encoding/test_schema.cpp encoding/test_lanes.cpp
