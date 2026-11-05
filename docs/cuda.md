@@ -303,8 +303,8 @@ outputs are empty tensors. `rows=False` is the label-only form; `capacity=` make
 padded op also takes `k`; its tenth result holds the canonical positions (-1 padding), parent -1 marks padding and
 `offsets` stay CSR counts. All outputs have fake implementations for `torch.compile(fullgraph=True)`.
 
-The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
-[Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule
+The helper predicates `@domain-<k>` and `@problem-<k>` compiled from quantified and disjunctive conditions (see
+[Parsing and tasks](parsing-and-tasks.md#helper-predicates)) are axioms like any other: the device evaluates their rules, unless a rule
 has a numeric comparison or more parameters than the device kernels take; then the task's axioms run on the CPU
 (`counters["device_axioms"] == 0` of a device BrFS result) and the results are the same.
 The device evaluates numeric conditions and effects only in tasks with numeric state values: a task whose numeric

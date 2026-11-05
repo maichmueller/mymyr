@@ -44,14 +44,14 @@ The semantics of the supported PDDL fragment are as follows; the notes at the en
   condition, `imply`, typed `exists` and `forall` in any nesting, equality `(= ?x ?y)`, constants and numeric
   comparisons. They are compiled into conjunctions of literals and comparisons plus derived predicates, as in Fast
   Downward's translator. Negations are pushed down to literals and comparisons; a negated comparison is the
-  complementary one. A universal quantifier becomes the negated literal of a derived predicate `axiom_<k>` that holds
+  complementary one. A universal quantifier becomes the negated literal of a derived helper predicate that holds
   when some binding satisfies the negated body. Disjunctions split an action or a derived predicate rule into one copy
   per disjunct, and a conditional effect into one effect per disjunct. An existential precondition adds its variables
   to the action's parameters, so the actions list one instance per witness. A goal part that is not a literal or a
-  comparison becomes a nullary derived predicate `axiom_<k>`. So does the condition of an effect inside a `forall`
-  effect that quantifies universally over the effect's variable, as a derived predicate over its free variables. The
-  helper predicates `axiom_<k>` appear in `task.formalism` and among a state's derived atoms like any other derived
-  predicate. Two consequences: a comparison with an undefined side does not falsify a universal quantifier (it is
+  comparison becomes a nullary helper predicate. So does the condition of an effect inside a `forall` effect that
+  quantifies universally over the effect's variable, as a helper over its free variables. The helper predicates
+  (`@domain-<k>`, `@problem-<k>`, see [Helper predicates](#helper-predicates)) appear in `task.formalism` and among a
+  state's derived atoms like any other derived predicate. Two consequences: a comparison with an undefined side does not falsify a universal quantifier (it is
   false negated, too), and a derived predicate that depends on itself through a universal quantifier is refused as not
   stratifiable (`ValueError`).
 - **Conditional effects.** The effects whose conditions hold in the state an action is applied to fire, and every
@@ -111,6 +111,51 @@ Notes:
   a difference of depths, which would round fractional costs), so its goal distances equal plan costs;
 - heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), whereas the unit-cost heuristics count
   every action 1.
+
+## Helper predicates
+
+The derived predicates that normalization introduces for the conditions it compiles (see Conditions above) are
+*helpers*. Their names are a stable contract, so that code downstream can recognize and filter them:
+
+- `@domain-<k>`: a helper of the domain, for a universal quantifier in a precondition, an effect condition or a rule
+  body of the domain, or for the condition of an effect inside a `forall` effect. The domain's helpers are numbered
+  `k = 0, 1, ...` in the order of their predicates in `task.formalism.predicates`; they depend on the domain alone, so
+  every problem of a domain has the same domain helpers under the same names.
+- `@problem-<k>`: a helper of one problem, for a goal part that is not a literal or a comparison, a quantifier inside
+  it, or a rule body of the problem. Numbered from 0 per problem, after the domain's predicates: `@problem-0` of two
+  problems are unrelated predicates.
+
+A PDDL name cannot contain `@`, so no declared predicate has a helper's name and a declared predicate is never taken
+for one, whatever its name. The names are deterministic: the same files give the same helpers under the same names in
+every run, with any number of threads; within a kind they follow the order in which normalization meets the
+conditions in the files.
+
+`Predicate.helper` gives the kind: `None` for a declared predicate (every static and fluent one among them), `"domain"`
+or `"problem"` for a helper. The text format records it (predicate kinds `C` and `P`), so tasks read with
+`Task.from_text` and unpickled tasks keep it. Helpers appear under their names wherever predicates do: in
+`task.formalism`, in derived atoms (`(@domain-0 a b)`), in the relation names of encodings (`[+]@domain-0[g]`; see
+[Encoding](encoding.md) for `include_derived="domain"` and `relation_compiled`) and in the output of `mymyr info`.
+`Task.to_pddl` and `mymyr.write_pddl` spell a domain helper `helper-domain-<k>` (extending the prefix with `_` while
+that names a declared predicate, function or type) and write a problem helper into the goal as the formula it stands
+for; reading the files back gives a task whose former domain helpers are declared derived predicates.
+
+```python
+import mymyr
+
+doors = mymyr.Domain.from_string("""
+(define (domain doors) (:requirements :adl :derived-predicates)
+  (:predicates (open ?d) (locked ?d) (axiom_0))
+  (:derived (axiom_0) (exists (?d) (open ?d)))
+  (:action unlock :parameters (?d) :precondition (forall (?e) (not (open ?e))) :effect (not (locked ?d)))
+  (:action open :parameters (?d) :precondition (not (locked ?d)) :effect (open ?d)))""")
+doors_task = mymyr.Task(doors.instantiate_string(
+    "(define (problem p) (:domain doors) (:objects a b) (:init (locked a) (locked b))"
+    " (:goal (and (axiom_0) (or (open a) (open b)))))"))
+helpers = {p.name: p.helper for p in doors_task.formalism.predicates if p.helper is not None}
+assert helpers == {"@domain-0": "domain", "@problem-0": "problem"}
+assert next(p for p in doors_task.formalism.predicates if p.name == "axiom_0").helper is None  # declared
+assert [str(x) for x in doors_task.encoding_goal] == ["(axiom_0)"]
+```
 
 ## Unused parameters
 
@@ -374,8 +419,8 @@ each row its own width. `rl.numeric_values(table, states, task_ids)` decodes the
 float64. The CUDA expansion and environments take tasks of up to 2048 objects; wider instances run on the host
 ([CUDA](cuda.md)).
 
-**Encoding goal.** The planner works on the normalized goal, in which `forall`, `or` and `imply` have become derived
-predicates (`axiom_<k>`). `task.encoding_goal` is the goal as written, expanded into signed ground literals, for
+**Encoding goal.** The planner works on the normalized goal, in which `forall`, `or` and `imply` have become helper
+predicates (`@problem-<k>`). `task.encoding_goal` is the goal as written, expanded into signed ground literals, for
 encodings of the goal. A tuple of `GroundLiteral`, positive literals first, then by predicate and objects, without
 duplicates:
 
@@ -401,15 +446,14 @@ A conjunct that cannot be expanded (a disjunction with two or more disjuncts tha
 decide, a numeric constraint) is left out, and `task.encoding_goal_complete` is false. For a task whose goal is a
 conjunction of literals, the encoding goal is the goal itself and `encoding_goal_complete` is true. The planner's
 goal, `task.goal_condition` and the search are unaffected. `Task.from_text` has no goal as written: the encoding goal
-is the planner's goal without the `axiom_<k>` literals, complete if there were none, unless the text carries it
+is the planner's goal without the literals of helpers, complete if there were none, unless the text carries it
 (`NormalizedTask.to_text(encoding_goal=True)`). The bindings of the quantifiers of a goal are counted up front (the
 product of the sizes of their domains): a conjunct whose quantifiers would take the goal past 2^24 bindings in total
 is left out whole, and the goal is incomplete. A task built without a front end (a `TaskData` with no recorded
 encoding goal) gets the text derivation described above when the `Task` is created.
 
-The text derivation recognizes the derived predicates that goal normalization introduced by their name (`axiom_<k>`),
-so a task read from text whose goal uses a user predicate of that name has it left out of the encoding goal (and the
-goal incomplete). Tasks from PDDL are not affected: they expand the goal as written.
+The text derivation recognizes the helpers by their kind (`P` and `C` in the text, `Predicate.helper`), never by
+name: a declared predicate stays in the encoding goal whatever it is called.
 
 ## Binding generators
 
