@@ -52,8 +52,14 @@ __global__ void masks_kernel(encoding::detail::ContextView context, DeviceLitera
         const auto slot = encoding::detail::resolve_literal(
             context, input.task_ids ? input.task_ids[row] : 0, input.predicates[i],
             input.width ? input.objects + i * input.width : nullptr, input.width);
-        if (slot.kind == LiteralKind::Invalid)
+        if (slot.kind == LiteralKind::Invalid ||
+            (slot.kind == LiteralKind::Derived && context.omits_derived &&
+             context.literal_ranges[(static_cast<u64>(input.task_ids ? input.task_ids[row] : 0) * context.num_predicates +
+                                     static_cast<u64>(input.predicates[i])) *
+                                        encoding::detail::k_literal_columns +
+                                    encoding::detail::k_literal_omitted] != 0))
         {
+            // an invalid literal, or one over a predicate the encoding leaves out (no relation would list it)
             invalid(output.status);
             continue;
         }

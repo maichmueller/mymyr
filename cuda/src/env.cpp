@@ -179,7 +179,7 @@ struct DeviceEnv::Impl
     bool label = false;
     std::unique_ptr<DeviceMasks> masks;
     DeviceBuffer label_views;
-    u32 I = 1, D = 1, W = 1, L = 1, S = 0;  // instances (global), domains, row words, label width, segments per state
+    u32 I = 1, D = 1, W = 1, L = 0, S = 0;  // instances (global), domains, row words, label width, segments per state
     u32 NN = 0;
     u64 V = 0;   // words of a row of the views cache: the widest instance's view (VV words), then DW derived words
     u64 VV = 0;
@@ -1069,7 +1069,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     I.D = I.suite->num_domains();
     I.W = I.suite->words();
     I.NN = I.suite->numeric_words();
-    I.L = std::max<u32>(1, I.suite->label_width());
+    I.L = I.suite->label_width();
     const std::string why = fast_unsupported(*I.suite, I.cfg);
     I.label = I.cfg.actions == rl::ActionSpace::Label;
     if (I.label && (path == Path::General || !why.empty()))

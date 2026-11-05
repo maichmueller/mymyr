@@ -1053,6 +1053,19 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         goal_constants.insert(goal_constants.end(), rows.goal_constants.begin(), rows.goal_constants.end());
         literal_ranges.insert(literal_ranges.end(), rows.literal_ranges.begin(), rows.literal_ranges.end());
     }
+    // the helpers that include_derived='domain' leaves out: a row's literal over one has no relation to go to
+    if (own->options().include_derived == DerivedRelations::Domain)
+    {
+        const u32 P = table->num_domain_predicates();
+        for (u32 tp = 0; tp < P; ++tp)
+        {
+            if (table->predicate_compiled()[tp] == 0)
+                continue;
+            context->m_omits_derived = true;
+            for (u32 i = 0; i < instances.size(); ++i)
+                literal_ranges[(u64{i} * P + tp) * detail::k_literal_columns + detail::k_literal_omitted] = 1;
+        }
+    }
     auto shape = [&](const std::vector<i32>& rows) { return std::vector<i64>{static_cast<i64>(rows.size() / max_arity), max_arity}; };
     rl::ArrayBundle::Builder builder;
     builder.add("inst", rl::DType::U64, {static_cast<i64>(instances.size()), detail::k_instance_columns}, inst);
@@ -1122,6 +1135,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
                             : detail::k_numeric_storage_f64;
     v.literal_ranges = reinterpret_cast<const u32*>(at(14));
     v.num_predicates = m_table->num_domain_predicates();
+    v.omits_derived = m_omits_derived;
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     v.repeated_literals = m_schema->options().repeated_literals;

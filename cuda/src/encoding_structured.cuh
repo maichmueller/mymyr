@@ -77,7 +77,8 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
             (h.derived && ed::has_foreign_derived_bits(r.v, ed::horizon_derived(h, n))))
             return false;
     if (ed::has_foreign_goal_bits(r.v, r.in) ||
-        (r.in.layers && ed::has_foreign_layer_bits(r.v, r.in.layers->subgoals)))
+        (r.in.layers && ed::has_foreign_layer_bits(r.v, r.in.layers->subgoals)) ||
+        ed::has_omitted_bits(r.v, r.in, r.in.layers ? &r.in.layers->subgoals : nullptr, nullptr))
         return false;
     return !(ed::has_row_constants<true>(r.in) && ed::has_bad_constants<true>(r.v, r.in));
 }

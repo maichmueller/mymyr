@@ -119,7 +119,7 @@ void widen(PoolBatch& b, u32 W)
 struct CpuEnvPool::Impl
 {
     HostEnv env;
-    u32 N = 0, T = 1, W = 1, NN = 0, L = 1;
+    u32 N = 0, T = 1, W = 1, NN = 0, L = 0;
     u32 fixed_words = 0;  // PoolOptions::words: the batches' row width (0: each batch's widest instance's)
     std::vector<u32> inst_words;  // the atom words of each instance (global ids)
     bool uniform = true;          // every instance has W atom words
@@ -435,7 +435,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
         I.inst_words[g] = tt.instance(g).words;
         I.uniform = I.uniform && I.inst_words[g] == I.W;
     }
-    I.L = std::max<u32>(1, tt.label_width());
+    I.L = tt.label_width();
     I.goals = options.goals;
     const u64 RW = I.W + I.NN;
     I.states.assign(u64{I.N} * RW, 0);

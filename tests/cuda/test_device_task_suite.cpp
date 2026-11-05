@@ -399,7 +399,9 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, const r
             crossed += S.domain_of(static_cast<u32>(before[i])) != S.domain_of(static_cast<u32>(h.v.task_ids[i])) ? 1 : 0;
     }
     if (S.num_domains() > 1)
+    {
         EXPECT_GT(crossed, 0u);  // some rows restarted in another domain
+    }
     other.synchronize();
 }
 
@@ -1267,8 +1269,12 @@ TEST(DeviceTaskSuiteExpand, AxiomTablesExpandInMultiModeEqualHost)
             const rl::TaskSuite& S = *ns.suite;
             cuda::SuiteExpander ex(ctx, ns.suite);
             for (u32 d = 0; d < S.num_domains(); ++d)
+            {
                 if (S.table(d)->size() > 1)
+                {
                     EXPECT_EQ(ex.domain(d).mode(), cuda::DeviceExpander::Mode::Multi) << S.domain_name(d);
+                }
+            }
             std::vector<u64> rows;
             std::vector<i32> ids;
             reachable_rows(S, 48, rows, ids);

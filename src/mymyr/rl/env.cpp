@@ -160,7 +160,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
     m_init_goal.resize(m_suite->size());
     m_init_hash.resize(m_suite->size());
     m_tasks.resize(m_suite->size());
-    m_label_width = std::max<u32>(1, m_suite->label_width());
+    m_label_width = m_suite->label_width();
     for (u32 i = 0; i < m_suite->size(); ++i)
     {
         const Task& task = *m_suite->task(i);

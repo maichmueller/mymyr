@@ -291,7 +291,7 @@ void count_range(const Pass& p, u32 t)
     m.entities = m.tuples = m.args = m.targets = m.history = m.numeric = 0;
     m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = m.bad_constants = k_none;
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
-    m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
+    m.bad_slice = m.bad_action_order = m.bad_action_label = m.omitted = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
     const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.layered || p.simple;
     if (p.starts_stride)
@@ -365,7 +365,8 @@ void count_range(const Pass& p, u32 t)
         totals = detail::count_graph<Layered>(v, input, cell_counts, m.virtual_scratch.data());
         if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
                             detail::k_graph_bad_action_label | detail::k_graph_bad_layers |
-                            detail::k_graph_bad_history | detail::k_graph_bad_constants))
+                            detail::k_graph_bad_history | detail::k_graph_bad_constants |
+                            detail::k_graph_omitted_literal))
         {
             if (totals.flags & detail::k_graph_bad_row)
                 m.bad_bits = std::min(m.bad_bits, g);
@@ -379,6 +380,14 @@ void count_range(const Pass& p, u32 t)
                 m.bad_history_bits = std::min(m.bad_history_bits, g);
             else if (totals.flags & detail::k_graph_bad_action_label)
                 m.bad_action_label = std::min(m.bad_action_label, g);
+            else if (totals.flags & detail::k_graph_omitted_literal)
+            {
+                if (g < m.omitted)
+                {
+                    m.omitted = g;
+                    m.omitted_fault = detail::omitted_input_fault(p.context, instance, input, "row " + std::to_string(g));
+                }
+            }
             else
                 m.bad_action_order = std::min(m.bad_action_order, g);
             continue;
@@ -716,9 +725,15 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none, bad_constants = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, narrow_history = k_none, bad_history_bits = k_none,
-        bad_history_count = k_none;
+        bad_history_count = k_none, omitted = k_none;
+    const std::string* omitted_fault = nullptr;
     for (const Member& m : s.members)
     {
+        if (m.omitted < omitted)
+        {
+            omitted = m.omitted;
+            omitted_fault = &m.omitted_fault;
+        }
         narrow_subgoals = std::min(narrow_subgoals, m.narrow_subgoals);
         bad_subgoal_bits = std::min(bad_subgoal_bits, m.bad_subgoal_bits);
         narrow_history = std::min(narrow_history, m.narrow_history);
@@ -778,6 +793,8 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     if (bad_constants != k_none)
         invalid(detail::constant_input_fault(context, in, pass.instance_of(bad_constants), bad_constants,
                                              "row " + std::to_string(bad_constants)));
+    if (omitted != k_none)
+        invalid(*omitted_fault);
     if (bad_slice != k_none)
         invalid("the offsets of the action expansion do not give state " + std::to_string(bad_slice) +
                 " a slice of its rows");

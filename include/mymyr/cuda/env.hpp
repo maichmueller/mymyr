@@ -147,7 +147,7 @@ public:
     /// Numeric words per row, in the CPU encoding of each instance.
     [[nodiscard]] u32 numeric_words() const noexcept { return suite()->numeric_words(); }
     [[nodiscard]] u32 row_words() const noexcept { return words() + numeric_words(); }
-    /// Largest schema arity (at least 1): the label width of step().
+    /// Largest schema arity (0 when every schema is nullary): the label width of step().
     [[nodiscard]] u32 label_width() const noexcept;
     /// Columns of the fast path's cache arrays: EnvBatch::counts [rows, cache_schemas()] (u32 words of the count cache,
     /// lifted::CountCache: the counts per schema come first, TaskSuite::max_schemas() of them; then, over several

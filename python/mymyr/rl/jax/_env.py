@@ -617,7 +617,7 @@ class Env:
                 state.sampling_seed,
                 act,
                 nxt,
-                self.label_width if self.labels else 0,
+                self.label_width if self.labels else None,
                 self.final_state,
             )
         (states, task_id, steps, draws, count, counts, views, gpos, gneg, at_goal, visited, visited_count, visited_status,

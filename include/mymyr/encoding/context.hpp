@@ -99,5 +99,6 @@ private:
     u32 m_max_arity = 1;
     u32 m_max_derived_words = 0;
     u32 m_num_virtual = 0;
+    bool m_omits_derived = false;  // detail::ContextView::omits_derived
 };
 }

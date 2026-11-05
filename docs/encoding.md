@@ -132,8 +132,8 @@ instances of a table, so tables over one domain give the same relation ids to th
   (`:derived`) included. An instance's goal never names a helper of the domain: a goal part that is not a literal
   becomes a derived predicate of the problem alone, which no catalog lists under any `include_derived`, and the
   instance's goal is its [encoding goal](#goals). A goal, subgoal layer or history step of a row (`goals=`,
-  `subgoals=`, `history=`) that sets a helper's atom bit has no relation to hold that literal under `'domain'`, and the
-  literal is not encoded. The front end marks the helpers where it creates them and names them `@domain-<k>`, a name
+  `subgoals=`, `history=`) that sets a helper's atom bit has no relation to hold that literal under `'domain'` and is
+  refused ([Goals](#goals)). The front end marks the helpers where it creates them and names them `@domain-<k>`, a name
   no declared predicate can have; `relation_compiled` tells their relations apart, and a task read from the text format
   keeps the mark (predicate kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
@@ -418,8 +418,7 @@ The literals of fluent and derived predicates are evaluated against the state wo
 static predicates and of atoms without a slot (not reachable by any state) have a fixed truth and form the constant part
 of the goal. A statically false literal is still emitted: in its plain relation, and in `[unsat]` for a positive
 literal over a false atom or `[sat]` for a negative one. Goal literals whose predicate has no goal relation (equality
-without `equality=True`, nullary atoms with `nullary='omit'`, the types, the helpers under
-`include_derived='domain'`) are not encoded. A cell lists its tuples in the lexicographic order of their arguments,
+without `equality=True`, nullary atoms with `nullary='omit'`, the types) are not encoded. A cell lists its tuples in the lexicographic order of their arguments,
 constant part and masked literals merged.
 
 With `target_sources=("goal",)` every plain goal tuple gets a **goal entity** (after the objects and the auxiliary
@@ -432,7 +431,13 @@ index](#entities), and the batch lists the goal entities as targets of group 0.
 goal_neg, goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns
 them. The arrays are `[N, W]` (`[N, D]` for the derived pair), u64 words or u32 halves, or `[1, W]` for one goal that
 every row shares. These masks and the row's constant literals (below) define the row's whole goal, and its
-`goal_complete` is 1.
+`goal_complete` is 1. Under `include_derived='domain'` the helpers that normalization introduces have no relation, so
+a derived mask bit of a helper atom (in a row's goal, its subgoal layers or the history steps it encodes) would leave
+part of the goal out: the host raises `ValueError` naming the literal and saying that `'domain'` leaves the helpers
+out, the device and the JAX targets flag the row invalid (`invalid_input`); `goal_masks`, `subgoal_masks`,
+`history_masks` and `literal_masks` of such an encoder raise for the literal at once (CUDA `literal_masks` sets status
+4 and skips it). Masks built from a `Task` or `TaskTable` know no options and hold the helper's bit; under
+`include_derived=True` it is encoded.
 With subgoal layers, `repeated_literals` decides which [levels](#subgoals) hold these literals. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
 that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
 pair a row's derived goal part is empty. The masks of `rl.goal_masks` (`table.goal_masks()`) are the instance's goal

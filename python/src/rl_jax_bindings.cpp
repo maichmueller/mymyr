@@ -108,7 +108,7 @@ struct Entry : FfiEntry
     rl::TaskSuitePtr suite;
     rl::EnvConfig cfg;
     std::string path = "auto";
-    u32 W = 1, NN = 0, L = 1, H = 0;
+    u32 W = 1, NN = 0, L = 0, H = 0;
     std::mutex host_mutex;
     std::unique_ptr<rl::HostEnv> host;
     std::vector<u64> scratch_succ;
@@ -168,7 +168,7 @@ public:
             e->host = std::make_unique<rl::HostEnv>(e->suite, cfg);
         }
         e->W = e->host->words();
-        e->L = std::max<u32>(1, e->suite->label_width());
+        e->L = e->suite->label_width();
         for (u32 i = 0; i < e->suite->size(); ++i)
             m_init_count.push_back(e->host->initial_count(i));
         if (!device.is_none())

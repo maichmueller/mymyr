@@ -761,7 +761,8 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None, *, 
                 raise _error(_INVALID + ": a task id outside the table, a state row, goal mask, subgoal layer or "
                              "history step narrower than its instance, invalid expansion labels, horizon offsets or "
                              "endpoints, a history count outside [0, steps], a bit that its instance has no atom "
-                             "for, or a constant literal that it cannot encode")
+                             "for, a constant literal that it cannot encode, or a derived literal over a helper "
+                             "predicate that include_derived='domain' leaves out")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
                                     f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}, "

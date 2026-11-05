@@ -79,7 +79,7 @@ visiting the full applicable set when a witness can be found early.
 
 `mymyr.rl.torch.BatchedEnv(table, N, actions="label")` accepts
 `env.step((schema, binding))`: `schema` is int32 `[N]` and `binding` is int32 `[N, L]`, with at least the suite's
-largest schema arity. Schema ids belong to each row's domain and object ids to its instance; columns past an
+largest schema arity (`label_width`). Schema ids belong to each row's domain and object ids to its instance; columns past an
 action's arity are ignored. The result's `schema` and `binding` report the applied action, with `-1` padding and
 all `-1` for a row that did not move. An inapplicable or malformed label in a nonterminal state with applicable
 actions leaves the state unchanged, sets `invalid`, and earns `step_reward`.
@@ -90,6 +90,12 @@ Dead ends, absorbing goals, rewards, truncation, goal masks, `next_task_ids`, sa
 `final_states` have the same semantics as `actions="index"` (the default). Labels include every applicable binding,
 regardless of `witness_pruning` and `canonical_order`. `step(None)` and `random_actions()` raise `ValueError` in
 label mode, since a uniform random action requires enumerating the action space.
+
+`label_width` is the largest schema arity, so a table or suite whose schemas are all nullary (for instance once
+[unused parameters collapse](parsing-and-tasks.md#unused-parameters)) has `label_width` 0, and every binding array has zero columns:
+`rl.expand` (`[M, 0]`), the `CpuEnvPool`, the torch `BatchedEnv` on the host and the device (step results `[N, 0]`,
+label steps take `binding` `[N, 0]`, captured steps alike), the JAX env (`info["binding"]` `[N, 0]`, `expand`
+`[N, K, 0]`, `expand_flat` `[M, 0]`), the plan rows of `mymyr.datasets` and the labels of state spaces and their files.
 
 Label stepping runs on the host and torch CPU, including `torch.compile`, and on a CUDA device (see
 [Action masks and label steps on the device](#action-masks-and-label-steps-on-the-device)). The C++ API selects `EnvConfig::actions = rl::ActionSpace::Label` and passes

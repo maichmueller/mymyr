@@ -13,6 +13,7 @@
 #include <memory>
 #include <functional>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace mymyr::encoding
@@ -37,6 +38,31 @@ inline std::string constant_input_fault(const EncodingContext& context, const En
     return "the subgoal layers of " + graph + ": " +
            constant_fault_text(context, instance, constant_rows(in.subgoal_constants, g),
                                std::min(in.subgoals.layers, k_max_subgoal_levels));
+}
+
+/// Which literal of the derived part of graph g's own goal, subgoal layers or history steps (`in`, of `instance`, named
+/// `graph` in the message) is over a predicate that the encoding leaves out (k_graph_omitted_literal).
+inline std::string omitted_input_fault(const EncodingContext& context, u32 instance, const RowInput& in,
+                                       const std::string& graph)
+{
+    std::string where = "the goal of ";
+    std::string literal = in.goal_pos ? omitted_literal(context, instance, in.goal_derived_pos, in.goal_derived_neg)
+                                      : std::string();
+    auto scan = [&](const MaskLayers& layers, const std::string& name, u32 first)
+    {
+        for (u32 l = 0; l < layers.layers && literal.empty(); ++l)
+        {
+            const u64 at = u64{l} * layers.derived_words;
+            literal = omitted_literal(context, instance, layers.derived_pos ? layers.derived_pos + at : nullptr,
+                                      layers.derived_neg ? layers.derived_neg + at : nullptr);
+            where = name + " " + std::to_string(first + l) + " of ";
+        }
+    };
+    if (literal.empty() && in.layers)
+        scan(in.layers->subgoals, "subgoal layer", 0);
+    if (literal.empty() && in.layers)
+        scan(in.layers->history.masks, "history step", in.layers->history.first);
+    return where + graph + " lists the literal " + literal + ", which " + k_omitted_literal_reason;
 }
 
 /// The kin scratch of the graphs of a member's slice (horizon relations _sibling_ and _cousin_): per graph, the words
@@ -68,6 +94,8 @@ struct alignas(k_cache_line) Member
     u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
+    u64 omitted = k_none;   // the first graph whose masks list a literal the encoding leaves out
+    std::string omitted_fault;  // why (omitted_input_fault)
     std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
     std::vector<u64> mapped_state;     // one destination-width atom row, reused for count and fill
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
