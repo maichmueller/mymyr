@@ -131,7 +131,7 @@ struct HostEnvs
     HostEnvs(const Table& T, const std::vector<i32>& ids, bool goals)
     {
         const u64 n = ids.size();
-        const u32 W = T.words(), NN = T.numeric_words(), L = std::max<u32>(1, T.label_width());
+        const u32 W = T.words(), NN = T.numeric_words(), L = T.label_width();
         v.states.assign(n * (W + NN), 0);
         v.final_states.assign(n * (W + NN), 0);
         v.draws.assign(n, 0);
