@@ -328,7 +328,7 @@ TOGGLES = """(define (domain toggles) (:requirements :strips :negative-precondit
  (:action down :parameters () :precondition (p) :effect (not (p)))
  (:action finish :parameters () :precondition (p) :effect (q)))"""
 TOGGLES_PROBLEMS = ["(:init) (:goal (q))", "(:init (q)) (:goal (q))", "(:init (p)) (:goal (and (q) (not (p))))"]
-# a derived goal and numeric goals: the general path only, without goal masks
+# a derived goal (the device closes the axiom on the fast path) and numeric goals (the general path): without goal masks
 RELAY = """(define (domain relay) (:requirements :strips :derived-predicates)
  (:predicates (at ?x) (link ?x ?y) (exit ?x) (out ?x) (alive))
  (:derived (out ?x) (and (at ?x) (exit ?x)))
@@ -348,7 +348,8 @@ LEVEL_PROBLEMS = [
     "(:init (alive) (= (level) 0)) (:goal (>= (level) 2))",
     "(:init (= (level) 1)) (:goal (>= (level) 3))",
 ]
-FAST_KINDS = ("corridor", "toggles", "suite")
+FAST_KINDS = ("corridor", "toggles", "suite", "derived")
+MASK_KINDS = ("corridor", "toggles", "suite")  # goals of fluent atoms, which per-env goal masks carry
 CONFIG = dict(max_steps=5, step_reward=-1.0, goal_reward=5.0, dead_end_reward=-2.0)
 DEAD_ENDS = [("no_successors", True), ("no_successors", False), ("none", True)]
 
@@ -412,7 +413,7 @@ def test_device_absorbing_rollout_equals_host(absorbing_tables, dead_end, termin
         assert (rt.fast_unsupported(table) == "") == fast
         instances = len(table)
         sampler = rl.InstanceSampler(instances, weights_of(instances)) if autoreset else "uniform"
-        for goals in (False, True) if fast else (False,):
+        for goals in (False, True) if kind in MASK_KINDS else (False,):
             cfg = dict(CONFIG, dead_end=dead_end, dead_end_terminal=terminal, autoreset=autoreset, goals=goals, seed=7,
                        task_ids=(np.arange(n) % instances).astype(np.int32), sampler=sampler)  # fmt: skip
             ref = absorbing_rollout(rt.BatchedEnv(table, n, **cfg), steps, autoreset)
@@ -442,7 +443,7 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
     for kind in FAST_KINDS:
         table, instances = absorbing_tables[kind], len(absorbing_tables[kind])
         sampler = rl.InstanceSampler(instances, weights_of(instances))
-        cfg = dict(CONFIG, sampler=sampler, seed=11, goals=kind != "toggles")
+        cfg = dict(CONFIG, sampler=sampler, seed=11, goals=kind in MASK_KINDS and kind != "toggles")
         host = rt.BatchedEnv(table, n, **cfg)
         ref = [step_arrays(host.step(final=True)) for _ in range(K * R)]
         env = rt.BatchedEnv(table, n, device=dev, **cfg)
@@ -465,7 +466,7 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
 @pytest.mark.parametrize("autoreset", [False, True])
 def test_jax_device_absorbing_scan_equals_cpu(absorbing_tables, dead_end, terminal, autoreset):
     """A jitted scan over solved and dead-end rows (given and random actions, sampled resets) on the GPU, general and
-    fast path (derived and numeric goals: the general path), equals the same scan on the CPU."""
+    fast path (numeric goals: the general path), equals the same scan on the CPU."""
     jax = pytest.importorskip("jax")
     import jax.numpy as jnp
 
