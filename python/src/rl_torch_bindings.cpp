@@ -123,7 +123,7 @@ public:
             if (threads > 1)
                 m_pool = std::make_unique<ThreadPool>(threads);
             m_W = m_host->words();
-            m_L = std::max<u32>(1, t->label_width());
+            m_L = t->label_width();
             for (u32 i = 0; i < t->size(); ++i)
                 m_init_count[i] = m_host->initial_count(i);
         }
@@ -712,7 +712,7 @@ private:
     std::unique_ptr<ThreadPool> m_pool;
     std::mutex m_mutex;  // one call at a time (the Env's scratch); held only while detached from Python
     int m_device = -1;
-    u32 m_W = 1, m_NN = 0, m_L = 1, m_S = 0;
+    u32 m_W = 1, m_NN = 0, m_L = 0, m_S = 0;
     u64 m_V = 0;
     std::vector<u32> m_init_count;
 };
@@ -778,7 +778,7 @@ void bind_rl_torch(nb::module_& parent)
         .def_prop_ro("words", &PyEnv::words, "Atom words per state row (the table's words, at least 1).")
         .def_prop_ro("numeric_words", &PyEnv::numeric_words, "Numeric words per row after the atom words.")
         .def_prop_ro("row_words", &PyEnv::row_words, "Words per state row: words + numeric_words.")
-        .def_prop_ro("label_width", &PyEnv::label_width, "Columns of step()'s binding output (the largest arity, >= 1).")
+        .def_prop_ro("label_width", &PyEnv::label_width, "Columns of step()'s binding output (the largest schema arity; 0 when every schema is nullary).")
         .def_prop_ro("cache_schemas", &PyEnv::cache_schemas, "Columns of the fast path's counts cache (0 otherwise).")
         .def_prop_ro("cache_view_words", &PyEnv::cache_view_words, "Columns of the fast path's views cache (0 otherwise).")
         .def_prop_ro("initial_counts", &PyEnv::initial_counts, "Successors of each instance's initial state [I].")

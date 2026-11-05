@@ -150,9 +150,10 @@ def env_refresh(handle: int, states, task_ids, counts, views, goal_pos, goal_neg
 
 def env_step(
     handle: int, states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, visited, visited_count, visited_status,
-    reset_counts, env_id, seed, sampling_seed, action, next_task_ids, label_width: int, final: bool,
+    reset_counts, env_id, seed, sampling_seed, action, next_task_ids, label_width: Optional[int], final: bool,
 ):  # fmt: skip
-    """The state arrays (reset_counts included) and transition outputs of mymyr_env_step."""
+    """The state arrays (reset_counts included) and transition outputs of mymyr_env_step; ``label_width`` None: no
+    binding labels (an empty [0, 1] output), else their columns (0 when every schema is nullary)."""
     n = states.shape[:-1]
     same = tuple(
         jax.ShapeDtypeStruct(x.shape, x.dtype)
@@ -166,7 +167,7 @@ def env_step(
         _bool(n),
         _bool(n),
         _i32(n),
-        _i32((*n, label_width) if label_width else (0, 1)),
+        _i32((0, 1) if label_width is None else (*n, label_width)),
         _u32((*n, states.shape[-1]) if final else (0, states.shape[-1])),
         _bool(n),
     )

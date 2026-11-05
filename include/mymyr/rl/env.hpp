@@ -272,7 +272,7 @@ private:
     std::vector<u8> m_init_goal;
     std::vector<u64> m_init_hash;        // per instance
     std::vector<const Task*> m_tasks;    // per instance: its task (the rows' lookup without the suite's indirections)
-    u32 m_label_width = 1;               // max(1, the suite's label width)
+    u32 m_label_width = 0;               // the suite's label width (0: every schema is nullary)
     std::vector<Scratch> m_scratch;      // per pool member
 };
 }  // namespace mymyr::rl
