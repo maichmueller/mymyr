@@ -287,7 +287,7 @@ void Catalog::build()
     for (u32 predicate = 0; predicate < m_domain.predicates.size(); ++predicate)
     {
         const DomainSignature::Predicate& source = m_domain.predicates[predicate];
-        // the helpers that normalization introduced have no relation under Domain: no instance goal lists them
+        // under Domain the helpers that normalization introduced have no relation of any lane
         if ((source.arity == 0 && o.nullary == Nullary::Omit) || (source.name == "=" && !o.equality) ||
             (source.compiled && o.include_derived == DerivedRelations::Domain))
             continue;
