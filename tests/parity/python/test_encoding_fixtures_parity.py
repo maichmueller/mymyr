@@ -7,7 +7,7 @@ import pytest
 
 from encoding_parity import (
     FIXTURES, HELPER, ROOT, atoms, base_predicate, derived_in_fixture_order, flat_catalogs, hgraph_catalogs, load, read,
-    replay, state_path,
+    replay, state_path, to_reference,
 )
 
 
@@ -123,7 +123,7 @@ def test_helper_atoms_exist_only_where_the_fixture_has_them(case):
     fixture, task = case
     for record in fixture["states"]:
         state = replay(task, record["path"])
-        extra = [a for a in atoms(state.derived_atoms())
+        extra = [a for a in atoms(state.derived_atoms(), task)
                  if HELPER.match(a.strip("()").split()[0]) and a.strip("()").split()[0]
                  not in fixture["task"]["helper_predicates"]]
         assert not extra or "mifrost_problem" in fixture["task"], extra
@@ -137,7 +137,7 @@ def test_objects_and_static_atoms(case):
 
 def test_catalog_names_exist_in_the_task(case):
     fixture, task = case
-    predicates = {p.name for p in task.formalism.predicates}
+    predicates = {to_reference(p.name, task) for p in task.formalism.predicates}
     schemas = {s.name for s in task.formalism.schemas}
     for _, catalog in flat_catalogs(fixture):
         for name, source in zip(catalog["names"], catalog["sources"]):
@@ -152,7 +152,7 @@ def test_catalog_names_exist_in_the_task(case):
 
 def test_logical_arities_match_the_task(case):
     fixture, task = case
-    predicates = {p.name: p.arity for p in task.formalism.predicates}
+    predicates = {to_reference(p.name, task): p.arity for p in task.formalism.predicates}
     schemas = {s.name: s.arity for s in task.formalism.schemas}
     for _, catalog in flat_catalogs(fixture):
         for name, source, arity in zip(catalog["names"], catalog["sources"], catalog["logical_arities"]):
@@ -179,7 +179,7 @@ def test_hgraph_catalogs_match_the_task(case):
     """Edge positions of a predicate node are its argument positions; an action node has the target entity at
     position 0 and the action's objects (witnesses included) after it."""
     fixture, task = case
-    positions = {p.name: max(p.arity, 1) for p in task.formalism.predicates}
+    positions = {to_reference(p.name, task): max(p.arity, 1) for p in task.formalism.predicates}
     for schema in task.formalism.schemas:
         positions[schema.name] = max(positions.get(schema.name, 0), schema.arity + 1)
     for _, catalog in hgraph_catalogs(fixture):

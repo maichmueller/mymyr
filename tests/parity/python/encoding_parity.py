@@ -34,6 +34,7 @@ from parity_support import DATA, ROOT
 
 FIXTURES = sorted((DATA / "encoding/mifrost").glob("f*.json"))
 HELPER = re.compile(r"axiom_\d+$")
+NATIVE_HELPER = re.compile(r"@(?:domain|problem)-\d+")
 DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 FLAT_ENCODERS = ("FlatRelationEncoder", "FlatHorizonEncoder", "FlatRootedHorizonEncoder", "FlatTransitionEncoder",
                  "FlatTransitionEffectsEncoder")
@@ -44,6 +45,35 @@ STATE_SOURCES = ("state", "goal", "goal_derivation")
 
 
 # ------------------------------------------------------------------------------------------------ fixtures
+_REFERENCE_NAMES = {}  # id(task) -> (task, its reference_names)
+
+
+def reference_names(task):
+    """mymyr's helper names in ``task`` and the reference's for them: the reference names a helper ``axiom_<k>`` by
+    loki's counter, which numbers the domain's helpers and then the problem's in creation order, i.e. in predicate
+    order."""
+    held = _REFERENCE_NAMES.get(id(task))
+    if held is None or held[0] is not task:
+        helpers = [p.name for p in task.formalism.predicates if p.helper is not None]
+        held = _REFERENCE_NAMES[id(task)] = (task, {name: f"axiom_{k}" for k, name in enumerate(helpers)})
+    return held[1]
+
+
+def to_reference(text, task):
+    """``text`` (an atom, a relation or predicate name) with the helper names of ``task`` replaced by the
+    reference's."""
+    if "@" not in text:
+        return text
+    names = reference_names(task)
+    return NATIVE_HELPER.sub(lambda m: names[m.group(0)], text)
+
+
+def from_reference(name, task):
+    """mymyr's name of the predicate the reference calls ``name`` in ``task``."""
+    native = {v: k for k, v in reference_names(task).items()}
+    return native.get(name, name)
+
+
 def read(path):
     return json.loads(path.read_text())
 
@@ -66,8 +96,9 @@ def replay(task, path):
     return state
 
 
-def atoms(values):
-    return sorted(str(a) for a in values)
+def atoms(values, task=None):
+    """The atoms as sorted text, with the reference's helper names when ``task`` is given."""
+    return sorted(str(a) if task is None else to_reference(str(a), task) for a in values)
 
 
 def state_path(fixture, state_id):
@@ -83,7 +114,7 @@ def helper_column_order(task, fixture, predicate):
     recorded = fixture["task"]["helper_predicates"].get(predicate)
     if not recorded:
         return None
-    own = next(p for p in task.formalism.predicates if p.name == predicate)
+    own = next(p for p in task.formalism.predicates if p.name == from_reference(predicate, task))
     names = [parameter.name for parameter in own.parameters]
     assert sorted(names) == sorted(recorded), predicate
     return [names.index(name) for name in recorded]
@@ -103,7 +134,7 @@ def helper_arguments_in_fixture_order(task, fixture, atom):
 
 def derived_in_fixture_order(task, fixture, state):
     output = []
-    for atom in atoms(state.derived_atoms()):
+    for atom in atoms(state.derived_atoms(), task):
         if HELPER.match(atom.strip("()").split()[0]):
             atom = helper_arguments_in_fixture_order(task, fixture, atom)
             if atom is None:
@@ -233,21 +264,38 @@ TARGET_ROLES = ("goal", "subgoal", "action", "history_target")
 
 
 def native_graph(encoder, batch, row, tasks, lanes=None):
+    """``native_graph_in_native_order`` put in the reference's order (``reorder``)."""
+    return reorder(*native_graph_in_native_order(encoder, batch, row, tasks, lanes))
+
+
+def reorder(graph, catalog_order, entity_order):
+    """``graph`` with its catalog and entities in the given orders (lists of positions)."""
+    return Graph([graph.catalog[i] for i in catalog_order], [graph.entities[i] for i in entity_order], graph.tuples,
+                 graph.unordered)
+
+
+def native_graph_in_native_order(encoder, batch, row, tasks, lanes=None):
     """Graph ``row`` of a batch of ``encoder``, restricted to the relations of the given lanes (``None``: all).
     ``tasks`` are the tasks of the batch's table, indexed by task id. A goal entity is named
     ``[+](predicate arguments)[g]`` after the plain goal tuple it stands for (the entity's reference is the tuple's
     index among the graph's tuples in graph-major order), a subgoal entity ``[+](predicate arguments)[sg]`` (``[ssg]``,
     ``[sssg]``) likewise, and a history target ``history:<dt>#<i>:[+](predicate arguments)`` after its step and the
     history tuple it stands for. A history step is ``history:<dt>#<i>``, with ``i`` its position among the graph's
-    steps. An action entity is named ``(action arguments)`` after the action tuples it leads."""
+    steps. An action entity is named ``(action arguments)`` after the action tuples it leads.
+
+    Helpers carry the reference's names (``to_reference``). Returns the graph with its catalog and entities in the
+    native order, and the orders (``reorder``) the native encoder gives them under the reference's names: relations
+    by name (the numeric ones last), predicate virtual nodes by predicate name, and goal, subgoal, history target and
+    action entities by their relation, then their tuple."""
     task = tasks[int(batch.task_ids[row])]
     role_names = batch.schema.entity_role_names
     begin, end = (int(x) for x in batch.entity_offsets[row : row + 2])
     roles = [role_names[int(role)] for role in batch.entity_role[begin:end]]
     refs = [int(ref) for ref in batch.entity_ref[begin:end]]
-    names = encoder.relation_names
+    names = [to_reference(name, task) for name in encoder.relation_names]
     arities = encoder.relation_arities
     relations = batch.num_relations
+    origin = {}  # entity position -> (relation, tuple) of the tuple it is named after
     graphs = batch.num_graphs
     by_relation = encoder.options["layout"] == "relation"
 
@@ -286,6 +334,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
                     arguments_ = [entities[x][1] for x in key[1:] if roles[x] not in ("auxiliary", "predicate_virtual")]
                     sign, predicate = target.group(1), target.group(2)
                     entities[position] = (role, f"[{sign}]({' '.join([predicate] + arguments_)})[{suffix}]")
+                    origin[position] = (relation, int(identifier))
         history = HISTORY_RELATION.match(names[relation])
         if history and encoder.relation_lanes[relation] == "history":
             targeted = "history_target" in roles
@@ -300,11 +349,14 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
                                     if r == "history_target" and ref == int(identifier))
                     assert key[0] == position, f"{names[relation]}: the first argument is not the history target"
                     entities[position] = ("history_target", f"{entities[step][1]}:{literal}")
+                    origin[position] = (relation, int(identifier))
         if encoder.relation_lanes[relation] == "action" and "action" in roles:
-            for key in rows[relation]:
+            for k, key in enumerate(rows[relation]):
                 assert roles[key[0]] == "action", f"{names[relation]}: the first argument is not the action entity"
                 entities[key[0]] = ("action", f"({' '.join([names[relation]] + [entities[x][1] for x in key[1:]])})")
+                origin.setdefault(key[0], (relation, k))
     assert all(e is not None for e in entities), "a goal, subgoal, history target or action entity belongs to no tuple"
+    rank = {r: i for i, r in enumerate(sorted(range(len(names)), key=lambda r: (names[r].startswith("[num]"), names[r].encode())))}
     selected = [i for i, lane in enumerate(encoder.relation_lanes) if lanes is None or lane in lanes]
     tuples = {}
     unordered = []
@@ -316,7 +368,30 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
             unordered.append(names[relation])
         tuples[names[relation]] = [tuple(entities[x][1] for x in key) for key in keys]
     catalog = [(names[i], encoder.relation_logical_arities[i]) for i in selected]
-    return Graph(catalog, entities, tuples, tuple(unordered))
+    catalog_order = sorted(range(len(selected)), key=lambda i: rank[selected[i]])
+    return Graph(catalog, entities, tuples, tuple(unordered)), catalog_order, reference_entity_order(entities, origin, rank)
+
+
+def reference_entity_order(entities, origin, rank):
+    """The positions of ``entities`` with each run of one role reordered as the native encoder orders it under the
+    reference's helper names (``native_graph_in_native_order``); in order for a task without helpers."""
+    def key(i):
+        role, name = entities[i]
+        if role == "predicate_virtual":
+            return (name.encode(),)
+        if i in origin:
+            relation, k = origin[i]
+            return (rank[relation], k)
+        return (i,)
+
+    out, begin = [], 0
+    while begin < len(entities):
+        end = begin
+        while end < len(entities) and entities[end][0] == entities[begin][0]:
+            end += 1
+        out += sorted(range(begin, end), key=key)
+        begin = end
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ comparison
@@ -507,7 +582,7 @@ def _node_atoms(context):
     nodes = []
     for path in context.dag["nodes"]:
         state = replay(task, path)
-        held = {a.strip("()") for a in atoms(state.atoms()) + atoms(state.derived_atoms()) if " " not in a.strip("()")}
+        held = {a.strip("()") for a in atoms(state.atoms(), task) + atoms(state.derived_atoms(), task) if " " not in a.strip("()")}
         nodes.append(held | static)
     return nodes
 
@@ -565,7 +640,7 @@ def _nullary_horizon(expected, actual, context):
     if context.dag is None or not over_auxiliary(context.config):
         return expected, actual
     nodes = _node_atoms(context)
-    nullary = {p.name for p in context.task.formalism.predicates if p.arity == 0}
+    nullary = {to_reference(p.name, context.task) for p in context.task.formalism.predicates if p.arity == 0}
     tuples = dict(expected.tuples)
     for name, count in expected.catalog:
         if count == 0 and HORIZON_RELATION.match(name).group(2) in nullary:
@@ -634,7 +709,7 @@ def _delta_static_relations(expected, actual, context):
     expectation drops the relations of static predicates that the native catalog lacks and the reference leaves empty."""
     if context.dag is None or SUPPORTED[context.config]["horizon_mode"] != "delta":
         return expected, actual
-    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    static = {to_reference(p.name, context.task) for p in context.task.formalism.predicates if p.kind == "static"}
     own = {name for name, _ in actual.catalog}
     dropped = {name for name, _ in expected.catalog if name not in own and not expected.tuples.get(name)
                and HORIZON_RELATION.match(name).group(2) in static}
@@ -649,7 +724,7 @@ def _never_filled_relations(expected, actual, context):
     entries of the catalog while the reference has no tuple in them and the native catalog lacks them."""
     if context.dag is None:
         return expected, actual
-    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    static = {to_reference(p.name, context.task) for p in context.task.formalism.predicates if p.kind == "static"}
     own = {name for name, _ in actual.catalog}
     levels = {"g", "sg", "ssg", "sssg"}
 
@@ -676,7 +751,7 @@ def _static_literal_at_nodes(expected, actual, context):
     if context.dag is None:
         return expected, actual
     static = _static_names(context)
-    kinds = {p.name: p.kind for p in context.task.formalism.predicates}
+    kinds = {to_reference(p.name, context.task): p.kind for p in context.task.formalism.predicates}
     levels = {}
     for literal in goal_literals(context):
         levels.setdefault(literal, set()).add(0)
@@ -777,7 +852,7 @@ def _nullary_layers_over_auxiliary(expected, actual, context):
 def goal_literals(context):
     if context.goals is not None:
         return set(map(parse_literal, context.goals))
-    return {(x.positive, x.predicate.name, tuple(context.task.objects[o.index] for o in x.objects))
+    return {(x.positive, to_reference(x.predicate.name, context.task), tuple(context.task.objects[o.index] for o in x.objects))
             for x in context.task.encoding_goal}
 
 
@@ -1253,7 +1328,7 @@ def goal_masks(task, literals):
     slots = {}
     for slot, predicate in enumerate(metadata["atom_pred"]):
         arguments = tuple(task.objects[int(a)] for a in metadata["atom_args"][slot] if a >= 0)
-        slots[(predicates[int(predicate)].name, arguments)] = slot
+        slots[(to_reference(predicates[int(predicate)].name, task), arguments)] = slot
     words = int(metadata["words"][0])
     pos = np.zeros((1, words), np.uint64)
     neg = np.zeros((1, words), np.uint64)

@@ -10,6 +10,7 @@ import pytest
 import mymyr
 from mymyr.encoding import EncodingSchema
 
+from encoding_parity import to_reference
 from parity_support import DATA as PARITY_DATA, ROOT
 
 DATA = ROOT / "tests/data"
@@ -29,6 +30,29 @@ def tasks():
     if not PDDL:
         pytest.skip("built without the loki front end")
     return {name: mymyr.Task.from_pddl(domain, problem, collapse_unused_parameters=False) for name, (domain, problem) in DOMAINS.items()}
+
+
+class ReferenceSchema:
+    """An EncodingSchema as mifrost lists it: helper predicates under the reference's names (``to_reference``) and the
+    relations in the native catalog order under those names (by name, the numeric ones last)."""
+
+    COLUMNS = ("relation_names", "relation_arities", "relation_slot_roles", "relation_logical_arities",
+               "relation_predicates", "relation_lanes")
+
+    def __init__(self, schema, task):
+        self.schema = schema
+        names = [to_reference(n, task) for n in schema.relation_names]
+        order = sorted(range(len(names)), key=lambda i: (names[i].startswith("[num]"), names[i].encode()))
+        for column in self.COLUMNS:
+            values = names if column == "relation_names" else list(getattr(schema, column))
+            setattr(self, column, [values[i] for i in order])
+
+    def __getattr__(self, name):
+        return getattr(self.schema, name)
+
+
+def reference_schema(task, **options):
+    return ReferenceSchema(EncodingSchema(task, **options), task)
 
 
 def native_options(entry):
@@ -119,7 +143,7 @@ def never_filled(entry, schema):
 @pytest.mark.parametrize("name", [n for n in CATALOGS if n not in (SUPPORT_LITERALS, NO_STATIC)])
 def test_catalog_equals_mifrost(tasks, name):
     entry = CATALOGS[name]
-    schema = EncodingSchema(tasks[entry["domain"]], **native_options(entry))
+    schema = reference_schema(tasks[entry["domain"]], **native_options(entry))
     skipped = never_filled(entry, schema)
     assert native_catalog(schema) == [row for i, row in enumerate(mifrost_catalog(entry)) if i not in skipped]
     nullary = [i for i, n in enumerate(schema.relation_logical_arities) if n == 0 and schema.relation_predicates[i] >= 0]
@@ -142,7 +166,7 @@ def test_the_arity0_catalog_equals_mifrost_without_removing_a_slot(tasks, name):
     # nullary='arity0' lists the nullary relations as mifrost does with them kept: without an auxiliary slot
     entry = CATALOGS[name]
     options = native_options(entry)
-    schema = EncodingSchema(tasks[entry["domain"]], **dict(options, nullary="arity0"))
+    schema = reference_schema(tasks[entry["domain"]], **dict(options, nullary="arity0"))
     skipped = never_filled(entry, schema)
     rows = list(zip(schema.relation_names, schema.relation_arities, schema.relation_slot_roles))
     assert rows == [row for i, row in enumerate(mifrost_catalog(entry)) if i not in skipped]
@@ -155,7 +179,7 @@ def test_the_relations_no_horizon_graph_fills_are_the_only_difference_to_the_hor
     for name, entry in CATALOGS.items():
         if entry["kind"] == "flat":
             continue
-        schema = EncodingSchema(tasks[entry["domain"]], **native_options(entry))
+        schema = reference_schema(tasks[entry["domain"]], **native_options(entry))
         skipped = never_filled(entry, schema)
         names = {entry["names"][i] for i in skipped}
         # nothing the native catalog lists is skipped, and the skipped relations are of the two kinds only
@@ -174,7 +198,7 @@ def test_the_relations_no_horizon_graph_fills_are_the_only_difference_to_the_hor
 @needs_pddl
 def test_support_literals_are_the_only_difference_to_the_relmo_catalog(tasks):
     entry = CATALOGS[SUPPORT_LITERALS]
-    schema = EncodingSchema(tasks["blocks"], **native_options(entry))
+    schema = reference_schema(tasks["blocks"], **native_options(entry))
     # support_literals adds `[+]p`, `[+]p[sat]` and `[+]p[unsat]` (and the `-` forms) to the goal lanes.
     literal = re.compile(r"^\[[+-]\][^\[]+(\[(sat|unsat)\])?$")
     dropped = [row for row in mifrost_catalog(entry) if literal.match(row[0])]
@@ -187,7 +211,7 @@ def test_support_literals_are_the_only_difference_to_the_relmo_catalog(tasks):
 def test_include_static_false_drops_the_static_relations(tasks):
     # mifrost keeps the (empty) static relations in the catalog; the native catalog leaves them out.
     entry = CATALOGS[NO_STATIC]
-    schema = EncodingSchema(tasks["blocks"], **native_options(entry))
+    schema = reference_schema(tasks["blocks"], **native_options(entry))
     expected = [row for row in mifrost_catalog(entry) if row[0] not in ("number", "object")]
     assert native_catalog(schema) == expected
     assert "object" not in schema.relation_names and "[+]object[hist]" in schema.relation_names
