@@ -40,6 +40,20 @@ enum class PredKind : u8
     Fluent,
     Derived,
 };
+/// Whether normalization introduced a derived predicate (a helper), and for which part of the task. A helper is
+/// named `@domain-<k>` or `@problem-<k>` (helper_name): '@' cannot occur in a PDDL name, so no declared predicate
+/// has such a name.
+enum class HelperKind : u8
+{
+    None,     // declared by the domain or the problem; every static and fluent predicate
+    Domain,   // a helper of the domain: of a precondition, an effect condition or a rule body of the domain
+    Problem,  // a helper of one problem: of a goal part or a rule body of the problem
+};
+
+/// The name of the k-th helper of its kind: "@domain-<k>" or "@problem-<k>". Helpers of each kind are numbered from
+/// 0 in predicate id order.
+[[nodiscard]] std::string helper_name(HelperKind kind, u32 k);
+
 enum class FuncKind : u8
 {
     Static,
@@ -116,10 +130,11 @@ struct Predicate
     PredKind kind = PredKind::Static;
     u32 arity = 0;
     Range params;  // into params
-    /// A derived predicate that normalization introduced (the helper `axiom_<k>` of a universal quantifier, of a
-    /// disjunctive goal part or of a quantified effect condition) rather than one the domain or problem declares.
-    /// Always false for static and fluent predicates.
-    bool compiled = false;
+    /// Whether normalization introduced this derived predicate (the helper of a universal quantifier, of a goal part
+    /// that is not a literal or of a quantified effect condition) rather than the domain or problem declaring it.
+    /// Always None for static and fluent predicates.
+    HelperKind helper = HelperKind::None;
+    [[nodiscard]] bool compiled() const noexcept { return helper != HelperKind::None; }
 };
 
 struct Function

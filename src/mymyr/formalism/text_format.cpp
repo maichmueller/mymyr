@@ -37,9 +37,11 @@ public:
         {
             const std::string kind = word();
             Predicate p;
-            p.kind = kind == "S" ? PredKind::Static : kind == "F" ? PredKind::Fluent : kind == "D" || kind == "C" ? PredKind::Derived
-                                                                                                   : (fail("bad predicate kind " + kind), PredKind::Static);
-            p.compiled = kind == "C";
+            p.kind = kind == "S"                                 ? PredKind::Static
+                     : kind == "F"                               ? PredKind::Fluent
+                     : kind == "D" || kind == "C" || kind == "P" ? PredKind::Derived
+                                                                 : (fail("bad predicate kind " + kind), PredKind::Static);
+            p.helper = kind == "C" ? HelperKind::Domain : kind == "P" ? HelperKind::Problem : HelperKind::None;
             p.arity = parameters(0);
             p.name = t.intern_string(word());
             p.params = anonymous_params(p.arity);
@@ -460,8 +462,12 @@ public:
     {
         o << "O " << t.objects.size() << "\nP " << t.predicates.size() << "\n";
         for (const auto& p : t.predicates)
-            o << (p.kind == PredKind::Static ? 'S' : p.kind == PredKind::Fluent ? 'F' : p.compiled ? 'C' : 'D') << " " << p.arity << " "
-              << t.str(p.name) << "\n";
+            o << (p.kind == PredKind::Static         ? 'S'
+                  : p.kind == PredKind::Fluent       ? 'F'
+                  : p.helper == HelperKind::Domain   ? 'C'
+                  : p.helper == HelperKind::Problem  ? 'P'
+                                                     : 'D')
+              << " " << p.arity << " " << t.str(p.name) << "\n";
         if (m_numeric)
         {
             o << "N " << t.functions.size() << "\n";

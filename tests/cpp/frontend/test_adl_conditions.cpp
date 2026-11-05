@@ -295,16 +295,17 @@ TEST(AdlConditions, SearchFindsPlansForGuardedForallGoals)
 
 TEST(AdlConditions, ConditionsOfForallEffectsBecomeHelperPredicates)
 {
-    // the condition of the forall effect quantifies universally over its variable ?w: it becomes a derived predicate
-    // axiom_<k> over ?w; the derived predicate ok and the other quantifiers compile as loki compiles them
+    // the condition of the forall effect quantifies universally over its variable ?w: it becomes a helper of the domain
+    // over ?w; the derived predicate ok and the other quantifiers compile as loki compiles them
     const auto d = frontend::Domain::from_string(kDomain, "d.pddl");
     const auto data = d->instantiate_string(problem("(forall (?x) (imply (s ?x) (p ?x)))"), "p.pddl");
-    u32 helpers = 0, unary = 0;
+    u32 helpers = 0, unary = 0, domain_helpers = 0, problem_helpers = 0;
     for (const formalism::Predicate& p : data->predicates)
-        if (const std::string name(data->str(p.name)); name.starts_with("axiom_"))
+        if (const std::string name(data->str(p.name)); p.compiled())
         {
             ++helpers;
             EXPECT_EQ(p.kind, formalism::PredKind::Derived) << name;
+            EXPECT_EQ(name, formalism::helper_name(p.helper, p.helper == formalism::HelperKind::Domain ? domain_helpers++ : problem_helpers++));
             unary += p.arity == 1 ? 1 : 0;
         }
     EXPECT_GE(helpers, 4u);

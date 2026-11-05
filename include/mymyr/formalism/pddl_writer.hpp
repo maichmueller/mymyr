@@ -16,10 +16,15 @@
 // Goal axioms: normalization turns a goal that is not a conjunction of literals into derived predicates of the
 // problem (formalism::Axiom::from_problem). They are written into the problem's goal as the formula they stand for (a
 // disjunction over the rules of a derived predicate, each an `exists` over its variables), so that the domain holds
-// only what its problems share.
+// only what its problems share. So are the helpers of the problem (HelperKind::Problem) of a task read from the text
+// format, which records which predicates those are but not which rules came from the problem.
 //
-// Names: objects, predicates, functions, actions and types keep their names; variables are written with the names
-// normalization gave them. Numbers are written in their shortest exact decimal form.
+// Names: objects, declared predicates, functions, actions and types keep their names; variables are written with the
+// names normalization gave them. A helper predicate of the domain (HelperKind::Domain, "@domain-<k>") is not a PDDL
+// name: it is written as "helper-domain-<k>" (in general `helper-` and the name without the characters PDDL names
+// cannot contain), with the prefix extended by '_' ("helper_-domain-<k>", ...) while that names a declared predicate,
+// function or type. The written domain declares it, so it reads back as a declared derived predicate of that name.
+// Numbers are written in their shortest exact decimal form.
 
 #include "mymyr/formalism/task_data.hpp"
 

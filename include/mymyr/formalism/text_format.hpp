@@ -2,7 +2,8 @@
 // Reader and writer for mymyr's normalized task text format: a plain-text serialization of a TaskData (O P SI FI G
 // A, with numeric sections N NI NG added for tasks with functions). It carries no names beyond predicates, functions
 // and schemas; objects become "o<i>" and parameters "x<i>". A predicate line starts with its kind: S (static), F
-// (fluent), D (derived) or C (a derived predicate that normalization introduced, Predicate::compiled).
+// (fluent), D (derived), C (a helper of the domain) or P (a helper of the problem); the helpers are the derived
+// predicates that normalization introduced (Predicate::helper).
 //
 // write_task_text() writes it; read_task_text() and read_task_text_file() read it back.
 // Numbers use locale-independent decimal notation, with inf, -inf, nan and -nan for non-finite values.

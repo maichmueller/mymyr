@@ -22,8 +22,8 @@ F 2 airborne
 F 1 is-moving
 F 1 is-pushing
 F 2 is-parked
-D 2 axiom_0
-D 4 axiom_1
+C 2 @domain-0
+C 4 @domain-1
 SI 361
 3 0
 0 0

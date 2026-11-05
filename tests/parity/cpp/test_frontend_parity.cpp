@@ -44,13 +44,6 @@ TaskData without_numerics(TaskData t)
     return t;
 }
 
-/// The task as the reference exports write it: their derived predicates do not tell the generated ones apart.
-TaskData without_compiled_marks(TaskData t)
-{
-    for (auto& p : t.predicates)
-        p.compiled = false;
-    return t;
-}
 
 struct Outcome
 {
@@ -92,10 +85,11 @@ void compare(const test::GoldenTask& gt, const TaskData& ours, bool fast, Outcom
 {
     const auto type_preds = test::type_predicates(ours);
     auto project = [](const TaskData& golden, const TaskData& t)
-    { return without_compiled_marks(!golden.has_numerics() && !golden.metric ? without_numerics(t) : t); };
+    { return test::with_fork_names(!golden.has_numerics() && !golden.metric ? without_numerics(t) : t); };
     for (const auto& g : gt.goldens)
     {
-        const TaskData golden = read_task_text_file(g.string());
+        // the exports vendored under tests/data name the helpers as mymyr does
+        const TaskData golden = test::with_fork_names(read_task_text_file(g.string()));
         const TaskData mine = project(golden, ours);
         ++out.compared;
         std::ifstream f(g);

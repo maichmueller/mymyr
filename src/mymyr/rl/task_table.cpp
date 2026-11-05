@@ -28,8 +28,8 @@ std::string kind_text(i32 k, bool compiled)
     return k == k_pred_static ? "static" : k == k_pred_fluent ? "fluent" : compiled ? "derived, compiled" : "derived";
 }
 
-/// Per predicate: 1 if it is problem-local, i.e. derived and defined by problem axioms only (goal normalization's
-/// "axiom_<k>"), else 0.
+/// Per predicate: 1 if it is problem-local, i.e. derived and defined by problem axioms only (the helpers
+/// "@problem-<k>" of goal parts), else 0.
 std::vector<u8> problem_local(const formalism::TaskData& D)
 {
     std::vector<u8> any(D.predicates.size(), 0), domain(D.predicates.size(), 0);
@@ -66,7 +66,7 @@ std::vector<DomainPred> domain_predicates(const formalism::TaskData& D)
     for (usize p = 0; p < D.predicates.size(); ++p)
         if (!local[p])
             out.push_back({std::string(D.str(D.predicates[p].name)), D.predicates[p].arity, kind_code(D.predicates[p].kind),
-                           D.predicates[p].compiled});
+                           D.predicates[p].compiled()});
     return out;
 }
 }  // namespace
@@ -133,8 +133,8 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         }
     }
     // predicates: the domain's (every instance's, in the same order: their table ids are the domain's own) first, then
-    // the problem-local ones (derived predicates defined by problem axioms only, e.g. goal normalization's "axiom_0"),
-    // one table predicate per (instance, predicate): two problems' "axiom_0" are unrelated
+    // the problem-local ones (derived predicates defined by problem axioms only, e.g. the goal helper "@problem-0"),
+    // one table predicate per (instance, predicate): two problems' "@problem-0" are unrelated
     struct Local
     {
         u32 instance, pred;
@@ -166,7 +166,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
                 m_pred_names.emplace_back(D.str(P.name));
                 m_pred_arity.push_back(P.arity);
                 m_pred_kind.push_back(kind_code(P.kind));
-                m_pred_compiled.push_back(P.compiled ? 1 : 0);
+                m_pred_compiled.push_back(P.compiled() ? 1 : 0);
                 m_pred_instance.push_back(-1);
             }
             in.pred_map[p] = d++;  // domain_mismatch: instance i's domain predicates are instance 0's, in its order
@@ -212,7 +212,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         m_pred_names.emplace_back(D.str(P.name));
         m_pred_arity.push_back(P.arity);
         m_pred_kind.push_back(kind_code(P.kind));
-        m_pred_compiled.push_back(P.compiled ? 1 : 0);
+        m_pred_compiled.push_back(P.compiled() ? 1 : 0);
         m_pred_instance.push_back(static_cast<i32>(l.instance));
     }
     // rows at the table width

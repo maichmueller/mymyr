@@ -255,6 +255,18 @@ void bind_formalism(nb::module_& parent)
             .field("name", [](const PredicateV& v) { return std::string(v.d().str(v.d().predicates[v.i].name)); },
                    "The predicate name.")
             .field("kind", [](const PredicateV& v) { return std::string(kind_name(v.d().predicates[v.i].kind)); }, "'static', 'fluent' or 'derived'")
+            .field("helper", [](const PredicateV& v) -> std::optional<std::string> {
+                switch (v.d().predicates[v.i].helper)
+                {
+                    case fm::HelperKind::Domain: return "domain";
+                    case fm::HelperKind::Problem: return "problem";
+                    case fm::HelperKind::None: break;
+                }
+                return std::nullopt;
+            }, "None for a predicate the domain or problem declares; for a derived predicate that normalization "
+               "introduced, 'domain' (a helper of a precondition, effect condition or rule body of the domain, named "
+               "'@domain-<k>') or 'problem' (a helper of a goal part or rule body of the problem, named "
+               "'@problem-<k>'). Helper names start with '@', which no PDDL name contains.")
             .field("arity", [](const PredicateV& v) { return v.d().predicates[v.i].arity; },
                    "The number of parameters.")
             .field("parameters", [](const PredicateV& v) { return parameter_list(v.t, v.d().predicates[v.i].params); },

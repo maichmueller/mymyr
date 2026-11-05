@@ -5,8 +5,11 @@
 #include <algorithm>
 #include <array>
 #include <ranges>
+#include <cctype>
 #include <charconv>
 #include <cmath>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 
@@ -56,6 +59,10 @@ public:
         for (const Axiom& a : t.axioms)
             if (a.from_problem)
                 m_problem_pred[a.head.pred.v] = true;
+        for (u32 p = 0; p < t.predicates.size(); ++p)
+            if (t.predicates[p].helper == HelperKind::Problem)
+                m_problem_pred[p] = true;
+        name_helpers();
         for (const Type& ty : t.types)
             if (const std::string_view n = t.str(ty.name); n != "object" && n != "number")
                 m_typing = true;
@@ -103,7 +110,7 @@ public:
             if (m_type_pred[p] || p == m_eq || m_problem_pred[p])
                 continue;
             const Predicate& P = T.predicates[p];
-            o += "\n    (" + std::string(T.str(P.name)) + typed_params(P.params, P.arity) + ")";
+            o += "\n    (" + m_pred_name[p] + typed_params(P.params, P.arity) + ")";
             any = true;
         }
         o += any ? "\n  )\n" : ")\n";
@@ -113,7 +120,7 @@ public:
         if (!functions.empty())
             o += "  (:functions" + functions + "\n  )\n";
         for (const Axiom& a : T.axioms)
-            if (!a.from_problem)
+            if (!problem_axiom(a))
                 o += axiom(a);
         // the schemas of one name are one action (normalization splits a disjunctive precondition)
         std::vector<bool> done(T.schemas.size(), false);
@@ -150,7 +157,7 @@ public:
             {
                 if (m_type_pred[a.pred.v] || a.pred.v == m_eq)
                     continue;
-                o += "\n    (" + std::string(T.str(T.predicates[a.pred.v].name));
+                o += "\n    (" + m_pred_name[a.pred.v];
                 for (const ObjectId x : T.objects_of(a))
                     o += " " + object_name(x);
                 o += ")";
@@ -248,9 +255,9 @@ public:
             add("conditional-effects");
         if (existential || std::ranges::any_of(T.axioms, [](const Axiom& a) { return a.params.count > 0; }))
             add("existential-preconditions");
-        if (disjunctive || std::ranges::any_of(T.axioms, &Axiom::from_problem))
+        if (disjunctive || std::ranges::any_of(T.axioms, [&](const Axiom& a) { return problem_axiom(a); }))
             add("disjunctive-preconditions");
-        if (std::ranges::any_of(T.axioms, [&](const Axiom& a) { return !a.from_problem; }))
+        if (std::ranges::any_of(T.axioms, [&](const Axiom& a) { return !problem_axiom(a); }))
             add("derived-predicates");
         if (std::ranges::any_of(T.functions, [](const Function& f) { return f.kind != FuncKind::Auxiliary; }))
             add("numeric-fluents");
@@ -264,11 +271,73 @@ private:
 
     const TaskData& T;
     std::vector<bool> m_type_pred, m_problem_pred;
+    std::vector<std::string> m_pred_name;  // per predicate: the name written (helper_pddl_name for a helper)
     u32 m_eq = ~u32{0};
     bool m_typing = false;
     mutable u32 m_fresh = 0;  // fresh variables of inlined goal axioms
     mutable std::vector<bool> m_constant;  // per object: written as a constant of the domain
     mutable bool m_collect = false;        // writing the domain marks the objects it names as constants
+
+    /// Whether the rule defines a predicate of the problem (written into the goal, not into the domain).
+    bool problem_axiom(const Axiom& a) const { return m_problem_pred[a.head.pred.v]; }
+
+    /// m_pred_name: the declared predicates keep their names; a helper (a name with '@', not a PDDL name) is written
+    /// as `helper-` followed by its name without the '@' and with every other character that PDDL names cannot
+    /// contain left out ("@domain-3" -> "helper-domain-3"). If that name is taken by a declared predicate, function or
+    /// type, or by another helper, the prefix grows by '_' ("helper_-domain-3", ...) until every name is distinct.
+    void name_helpers()
+    {
+        m_pred_name.resize(T.predicates.size());
+        std::set<std::string> taken{"object", "number"};
+        std::vector<u32> helpers;
+        for (u32 p = 0; p < T.predicates.size(); ++p)
+        {
+            m_pred_name[p] = std::string(T.str(T.predicates[p].name));
+            if (T.predicates[p].compiled())
+                helpers.push_back(p);
+            else
+                taken.insert(m_pred_name[p]);
+        }
+        if (helpers.empty())
+            return;
+        for (const Function& f : T.functions)
+            taken.insert(std::string(T.str(f.name)));
+        for (const Type& ty : T.types)
+            taken.insert(std::string(T.str(ty.name)));
+        std::vector<std::string> base;
+        for (u32 p : helpers)
+        {
+            std::string b;
+            for (const char c : m_pred_name[p])
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+                    b += c;
+            base.push_back(b);
+        }
+        // helpers whose names differ only in characters PDDL cannot spell are told apart by predicate id
+        std::map<std::string, u32> uses;
+        for (const std::string& b : base)
+            ++uses[b];
+        for (usize i = 0; i < helpers.size(); ++i)
+            if (uses[base[i]] > 1)
+                base[i] += (base[i].empty() ? "" : "-") + std::to_string(helpers[i]);
+        for (std::string prefix = "helper";; prefix += '_')
+        {
+            std::set<std::string> names;
+            bool free = true;
+            for (const std::string& b : base)
+            {
+                std::string n = b.empty() ? prefix : prefix + "-" + b;
+                free = free && !taken.contains(n) && names.insert(std::move(n)).second;
+            }
+            if (!free && prefix.size() > 64 + taken.size())
+                throw std::invalid_argument("mymyr write_pddl: the helper predicates have no distinct PDDL names");
+            if (!free)
+                continue;
+            for (usize i = 0; i < helpers.size(); ++i)
+                m_pred_name[helpers[i]] = base[i].empty() ? prefix : prefix + "-" + base[i];
+            return;
+        }
+    }
 
     std::string name_or(const std::string& s, const char* fallback) const { return s.empty() ? fallback : s; }
     std::string object_name(ObjectId o) const { return std::string(T.str(T.objects[o.v].name)); }
@@ -343,7 +412,7 @@ private:
 
     std::string atom(PredicateId p, std::span<const Term> terms, const Vars& vars) const
     {
-        std::string o = "(" + (p.v == m_eq ? std::string("=") : std::string(T.str(T.predicates[p.v].name)));
+        std::string o = "(" + (p.v == m_eq ? std::string("=") : m_pred_name[p.v]);
         for (const Term t : terms)
             o += " " + term(t, vars);
         return o + ")";
@@ -583,7 +652,7 @@ private:
         for (u32 i = 0; i < a.params.count; ++i)
             vars.push_back(var_name(a.params.begin + i, i));
         std::vector<bool> in_head(a.params.count, false);
-        std::string head = "(" + std::string(T.str(T.predicates[a.head.pred.v].name));
+        std::string head = "(" + m_pred_name[a.head.pred.v];
         for (const Term t : T.terms_of(a.head))
         {
             if (is_object(t) || term_parameter(t) >= a.params.count || in_head[term_parameter(t)])
@@ -615,7 +684,7 @@ private:
         std::vector<std::string> disjuncts;
         for (const Axiom& a : T.axioms)
         {
-            if (!a.from_problem || a.head.pred != pred)
+            if (a.head.pred != pred)
                 continue;
             Vars vars(a.params.count);
             std::vector<bool> bound(a.params.count, false);

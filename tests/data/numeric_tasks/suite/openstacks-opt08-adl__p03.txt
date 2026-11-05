@@ -13,8 +13,8 @@ F 1 started
 F 1 shipped
 F 1 made
 F 1 stacks-avail
-D 1 axiom_0
-D 1 axiom_1
+C 1 @domain-0
+C 1 @domain-1
 N 1
 A 0 total-cost
 SI 81

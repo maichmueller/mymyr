@@ -45,7 +45,7 @@ struct DomainSignature
         std::string name;
         u32 arity = 0;
         PredicateKind kind = PredicateKind::Fluent;
-        /// A derived predicate that normalization introduced (formalism::Predicate::compiled); false for the others.
+        /// A helper of the domain (formalism::HelperKind::Domain): a derived predicate that normalization introduced.
         bool compiled = false;
     };
     struct ActionSchema

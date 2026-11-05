@@ -98,10 +98,21 @@ static void check_ground_atom(const TaskData& t, const GroundAtom& a, const char
             invalid(std::string(where) + ": object out of range");
 }
 
+std::string helper_name(HelperKind kind, u32 k)
+{
+    if (kind == HelperKind::None)
+        throw std::invalid_argument("mymyr: helper_name: a declared predicate has no helper name");
+    return (kind == HelperKind::Domain ? "@domain-" : "@problem-") + std::to_string(k);
+}
+
 void validate(const TaskData& t)
 {
     for (const auto& p : t.predicates)
+    {
         check_range(t.params, p.params, "predicate params");
+        if (p.compiled() && p.kind != PredKind::Derived)
+            invalid("a helper predicate must be derived");
+    }
     for (const auto& a : t.static_init)
     {
         check_ground_atom(t, a, "static initial atom");
@@ -178,20 +189,12 @@ std::vector<u32> key_of(PredicateId pred, std::span<const ObjectId> objects)
     return k;
 }
 
-/// Whether goal normalization introduced the predicate: loki names these "axiom_<k>".
-bool introduced_by_normalization(std::string_view name)
-{
-    constexpr std::string_view prefix = "axiom_";
-    return name.size() > prefix.size() && name.starts_with(prefix) &&
-           std::ranges::all_of(name.substr(prefix.size()), [](char c) { return c >= '0' && c <= '9'; });
-}
-
 /// The literals of the planner's goal that the encoding goal keeps by default, and whether they are all of it.
 bool default_goal(const TaskData& t, std::vector<GroundLiteralData>& out)
 {
     std::vector<u8> normalized(t.predicates.size(), 0);
     for (u32 p = 0; p < t.predicates.size(); ++p)
-        normalized[p] = t.predicates[p].kind == PredKind::Derived && introduced_by_normalization(t.str(t.predicates[p].name));
+        normalized[p] = t.predicates[p].compiled();
     bool complete = t.goal.constraints.count == 0;
     for (const Literal& l : t.literals_of(t.goal))
     {

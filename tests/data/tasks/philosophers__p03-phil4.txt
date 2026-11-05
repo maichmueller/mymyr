@@ -41,8 +41,8 @@ F 2 queue-tail-msg
 F 2 queue-size
 D 1 blocked
 D 2 blocked-trans
-D 0 axiom_0
-D 3 axiom_1
+C 0 @domain-0
+C 3 @domain-1
 SI 112
 10 0
 0 0

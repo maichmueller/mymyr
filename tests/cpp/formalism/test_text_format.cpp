@@ -145,23 +145,36 @@ TEST(TextFormat, ParsedStructureIsConsistent)
             EXPECT_TRUE(is_object(x));
 }
 
-TEST(TextFormat, MarksTheDerivedPredicatesThatNormalizationIntroduced)
+TEST(TextFormat, MarksTheHelpersOfTheDomainAndOfTheProblem)
 {
-    // kind C: a derived predicate that normalization introduced; D: one the domain declares
-    const std::string text = "O 1\nP 3\nF 1 at\nD 1 near\nC 1 axiom_0\nSI 0\nFI 0\nG 0\nA 0\n";
+    // kind C: a helper of the domain; P: a helper of the problem; D: a derived predicate the domain declares (its name
+    // does not decide)
+    const std::string text = "O 1\nP 4\nF 1 at\nD 1 axiom_0\nC 1 @domain-0\nP 0 @problem-0\nSI 0\nFI 0\nG 0\nA 0\n";
     std::istringstream in(text);
     const TaskData t = read_task_text(in);
-    ASSERT_EQ(t.predicates.size(), 3u);
-    EXPECT_FALSE(t.predicates[0].compiled);
+    ASSERT_EQ(t.predicates.size(), 4u);
+    EXPECT_EQ(t.predicates[0].helper, HelperKind::None);
     EXPECT_EQ(t.predicates[1].kind, PredKind::Derived);
-    EXPECT_FALSE(t.predicates[1].compiled);
+    EXPECT_EQ(t.predicates[1].helper, HelperKind::None);
+    EXPECT_FALSE(t.predicates[1].compiled());
     EXPECT_EQ(t.predicates[2].kind, PredKind::Derived);
-    EXPECT_TRUE(t.predicates[2].compiled);
+    EXPECT_EQ(t.predicates[2].helper, HelperKind::Domain);
+    EXPECT_EQ(t.predicates[3].kind, PredKind::Derived);
+    EXPECT_EQ(t.predicates[3].helper, HelperKind::Problem);
+    EXPECT_TRUE(t.predicates[3].compiled());
     std::istringstream again(write_task_text(t));
     const TaskData back = read_task_text(again);
-    EXPECT_TRUE(back.predicates[2].compiled);
-    EXPECT_FALSE(back.predicates[1].compiled);
+    EXPECT_EQ(back.predicates[1].helper, HelperKind::None);
+    EXPECT_EQ(back.predicates[2].helper, HelperKind::Domain);
+    EXPECT_EQ(back.predicates[3].helper, HelperKind::Problem);
     EXPECT_EQ(write_task_text(back), write_task_text(t));
+}
+
+TEST(TextFormat, HelperNamesShowTheirKind)
+{
+    EXPECT_EQ(helper_name(HelperKind::Domain, 0), "@domain-0");
+    EXPECT_EQ(helper_name(HelperKind::Problem, 12), "@problem-12");
+    EXPECT_THROW((void)helper_name(HelperKind::None, 0), std::invalid_argument);
 }
 
 TEST(TextFormat, RejectsMalformedInput)

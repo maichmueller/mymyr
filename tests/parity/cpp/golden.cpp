@@ -117,8 +117,28 @@ bool is_generated_axiom_predicate(const TaskData& t, u32 p)
 {
     const Predicate& pr = t.predicates[p];
     const std::string_view n = t.str(pr.name);
-    return pr.kind == PredKind::Derived && pr.arity >= 2 && n.size() > 6 && n.substr(0, 6) == "axiom_"
-           && n.find_first_not_of("0123456789", 6) == std::string_view::npos;
+    return pr.kind == PredKind::Derived && pr.arity >= 2 &&
+           (pr.compiled() || (n.size() > 6 && n.substr(0, 6) == "axiom_" && n.find_first_not_of("0123456789", 6) == std::string_view::npos));
+}
+
+std::vector<std::string> fork_predicate_names(const TaskData& t)
+{
+    std::vector<std::string> out;
+    u32 k = 0;
+    for (const Predicate& p : t.predicates)
+        out.push_back(p.compiled() ? "axiom_" + std::to_string(k++) : std::string(t.str(p.name)));
+    return out;
+}
+
+TaskData with_fork_names(TaskData t)
+{
+    const std::vector<std::string> names = fork_predicate_names(t);
+    for (u32 p = 0; p < t.predicates.size(); ++p)
+    {
+        t.predicates[p].name = t.intern_string(names[p]);
+        t.predicates[p].helper = HelperKind::None;
+    }
+    return t;
 }
 
 namespace
