@@ -21,14 +21,19 @@ from conftest import ROOT
 pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="needs the PDDL front end")
 
 PHILOSOPHERS = ROOT / "tests/data/pddl/philosophers"
-HELPER = "(axiom_1 philosopher-0 philosopher state-1)"  # a quantified condition's helper, with a derived slot
 DECLARED = "(blocked philosopher-0)"  # a derived predicate the domain declares
 REASON = "include_derived='domain' leaves the helpers out"
 FLAGGED = "a row is invalid.*helper predicate that include_derived='domain' leaves out"  # device and JAX
 
 
 def phil():
-    return mymyr.Task.from_pddl(PHILOSOPHERS / "domain.pddl", PHILOSOPHERS / "p03-phil4.pddl")
+    """The task and an atom of a helper predicate that normalization introduced for a quantified condition of the
+    domain, with a derived slot (found by its kind, whatever the helper's name)."""
+    task = mymyr.Task.from_pddl(PHILOSOPHERS / "domain.pddl", PHILOSOPHERS / "p03-phil4.pddl")
+    helpers = {p.name for p in task.formalism.predicates if p.helper == "domain"}
+    atom = next(a for a in task.derived_atoms(task.initial_state)
+                if a.predicate.name in helpers and a.derived_slot is not None)
+    return task, atom
 
 
 def refusal(where, literal):
@@ -40,49 +45,51 @@ def relation_count(encoder, batch, name):
 
 
 def test_the_literal_is_a_compiled_helper_with_a_slot():
-    task = phil()
-    atom = task.literal(HELPER).atom
+    task, atom = phil()
+    name = atom.predicate.name
     assert atom.kind == "derived" and atom.derived_slot is not None
     schema = encoding.EncodingSchema(task)
-    assert dict(zip(schema.relation_names, schema.relation_compiled))["axiom_1"]
-    assert "axiom_1" not in encoding.EncodingSchema(task, include_derived="domain").relation_names
+    assert dict(zip(schema.relation_names, schema.relation_compiled))[name]
+    assert name not in encoding.EncodingSchema(task, include_derived="domain").relation_names
 
 
 @pytest.mark.parametrize("negative", [False, True])
-@pytest.mark.parametrize("helper", ["goal_masks", "subgoal_masks", "history_masks"])
-def test_the_literal_helpers_of_an_encoder_refuse_it_under_domain(helper, negative):
-    task = phil()
-    literal = f"(not {HELPER})" if negative else HELPER
+@pytest.mark.parametrize("builder", ["goal_masks", "subgoal_masks", "history_masks"])
+def test_the_literal_helpers_of_an_encoder_refuse_it_under_domain(builder, negative):
+    task, atom = phil()
+    helper = str(atom)
+    literal = f"(not {helper})" if negative else helper
     rows = {"goal_masks": [[DECLARED, literal]], "subgoal_masks": [[[DECLARED, literal]]],
-            "history_masks": [[(0, [DECLARED, literal])]]}[helper]
-    options = {"goal_masks": {}, "subgoal_masks": {"max_goal_level": 1}, "history_masks": {"history": True}}[helper]
-    build = getattr(encoding, helper)
+            "history_masks": [[(0, [DECLARED, literal])]]}[builder]
+    options = {"goal_masks": {}, "subgoal_masks": {"max_goal_level": 1}, "history_masks": {"history": True}}[builder]
+    build = getattr(encoding, builder)
     with pytest.raises(ValueError, match=re.escape(f"the literal {literal} ") + ".*" + re.escape(REASON)):
         build(encoding.FlatRelationEncoder(task, include_derived="domain", **options), rows)
     masks = build(encoding.FlatRelationEncoder(task, **options), rows)
-    derived = masks[4:] if helper == "history_masks" else masks[2:]  # history: (pos, neg, dt, count, dpos, dneg)
+    derived = masks[4:] if builder == "history_masks" else masks[2:]  # history: (pos, neg, dt, count, dpos, dneg)
     assert np.asarray(derived[1 if negative else 0]).any()
     # the declared derived predicate keeps its relations
     build(encoding.FlatRelationEncoder(task, include_derived="domain", **options),
-          {"goal_masks": [[DECLARED]], "subgoal_masks": [[[DECLARED]]], "history_masks": [[(0, [DECLARED])]]}[helper])
+          {"goal_masks": [[DECLARED]], "subgoal_masks": [[[DECLARED]]], "history_masks": [[(0, [DECLARED])]]}[builder])
 
 
 def test_literal_masks_from_arrays_refuse_it_under_domain():
-    task = phil()
+    task, atom = phil()
+    helper, name = str(atom), atom.predicate.name
     table = rl.as_table(task)
-    atom = task.literal(HELPER).atom
-    predicates = np.array([table.predicate_names.index("axiom_1")], np.int32)
+    predicates = np.array([table.predicate_names.index(name)], np.int32)
     objects = np.array([list(atom.object_indices)], np.int32)
     domain = encoding.FlatRelationEncoder(task, include_derived="domain")
-    with pytest.raises(ValueError, match=re.escape(f"the literal {HELPER} ") + ".*" + re.escape(REASON)):
+    with pytest.raises(ValueError, match=re.escape(f"the literal {helper} ") + ".*" + re.escape(REASON)):
         encoding.literal_masks(domain, predicates, objects, [True], [0], 1)
     assert encoding.literal_masks(task, predicates, objects, [True], [0], 1).derived_pos.any()
 
 
 @pytest.mark.parametrize("negative", [False, True])
 def test_a_row_goal_over_a_helper_raises_under_domain_and_encodes_under_true(negative):
-    task = phil()
-    literal = f"(not {HELPER})" if negative else HELPER
+    task, atom = phil()
+    helper, name = str(atom), atom.predicate.name
+    literal = f"(not {helper})" if negative else helper
     goals = encoding.goal_masks(task, [[DECLARED, literal]] * 2)  # a Task source: every derived predicate
     states = [task.initial_state] * 2
     domain = encoding.FlatRelationEncoder(task, include_derived="domain")
@@ -95,33 +102,35 @@ def test_a_row_goal_over_a_helper_raises_under_domain_and_encodes_under_true(neg
     assert relation_count(domain, declared, "[+]blocked[g]") == 1 and declared.goal_complete.tolist() == [1, 1]
     every = encoding.FlatRelationEncoder(task)
     batch = every.encode(states, goals=goals)
-    assert relation_count(every, batch, ("[-]" if negative else "[+]") + "axiom_1[g]") == 1
+    assert relation_count(every, batch, f"[{'-' if negative else '+'}]{name}[g]") == 1
 
 
 def test_subgoal_layers_and_history_steps_over_a_helper_raise_under_domain():
-    task = phil()
+    task, atom = phil()
+    helper, name = str(atom), atom.predicate.name
     states = [task.initial_state]
     layered = encoding.FlatRelationEncoder(task, include_derived="domain", max_goal_level=2)
-    layers = encoding.subgoal_masks(task, [[[DECLARED], [HELPER]]])
-    with pytest.raises(ValueError, match=refusal("subgoal layer 1 of row 0", HELPER)):
+    layers = encoding.subgoal_masks(task, [[[DECLARED], [helper]]])
+    with pytest.raises(ValueError, match=refusal("subgoal layer 1 of row 0", helper)):
         layered.encode(states, subgoals=layers)
-    steps = encoding.history_masks(task, [[(0, [DECLARED]), (1, [HELPER]), (2, [DECLARED])]])
+    steps = encoding.history_masks(task, [[(0, [DECLARED]), (1, [helper]), (2, [DECLARED])]])
     history = encoding.FlatRelationEncoder(task, include_derived="domain", history=True)
-    with pytest.raises(ValueError, match=refusal("history step 1 of row 0", HELPER)):
+    with pytest.raises(ValueError, match=refusal("history step 1 of row 0", helper)):
         history.encode(states, history=steps)
     # a step that the encoding does not use (older than the newest history_max_steps) is not read
     newest = encoding.FlatRelationEncoder(task, include_derived="domain", history=True, history_max_steps=1)
     assert newest.encode(states, history=steps).history_offsets.tolist() == [0, 1]
     every = encoding.FlatRelationEncoder(task, max_goal_level=2, history=True)
     batch = every.encode(states, subgoals=layers, history=steps)
-    assert relation_count(every, batch, "[+]axiom_1[ssg]") == 1 and relation_count(every, batch, "[+]axiom_1[hist]") == 1
+    assert relation_count(every, batch, f"[+]{name}[ssg]") == 1 and relation_count(every, batch, f"[+]{name}[hist]") == 1
 
 
 def test_a_stream_refuses_the_rows_when_they_are_appended():
-    task = phil()
-    goals = encoding.goal_masks(task, [[HELPER]])
+    task, atom = phil()
+    helper = str(atom)
+    goals = encoding.goal_masks(task, [[helper]])
     stream = encoding.FlatRelationEncoder(task, include_derived="domain").stream()
-    with pytest.raises(ValueError, match=refusal("the goal of state 0", HELPER)):
+    with pytest.raises(ValueError, match=refusal("the goal of state 0", helper)):
         stream.append([task.initial_state], goals=goals)
     assert len(stream) == 0
     stream.append([task.initial_state], goals=encoding.goal_masks(task, [[DECLARED]]))
@@ -131,12 +140,13 @@ def test_a_stream_refuses_the_rows_when_they_are_appended():
 def test_a_horizon_goal_over_a_helper_raises_under_domain():
     from horizon_support import expand_horizons
 
-    task = phil()
+    task, atom = phil()
+    helper = str(atom)
     table = rl.as_table(task)
     view = expand_horizons(table, np.ascontiguousarray(task.encode([task.initial_state])), depth=1)
-    goals = encoding.goal_masks(task, [[DECLARED, HELPER]])
+    goals = encoding.goal_masks(task, [[DECLARED, helper]])
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode="full", include_derived="domain")
-    with pytest.raises(ValueError, match=refusal("the goal of graph 0 of the horizon", HELPER)):
+    with pytest.raises(ValueError, match=refusal("the goal of graph 0 of the horizon", helper)):
         encoder.encode(view, goals=goals)
     encoder.encode(view, goals=encoding.goal_masks(task, [[DECLARED]]))
 
@@ -149,11 +159,12 @@ def test_jax_flags_the_row_invalid():
         pytest.skip("mymyr was built without the XLA FFI headers")
     import mymyr.encoding.jax as ej
 
-    task = phil()
+    task, atom = phil()
+    helper = str(atom)
     rows = np.ascontiguousarray(task.encode([task.initial_state] * 2))
     domain = encoding.FlatRelationEncoder(task, include_derived="domain")
     good = encoding.goal_masks(task, [[DECLARED]] * 2)
-    bad = encoding.goal_masks(task, [[DECLARED], [DECLARED, HELPER]])
+    bad = encoding.goal_masks(task, [[DECLARED], [DECLARED, helper]])
     host = domain.encode(rows, goals=good)
     caps = dict(graphs=2, entities=int(host.entity_offsets[-1]), args=int(host.relation_arg_offsets[-1]), targets=0)
     platforms = ["cpu"] + (["cuda"] if any(d.platform == "gpu" for d in jax.devices()) else [])
@@ -184,7 +195,8 @@ def gpu():
 
 def test_the_device_encoder_flags_the_row_invalid():
     torch, dev = gpu()
-    task = phil()
+    task, atom = phil()
+    helper = str(atom)
     rows = np.ascontiguousarray(task.encode([task.initial_state] * 2))
     domain = encoding.FlatRelationEncoder(task, include_derived="domain", max_goal_level=1, history=True)
 
@@ -196,8 +208,8 @@ def test_the_device_encoder_flags_the_row_invalid():
     caps = dict(graphs=2, entities=int(host.entity_offsets[-1]), args=int(host.relation_arg_offsets[-1]),
                 targets=0, history=0)
     state = torch.from_numpy(rows.view(np.int64)).to(dev)
-    for bad in ({"goals": tensors(encoding.goal_masks(task, [[DECLARED], [HELPER]]))},
-                {"goals": tensors(good), "subgoals": tensors(encoding.subgoal_masks(task, [[[DECLARED]], [[HELPER]]]))}):
+    for bad in ({"goals": tensors(encoding.goal_masks(task, [[DECLARED], [helper]]))},
+                {"goals": tensors(good), "subgoals": tensors(encoding.subgoal_masks(task, [[[DECLARED]], [[helper]]]))}):
         with pytest.raises(ValueError, match=FLAGGED):
             domain.encode(state, **bad)
         assert domain.encode(state, capacities=caps, **bad).sizes["invalid_input"]
@@ -207,10 +219,10 @@ def test_the_device_encoder_flags_the_row_invalid():
 
 def test_device_literal_masks_flag_a_helper_literal_under_domain():
     torch, dev = gpu()
-    task = phil()
+    task, atom = phil()
+    name = atom.predicate.name
     table = rl.as_table(task)
-    atom = task.literal(HELPER).atom
-    predicates = torch.tensor([table.predicate_names.index("axiom_1")], dtype=torch.int32, device=dev)
+    predicates = torch.tensor([table.predicate_names.index(name)], dtype=torch.int32, device=dev)
     objects = torch.tensor([list(atom.object_indices)], dtype=torch.int32, device=dev)
     positive = torch.ones(1, dtype=torch.bool, device=dev)
     rows = torch.zeros(1, dtype=torch.int32, device=dev)
