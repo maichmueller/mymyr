@@ -216,8 +216,9 @@ def test_per_env_goals_over_a_table_with_axioms(tmp_path):
             expect_rows_equal(out.obs_actions[k], want.actions, (r, k))
             goals += int(want.goal.sum())
     assert goals
-    # relabelled: the goal of every env is the first atom of its current state's first word
-    eager = rt.BatchedEnv(table, n, device=dev, **common)
+    # relabelled (without autoreset, which restores the instance's masks): the goal of every env is the first atom of
+    # its current state's first word
+    eager = rt.BatchedEnv(table, n, device=dev, autoreset=False, **common)
     new_pos = np.zeros_like(gpos)
     new_pos[:, 0] = eager.states.cpu().numpy().view(np.uint64)[:, 0] & np.uint64(1)
     eager.reset(goal_pos=torch.from_numpy(new_pos.view(np.int64)).to(dev), goal_neg=torch.zeros_like(eager.goal_neg))
