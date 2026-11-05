@@ -19,9 +19,11 @@ PROBLEM = """(define (problem switches) (:domain switches) (:objects a) (:init (
 
 
 def pddl_task(domain=DOMAIN, problem=PROBLEM, **kwargs):
+    """The task with every parameter kept: an idle action gives one no-op label per binding, and the labels have the
+    arity the domain writes."""
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
-    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem), **kwargs)
+    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem, collapse_unused_parameters=False), **kwargs)
 
 
 def check_expansion(task, states):
