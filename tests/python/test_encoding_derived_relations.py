@@ -51,15 +51,15 @@ def test_domain_leaves_out_exactly_the_relations_of_the_compiled_helpers():
     declared = encoding.EncodingSchema(task, include_derived="domain")
     compiled = {n for n, c in zip(every.relation_names, every.relation_compiled) if c}
     assert compiled == set(every.relation_names) - set(declared.relation_names)
-    assert {n.strip("[+-]").split("[")[0] for n in compiled} == {"axiom_0", "axiom_1"}
-    assert by_lane(every, "derived") == ["axiom_0", "axiom_1", "blocked", "blocked-trans"]
+    assert {n.strip("[+-]").split("[")[0] for n in compiled} == {"@domain-0", "@domain-1"}
+    assert by_lane(every, "derived") == ["@domain-0", "@domain-1", "blocked", "blocked-trans"]
     assert by_lane(declared, "derived") == ["blocked", "blocked-trans"]
     assert not any(declared.relation_compiled)
     # the goal and history relations of the declared derived predicates stay
     assert {"[+]blocked[g]", "[+]blocked[hist]", "[-]blocked-trans[g][sat]"} <= set(declared.relation_names)
     # False drops the state relations of both kinds and keeps their goal and history relations
     none = encoding.EncodingSchema(task, include_derived=False)
-    assert by_lane(none, "derived") == [] and "[+]axiom_0[g]" in none.relation_names
+    assert by_lane(none, "derived") == [] and "[+]@domain-0[g]" in none.relation_names
 
 
 def test_a_domain_without_helpers_has_the_same_catalog():
@@ -75,9 +75,9 @@ def test_a_domain_of_helpers_only_keeps_no_derived_relation():
     task = pddl_task("linking", "p01.pddl")
     every = encoding.EncodingSchema(task)
     declared = encoding.EncodingSchema(task, include_derived="domain")
-    assert by_lane(every, "derived") == ["axiom_0", "axiom_1"]
-    assert not [n for n in declared.relation_names if "axiom_" in n]
-    assert all(c == ("axiom_" in n) for n, c in zip(every.relation_names, every.relation_compiled))
+    assert by_lane(every, "derived") == ["@domain-0", "@domain-1"]
+    assert not [n for n in declared.relation_names if "@" in n]
+    assert all(c == ("@domain-" in n) for n, c in zip(every.relation_names, every.relation_compiled))
 
 
 def test_the_option_reads_back_and_rejects_other_values():
@@ -98,13 +98,13 @@ def test_batches_equal_the_full_catalog_on_the_kept_relations():
     # the objects come first in both; a graph whose only nullary tuples were helpers' loses the auxiliary entity
     assert (0 <= (full.entity_offsets - kept.entity_offsets)).all()
     names = set(kept.schema.relation_names)
-    seen = {"blocked": 0, "axiom_0": 0}
+    seen = {"blocked": 0, "@domain-0": 0}
     for graph in range(len(states)):
         a, b = unpack(full, graph), unpack(kept, graph)
         assert b == {n: t for n, t in a.items() if n in names}
         seen["blocked"] += len(b.get("blocked", []))
-        seen["axiom_0"] += len(a.get("axiom_0", []))
-    assert seen["blocked"] > 0 and seen["axiom_0"] > 0
+        seen["@domain-0"] += len(a.get("@domain-0", []))
+    assert seen["blocked"] > 0 and seen["@domain-0"] > 0
     dropped = [i for i, c in enumerate(full.schema.relation_compiled) if c]
     assert int(kept.relation_counts.sum()) == int(full.relation_counts.sum()) - int(full.relation_counts[:, dropped].sum())
 
@@ -112,7 +112,7 @@ def test_batches_equal_the_full_catalog_on_the_kept_relations():
 def test_the_mark_survives_the_text_format_and_pickling(tmp_path):
     task = philosophers()
     text = task.to_text()
-    assert any(line.startswith("C ") and line.endswith(" axiom_0") for line in text.splitlines())
+    assert any(line.startswith("C ") and line.endswith(" @domain-0") for line in text.splitlines())
     path = tmp_path / "philosophers.txt"
     path.write_text(text)
     again = mymyr.Task.from_text(str(path))
@@ -161,13 +161,13 @@ def relation_rows(schema):
 
 @pytest.mark.parametrize("config", sorted(CONFIGS))
 def test_domain_removes_every_relation_of_a_helper_and_nothing_else(config):
-    """triage has one helper (axiom_0, a universal precondition): 'domain' removes its relations of every lane, those
+    """triage has one helper (@domain-0, a universal precondition): 'domain' removes its relations of every lane, those
     the options ask for, and keeps every other relation as True has it."""
     options, extras = CONFIGS[config]
     task = pddl_task("triage", "p01.pddl")
     every = encoding.EncodingSchema(task, **options)
     declared = encoding.EncodingSchema(task, include_derived="domain", **options)
-    removed = {"axiom_0"} | {e.format(h="axiom_0") for e in extras}
+    removed = {"@domain-0"} | {e.format(h="@domain-0") for e in extras}
     assert set(every.relation_names) - set(declared.relation_names) == removed
     assert set(declared.relation_names) <= set(every.relation_names)
     assert {n for n, c in zip(every.relation_names, every.relation_compiled) if c} == removed
@@ -175,7 +175,7 @@ def test_domain_removes_every_relation_of_a_helper_and_nothing_else(config):
     assert kept == {n: d for n, d in full.items() if n not in removed}
     # False drops the plain state relations of the derived predicates alone
     none = encoding.EncodingSchema(task, include_derived=False, **options)
-    assert set(every.relation_names) - set(none.relation_names) == {"axiom_0"}
+    assert set(every.relation_names) - set(none.relation_names) == {"@domain-0"}
 
 
 @pytest.mark.parametrize("config", sorted(CONFIGS))
@@ -217,10 +217,10 @@ def test_quantified_goals_become_predicates_of_the_problem():
     tasks = [pddl_task("linking", p) for p in ("p01.pddl", "p02.pddl", "p03.pddl")]
     table = rl.TaskTable(tasks)
     names = encoding.EncodingSchema(table).relation_names
-    for task, helper in zip(tasks, ("axiom_2", "axiom_3", "axiom_2")):
+    for task, helper in zip(tasks, ("@problem-0", "@problem-1", "@problem-0")):
         assert helper in str(task.goal_condition)
         assert all(helper not in n for n in names)
-        assert all("axiom" not in str(literal) for literal in task.encoding_goal)
+        assert all("@" not in str(literal) for literal in task.encoding_goal)
         with pytest.raises(ValueError, match="of its problem alone"):
             encoding.goal_masks(task, [[f"({helper})"]])
     options = dict(goal_derivations=("plain", "satisfied", "unsatisfied"), target_sources=("goal",))
@@ -235,7 +235,7 @@ def test_quantified_goals_become_predicates_of_the_problem():
     for graph in range(len(states)):
         x, y = unpack(a, graph), unpack(b, graph)
         assert {n: t for n, t in x.items() if n in goal_lanes} == {n: t for n, t in y.items() if n in goal_lanes}
-        assert not [n for n in x if n in goal_lanes and "axiom_" in n]
+        assert not [n for n in x if n in goal_lanes and "@" in n]
         tuples += sum(len(t) for n, t in y.items() if n in goal_lanes)
     assert tuples > 0
 

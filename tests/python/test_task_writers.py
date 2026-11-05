@@ -52,9 +52,10 @@ def _read_pddl(domain_text, problem_text):
     return mymyr.Task(mymyr.Domain.from_string(domain_text).instantiate_string(problem_text))
 
 
-def _helper(name):
-    """A derived predicate normalization adds for a goal or a condition (axiom_<k>)."""
-    return name.startswith("axiom_") and name[6:].isdigit()
+def _written(text, prefix="helper"):
+    """The atom or predicate text with the domain's helpers named as the PDDL writer spells them (@domain-<k> ->
+    helper-domain-<k>, unless that names a declared predicate); a task read back from PDDL declares them so."""
+    return text.replace("(@domain-", f"({prefix}-domain-")
 
 
 def _signature(t):
@@ -62,10 +63,10 @@ def _signature(t):
     s = t.initial_state
     return {
         "objects": sorted(t.objects),
-        "predicates": sorted((p.name, p.arity) for p in f.predicates if not _helper(p.name)),
+        "predicates": sorted((_written(f"({p.name})"), p.arity) for p in f.predicates if p.helper != "problem"),
         "functions": sorted((x.name, x.arity) for x in f.functions),
         "actions": sorted({x.name for x in f.schemas}),
-        "atoms": sorted(str(a) for a in s.atoms()),
+        "atoms": sorted(_written(str(a)) for a in s.atoms()),
         "numeric": sorted(zip(t.numeric_names, [round(v, 9) for v in s.numeric_values()])),
         "goal": s.is_goal(),
     }
@@ -96,7 +97,13 @@ def assert_same_task(a, b):
         return
     assert _signature(a) == _signature(b)
     for seed in (1, 2, 3):
-        assert _walk(a, seed) == _walk(b, seed), seed
+        assert _written_walk(_walk(a, seed)) == _walk(b, seed), seed
+
+
+def _written_walk(walk, prefix="helper", keep=lambda atom: True):
+    steps, cost = walk
+    return [(acts, sorted(_written(x, prefix) for x in atoms if keep(x)), values, goal)
+            for acts, atoms, values, goal in steps], cost
 
 
 @pytest.mark.parametrize("pair", PDDL_PAIRS, ids=lambda p: _id(p[1]))
@@ -148,6 +155,29 @@ def test_numeric_start_state():
     b = _read_pddl(*t.to_pddl(start=s))
     assert dict(zip(b.numeric_names, b.initial_state.numeric_values())) == dict(
         zip(t.numeric_names, s.numeric_values()))
+
+
+HELPERS = """(define (domain h) (:requirements :adl :derived-predicates)
+ (:predicates (p ?x) (q ?x) {declared})
+ (:action act :parameters (?x) :precondition (forall (?y) (or (p ?y) (q ?y))) :effect (p ?x)))"""
+HELPERS_PROBLEM = "(define (problem h1) (:domain h) (:objects a b) (:init (q a)) (:goal (or (p a) (p b))))"
+
+
+@pytest.mark.parametrize("declared", ["", "(helper-domain-0)", "(helper-domain-0) (helper_-domain-0 ?x)"])
+def test_helpers_are_written_under_fresh_pddl_names(declared):
+    a = _read_pddl(HELPERS.format(declared=declared), HELPERS_PROBLEM)
+    assert [(p.name, p.helper) for p in a.formalism.predicates if p.helper] == [("@domain-0", "domain"), ("@problem-0", "problem")]
+    domain, problem = a.to_pddl()
+    written = "helper" + "_" * declared.count("helper") + "-domain-0"
+    assert f"(:derived ({written})" in domain and "@" not in domain + problem
+    b = _read_pddl(domain, problem)
+    names = {p.name: p.helper for p in b.formalism.predicates}
+    assert names[written] is None  # declared by the written domain
+    assert [n for n, h in names.items() if h] == ["@problem-0"]  # the goal, written as a formula, compiles again
+    declared_only = lambda atom: "@problem-" not in atom  # noqa: E731
+    for seed in (1, 2):
+        assert _written_walk(_walk(a, seed), written[: -len("-domain-0")], declared_only) == \
+               _written_walk(_walk(b, seed), keep=declared_only)
 
 
 def test_write_pddl_needs_tasks_of_one_domain(blocks):

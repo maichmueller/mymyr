@@ -126,7 +126,7 @@ def test_normalized_task_carries_the_same_goal(domain, problem):
 def test_the_planners_goal_is_unchanged(domain):
     task = task_of(domain, "forall")
     assert len(task.goal_condition.literals) == 1
-    assert task.goal_condition.literals[0].predicate.name.startswith("axiom_")
+    assert task.goal_condition.literals[0].predicate.name == "@problem-0"
     # the planner still reaches the goal only through the derived predicate
     state = task.initial_state
     assert not task.is_goal(state)

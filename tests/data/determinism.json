@@ -49,8 +49,8 @@
    "siw": "44f35946a81f7014",
    "task.atoms": "ea3f0dfddcd01ea7",
    "task.encoding": "409f212e01fbc342",
-   "task.encoding_fingerprint": "2e6fb8f66b5d4337",
-   "task.fingerprint": "fee57e872cb58f82",
+   "task.encoding_fingerprint": "d0394bedc93d04f7",
+   "task.fingerprint": "162e29e9d132f47e",
    "task.num_atoms": "9537f32ec7599e1a",
    "walks": "ed75c6c0e8da8c34"
   },
@@ -157,8 +157,8 @@
    "siw": "ca5b12870ed5e0e2",
    "task.atoms": "0f492fbd74ec99c1",
    "task.encoding": "2b89de7a4c085f29",
-   "task.encoding_fingerprint": "1f8e5add3747f406",
-   "task.fingerprint": "7314c5c985c5af5f",
+   "task.encoding_fingerprint": "a1e6d6b751f4d7f7",
+   "task.fingerprint": "7c47d4146864fd66",
    "task.num_atoms": "76a50887d8f1c2e9",
    "walks": "a53f3f5338f4fe27"
   },
@@ -175,8 +175,8 @@
    "siw": "d5471838e6898d91",
    "task.atoms": "ad70aff8162c263b",
    "task.encoding": "409f212e01fbc342",
-   "task.encoding_fingerprint": "5187039742015aa3",
-   "task.fingerprint": "dbf03a4f9330d0cb",
+   "task.encoding_fingerprint": "cc09d291bd614599",
+   "task.fingerprint": "15a2b4d78c5d1f87",
    "task.num_atoms": "9537f32ec7599e1a",
    "walks": "ed75c6c0e8da8c34"
   }

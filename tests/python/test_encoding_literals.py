@@ -221,10 +221,10 @@ def test_derived_literals_set_the_derived_masks():
 @pytest.mark.parametrize("helper", [encoding.goal_masks, encoding.subgoal_masks, encoding.history_masks])
 def test_problem_local_derived_literals_have_slots_but_no_encoding_relation(helper):
     task = goals_task("duplicate")
-    atom = task.literal("(axiom_0)").atom
+    atom = task.literal("(@problem-0)").atom
     assert atom.kind == "derived" and atom.derived_slot is not None
-    rows = [["(axiom_0)"]] if helper is encoding.goal_masks else (
-        [[["(axiom_0)"]]] if helper is encoding.subgoal_masks else [[(0, ["(axiom_0)"])]])
+    rows = [["(@problem-0)"]] if helper is encoding.goal_masks else (
+        [[["(@problem-0)"]]] if helper is encoding.subgoal_masks else [[(0, ["(@problem-0)"])]])
     with pytest.raises(ValueError, match="derived predicate of its problem alone.*no relation"):
         helper(task, rows)
 

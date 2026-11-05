@@ -13,6 +13,7 @@ undefined side both are false, and a universal quantifier holds when no binding 
 """
 
 import math
+import pickle
 import re
 
 import numpy as np
@@ -355,8 +356,8 @@ def test_encoding_goal_of_guarded_quantifiers(shape):
     assert {str(x) for x in task.encoding_goal} == literals
     assert task.encoding_goal_complete is complete
     assert task.encoding_goal_unsatisfiable is unsatisfiable
-    # the planner keeps the derived predicate of the compiled goal
-    assert all(x.predicate.name.startswith("axiom_") for x in task.goal_condition.literals)
+    # the planner keeps the derived predicate of the compiled goal, a helper of the problem
+    assert all(x.predicate.name.startswith("@problem-") for x in task.goal_condition.literals)
 
 
 def test_fast_init_and_loki_init_agree():
@@ -368,14 +369,47 @@ def test_fast_init_and_loki_init_agree():
             assert fast == d.instantiate_string(problem, fast_init=False).to_text()
 
 
-def test_helper_predicates_are_derived_axiom_predicates():
+def test_helper_predicates_are_derived_and_marked():
     domain, problem, _ = build(SHAPES["forall-free"], "forall-when")
     task = mymyr.Domain.from_string(domain).instantiate_string(problem)
     names = {p.name: p for p in task.predicates}
-    helpers = sorted(n for n in names if n.startswith("axiom_"))
-    assert helpers and all(names[n].kind == "derived" for n in helpers)
+    helpers = sorted(n for n in names if n.startswith("@"))
+    assert helpers and all(names[n].kind == "derived" and names[n].helper is not None for n in helpers)
+    assert all(p.helper is None for n, p in names.items() if n not in helpers)
+    domain_helpers = [p.name for p in task.predicates if p.helper == "domain"]
+    assert domain_helpers == [f"@domain-{k}" for k in range(len(domain_helpers))]
     # the forall effect's condition is lifted into a rule over its free variables (?w and ?x)
     assert any(names[n].arity == 2 for n in helpers)
+
+
+HELPER_LIKE = """(define (domain h) (:requirements :adl :derived-predicates)
+ (:predicates (p ?x) (q ?x) (axiom_0) (axiom_1 ?x))
+ (:derived (axiom_0) (exists (?x) (p ?x)))
+ (:derived (axiom_1 ?x) (q ?x))
+ (:action act :parameters (?x) :precondition (forall (?y) (not (axiom_1 ?y))) :effect (p ?x)))"""
+HELPER_LIKE_PROBLEM = """(define (problem h1) (:domain h) (:objects a b)
+ (:goal (and (axiom_0) (not (axiom_1 a)) (or (p a) (p b)))))"""
+
+
+def test_declared_predicates_named_like_helpers_are_not_helpers(tmp_path):
+    """Helpers are told apart by their mark, never by name: the declared axiom_0 and axiom_1 stay declared predicates
+    in the formalism, the text format and pickles, and the goal literals over them stay in the encoding goal."""
+    task = mymyr.Task(mymyr.Domain.from_string(HELPER_LIKE).instantiate_string(HELPER_LIKE_PROBLEM))
+    kinds = {p.name: p.helper for p in task.formalism.predicates}
+    assert {n: h for n, h in kinds.items() if h} == {"@domain-0": "domain", "@problem-0": "problem"}
+    assert kinds["axiom_0"] is None and kinds["axiom_1"] is None
+    text = task.to_text()
+    assert {"D 0 axiom_0", "D 1 axiom_1", "C 0 @domain-0", "P 0 @problem-0"} <= set(text.splitlines())
+    assert [str(x) for x in task.encoding_goal] == ["(axiom_0)", "(not (axiom_1 a))"]
+    (tmp_path / "task.txt").write_text(text)
+    from_text = mymyr.Task.from_text(tmp_path / "task.txt")
+    from_pickle = pickle.loads(pickle.dumps(task))
+    for again in (from_text, from_pickle):
+        assert {p.name: p.helper for p in again.formalism.predicates} == kinds
+        assert again.encoding_goal_complete is False
+    # from text, the encoding goal is the planner's goal without the literal of the goal's helper (objects renamed)
+    assert [str(x) for x in from_text.encoding_goal] == ["(axiom_0)", "(not (axiom_1 o0))"]
+    assert [str(x) for x in from_pickle.encoding_goal] == ["(axiom_0)", "(not (axiom_1 a))"]
 
 
 GOAL = "(and (forall (?y - a) (imply (s ?y) (p ?y))) (forall (?y - (either b c)) (imply (not (= ?y k)) (q ?y))) (not (g)))"

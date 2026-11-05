@@ -777,7 +777,7 @@ def test_match_first_problem_local_derived_goals(on_device):
     source, rows, ids, derived = match_rows(tasks, [(g, s) for g, task in enumerate(tasks)
                                                   for s in walk(task, steps=9, walks=1)])
     templates = rl.GoalTemplates.from_conditions(source, [
-        [tasks[0].condition([], ["(axiom_0)"]), tasks[0].condition([], ["(not (axiom_0))"])],
+        [tasks[0].condition([], ["(@problem-0)"]), tasks[0].condition([], ["(not (@problem-0))"])],
         [tasks[1].condition([], ["(done)"]), tasks[1].condition([], ["(not (done))"])],
     ])
     expected = rl.match_first(rows, ids, templates, derived=derived)
