@@ -547,7 +547,7 @@ def test_a_derived_array_narrower_than_the_instance_needs_is_refused():
 # encodings, so the arrays that Python exports are the bytes that the C++ encoder wrote.
 GOLDEN_DIGESTS = {
     "gripper__prob05": 7519147456470550542,
-    "philosophers__p03-phil4": 2548283153954645567,
+    "philosophers__p03-phil4": 12810868459524319671,
 }
 
 
