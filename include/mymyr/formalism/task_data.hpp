@@ -362,10 +362,9 @@ struct GroundLiteralData
 /// `encoding_goal_unsatisfiable` from the literals over static predicates (against `static_init`).
 void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, bool complete);
 
-/// The encoding goal of a task whose goal as written is not available: the literals of `goal` except those over the
-/// derived predicates that goal normalization introduced (loki names them "axiom_<k>"), complete iff nothing was left
-/// out and the goal has no numeric constraints. For a conjunctive goal this is the goal itself. The derived
-/// predicates are recognized by their name, so a user predicate called "axiom_<k>" in the goal is left out too.
+/// The encoding goal of a task whose goal as written is not available: the literals of `goal` except those over
+/// helpers (Predicate::helper, whatever their names), complete iff nothing was left out and the goal has no numeric
+/// constraints. For a conjunctive goal this is the goal itself.
 void set_encoding_goal_from_normalized(TaskData& t);
 
 /// Whether the encoding goal of `t` is the one set_encoding_goal_from_normalized would give (true if none is
