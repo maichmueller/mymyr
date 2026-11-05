@@ -1,6 +1,6 @@
 // The derived words of the device expand (GPU 0: CUDA_VISIBLE_DEVICES=0; the tests skip without a device) against
-// rl::expand on the host, byte for byte: a single instance, a table whose instances expand apart (axioms), a table of
-// the multi-instance kernels (no axioms: zero words), a suite of several domains (runs and gathered rows), the
+// rl::expand on the host, byte for byte: a single instance, a table of instances with axioms on the multi-instance
+// kernels, a table of them without axioms (zero words), a suite of several domains (runs and gathered rows), the
 // capacity clip, and the padded view.
 
 #include "../cpp/encoding/support.hpp"
@@ -192,11 +192,11 @@ TEST(DeviceExpandDerived, TableOfInstancesWithAxiomsEqualsHost)
     ASSERT_EQ(suite->num_domains(), 1u);
     {
         cuda::SuiteExpander ex(test::context(), suite);
-        EXPECT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::PerInstance);
+        EXPECT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::Multi);
     }
     expect_equal(suite, 0);
     expect_equal(suite, 4);
-    expect_equal(suite, 0, 2);  // wider derived rows: each part scatters zero padded
+    expect_equal(suite, 0, 2);  // wider derived rows: zero padded
 }
 
 TEST(DeviceExpandDerived, TableWithoutAxiomsHasZeroWords)

@@ -1738,6 +1738,7 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
             Predicate out;
             out.name = t.intern_string(p->get_name());
             out.kind = static_cast<PredKind>(kind);
+            out.compiled = out.kind == PredKind::Derived && !origin.declared.contains(p->get_name());
             out.arity = static_cast<u32>(p->get_parameters().size());
             out.params = loki_params(*ds, t, canonical_params(p));
             if (auto perm = generated_predicate_perm(p, origin); !perm.empty())
@@ -1935,6 +1936,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
         Predicate out;
         out.name = t.intern_string(p->get_name());
         out.kind = PredKind::Derived;
+        out.compiled = !origin.declared.contains(p->get_name());
         out.arity = static_cast<u32>(p->get_parameters().size());
         loki::ParameterList lps = p->get_parameters();
         if (auto perm = generated_predicate_perm(p, origin); !perm.empty())

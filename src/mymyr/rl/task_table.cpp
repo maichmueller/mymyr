@@ -23,7 +23,10 @@ i32 kind_code(formalism::PredKind k)
     return k == formalism::PredKind::Static ? k_pred_static : k == formalism::PredKind::Fluent ? k_pred_fluent : k_pred_derived;
 }
 
-std::string kind_text(i32 k) { return k == k_pred_static ? "static" : k == k_pred_fluent ? "fluent" : "derived"; }
+std::string kind_text(i32 k, bool compiled)
+{
+    return k == k_pred_static ? "static" : k == k_pred_fluent ? "fluent" : compiled ? "derived, compiled" : "derived";
+}
 
 /// Per predicate: 1 if it is problem-local, i.e. derived and defined by problem axioms only (goal normalization's
 /// "axiom_<k>"), else 0.
@@ -54,6 +57,7 @@ struct DomainPred
     std::string name;
     u32 arity;
     i32 kind;
+    bool compiled;
 };
 std::vector<DomainPred> domain_predicates(const formalism::TaskData& D)
 {
@@ -61,7 +65,8 @@ std::vector<DomainPred> domain_predicates(const formalism::TaskData& D)
     std::vector<DomainPred> out;
     for (usize p = 0; p < D.predicates.size(); ++p)
         if (!local[p])
-            out.push_back({std::string(D.str(D.predicates[p].name)), D.predicates[p].arity, kind_code(D.predicates[p].kind)});
+            out.push_back({std::string(D.str(D.predicates[p].name)), D.predicates[p].arity, kind_code(D.predicates[p].kind),
+                           D.predicates[p].compiled});
     return out;
 }
 }  // namespace
@@ -79,10 +84,12 @@ std::string TaskTable::domain_mismatch(const Task& ref, const Task& task)
                    "/" + std::to_string(R.schemas[s].arity());
     const std::vector<DomainPred> rp = domain_predicates(R), dp = domain_predicates(D);
     for (usize d = 0; d < dp.size(); ++d)
-        if (d >= rp.size() || rp[d].name != dp[d].name || rp[d].arity != dp[d].arity || rp[d].kind != dp[d].kind)
+        if (d >= rp.size() || rp[d].name != dp[d].name || rp[d].arity != dp[d].arity || rp[d].kind != dp[d].kind ||
+            rp[d].compiled != dp[d].compiled)
             return "domain predicate " + std::to_string(d) + " is " + dp[d].name + "/" + std::to_string(dp[d].arity) +
-                   " (" + kind_text(dp[d].kind) + "), instance 0 has " +
-                   (d < rp.size() ? rp[d].name + "/" + std::to_string(rp[d].arity) + " (" + kind_text(rp[d].kind) + ")"
+                   " (" + kind_text(dp[d].kind, dp[d].compiled) + "), instance 0 has " +
+                   (d < rp.size() ? rp[d].name + "/" + std::to_string(rp[d].arity) + " (" +
+                                        kind_text(rp[d].kind, rp[d].compiled) + ")"
                                   : std::string("no more"));
     if (dp.size() != rp.size())
         return std::to_string(dp.size()) + " domain predicates, instance 0 has " + std::to_string(rp.size());
@@ -159,6 +166,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
                 m_pred_names.emplace_back(D.str(P.name));
                 m_pred_arity.push_back(P.arity);
                 m_pred_kind.push_back(kind_code(P.kind));
+                m_pred_compiled.push_back(P.compiled ? 1 : 0);
                 m_pred_instance.push_back(-1);
             }
             in.pred_map[p] = d++;  // domain_mismatch: instance i's domain predicates are instance 0's, in its order
@@ -204,6 +212,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         m_pred_names.emplace_back(D.str(P.name));
         m_pred_arity.push_back(P.arity);
         m_pred_kind.push_back(kind_code(P.kind));
+        m_pred_compiled.push_back(P.compiled ? 1 : 0);
         m_pred_instance.push_back(static_cast<i32>(l.instance));
     }
     // rows at the table width

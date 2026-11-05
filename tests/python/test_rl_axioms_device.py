@@ -5,8 +5,10 @@ both signs and in goals (tests/data/pddl/beacons), as tables, a table of one ins
 - the fast path runs them (``fast_unsupported`` is empty, the environment is capturable);
 - a captured rollout of the random policy with visited tables and encoded observations equals the eager steps on the
   device, the general path, the CPU environment and the CPU pool, byte for byte: states, rewards, flags, counts, final
-  states, revisited, the visited tables and the observation arrays; over a table of one instance also the
-  observations' action rows (labels, successor hashes, no-op flags) and action_visited;
+  states, revisited, the visited tables and the observation arrays, with the observations' action rows (labels,
+  successor hashes, no-op flags) and action_visited (a table of several instances expands in one pass, its axioms on
+  the device);
+- per-env goal masks over a table whose instances have axioms but goals without derived atoms;
 - torch.compile of a loop of steps runs as CUDA graphs and equals the eager steps;
 - the JAX environment's jitted device steps equal its CPU steps.
 
@@ -93,9 +95,7 @@ def test_captured_rollout_equals_eager_general_cpu_and_pool(name):
     n, K, R = 48, 4, 3
     ids = np.arange(n, dtype=np.int32) % len(table)  # every instance, kept through resets
     common = dict(seed=7, **CFG)
-    # action rows on the device need the asynchronous device expansion, which runs tables of one instance with axioms
-    actions = name == "linking-p03"
-    obs = dict(observation=encoders(table), obs_actions=actions, obs_capacities=caps(), track_visited=True)
+    obs = dict(observation=encoders(table), obs_actions=True, obs_capacities=caps(), track_visited=True)
     captured = rt.BatchedEnv(table, n, device=dev, task_ids=ids, **common, **obs)
     eager = rt.BatchedEnv(table, n, device=dev, task_ids=ids, **common, **obs)
     general = rt.BatchedEnv(table, n, device=dev, path="general", task_ids=ids, track_visited=True, **common)
@@ -124,10 +124,9 @@ def test_captured_rollout_equals_eager_general_cpu_and_pool(name):
                     assert torch.equal(getattr(out, f)[k].cpu(), getattr(want, f)), (r, k, f)
             assert torch.equal(out.revisited[k].cpu(), want.revisited), (r, k)
             expect_obs_equal(out.obs[k], want.obs)
-            if actions:
-                expect_rows_equal(out.obs_actions[k], want.actions, (r, k))
-                for x, y in zip(per_domain(out.action_visited[k]), per_domain(want.action_visited), strict=True):
-                    assert torch.equal(x.cpu(), y), (r, k)
+            expect_rows_equal(out.obs_actions[k], want.actions, (r, k))
+            for x, y in zip(per_domain(out.action_visited[k]), per_domain(want.action_visited), strict=True):
+                assert torch.equal(x.cpu(), y), (r, k)
             goals += int(want.goal.sum())
             revisits += int(want.revisited.sum())
         for env in (captured, eager, general):
@@ -135,6 +134,99 @@ def test_captured_rollout_equals_eager_general_cpu_and_pool(name):
             assert torch.equal(env.views, captured.views) or env is general
     assert goals and revisits  # goals over derived atoms were reached, states revisited
     for env in (captured, eager, general):
+        env.check_errors()
+
+
+@pytest.mark.parametrize("name", ["linking", "linking+beacons"])
+def test_observations_without_the_compiled_helpers_are_captured(name):
+    """Encoders with include_derived="domain" (linking's compiled helpers left out, beacons' :derived kept) observe
+    captured steps equal to the CPU environment's, with their action rows."""
+    dev = gpu_device()
+    table = table_of(name)
+    tables = list(table.tables) if isinstance(table, rl.TaskSuite) else [table]
+    obs = [encoding.FlatRelationEncoder(t, include_derived="domain", target_sources=("action", "goal")) for t in tables]
+    full = encoders(table)
+    for e, f in zip(obs, full, strict=True):
+        assert set(f.relation_names) - set(e.relation_names) == {
+            r for r, c in zip(f.relation_names, f.relation_compiled) if c}
+    n, K = 32, 4
+    common = dict(seed=5, task_ids=np.arange(n, dtype=np.int32) % len(table), observation=obs, obs_actions=True,
+                  obs_capacities=caps(), **CFG)
+    captured = rt.BatchedEnv(table, n, device=dev, **common)
+    cpu = rt.BatchedEnv(table, n, **common)
+    assert captured.capturable
+    graph = captured.capture(K, final=True)
+    for r in range(2):
+        out = graph.replay()
+        for k in range(K):
+            want = cpu.step(final=True)
+            assert torch.equal(out.states[k].cpu(), want.states), (r, k)
+            expect_obs_equal(out.obs[k], want.obs)
+            expect_rows_equal(out.obs_actions[k], want.actions, (r, k))
+    captured.check_errors()
+
+
+# linking problems whose goals have no derived atoms (the instances' axioms come from the universal preconditions)
+PLAIN_GOALS = {
+    "plain-01": """(define (problem plain-01) (:domain linking)
+  (:objects g0 g1 - gadget a0 a1 - cell)
+  (:init (cur g0) (next g0 g1) (terminal g1) (in a0 g0) (in a1 g0))
+  (:goal (and (done) (linked a0))))""",
+    "plain-02": """(define (problem plain-02) (:domain linking)
+  (:objects g0 g1 g2 - gadget a0 a1 b0 b1 - cell)
+  (:init (cur g0) (next g0 g1) (next g1 g2) (terminal g2) (in a0 g0) (in a1 g0) (in b0 g1) (in b1 g1)
+         (border g1 g0) (road b0 a0) (road a0 b0) (road b1 a1) (road a1 b1))
+  (:goal (and (done) (linked b0) (not (linked a1)))))""",
+}
+
+
+@pytest.mark.jax_on_cpu
+def test_per_env_goals_over_a_table_with_axioms(tmp_path):
+    """goals=True over a table whose instances have axioms but goals without derived atoms: per-env goal masks (the
+    instances' masks by default); captured steps with observations and their action rows equal the CPU environment's,
+    and relabelled goals are mask tests."""
+    dev = gpu_device()
+    tasks = []
+    for name, text in PLAIN_GOALS.items():
+        path = tmp_path / f"{name}.pddl"
+        path.write_text(text)
+        tasks.append(mymyr.Task.from_pddl(DATA / "linking" / "domain.pddl", path, atoms="dense"))
+    table = rl.TaskTable(tasks)
+    assert rt.fast_unsupported(table) == ""
+    n, K = 32, 4
+    ids = np.arange(n, dtype=np.int32) % len(table)
+    common = dict(seed=11, goals=True, task_ids=ids, observation=encoders(table), obs_actions=True,
+                  obs_capacities=caps(), **CFG)
+    captured = rt.BatchedEnv(table, n, device=dev, **common)
+    cpu = rt.BatchedEnv(table, n, **common)
+    assert captured.capturable
+    gpos, gneg = rl.goal_masks(table, ids)
+    assert np.array_equal(captured.goal_pos.cpu().numpy().view(np.uint64), gpos)
+    assert np.array_equal(captured.goal_neg.cpu().numpy().view(np.uint64), gneg)
+    graph = captured.capture(K, final=True)
+    goals = 0
+    for r in range(3):
+        out = graph.replay()
+        for k in range(K):
+            want = cpu.step(final=True)
+            for f in STEP:
+                if f != "revisited":
+                    assert torch.equal(getattr(out, f)[k].cpu(), getattr(want, f)), (r, k, f)
+            expect_obs_equal(out.obs[k], want.obs)
+            expect_rows_equal(out.obs_actions[k], want.actions, (r, k))
+            goals += int(want.goal.sum())
+    assert goals
+    # relabelled (without autoreset, which restores the instance's masks): the goal of every env is the first atom of
+    # its current state's first word
+    eager = rt.BatchedEnv(table, n, device=dev, autoreset=False, **common)
+    new_pos = np.zeros_like(gpos)
+    new_pos[:, 0] = eager.states.cpu().numpy().view(np.uint64)[:, 0] & np.uint64(1)
+    eager.reset(goal_pos=torch.from_numpy(new_pos.view(np.int64)).to(dev), goal_neg=torch.zeros_like(eager.goal_neg))
+    for _ in range(4):
+        got = eager.step(final=True)
+        want = rl.goal_test(got.final_states.cpu().numpy().view(np.uint64), new_pos, np.zeros_like(new_pos))
+        assert np.array_equal(got.goal.cpu().numpy(), want)
+    for env in (captured, eager):
         env.check_errors()
 
 

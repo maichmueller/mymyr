@@ -638,7 +638,7 @@ TEST(EncoderVirtualNodes, PredicatesWithoutAStateRelationAreRankedByName)
     std::filesystem::remove(problem);
     FlatOptions options = test::encoder_options();
     options.include_static = false;
-    options.include_derived = false;
+    options.include_derived = DerivedRelations::None;
     options.predicate_virtual_nodes = true;
     options.goal_derivations = {GoalDerivation::Plain};
     const auto encoder = FlatEncoder::create(table, options);
@@ -684,7 +684,7 @@ TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
             FlatOptions options = action_options();
             options.layout = layout;
             options.include_static = wide;
-            options.include_derived = wide;
+            options.include_derived = wide ? DerivedRelations::All : DerivedRelations::None;
             const auto encoder = FlatEncoder::create(table, options);
             const EncodingSchema& schema = encoder->schema();
             // the rows are as wide as the widest domain predicate (link/3, trio/3), whichever relations the options

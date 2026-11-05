@@ -35,6 +35,7 @@ constexpr std::array<std::string_view, 4> k_modes = {"none", "full", "delta", "a
 constexpr std::array<std::string_view, 3> k_roots = {"include", "exclude", "encode_only"};
 constexpr std::array<std::string_view, 2> k_outputs = {"relations", "simple"};
 constexpr std::array<std::string_view, 3> k_nullary = {"auxiliary", "arity0", "omit"};
+constexpr std::array<std::string_view, 3> k_derived_relations = {"all", "domain", "none"};
 }
 
 std::string_view to_string(GoalDerivation value) noexcept { return k_derivations[static_cast<usize>(value)]; }
@@ -49,6 +50,7 @@ std::string_view to_string(HorizonMode value) noexcept { return k_modes[static_c
 std::string_view to_string(RootPolicy value) noexcept { return k_roots[static_cast<usize>(value)]; }
 std::string_view to_string(Output value) noexcept { return k_outputs[static_cast<usize>(value)]; }
 std::string_view to_string(Nullary value) noexcept { return k_nullary[static_cast<usize>(value)]; }
+std::string_view to_string(DerivedRelations value) noexcept { return k_derived_relations[static_cast<usize>(value)]; }
 
 std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept
 {
@@ -87,6 +89,10 @@ std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept
 
 std::optional<Output> parse_output(std::string_view text) noexcept { return parse<Output>(k_outputs, text); }
 std::optional<Nullary> parse_nullary(std::string_view text) noexcept { return parse<Nullary>(k_nullary, text); }
+std::optional<DerivedRelations> parse_derived_relations(std::string_view text) noexcept
+{
+    return parse<DerivedRelations>(k_derived_relations, text);
+}
 
 void require_repeated_statics(const FlatOptions& options, std::string_view family)
 {

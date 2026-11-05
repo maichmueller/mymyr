@@ -648,7 +648,7 @@ TEST(DeviceEncode, DerivedWordsAreEvaluatedWhereAGraphReadsThem)
     EXPECT_THROW((void)run_device(device, ctx, stream, narrow, {16, 1, 1, 1}), std::invalid_argument);
     // without derived relations nothing is read, so nothing is required
     encoding::FlatOptions options = test::encoder_options();
-    options.include_derived = false;
+    options.include_derived = encoding::DerivedRelations::None;
     const auto lean = encoding::FlatEncoder::create(c.table, options);
     cuda::DeviceEncoder lean_device(ctx, lean);
     lean_device.reserve(cuda::BatchShape{16, 0, 0, 0}, stream);
@@ -693,7 +693,7 @@ TEST(DeviceEncode, SuppliedDerivedScratchRefusesAnEvaluation)
     }
     // without derived relations nothing is evaluated and both sizes agree
     encoding::FlatOptions options = test::encoder_options();
-    options.include_derived = false;
+    options.include_derived = encoding::DerivedRelations::None;
     const cuda::DeviceEncoder lean(ctx, encoding::FlatEncoder::create(c.table, options));
     EXPECT_EQ(lean.scratch_bytes(shape), lean.scratch_bytes(shape, cuda::DerivedWords::Supplied));
 }
@@ -1117,7 +1117,7 @@ TEST(DeviceEncode, TheStreamFormEvaluatesTheDerivedAtomsOnItsStream)
             chosen.push_back(c);  // derived goal and subgoal masks
             Config layers_only = c;  // derived subgoal masks alone read the derived atoms
             layers_only.name = "derived subgoal masks alone";
-            layers_only.options.include_derived = false;
+            layers_only.options.include_derived = encoding::DerivedRelations::None;
             layers_only.inputs.derived_goals = false;
             chosen.push_back(layers_only);
         }
@@ -1744,7 +1744,7 @@ TEST(DeviceEncode, EvaluatedDerivedWordsEqualTheHostThroughSubgoalLayers)
                     // row goals over the fluent slots only: the subgoal layers alone read the derived atoms
                     if (config.inputs.layers == 0)
                         continue;
-                    config.options.include_derived = false;
+                    config.options.include_derived = encoding::DerivedRelations::None;
                     config.inputs.row_goals = true;
                     config.inputs.derived_goals = false;
                 }

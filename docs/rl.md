@@ -110,7 +110,7 @@ on it, so the outputs are ready in that stream's order, and without `stream` the
 stays in `offsets[N]` (true counts), and `status[0]` gets bit 0 when the successors exceed the capacity and bit 1 when a
 row is invalid (a task id outside the table, bits its instance has no slot for, a successor wider than `succ`; nothing
 is written then); successor rows past the total are zero. The result holds only `capacity`, unless the table's
-expansion needs the host (instances expanded apart, CPU-fallback schemas or axioms, numeric rows, suites of several
+expansion needs the host (instances expanded apart, CPU-fallback schemas or axioms beyond the device's evaluator, numeric rows, suites of several
 domains, batches beyond one chunk of views), which waits as without `status` and returns the usual keys (`total`
 among them): then rows past the total keep what the destination held, and an invalid row raises `ValueError` instead
 of setting bit 1.
@@ -1168,6 +1168,9 @@ encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of thos
   including unused capacity and device counters, without waiting. The same API covers `SuiteObservation`, including
   its domain/index mappings. See
   [observation bytes](encoding.md#observation-bytes) and [device status](encoding.md#capacities-status-and-synchronization).
+  `encoder.capacity_bounds(table, num_envs, drop_noops=obs_drop_noops)` computes capacities that no observation of the
+  table's rows exceeds, without a warm-up rollout ([Capacity bounds](encoding.md#capacity-bounds)); pass them as
+  `obs_capacities` (with `actions=False` when the observations hold no actions).
 - **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
   `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states: on the CPU, and on a device
   with or without `obs_capacities`. Exact device expansion waits for its total, and the encoding waits for its

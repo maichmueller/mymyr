@@ -135,7 +135,10 @@ TaskData make_explore_data(const TaskData& T)
     R.predicates = T.predicates;
     for (Predicate& p : R.predicates)
         if (p.kind == PredKind::Derived)
+        {
             p.kind = PredKind::Fluent;
+            p.compiled = false;
+        }
     R.static_init = T.static_init;
     R.fluent_init = T.fluent_init;
     R.collapsed_params = T.collapsed_params;

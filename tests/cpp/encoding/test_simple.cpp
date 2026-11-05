@@ -337,7 +337,7 @@ std::vector<Config> configs()
          [](FlatOptions& o)
          {
              o.include_static = false;
-             o.include_derived = false;
+             o.include_derived = DerivedRelations::None;
              o.nullary = Nullary::Omit;
          }},
         {"equality_actions_targets",

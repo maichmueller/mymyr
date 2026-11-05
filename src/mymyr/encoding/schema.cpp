@@ -119,6 +119,7 @@ void Catalog::add_predicate(u32 predicate, Lane lane, const Key& key, std::initi
     relation.derivation = key.derivation;
     relation.state_anchored = key.anchored;
     relation.predicate = static_cast<i32>(predicate);
+    relation.compiled = source.compiled;
     relation.logical_arity = source.arity;
     relation.name.reserve(source.name.size() + 16);
     if (key.sign != 0)
@@ -286,10 +287,12 @@ void Catalog::build()
     for (u32 predicate = 0; predicate < m_domain.predicates.size(); ++predicate)
     {
         const DomainSignature::Predicate& source = m_domain.predicates[predicate];
-        if ((source.arity == 0 && o.nullary == Nullary::Omit) || (source.name == "=" && !o.equality))
+        // the helpers that normalization introduced have no relation under Domain: no instance goal lists them
+        if ((source.arity == 0 && o.nullary == Nullary::Omit) || (source.name == "=" && !o.equality) ||
+            (source.compiled && o.include_derived == DerivedRelations::Domain))
             continue;
         const bool state_relation = !(source.kind == PredicateKind::Static && !o.include_static) &&
-                                    !(source.kind == PredicateKind::Derived && !o.include_derived);
+                                    !(source.kind == PredicateKind::Derived && o.include_derived == DerivedRelations::None);
         const bool top = is_top_type(source.name);
         if (horizon)
             build_horizon(predicate, state_relation, top);
@@ -406,6 +409,7 @@ DomainSignature DomainSignature::of(const rl::TaskTable& table)
         predicate.kind = code == rl::k_pred_static ? PredicateKind::Static
                          : code == rl::k_pred_fluent ? PredicateKind::Fluent
                                                      : PredicateKind::Derived;
+        predicate.compiled = table.predicate_compiled()[p] != 0;
         domain.predicates.push_back(std::move(predicate));
     }
     for (u32 s = 0; s < table.num_schemas(); ++s)

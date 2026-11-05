@@ -196,7 +196,7 @@ TEST(EncoderReference, WithoutNullaryStaticOrDerived)
     expect_matches_reference(options);
     options.include_static = false;
     expect_matches_reference(options);
-    options.include_derived = false;
+    options.include_derived = DerivedRelations::None;
     expect_matches_reference(options);
 }
 

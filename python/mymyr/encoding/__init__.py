@@ -46,6 +46,8 @@ batch (``SuiteBatch``). ``encode(..., capacities=..., into=batch)`` writes into 
 same capacities (the arrays it exported change with it). ``schema_to_dict`` and ``schema_from_dict`` serialize a
 schema as options, catalog, fingerprint and version and check it when it is rebuilt over a table;
 ``FlatBatch.from_arrays(schema, arrays)`` reads back a batch from ``batch.as_dict()`` and checks it against the schema.
+``encoder.capacity_bounds(table, graphs)`` gives capacities that no batch of that many rows exceeds, per relation too
+(``CapacityBounds``), computed from the instances and the schema without encoding a state.
 
 EncodingSchema is the relation catalog of an encoding: the relations a batch holds, sorted by name, with their
 arities, lanes and slot roles, and a fingerprint. It is a function of the domain and the options alone.
@@ -65,6 +67,7 @@ from mymyr._core._encoding import (
     SimpleEncoder,
 )
 from mymyr.encoding._actions import action_entities, action_entities_of, action_indices, action_rows
+from mymyr.encoding._capacity import CapacityBounds
 from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
 from mymyr.encoding._hgraph import DeviceHGraphView, hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
@@ -84,6 +87,7 @@ from mymyr.encoding._record import schema_from_dict, schema_to_dict
 from mymyr.encoding._suite import SuiteBatch, SuiteEncoder
 
 __all__ = [
+    "CapacityBounds",
     "DeviceCollator",
     "DeviceFlatBatch",
     "DeviceFlatStream",

@@ -116,6 +116,10 @@ struct Predicate
     PredKind kind = PredKind::Static;
     u32 arity = 0;
     Range params;  // into params
+    /// A derived predicate that normalization introduced (the helper `axiom_<k>` of a universal quantifier, of a
+    /// disjunctive goal part or of a quantified effect condition) rather than one the domain or problem declares.
+    /// Always false for static and fluent predicates.
+    bool compiled = false;
 };
 
 struct Function

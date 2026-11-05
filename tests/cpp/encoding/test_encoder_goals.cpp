@@ -424,7 +424,7 @@ TEST(EncoderGoals, WithoutNullaryEqualityStaticOrDerivedRelations)
     options.equality = false;
     expect_instance_goals(options);
     options.include_static = false;
-    options.include_derived = false;
+    options.include_derived = DerivedRelations::None;
     expect_instance_goals(options);
 }
 
@@ -1017,7 +1017,7 @@ TEST(EncoderGoals, GoalRelationsWiderThanEveryStateRelationAreEncodedWhole)
                              (include_static ? "" : " without static") + (include_derived ? "" : " without derived"));
                 FlatOptions options = goal_options(layout, false);
                 options.include_static = include_static;
-                options.include_derived = include_derived;
+                options.include_derived = include_derived ? DerivedRelations::All : DerivedRelations::None;
                 const auto encoder = FlatEncoder::create(table, options);
                 const EncodingSchema& schema = encoder->schema();
                 EXPECT_EQ(encoder->context().max_arity(), 3u);

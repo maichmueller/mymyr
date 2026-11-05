@@ -89,6 +89,11 @@ def action_indices(batch: FlatBatch | DeviceFlatBatch, entities: SupportsDLPack 
     sequence of ints; CUDA arrays are copied to the host), for instance ``batch.target_entity`` entries of the action
     targets a policy chose; ``None`` means every action entity of the batch, which is none for a batch with implicit
     entity arrays. Raises ``ValueError`` for an id outside the batch or one that is not an action entity.
+
+    The result is a host array also for a ``DeviceFlatBatch``: the checks read its arrays on the host, which waits for
+    the device. Inside a captured step, index the batch's own array instead: for action entities ``chosen`` (a torch
+    tensor on the batch's device, for instance from ``action_entities_of``), ``batch.entity_ref[chosen]`` are these
+    indices on the device, without the checks and without waiting.
     """
     if batch.implicit_entities:
         return _implicit(entities)

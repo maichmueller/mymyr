@@ -67,6 +67,9 @@ def test_expansion_action_entities_targets_and_capacity_match_host(layout, index
     same(expected, actual)
     np.testing.assert_array_equal(encoding.action_rows(actual, actions), encoding.action_rows(expected, rl.expand(task, rows)))
     np.testing.assert_array_equal(encoding.action_indices(actual), encoding.action_indices(expected))
+    # the device idiom: entity_ref of the action entities (here every one of them) is the same index
+    chosen = torch.as_tensor(encoding.action_entities(actual), device=device)
+    np.testing.assert_array_equal(actual.entity_ref[chosen].cpu().numpy(), encoding.action_indices(expected))
     same(expected, encoder.encode(words, actions=actions, capacities=caps(expected)))
 
 

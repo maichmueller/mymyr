@@ -173,7 +173,7 @@ TEST(EncodingContext, PhilosophersHaveDerivedCellsAndEqualityOnlyOnRequest)
     EXPECT_EQ(cell->b - cell->a, task->num_objects());
 
     FlatOptions no_derived = test::encoder_options();
-    no_derived.include_derived = false;
+    no_derived.include_derived = DerivedRelations::None;
     const auto without = context_of(table, no_derived);
     EXPECT_EQ(count_op(cells_of(*without, 0), CellOp::Derived), 0u);
     EXPECT_FALSE(without->needs_derived(0));
@@ -497,7 +497,7 @@ TEST(EncodingContext, TheLiteralSectionResolvesEveryAtomUnderEveryFixedLayoutAnd
     // every tuple of objects of every domain predicate: fluent, derived and static predicates, nullary ones and `=`
     std::vector<FlatOptions> variants(6, test::encoder_options());
     variants[1].include_static = false;
-    variants[2].include_derived = false;
+    variants[2].include_derived = DerivedRelations::None;
     variants[3].nullary = Nullary::Omit;
     variants[4].statics = Statics::Shared;
     variants[5].horizon.mode = HorizonMode::Delta;

@@ -60,7 +60,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `max_goal_level` | 0 to 3 | 0 | the [subgoal](#subgoals) levels beyond the goal |
 | `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"every"` | placement of literals listed at several goal levels |
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
-| `include_derived` | bool | `True` | the state relations of the derived predicates |
+| `include_derived` | bool or `'domain'` | `True` | the state relations of the derived predicates; `'domain'` keeps the declared ones and leaves out the [helpers](#the-relation-catalog) normalization introduces |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
 | `nullary` | `'auxiliary'`, `'arity0'`, `'omit'` | `'auxiliary'` | the relations of nullary predicates: tuples over the [auxiliary entity](#lanes), tuples without an argument, or none |
 | `equality` | bool | `False` | the relations of the equality predicate `=` |
@@ -116,13 +116,20 @@ instances of a table, so tables over one domain give the same relation ids to th
   action schema name, `[hist]`, a goal level (`[g]`, `[sg]`, `[ssg]`, `[sssg]`) and a derivation (`[sat]`, `[unsat]`,
   `[sat+]`, `[sat-]`). State relations carry the plain name, numeric relations the prefix `[num]`. The catalog is
   sorted by name, bytewise, with the numeric relations last; a relation's id is its position. `relation_lanes`,
-  `relation_signs`, `relation_levels`, `relation_derivations`, `relation_predicates` and `relation_schemas` describe
-  each relation, `relation_arities` the encoded arity of its tuples and `relation_slot_roles` each position of them.
+  `relation_signs`, `relation_levels`, `relation_derivations`, `relation_predicates`, `relation_compiled` and
+  `relation_schemas` describe each relation, `relation_arities` the encoded arity of its tuples and
+  `relation_slot_roles` each position of them.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
   (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`; the
   state relations of the static predicates (the types included) and of the derived predicates can be dropped
-  (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates have relations of
+  (`include_static`, `include_derived=False`); their goal and history relations stay. `include_derived='domain'`
+  keeps the derived predicates the domain declares (`:derived`) and leaves the helpers out altogether: the derived
+  predicates that normalization introduces for universal quantifiers, disjunctive goal parts and quantified effect
+  conditions. No instance goal lists a helper, so its goal relations would stay empty, and its state and history
+  relations would hold the truth of the condition it stands for (an action's applicability, say). The front end marks
+  the helpers where it creates them, whatever their names; `relation_compiled` tells their relations apart, and a task
+  read from the text format keeps the mark (predicate kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
   their relation (a state relation without predicate virtual nodes has arity 0); with `nullary='omit'` they have none.
   `slot_role_names` and `entity_role_names` always list all nine roles. An action relation holds the schema's full
@@ -137,6 +144,21 @@ instances of a table, so tables over one domain give the same relation ids to th
   `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit entity arrays); an encoding that
   stores every array has one fingerprint however it was asked for. It does not depend on declaration order, on
   predicate ids, on the process or on the build.
+
+The philosophers domain declares the derived predicates `blocked` and `blocked-trans`; its universal quantifiers
+become the helpers `axiom_0` and `axiom_1`:
+
+```python
+phil = mymyr.Task.from_pddl("tests/data/pddl/philosophers/domain.pddl", "tests/data/pddl/philosophers/p03-phil4.pddl")
+every = encoding.EncodingSchema(phil)
+declared = encoding.EncodingSchema(phil, include_derived="domain")
+derived = lambda s: [n for n, lane in zip(s.relation_names, s.relation_lanes) if lane == "derived"]
+assert derived(every) == ["axiom_0", "axiom_1", "blocked", "blocked-trans"]
+assert derived(declared) == ["blocked", "blocked-trans"]
+assert {n for n, c in zip(every.relation_names, every.relation_compiled) if c} == \
+    set(every.relation_names) - set(declared.relation_names)  # [+]axiom_0[g], axiom_0, [-]axiom_1[hist], ...
+assert declared.options["include_derived"] == "domain"
+```
 
 ## Encoding states
 
@@ -904,7 +926,7 @@ fanout.
 The transition encoders expand CUDA parent rows and encode them on the current stream; `actions=` a device expansion
 reuses its successor rows. With `capacities` the expansion is bounded by the entity capacity (every successor is a
 node with a state entity), and nothing waits for the device unless the table's expansion needs the host (instances
-expanded apart, CPU-fallback schemas or axioms, lazy atom slots, batches beyond one chunk of views; `expand_into` in
+expanded apart, CPU-fallback schemas or axioms beyond the device's evaluator, lazy atom slots, batches beyond one chunk of views; `expand_into` in
 [rl.md](rl.md)): an expansion past the capacity makes the batch report `capacity_overflow`, an invalid parent row
 `invalid_input`. That expansion is sized by `capacities["entities"]`, not by the successors the rows have: the
 successor rows, the builder's nodes and scratch and the encoder's horizon scratch each hold that many rows (about
@@ -1254,6 +1276,62 @@ assert np.array_equal(one.relation_args[: one.sizes["args"]], exact.relation_arg
 
 tight = fixed_encoder.encode([state] * 3, capacities=dict(graphs=8, entities=16, args=512))
 assert tight.sizes["capacity_overflow"] and not tight.relation_args.any()
+```
+
+### Capacity bounds
+
+`encoder.capacity_bounds(table_or_suite, graphs, *, actions=True, drop_noops=False, history=0)` computes capacities
+that no batch of `graphs` rows exceeds, from the instances and the schema alone (no rollout, nothing encoded):
+`table_or_suite` is a `Task`, `TaskHandle` or `TaskTable` of the encoder's domain, or a `TaskSuite` (its tables whose
+catalog is the encoder's). The bounds of one graph are the largest over the instances, whether a row has its
+instance's goal or a goal of its own (`goals=` masks), and those of `graphs` rows are `graphs` times them. With
+`actions` the rows bring expansion rows (`actions=` of `encode`, `obs_actions=True`); `history` is the most steps a
+row's history has (0: `history_max_steps`, which a schema that encodes every step needs). Rows with constant literals
+of their own (`goal_constants`, `subgoal_constants`) are not covered.
+
+The result, a `CapacityBounds`, is a dict of the keys that `capacities` take (`graphs`, `entities`, `args`, and
+`targets`, `history`, `numeric`, `static_instances` and `static_args` where the schema has them), so it goes directly
+into `encode(..., capacities=...)` and `BatchedEnv(..., obs_capacities=...)`; with `drop_noops` it also has the
+`successors` that `obs_capacities` takes for `obs_drop_noops=True` (without the drop the kept rows are all the
+successors, which the entity capacity bounds already). `relation_tuples` holds the tuples of each relation by name, in
+catalog order, `exact` and `relation_exact` tell which bounds some batch reaches and which are upper bounds:
+
+| Bound | Per graph | Kind |
+|---|---|---|
+| `graphs` | the rows | exact |
+| a static relation | the instance's static tuples (none under `statics='shared'`) | exact |
+| a numeric relation, `numeric` | the instance's numeric slots | exact |
+| `history` | the steps of a row | exact |
+| `static_instances`, `static_args` | the largest static blocks, one per instance among the rows | exact |
+| a fluent or derived state relation | the atom slots of its predicate | upper bound |
+| a goal relation (any level and derivation) | the atom slots of its predicate, plus the instance goal's literals of fixed truth | upper bound |
+| a history relation | the steps times the atom slots of its predicate | upper bound |
+| an action relation | the ground actions of its schemas that the delete relaxation reaches and whose static preconditions hold | upper bound |
+| `successors` | those ground actions of every schema: the expansion rows of a state | upper bound |
+| `entities`, `args`, `targets` | counted from the relations as the encoder counts them | upper bound |
+
+The atom slots are the instance's (`atoms='reachable'` and `'auto'` give only the relaxed-reachable atoms one, which
+tightens every bound but the static ones). The action bounds come from a grounding of the delete relaxation; past its
+budget they are unknown: the value is None, `unbounded` names the keys and relations without a bound, `reason` says
+why, and such a dict is refused as capacities. A relation without tuples in every instance has the exact bound 0.
+
+relmo's per-relation capacities map by name: `FlatCapacities.for_relations(dict(zip(encoder.relation_names,
+encoder.relation_arities)), tuples=bounds.relation_tuples, nodes=bounds["entities"], graphs=bounds["graphs"])`.
+
+```python
+bounds = fixed_encoder.capacity_bounds(task, 8)
+assert set(bounds) == {"graphs", "entities", "args"} and bounds["graphs"] == 8
+assert bounds.exact == {"graphs": True, "entities": False, "args": False} and not bounds.unbounded
+walk = [task.initial_state]
+for _ in range(20):
+    walk.append(task.successor_states(walk[-1])[-1])
+for start in range(0, len(walk), 8):
+    batch = fixed_encoder.encode(walk[start : start + 8], capacities=bounds)
+    assert not batch.sizes["overflow"]
+    counts = batch.relation_counts.sum(axis=0)
+    assert all(n <= bounds.relation_tuples[r] for r, n in zip(fixed_encoder.relation_names, counts))
+lanes = dict(zip(fixed_encoder.relation_names, fixed_encoder.relation_lanes))
+assert all(bounds.relation_exact[r] == (lanes[r] == "static") for r in lanes if bounds.relation_tuples[r])
 ```
 
 **`into=`** writes the encoding into an earlier batch instead of new memory: a `FlatBatch` that a call with the same

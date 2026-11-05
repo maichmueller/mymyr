@@ -121,6 +121,18 @@ enum class Nullary : u8
     Omit,
 };
 
+/// Which derived predicates have state relations. All lists every one, None none (their goal and history relations
+/// stay). Domain keeps those the domain declares and leaves the derived predicates that normalization introduced
+/// (formalism::Predicate::compiled: the helpers `axiom_<k>` of quantified and disjunctive conditions) out of the
+/// catalog altogether: an instance's goal never lists them, so their goal relations would stay empty, and their state
+/// and history relations would hold the truth of the conditions they stand for.
+enum class DerivedRelations : u8
+{
+    All,
+    Domain,
+    None,
+};
+
 /// The integer type of every index, count and offset array.
 enum class IndexType : u8
 {
@@ -186,8 +198,8 @@ struct FlatOptions
     RepeatedLiterals repeated_literals = k_default_repeated_literals;
     /// Relations of the static predicates (the types included) in the state lane.
     bool include_static = true;
-    /// Relations of the derived predicates in the state lane.
-    bool include_derived = true;
+    /// Relations of the derived predicates in the state lane (see DerivedRelations).
+    DerivedRelations include_derived = DerivedRelations::All;
     /// One relation `[num]f` for each numeric function f of the domain that a state gives values to (a fluent function;
     /// not total-cost), with one tuple per ground function term of the instance and its value in `numeric_values`.
     /// Without it the numeric part of the states is ignored.
@@ -257,7 +269,7 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
 /// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "repeat", "shared"; "int32", "int64";
 /// "every", "lowest", "highest"; "float32", "float64"; "none", "full", "delta", "action"; "include", "exclude",
-/// "encode_only"; "relations", "simple"; "auxiliary", "arity0", "omit"),
+/// "encode_only"; "relations", "simple"; "auxiliary", "arity0", "omit"; "all", "domain", "none"),
 /// and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
@@ -271,6 +283,7 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
 [[nodiscard]] std::string_view to_string(Output value) noexcept;
 [[nodiscard]] std::string_view to_string(Nullary value) noexcept;
+[[nodiscard]] std::string_view to_string(DerivedRelations value) noexcept;
 [[nodiscard]] std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept;
 [[nodiscard]] std::optional<TargetSource> parse_target_source(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
@@ -283,4 +296,5 @@ void require_repeated_statics(const FlatOptions& options, std::string_view famil
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Output> parse_output(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Nullary> parse_nullary(std::string_view text) noexcept;
+[[nodiscard]] std::optional<DerivedRelations> parse_derived_relations(std::string_view text) noexcept;
 }

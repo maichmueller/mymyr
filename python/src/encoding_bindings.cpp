@@ -7,6 +7,7 @@
 #include "rl_imports.hpp"
 
 #include "mymyr/core/threads.hpp"
+#include "mymyr/encoding/capacity.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/collate.hpp"
 #include "mymyr/encoding/hgraph.hpp"
@@ -105,6 +106,9 @@ struct EncodingRepeatedLiterals
 struct EncodingNullary
 {
 };
+struct EncodingIncludeDerived
+{
+};
 struct EncodingLiteralSource
 {
 };
@@ -141,6 +145,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingNullary>
 {
     static constexpr auto Name = const_name("typing.Literal['auxiliary', 'arity0', 'omit']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingIncludeDerived>
+{
+    static constexpr auto Name = const_name("bool | typing.Literal['domain']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingStatics>
@@ -413,8 +422,20 @@ encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse,
     return out;
 }
 
+/// include_derived: True (every derived predicate), False (none) or "domain" (the declared ones).
+encoding::DerivedRelations derived_relations(nb::handle value)
+{
+    if (PyBool_Check(value.ptr()))
+        return value.ptr() == Py_True ? encoding::DerivedRelations::All : encoding::DerivedRelations::None;
+    if (nb::isinstance<nb::str>(value) && std::string_view(nb::borrow<nb::str>(value).c_str()) == "domain")
+        return encoding::DerivedRelations::Domain;
+    throw nb::value_error(("mymyr: encoding: include_derived must be True, False or 'domain', not " +
+                           nb::cast<std::string>(nb::repr(value)))
+                              .c_str());
+}
+
 encoding::FlatOptions schema_options(nb::handle max_goal_level, nb::handle repeated_literals, bool include_static,
-                                     bool include_derived, bool include_numeric, nb::handle nullary, bool equality,
+                                     nb::handle include_derived, bool include_numeric, nb::handle nullary, bool equality,
                                      bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, nb::handle numeric_dtype, bool emit_counts,
@@ -435,7 +456,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, nb::handle repea
     options.repeated_literals = choice(repeated_literals, "repeated_literals", parse_repeated_literals,
                                        "'every', 'lowest', 'highest'");
     options.include_static = include_static;
-    options.include_derived = include_derived;
+    options.include_derived = derived_relations(include_derived);
     options.include_numeric = include_numeric;
     options.nullary = choice(nullary, "nullary", parse_nullary, "'auxiliary', 'arity0', 'omit'");
     options.equality = equality;
@@ -485,7 +506,12 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["max_goal_level"] = o.max_goal_level;
     out["repeated_literals"] = std::string(encoding::to_string(o.repeated_literals));
     out["include_static"] = o.include_static;
-    out["include_derived"] = o.include_derived;
+    switch (o.include_derived)
+    {
+    case encoding::DerivedRelations::All: out["include_derived"] = true; break;
+    case encoding::DerivedRelations::None: out["include_derived"] = false; break;
+    case encoding::DerivedRelations::Domain: out["include_derived"] = "domain"; break;
+    }
     out["include_numeric"] = o.include_numeric;
     out["nullary"] = std::string(encoding::to_string(o.nullary));
     out["equality"] = o.equality;
@@ -520,7 +546,10 @@ constexpr const char* k_option_doc =
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
     "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
-    "predicates. include_numeric: one relation `[num]f` for each numeric function f of the domain that a state gives "
+    "predicates; include_derived='domain' keeps the derived predicates the domain declares and leaves the helpers "
+    "`axiom_<k>` that normalization introduces for quantified and disjunctive conditions out of the catalog, with "
+    "their goal and history relations (relation_compiled tells the two kinds apart). include_numeric: one relation "
+    "`[num]f` for each numeric function f of the domain that a state gives "
     "values to (a fluent function; total-cost is not one), with one tuple per ground term of f in the instance "
     "(over the term's objects; over the auxiliary entity for a nullary function, no argument with nullary='arity0') "
     "and its value in the batch's "
@@ -575,8 +604,9 @@ enum class HorizonArgs
 // the options other than the horizon's, in the order of the signatures
 #define MYMYR_ENCODING_ARGS_BASE                                                                                      \
     TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level,                                          \
-        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,              \
-        bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality, bool predicate_virtual_nodes,       \
+        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static,                                     \
+        Arg<ann::EncodingIncludeDerived> include_derived, bool include_numeric, Arg<ann::EncodingNullary> nullary,   \
+        bool equality, bool predicate_virtual_nodes,                                                                  \
         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,                        \
         Arg<ann::EncodingIndexDtype> index_dtype,                                                                     \
         Arg<ann::EncodingNumericDtype> numeric_dtype, bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays, \
@@ -672,7 +702,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level,
-                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
+                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, Arg<ann::EncodingIncludeDerived> include_derived,
                         bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality,
                         bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
@@ -694,7 +724,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level,
-                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, bool include_derived,
+                        Arg<ann::EncodingRepeatedLiterals> repeated_literals, bool include_static, Arg<ann::EncodingIncludeDerived> include_derived,
                         bool include_numeric, Arg<ann::EncodingNullary> nullary, bool equality,
                         bool predicate_virtual_nodes,
                         bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
@@ -819,6 +849,13 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
             [schema_of](const Py& self)
             { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.predicate; }); },
             "The domain predicate id of each relation, -1 for action and parent relations.")
+        .def_prop_ro(
+            "relation_compiled",
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.compiled; }); },
+            "Whether each relation's predicate is a derived predicate that normalization introduced (a helper "
+            "`axiom_<k>` of a quantified or disjunctive condition) rather than one the domain declares; False for "
+            "relations without a predicate. include_derived='domain' leaves out every relation of these.")
         .def_prop_ro(
             "relation_schemas",
             [schema_of](const Py& self)
@@ -3050,6 +3087,71 @@ void bind_encoding(nb::module_& parent)
         { new (self) PyFlatEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
         encoder_doc.c_str());
     define_encoder_common(encoder_class, "FlatRelationEncoder");
+    module.def(
+        "_capacity_counts",
+        [](const PyFlatEncoder& self, nb::handle table, u64 graphs, bool actions, u64 history)
+        {
+            nb::object source = nb::borrow(table);
+            if ((nb::isinstance<PyTask>(source) || nb::isinstance<PyHandle>(source)) &&
+                !owner_of(source).core->task->atoms().frozen())
+                source = frozen_task(source);
+            const TableRef reference = table_of(source);
+            const encoding::FlatEncoder& encoder = *self.encoder;
+            encoding::CapacityBounds b;
+            {
+                nb::gil_scoped_release release;
+                // another table of the domain gets a context of its own (EncodingContext::create checks the domain)
+                const auto context = reference.table.get() == &encoder.table()
+                                         ? encoder.context_ptr()
+                                         : encoding::EncodingContext::create(reference.table, encoder.schema_ptr());
+                b = encoding::capacity_bounds(*context, {graphs, actions, history});
+            }
+            const encoding::EncodingSchema& schema = encoder.schema();
+            auto value = [](u64 v) { return v == encoding::k_unbounded ? nb::none() : nb::object(nb::int_(v)); };
+            nb::dict out;
+            out["graphs"] = value(b.graphs);
+            out["entities"] = value(b.entities);
+            out["args"] = value(b.args);
+            if (schema.has_targets())
+                out["targets"] = value(b.targets);
+            if (schema.has_history())
+                out["history"] = value(b.history);
+            if (schema.stores_numeric_values())
+                out["numeric"] = value(b.numeric);
+            if (schema.shared_statics())
+            {
+                out["static_instances"] = value(b.static_instances);
+                out["static_args"] = value(b.static_args);
+            }
+            if (actions && schema.options().include_actions)
+                out["successors"] = value(b.successors);
+            nb::list tuples;
+            for (u64 v : b.relation_tuples)
+                tuples.append(value(v));
+            out["relation_tuples"] = tuples;
+            out["relation_exact"] = std::vector<bool>(b.relation_exact.begin(), b.relation_exact.end());
+            out["reason"] = b.unbounded_reason;
+            return out;
+        },
+        "encoder"_a, "table"_a, "graphs"_a, "actions"_a, "history"_a,
+        "The bounds of encoding::capacity_bounds for `encoder`'s schema over `table` (None: unbounded); "
+        "encoding.FlatRelationEncoder.capacity_bounds wraps them.");
+    encoder_class.def(
+        "capacity_bounds",
+        [](nb::handle self, nb::handle table_or_suite, nb::handle graphs, bool actions, bool drop_noops,
+           nb::handle history)
+        {
+            return nb::module_::import_("mymyr.encoding._capacity")
+                .attr("capacity_bounds")(self, table_or_suite, graphs, actions, drop_noops, history);
+        },
+        "table_or_suite"_a, "graphs"_a, nb::kw_only(), "actions"_a = true, "drop_noops"_a = false, "history"_a = 0,
+        "Capacities that no batch of `graphs` rows over `table_or_suite` (a Task, TaskHandle or TaskTable of this "
+        "encoder's domain, or a TaskSuite: its tables of this domain) exceeds, computed from the instances and the "
+        "schema alone: a mymyr.encoding.CapacityBounds, a dict usable as `capacities` of encode and as "
+        "BatchedEnv(obs_capacities=...), with the tuples of each relation in `relation_tuples` and which bounds are "
+        "exact in `exact`. actions: the rows bring expansion rows (obs_actions=True): the action relations get the "
+        "ground actions that the delete relaxation reaches, and the dict 'successors' with drop_noops "
+        "(obs_drop_noops=True). history: with history relations, the most steps of a row (0: history_max_steps).");
     encoder_class
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
              "goals"_a = nb::none(), "actions"_a = nb::none(), "subgoals"_a = nb::none(), "history"_a = nb::none(),

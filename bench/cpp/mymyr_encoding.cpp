@@ -326,7 +326,7 @@ void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::
         throw std::runtime_error("supplied derived words produced a different batch");
     reused.bundle.reset();
     options.outputs = {encoding::Output::Relations};
-    options.include_derived = false;
+    options.include_derived = encoding::DerivedRelations::None;
     const EncodeTimes plain = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
     const double args = static_cast<double>(core_sizes.args) / static_cast<double>(n);
     char action_ns[32] = "null";

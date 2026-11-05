@@ -8,13 +8,15 @@
 #include "mymyr/cuda/expand.hpp"
 
 
-#include "numeric_pad.hpp"
+#include "expand_axioms.hpp"
 #include "expand_drop.hpp"
+#include "numeric_pad.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 #include "table_launch.hpp"
 
 #include <algorithm>
@@ -31,8 +33,10 @@ namespace
 /// Views of one chunk at most (larger batches are expanded in chunks of parents).
 constexpr u64 k_view_budget = u64{256} << 20;
 
-// control words (device and pinned host)
-constexpr u32 k_bad_row = 0, k_words_needed = 1, k_error = 2, k_overflow = 3, k_bad_id = 4, k_live = 5, k_ctl_words = 6;
+// control words (device and pinned host); k_axioms_refused: the axiom evaluator's flag for instances it cannot
+// evaluate (never set: a Multi table's axioms are within the device's evaluator)
+constexpr u32 k_bad_row = 0, k_words_needed = 1, k_error = 2, k_overflow = 3, k_bad_id = 4, k_live = 5,
+              k_axioms_refused = 6, k_ctl_words = 7;
 
 template<class T>
 T* scratch_of(Scratch& sc, const ContextPtr& ctx, u64 n, cudaStream_t s)
@@ -83,6 +87,12 @@ struct DeviceExpander::Impl
     DeviceBuffer limits;  // [I] the instances' fluent slots (frozen)
     Scratch views, counts, seg, scan, order_temp, order, pos;
     detail::Fanout fan;  // the launches over the plan's row groups, concurrently
+    // Multi with axioms: the device's evaluator over the instances; the derived words of the chunk's parents (beside
+    // its views); the successors' instances, scratch views and derived words; the live row count of an asynchronous
+    // batch, widened
+    bool axioms = false;
+    detail::AxiomClosure closure;
+    Scratch parent_derived, succ_ids, succ_views, succ_derived, live_rows;
     bool segs_kept = false;  // every chunk's launch order and segment offsets are still there (count() ran)
     i64 views_chunk = -1;    // the chunk whose views are in `views`
     // PerInstance
@@ -366,10 +376,14 @@ struct DeviceExpander::Impl
 
     [[nodiscard]] lifted::Parents parents_of(const Chunk& c) const
     {
-        return lifted::Parents{in.data + c.first * stride, stride, in.words, static_cast<u32>(c.rows), nullptr, 0, rows_dev};
+        // axioms: the derived words of the chunk's parents, from prepare_multi's closure
+        const u64* der = axioms ? static_cast<const u64*>(parent_derived.data()) : nullptr;
+        return lifted::Parents{in.data + c.first * stride, stride, in.words, static_cast<u32>(c.rows),
+                               der, axioms ? closure.words : 0u, rows_dev};
     }
 
-    /// The chunk's launch order, views, counts and segment offsets (views_only: its views, from the kept order). The
+    /// The chunk's launch order, views (with axioms: the closure of its parents, their views over fluent and derived
+    /// atoms and their derived words), counts and segment offsets (views_only: its views, from the kept order). The
     /// orders and segment offsets of all chunks are kept (count() sizes them), so write() rebuilds only the views of
     /// the chunks whose views are gone.
     void prepare_multi(const Chunk& c, bool views_only)
@@ -389,10 +403,25 @@ struct DeviceExpander::Impl
                   "launch_order");
             detail::check_order(ctx, rid, plan.instances, plan.order_keys(), n, ord, ps, 1, s);
         }
+        auto* der = axioms ? scratch_of<u64>(parent_derived, ctx, n * closure.words, s) : nullptr;
         const lifted::Parents p = parents_of(c);
         const lifted::Views v{scratch_of<u64>(views, ctx, n * plan.view_words, s), plan.view_words};
         lifted::Multi m = multi_of(c);
-        check(lifted::launch_view_multi(m, p, v, s), "launch_view_multi");
+        if (axioms)
+        {
+            // the views and derived words of every parent (the rows past a live count are absent)
+            const u64* live = nullptr;
+            if (rows_dev)
+            {
+                auto* l = scratch_of<u64>(live_rows, ctx, 1, s);
+                check(detail::launch_widen_count(rows_dev, l, s), "launch_widen_count");
+                live = l;
+            }
+            closure.run(p.data, stride, in.words, n, ids + c.first, v.data, v.words, der, dctl() + k_axioms_refused, s, 0,
+                        live);
+        }
+        else
+            check(lifted::launch_view_multi(m, p, v, s), "launch_view_multi");
         views_chunk = static_cast<i64>(&c - chunks.data());
         if (views_only)
             return;
@@ -464,8 +493,8 @@ struct DeviceExpander::Impl
             sc = static_cast<u32*>(sort.ensure(ctx, widest * L * sizeof(u32), s));
         if (out.offsets && chunks.empty() && !map)
             check(cudaMemsetAsync(out.offsets, 0, sizeof(i32), s), "cudaMemsetAsync");
-        // a Multi table has no axioms: its derived words are zero (a mapped write leaves the larger batch's rows to the
-        // caller, which zeroes them)
+        // derived words: those of instances without axioms are zero, the others' successor_axioms() below sets (a
+        // mapped write leaves the larger batch's other rows to the caller, which zeroes them)
         if (out.derived && out.derived_words && !map && std::min(total, out.capacity))
             check(cudaMemsetAsync(out.derived, 0, std::min(total, out.capacity) * out.derived_words * sizeof(u64), s),
                   "cudaMemsetAsync");
@@ -545,13 +574,49 @@ struct DeviceExpander::Impl
                     to.schema = reinterpret_cast<u32*>(out.schema);
                     to.parent = reinterpret_cast<u32*>(out.parent);
                 }
-                to.goal = out.goal && rows.words ? (map ? out.goal : out.goal + base) : nullptr;
+                // the goal flags (with axioms: successor_axioms(), over the successors' derived words)
+                to.goal = out.goal && rows.words && !axioms ? (map ? out.goal : out.goal + base) : nullptr;
                 check(lifted::launch_put_multi(m, p, sg, lab, rows, to, c.total, s), "launch_put_multi");
             }
             if (out.offsets && !map)
                 check(lifted::launch_state_offsets(sg, S, c.rows, base, out.offsets + c.first, s), "launch_state_offsets");
         }
+        successor_axioms(out, map, map ? out.capacity : std::min(total, out.capacity));
         finish_write(out, 0);
+    }
+
+    /// Axioms (Multi): the derived words (out.derived) and goal flags (out.goal) of the successor rows [0, n) of
+    /// out.succ from their instances' axioms, each row's instance its parent's (the chunks' segment offsets; mapped:
+    /// at the batch rows of `map`). Rows that are no successor of the batch keep their derived words and goal flags
+    /// (unmapped: their goal flags are zeroed). Stream-ordered on s: capturable.
+    void successor_axioms(const rl::Expansion& out, const RowMap* map, u64 n)
+    {
+        if (!axioms || n == 0 || !out.succ || !(out.derived || out.goal))
+            return;
+        const u32 W = out.words;
+        auto* sid = scratch_of<i32>(succ_ids, ctx, n, s);
+        check(cudaMemsetAsync(sid, 0xFF, n * sizeof(i32), s), "cudaMemsetAsync");
+        const auto* sg = static_cast<const u32*>(seg.data());
+        for (const Chunk& c : chunks)
+            check(detail::launch_successor_ids(sg + c.seg_base, plan.num_schemas, c.rows, c.base, ids + c.first,
+                                               map ? map->rows + c.first : nullptr, map ? map->batch_offsets : nullptr,
+                                               n, sid, s),
+                  "launch_successor_ids");
+        const u32 dw = out.derived ? out.derived_words : closure.words;
+        u64* der = out.derived ? out.derived : scratch_of<u64>(succ_derived, ctx, n * dw, s);
+        // the successors' views in chunks within the view budget
+        const u64 per = std::max<u64>(1, k_view_budget / std::max<u64>(8, plan.view_words * 8));
+        auto* v = scratch_of<u64>(succ_views, ctx, std::min(per, n) * plan.view_words, s);
+        for (u64 b = 0; b < n; b += per)
+            closure.run(out.succ + b * W, W, W, std::min(per, n - b), sid + b, v, plan.view_words, der + b * dw,
+                        dctl() + k_axioms_refused, s, dw);
+        if (!out.goal)
+            return;
+        if (!map)
+            check(cudaMemsetAsync(out.goal, 0, n, s), "cudaMemsetAsync");
+        check(detail::launch_goal_rows_derived_multi(dt->device_views(), plan.instances, sid, out.succ, W, W, n, der, dw,
+                                                     out.goal, s),
+              "launch_goal_rows_derived_multi");
     }
 
     /// The counted batch's CSR offsets (Multi: from the kept segment offsets).
@@ -578,7 +643,7 @@ struct DeviceExpander::Impl
             case Mode::Host: return "the device kernels cannot run the table's instance: it is expanded on the host";
             case Mode::PerInstance:
                 return "the table's instances are expanded apart (numeric fluents, CPU-fallback schemas, conditional "
-                       "effects or axioms over several instances)";
+                       "effects or axioms beyond the device's evaluator over several instances)";
             case Mode::Single:
                 if (table->task(0)->numeric_slots())
                     return "numeric state rows are converted and checked on the host";
@@ -702,8 +767,11 @@ struct DeviceExpander::Impl
         u32* sc = nullptr;
         if (opt.canonical_order && plan.w[opt.witness_pruning ? 0 : 1][0].sorts && n)
             sc = static_cast<u32*>(sort.ensure(ctx, n * L * sizeof(u32), s));
+        // the rows past the total: zero derived words and goal flags
         if (out.derived && out.derived_words && n)
             check(cudaMemsetAsync(out.derived, 0, n * out.derived_words * sizeof(u64), s), "cudaMemsetAsync");
+        if (out.goal && n)
+            check(cudaMemsetAsync(out.goal, 0, n, s), "cudaMemsetAsync");
         lifted::SuccessorRows rows;
         rows.words = n ? out.succ : nullptr;
         rows.hash = n ? out.succ_hash : nullptr;
@@ -743,9 +811,11 @@ struct DeviceExpander::Impl
         if (defer)
         {
             lifted::PutRows to;
-            to.goal = out.goal;
+            to.goal = axioms ? nullptr : out.goal;
             check(lifted::launch_put_multi(m, p, sg, lab, rows, to, n, s), "launch_put_multi");
         }
+        // axioms: the derived words and goal flags of every row below the capacity (past the total: zero)
+        successor_axioms(out, nullptr, n);
     }
 
     // ------------------------------------------------------------------------------------------ Host
@@ -1164,12 +1234,19 @@ DeviceExpander::DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStrea
         I.mode = Mode::Single;
         I.gen = std::make_unique<ChunkGenerator>(I.ctx, I.table->task(0), I.s);
     }
-    else if (detail::multi_unsupported(*I.table).empty())
+    else if (detail::multi_unsupported(*I.table, true).empty())
     {
         I.mode = Mode::Multi;
         I.dt = DeviceTaskTable::upload(I.ctx, I.table);
         I.dt->acquire(I.s);
         I.plan = detail::plan_launches(I.ctx, *I.dt, I.s);
+        for (u32 i = 0; i < I.table->size(); ++i)
+            I.axioms = I.axioms || I.table->task(i)->has_axioms();
+        if (I.axioms)
+            I.closure = detail::AxiomClosure::create(
+                I.ctx, I.table->size(), [&](u32 i) { return I.dt->view(i); },
+                [&](u32 i) { return rl::task_view(I.dt->bundle(i)); },
+                [&](u32 i) -> const Task& { return *I.table->task(i); }, I.s);
         std::vector<u32> lim(I.table->size());
         for (u32 i = 0; i < I.table->size(); ++i)
             lim[i] = I.table->task(i)->atoms().fluent_slots();
@@ -1231,6 +1308,11 @@ void DeviceExpander::set_stream(cudaStream_t s)
         I.dt->acquire(s);
         I.plan.record_stream(s);
         I.limits.record_stream(s);
+        if (I.axioms)
+        {
+            I.closure.records.record_stream(s);
+            I.closure.reads.record_stream(s);
+        }
     }
     for (auto& x : I.subs)
         if (x)

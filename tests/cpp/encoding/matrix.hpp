@@ -545,7 +545,7 @@ inline std::vector<Config> configs()
         [](auto& o)
         {
             o.include_static = false;
-            o.include_derived = false;
+            o.include_derived = encoding::DerivedRelations::None;
         });
     add("implicit_entities_no_counts",
         [](auto& o)

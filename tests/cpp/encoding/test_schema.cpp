@@ -122,7 +122,7 @@ TEST(EncodingSchema, NullaryStaticAndDerivedOptionsSelectRelations)
     }
     options = {};
     options.include_static = false;
-    options.include_derived = false;
+    options.include_derived = DerivedRelations::None;
     const auto schema = EncodingSchema::create(blocks(), options);
     for (const char* name : {"number", "object", "above"})
         EXPECT_FALSE(has(*schema, name)) << name;
@@ -132,6 +132,39 @@ TEST(EncodingSchema, NullaryStaticAndDerivedOptionsSelectRelations)
     options.include_actions = false;
     EXPECT_FALSE(has(*EncodingSchema::create(blocks(), options), "stack"));
     EXPECT_TRUE(EncodingSchema::create(blocks(), options)->schema_relations().empty());
+}
+
+TEST(EncodingSchema, DomainDerivedRelationsLeaveOutTheCompiledHelpers)
+{
+    DomainSignature d = blocks();
+    d.predicates.push_back({"reachable", 1, PredicateKind::Derived});
+    d.predicates.push_back({"axiom_0", 1, PredicateKind::Derived, true});
+    const auto every = EncodingSchema::create(d);
+    FlatOptions options;
+    options.include_derived = DerivedRelations::Domain;
+    const auto declared = EncodingSchema::create(d, options);
+    for (const char* name : {"reachable", "[+]reachable[g]", "[-]reachable[hist]", "above"})
+        EXPECT_TRUE(has(*declared, name)) << name;
+    usize compiled = 0;
+    for (const Relation& r : every->relations())
+        if (r.compiled)
+        {
+            ++compiled;
+            EXPECT_EQ(r.predicate, static_cast<i32>(d.predicates.size() - 1));
+            EXPECT_FALSE(has(*declared, r.name)) << r.name;
+        }
+    EXPECT_GT(compiled, 0u);
+    EXPECT_EQ(declared->num_relations() + compiled, every->num_relations());
+    // None keeps the goal and history relations of both kinds
+    options.include_derived = DerivedRelations::None;
+    const auto none = EncodingSchema::create(d, options);
+    for (const char* name : {"[+]reachable[g]", "[+]axiom_0[g]", "[+]axiom_0[hist]"})
+        EXPECT_TRUE(has(*none, name)) << name;
+    EXPECT_FALSE(has(*none, "axiom_0"));
+    EXPECT_FALSE(has(*none, "reachable"));
+    EXPECT_EQ(to_string(DerivedRelations::Domain), "domain");
+    EXPECT_EQ(parse_derived_relations("none"), DerivedRelations::None);
+    EXPECT_FALSE(parse_derived_relations("declared").has_value());
 }
 
 TEST(EncodingSchema, EqualityIsOptional)
@@ -281,7 +314,7 @@ TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
     vary([](FlatOptions& o) { o.goal_derivations = {GoalDerivation::Plain}; });
     vary([](FlatOptions& o) { o.max_goal_level = 1; });
     vary([](FlatOptions& o) { o.include_static = false; });
-    vary([](FlatOptions& o) { o.include_derived = false; });
+    vary([](FlatOptions& o) { o.include_derived = DerivedRelations::None; });
     vary([](FlatOptions& o) { o.nullary = Nullary::Omit; });
     vary([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     vary([](FlatOptions& o) { o.include_actions = false; });

@@ -641,6 +641,25 @@ def test_derived_words_are_evaluated_where_a_graph_reads_them(cases):
     plain.encode(rows)
 
 
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_domain_derived_relations_equal_host(cases, layout):
+    """include_derived="domain" (the compiled helpers left out) on the device equals the host, exactly and with
+    capacities, the helpers' derived words still evaluated where the goal reads them."""
+    dev = gpu()
+    if "philosophers_table" not in cases:
+        pytest.skip("built without the PDDL front end")
+    case = cases["philosophers_table"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, include_derived="domain",
+                                           goal_derivations=("plain", "satisfied", "unsatisfied"))
+    full = encoding.FlatRelationEncoder(case.source, layout=layout)
+    assert set(full.relation_names) - set(encoder.relation_names) == {
+        r for r, c in zip(full.relation_names, full.relation_compiled) if c}
+    host = host_encode(encoder, case)
+    same_batch(host, device_encode(encoder, case, dev))
+    caps = exact_capacities(host)
+    same_batch(host_encode(encoder, case, capacities=caps), device_encode(encoder, case, dev, capacities=caps))
+
+
 def test_invalid_rows_raise_without_capacities_and_are_flagged_with_them(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else None
