@@ -60,7 +60,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `max_goal_level` | 0 to 3 | 0 | the [subgoal](#subgoals) levels beyond the goal |
 | `repeated_literals` | `"every"`, `"lowest"`, `"highest"` | `"every"` | placement of literals listed at several goal levels |
 | `include_static` | bool | `True` | the state relations of the static predicates (the types included) |
-| `include_derived` | bool or `'domain'` | `True` | the state relations of the derived predicates; `'domain'` keeps the declared ones and leaves out the [helpers](#the-relation-catalog) normalization introduces |
+| `include_derived` | bool or `'domain'` | `True` | the state relations of the derived predicates; `'domain'` removes every relation of the [helpers](#the-relation-catalog) normalization introduces and keeps the declared ones |
 | `include_numeric` | bool | `True` | the [numeric](#numeric-functions) relations and `numeric_values` |
 | `nullary` | `'auxiliary'`, `'arity0'`, `'omit'` | `'auxiliary'` | the relations of nullary predicates: tuples over the [auxiliary entity](#lanes), tuples without an argument, or none |
 | `equality` | bool | `False` | the relations of the equality predicate `=` |
@@ -124,12 +124,17 @@ instances of a table, so tables over one domain give the same relation ids to th
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`; the
   state relations of the static predicates (the types included) and of the derived predicates can be dropped
   (`include_static`, `include_derived=False`); their goal and history relations stay. `include_derived='domain'`
-  keeps the derived predicates the domain declares (`:derived`) and leaves the helpers out altogether: the derived
-  predicates that normalization introduces for universal quantifiers, disjunctive goal parts and quantified effect
-  conditions. No instance goal lists a helper, so its goal relations would stay empty, and its state and history
-  relations would hold the truth of the condition it stands for (an action's applicability, say). The front end marks
-  the helpers where it creates them, whatever their names; `relation_compiled` tells their relations apart, and a task
-  read from the text format keeps the mark (predicate kind `C`). Nullary predicates have relations of
+  removes every relation of the helpers, the derived predicates that normalization introduces for universal
+  quantifiers and quantified effect conditions: their state relations (the truth of the condition a helper stands
+  for, an action's applicability, say) and every goal, subgoal, history and horizon relation the options would give
+  them. Every other predicate keeps all the relations the options ask for, the derived predicates the domain declares
+  (`:derived`) included. An instance's goal never names a helper of the domain: a goal part that is not a literal
+  becomes a derived predicate of the problem alone, which no catalog lists under any `include_derived`, and the
+  instance's goal is its [encoding goal](#goals). A goal, subgoal layer or history step of a row (`goals=`,
+  `subgoals=`, `history=`) that sets a helper's atom bit has no relation to hold that literal under `'domain'`, and the
+  literal is not encoded. The front end marks the helpers where it creates them, whatever their names;
+  `relation_compiled` tells their relations apart, and a task read from the text format keeps the mark (predicate
+  kind `C`). Nullary predicates have relations of
   arity 1 (slot role `auxiliary_slot`); with `nullary='arity0'` they have no argument slot, only the leading slots of
   their relation (a state relation without predicate virtual nodes has arity 0); with `nullary='omit'` they have none.
   `slot_role_names` and `entity_role_names` always list all nine roles. An action relation holds the schema's full
@@ -412,8 +417,9 @@ The literals of fluent and derived predicates are evaluated against the state wo
 static predicates and of atoms without a slot (not reachable by any state) have a fixed truth and form the constant part
 of the goal. A statically false literal is still emitted: in its plain relation, and in `[unsat]` for a positive
 literal over a false atom or `[sat]` for a negative one. Goal literals whose predicate has no goal relation (equality
-without `equality=True`, nullary atoms with `nullary='omit'`, the types) are not encoded. A cell lists its tuples in the
-lexicographic order of their arguments, constant part and masked literals merged.
+without `equality=True`, nullary atoms with `nullary='omit'`, the types, the helpers under
+`include_derived='domain'`) are not encoded. A cell lists its tuples in the lexicographic order of their arguments,
+constant part and masked literals merged.
 
 With `target_sources=("goal",)` every plain goal tuple gets a **goal entity** (after the objects and the auxiliary
 entity), numbered in the order of the plain goal relations (relation id, then tuple), so that the id is
