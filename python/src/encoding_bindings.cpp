@@ -112,6 +112,12 @@ struct EncodingIncludeDerived
 struct EncodingLiteralSource
 {
 };
+struct EncodingBoundsSource
+{
+};
+struct EncodingTableSource
+{
+};
 }
 
 namespace nanobind::detail
@@ -238,6 +244,17 @@ struct type_caster<mymyr::python::ann::EncodingLiteralSource>
     static constexpr auto Name =
         const_name("FlatRelationEncoder | FlatHorizonEncoder | FlatTransitionEncoder | FlatTransitionEffectsEncoder | "
                    "mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingBoundsSource>
+{
+    static constexpr auto Name = const_name(
+        "mymyr._core._rl.TaskTable | mymyr._core._rl.TaskSuite | mymyr._core.Task | mymyr._core.TaskHandle");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingTableSource>
+{
+    static constexpr auto Name = const_name("mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
@@ -3089,7 +3106,8 @@ void bind_encoding(nb::module_& parent)
     define_encoder_common(encoder_class, "FlatRelationEncoder");
     module.def(
         "_capacity_counts",
-        [](const PyFlatEncoder& self, nb::handle table, u64 graphs, bool actions, u64 history)
+        [](const PyFlatEncoder& self, Arg<ann::EncodingTableSource> table, u64 graphs, bool actions,
+           u64 history) -> ResultDict
         {
             nb::object source = nb::borrow(table);
             if ((nb::isinstance<PyTask>(source) || nb::isinstance<PyHandle>(source)) &&
@@ -3131,18 +3149,19 @@ void bind_encoding(nb::module_& parent)
             out["relation_tuples"] = tuples;
             out["relation_exact"] = std::vector<bool>(b.relation_exact.begin(), b.relation_exact.end());
             out["reason"] = b.unbounded_reason;
-            return out;
+            return nb::borrow<ResultDict>(out);
         },
         "encoder"_a, "table"_a, "graphs"_a, "actions"_a, "history"_a,
         "The bounds of encoding::capacity_bounds for `encoder`'s schema over `table` (None: unbounded); "
         "encoding.FlatRelationEncoder.capacity_bounds wraps them.");
     encoder_class.def(
         "capacity_bounds",
-        [](nb::handle self, nb::handle table_or_suite, nb::handle graphs, bool actions, bool drop_noops,
-           nb::handle history)
+        [](nb::handle self, Arg<ann::EncodingBoundsSource> table_or_suite, IntArg graphs, bool actions,
+           bool drop_noops, IntArg history) -> ResultDict
         {
-            return nb::module_::import_("mymyr.encoding._capacity")
-                .attr("capacity_bounds")(self, table_or_suite, graphs, actions, drop_noops, history);
+            return nb::borrow<ResultDict>(nb::module_::import_("mymyr.encoding._capacity")
+                                              .attr("capacity_bounds")(self, table_or_suite, graphs, actions,
+                                                                       drop_noops, history));
         },
         "table_or_suite"_a, "graphs"_a, nb::kw_only(), "actions"_a = true, "drop_noops"_a = false, "history"_a = 0,
         "Capacities that no batch of `graphs` rows over `table_or_suite` (a Task, TaskHandle or TaskTable of this "
